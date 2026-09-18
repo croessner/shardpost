@@ -1,0 +1,78 @@
+# Bootstrap: the self-signed issuer of the base (shardpost-selfsigned)
+# signs the admin CA; cert-manager renews every certificate automatically
+# and shardpost re-reads certificate, key and client CA on change.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shardpost-admin-ca
+  namespace: shardpost
+spec:
+  isCA: true
+  commonName: shardpost-admin-ca
+  secretName: shardpost-admin-ca
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: shardpost-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: shardpost-admin-ca
+  namespace: shardpost
+spec:
+  ca:
+    secretName: shardpost-admin-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shardpost-admin-tls
+  namespace: shardpost
+spec:
+  secretName: shardpost-admin-tls
+  duration: 2160h
+  renewBefore: 360h
+  commonName: shardpost-admin.shardpost.svc.cluster.local
+  dnsNames:
+    - shardpost-admin
+    - shardpost-admin.shardpost.svc
+    - shardpost-admin.shardpost.svc.cluster.local
+  usages:
+    - digital signature
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: shardpost-admin-ca
+    kind: Issuer
+---
+# Operator identity for shardpostctl from an admin-client pod
+# (label shardpost.roessner-net.de/admin-client: "true"). Further clients
+# (e.g. an import job) get their own Certificate and admin.clients entry.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shardpost-admin-operator
+  namespace: shardpost
+spec:
+  secretName: shardpost-admin-operator
+  duration: 2160h
+  renewBefore: 360h
+  commonName: shardpost-admin-operator
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: shardpost-admin-ca
+    kind: Issuer

@@ -1,0 +1,13 @@
+# Mutual-TLS listener of the admin API (docs/admin-api.md). A dedicated
+# namespace-local CA issues the server certificate and the client
+# certificates; the server trusts only this CA for clients, so certificates
+# of the general shardpost-ca (IMAP/LMTP servers) never act as admin clients.
+# Roles per client identity are set in server.yaml (admin.clients).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - certificates.yaml
+  - service.yaml
+  - network-policy.yaml
+patches:
+  - path: deployment-patch.yaml

@@ -1,0 +1,19 @@
+# Only pods that are explicitly marked as admin clients in this namespace
+# reach the admin listener; mTLS and the role list decide the rest.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shardpost-admin-ingress
+  namespace: shardpost
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-server
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              shardpost.roessner-net.de/admin-client: "true"
+      ports:
+        - {protocol: TCP, port: 8443}

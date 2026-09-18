@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: shardpost-admin
+  namespace: shardpost
+  labels:
+    app.kubernetes.io/name: shardpost-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: shardpost-server
+  ports:
+    - name: admin
+      port: 8443
+      targetPort: admin
+      protocol: TCP

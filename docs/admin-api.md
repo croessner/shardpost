@@ -106,3 +106,34 @@ shardpostctl deliver -d user@example.org --no-enforce-quota --json < warning.eml
 Exitcodes von `deliver` (sysexits): 0 ok, 64 Aufruf, 67 unbekannter Empfänger
 oder Postfach, 69 abgelehnt oder zu groß, 70 unerwartete Antwort, 73 über
 Quota, 75 temporär (erneut versuchen), 77 keine Berechtigung.
+
+## Betrieb im Cluster (mTLS)
+
+Die Komponente `deploy/components/admin-mtls` (im Overlay
+`croessner-nauthilus` aktiv) stellt den mTLS-Listener bereit:
+
+- Eigene CA `shardpost-admin-ca` (cert-manager, gebootstrappt über
+  `shardpost-selfsigned`). Sie ist bewusst getrennt von `shardpost-ca`, die
+  Serverzertifikate für IMAP/LMTP ausstellt; nur Zertifikate dieser CA
+  werden als Admin-Clients akzeptiert.
+- Serverzertifikat `shardpost-admin-tls` für den Service
+  `shardpost-admin:8443` (Pod-Port `admin`), als Verzeichnis nach
+  `/secrets/admin-tls` gemountet (ohne `subPath`, Rotation ohne Neustart).
+- Clientzertifikat `shardpost-admin-operator` (CN = Identität) mit der
+  Rolle `diagnose`. Weitere Clients bekommen je ein eigenes `Certificate`
+  mit `usages: [client auth]` und einen Eintrag in `admin.clients`.
+- NetworkPolicy `shardpost-admin-ingress`: Port 8443 nur für Pods im
+  Namespace `shardpost` mit Label
+  `shardpost.roessner-net.de/admin-client: "true"`.
+
+Aufruf aus einem solchen Pod mit eingehängtem Client-Secret:
+
+```sh
+shardpostctl -url https://shardpost-admin.shardpost.svc:8443 \
+  -cert /op/tls.crt -key /op/tls.key -ca /op/ca.crt version
+```
+
+Abgenommen am 2026-09-18: Operator `version` 200, `deliver` ohne Rolle 403,
+Client der fremden CA und ohne Zertifikat im Handshake abgewiesen, Pod
+ohne Label von der NetworkPolicy blockiert; Audit-Zeilen mit
+`transport=mtls` und der Identität.

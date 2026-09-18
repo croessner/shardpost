@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-server
+  namespace: shardpost
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          ports:
+            - name: admin
+              containerPort: 8443
+              protocol: TCP
+          volumeMounts:
+            # Directory mount (no subPath) so renewed files reach the pod.
+            - name: admin-tls
+              mountPath: /secrets/admin-tls
+              readOnly: true
+      volumes:
+        - name: admin-tls
+          secret:
+            secretName: shardpost-admin-tls
+            defaultMode: 0440
