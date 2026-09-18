@@ -14,7 +14,7 @@ type Admin struct {
 	// Socket is the path of the Unix socket ("" disables it).
 	Socket string `mapstructure:"socket" env:"ADMIN_SOCKET"`
 	// SocketRoles are the roles of local callers on the socket.
-	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce"`
+	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import"`
 	// Addr is the mutual-TLS listener ("" disables it).
 	Addr string `mapstructure:"addr" env:"ADMIN_ADDR"`
 	// TLSCert, TLSKey and ClientCA are files; they are re-read when they
@@ -24,13 +24,33 @@ type Admin struct {
 	ClientCA string `mapstructure:"client_ca" env:"ADMIN_CLIENT_CA"`
 	// Clients map certificate identities to roles.
 	Clients []AdminClient `mapstructure:"clients" validate:"dive"`
+	// Import bounds the account import (role import).
+	Import AdminImport `mapstructure:"import"`
+}
+
+// AdminImport configures the account import with preserved identities.
+type AdminImport struct {
+	// LockTTLSeconds is how long the account's import lock lasts without
+	// renewal (every import call renews it).
+	LockTTLSeconds int `mapstructure:"lock_ttl_seconds" validate:"gte=60,lte=86400"`
+	// MaxBatchBytes and MaxBatchMessages bound one importMessages request.
+	MaxBatchBytes    int64 `mapstructure:"max_batch_bytes" validate:"gte=1048576"`
+	MaxBatchMessages int   `mapstructure:"max_batch_messages" validate:"gte=1,lte=10000"`
+	// MaxInventory bounds one inventory page, MaxChanges the flag
+	// changes plus expunges of one changes request.
+	MaxInventory int `mapstructure:"max_inventory" validate:"gte=100,lte=100000"`
+	MaxChanges   int `mapstructure:"max_changes" validate:"gte=100,lte=100000"`
+	// ShardSize is the index shard size of mailboxes an import creates
+	// (0 = server.mbox_shard_size). Imported UIDs keep the source's gaps,
+	// so a small shard size makes full reads visit many empty shards.
+	ShardSize uint32 `mapstructure:"shard_size" validate:"lte=1000000"`
 }
 
 // AdminClient grants roles to the client certificate whose subject
 // common name or one of whose DNS or URI SANs equals Identity.
 type AdminClient struct {
 	Identity string   `mapstructure:"identity" validate:"required"`
-	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce"`
+	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import"`
 }
 
 // Validate checks the listener settings and refuses settings without

@@ -1,0 +1,10 @@
+# Account import with preserved IMAP identities (docs/admin-api.md,
+# "Kontoimport"): an idle sidecar in every server pod that runs
+# `shardpostctl migrate` against the pod's admin socket (role import).
+# The source (master) password comes from the Secret
+# shardpost-migrate-source (key password), created by hand; the source
+# endpoints are the SHARDPOST_MIGRATE_* variables below.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: deployment-patch.yaml

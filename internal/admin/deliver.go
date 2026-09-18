@@ -123,7 +123,7 @@ func checkDeliverParams(recipient, from, mailbox, contentType string) string {
 		return "invalid mailbox"
 	}
 
-	if mt, _, err := mime.ParseMediaType(contentType); err != nil || mt != "message/rfc822" {
+	if mt, _, err := mime.ParseMediaType(contentType); err != nil || mt != mimeRFC822 {
 		return "the body must be message/rfc822"
 	}
 
@@ -147,7 +147,7 @@ func (s *Server) deliveryError(w http.ResponseWriter, r *http.Request, err error
 		writeError(w, http.StatusInsufficientStorage, adminapi.OverQuota, "mailbox full")
 	case errors.Is(err, delivery.ErrQuotaExemptUnsupported):
 		writeError(w, http.StatusInternalServerError, adminapi.Internal, err.Error())
-	case errors.Is(err, auth.ErrTemporary), errors.Is(err, delivery.ErrBusy), errors.Is(err, delivery.ErrRedirectFailed):
+	case errors.Is(err, auth.ErrTemporary), errors.Is(err, delivery.ErrBusy), errors.Is(err, delivery.ErrRedirectFailed), errors.Is(err, model.ErrImportLocked):
 		writeError(w, http.StatusServiceUnavailable, adminapi.Temporary, "temporary failure, try again later")
 	default:
 		s.o.Log.Error("admin delivery failed", "path", r.URL.Path, "err", err)

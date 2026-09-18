@@ -72,6 +72,7 @@ type box struct {
 	recentFrom uint32
 	uidNext    uint32
 	modseq     uint64
+	logStart   uint64 // oldest modseq the change log covers (imports move it)
 	keywords   []string
 	msgs       []model.Meta
 	vanished   map[uint64][]uint32
@@ -98,6 +99,7 @@ type User struct {
 	guidN   int
 	scripts map[string]string
 	active  string
+	imp     *importLock
 }
 
 // Close is a no-op; a memstore user holds no resources.
@@ -352,7 +354,7 @@ func (u *User) Info(name string) (*model.MailboxInfo, error) {
 		return nil, err
 	}
 
-	return &model.MailboxInfo{Mailbox: model.Mailbox{Name: n, MailboxRec: b.MailboxRec}, RecentFrom: b.recentFrom, UIDNext: b.uidNext, HighestModSeq: b.modseq, Keywords: b.keywords}, nil
+	return &model.MailboxInfo{Mailbox: model.Mailbox{Name: n, MailboxRec: b.MailboxRec}, RecentFrom: b.recentFrom, UIDNext: b.uidNext, HighestModSeq: b.modseq, LogStart: b.logStart, Keywords: b.keywords}, nil
 }
 
 // ListMessages returns a copy of the index entries of the mailbox.
@@ -605,7 +607,7 @@ func (u *User) Copy(metas []model.Meta, dest string) ([]model.Meta, error) {
 	var out []model.Meta
 
 	for _, m := range metas {
-		m.UID = b.uidNext
+		m.UID, m.POP3UIDL = b.uidNext, ""
 		b.uidNext++
 		m.ModSeq = b.bump()
 		b.changes = append(b.changes, model.Change{ModSeq: m.ModSeq, UIDs: []uint32{m.UID}})
@@ -640,7 +642,7 @@ func (u *User) GetMessages(id string, uids []uint32) ([]model.Meta, error) {
 }
 
 // Changes returns the change records after modseq since; the log is
-// always complete.
+// complete except before an import (logStart).
 func (u *User) Changes(id string, since uint64) ([]model.Change, bool, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -648,6 +650,10 @@ func (u *User) Changes(id string, since uint64) ([]model.Change, bool, error) {
 	b := u.byID(id)
 	if b == nil {
 		return nil, false, model.ErrNoMailbox
+	}
+
+	if since+1 < b.logStart {
+		return nil, false, nil
 	}
 
 	var out []model.Change

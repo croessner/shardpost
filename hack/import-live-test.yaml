@@ -1,0 +1,91 @@
+# Live test of the account import against RADOS (docs/admin-api.md,
+# "Kontoimport"): a temporary server pod with static authentication and
+# the admin socket (role import) that imports a real Dovecot account read
+# only from the mailstack into the throwaway ShardPost namespace
+# "importtest". Not selected by any Service; delete it afterwards with
+#   kubectl -n shardpost delete -f hack/import-live-test.yaml
+# and remove the namespace's objects (hack/import-live-test.sh cleanup).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shardpost-importtest-config
+  namespace: shardpost
+data:
+  server.yaml: |
+    server:
+      auth_backend: "static"
+      users: "importtest:importtest"
+      insecure_auth: true
+      imap_addr: "127.0.0.1:1143"
+      imaps_addr: "127.0.0.1:1993"
+      lmtp_addr: "127.0.0.1:2424"
+      pop3_addr: "127.0.0.1:1110"
+      pop3s_addr: "127.0.0.1:1995"
+      http_addr: ":8080"
+      mbox_shard_size: 20
+      quota_bytes: 1073741824
+    ceph:
+      user: "shardpost"
+      index_pool: "shardpost-index"
+      data_pool: "shardpost-data"
+    rook:
+      namespace: "rook-ceph"
+    sieve:
+      addr: "127.0.0.1:14190"
+    admin:
+      socket: "/run/shardpost/admin.sock"
+      socket_roles: [diagnose, import]
+      import:
+        shard_size: 100
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shardpost-importtest
+  namespace: shardpost
+  labels:
+    app.kubernetes.io/name: shardpost-importtest
+spec:
+  serviceAccountName: shardpost-server
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 167
+    runAsGroup: 167
+    fsGroup: 167
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: server
+      image: docker.io/chrroessner/shardpost:0.17.0
+      imagePullPolicy: Always
+      env:
+        - {name: SHARDPOST_CONFIG, value: /etc/shardpost/server.yaml}
+        - {name: SHARDPOST_ADMIN_SOCKET, value: /run/shardpost/admin.sock}
+        - {name: SHARDPOST_MIGRATE_SOURCE_ADDR, value: "192.168.0.2:993"}
+        - {name: SHARDPOST_MIGRATE_SOURCE_SERVER_NAME, value: mail.roessner-net.de}
+        - {name: SHARDPOST_MIGRATE_MASTER_USER, value: nauthilus-director}
+        - {name: SHARDPOST_MIGRATE_PASSWORD_FILE, value: /secrets/migrate-source/password}
+        - {name: SHARDPOST_MIGRATE_SIEVE_ADDR, value: "192.168.0.2:34190"}
+        - {name: SHARDPOST_MIGRATE_SIEVE_SERVER_NAME, value: mail.roessner-net.de}
+        - {name: SHARDPOST_MIGRATE_SIEVE_PROXY, value: "true"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {memory: 1Gi}
+      volumeMounts:
+        - {name: config, mountPath: /etc/shardpost, readOnly: true}
+        - {name: run, mountPath: /run/shardpost}
+        - {name: tmp, mountPath: /tmp}
+        - {name: migrate-source, mountPath: /secrets/migrate-source, readOnly: true}
+  volumes:
+    - name: config
+      configMap: {name: shardpost-importtest-config}
+    - name: run
+      emptyDir: {medium: Memory, sizeLimit: 1Mi}
+    - name: tmp
+      emptyDir: {sizeLimit: 64Mi}
+    - name: migrate-source
+      secret: {secretName: shardpost-migrate-source, defaultMode: 0440}

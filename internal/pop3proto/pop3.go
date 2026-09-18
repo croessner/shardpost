@@ -442,7 +442,7 @@ func (c *conn) handleTransaction(cmd, arg string) error {
 	case cmdLIST:
 		return c.listing(arg, func(i int, m *model.Meta) string { return fmt.Sprintf("%d %d", i, m.Size) })
 	case cmdUIDL:
-		return c.listing(arg, func(i int, m *model.Meta) string { return fmt.Sprintf("%d %s", i, m.GUID) })
+		return c.listing(arg, func(i int, m *model.Meta) string { return fmt.Sprintf("%d %s", i, m.UIDL()) })
 	case cmdRETR:
 		return c.retr(arg, -1)
 	case cmdTOP:
@@ -621,6 +621,13 @@ func (c *conn) finishLogin(req auth.Request, res *auth.Result, aerr error) error
 
 	u, err := c.s.o.Store.User(user)
 	if err != nil {
+		if errors.Is(err, model.ErrImportLocked) {
+			c.log.Info("login refused, account import in progress", "user", user)
+			c.err("[SYS/TEMP] Mailbox is being migrated, try again later")
+
+			return nil
+		}
+
 		c.log.Error("open user", "user", user, "err", err)
 		c.err("[SYS/TEMP] Storage unavailable")
 

@@ -249,7 +249,8 @@ Zusätzlich isolierten Restore aus einer echten Sicherung prüfen; ein
 erfolgreicher Export ist kein Backup-/Restore-Nachweis.
 
 **Vorgezogener Kern: identitätserhaltender Kontoimport** (Planung vom
-18.09.2026). Anlass: Die erste Produktivmigration per imapsync erzeugte neue
+18.09.2026, umgesetzt und ausgerollt mit 0.17.0; Bedienung und Semantik in
+[Admin-API: Kontoimport](../admin-api.md#kontoimport-mit-erhaltenen-imap-identitäten)). Anlass: Die erste Produktivmigration per imapsync erzeugte neue
 UIDVALIDITY/UIDs, alle Clients luden ihre Ordner vollständig neu. Geplant ist
 ein Import über die Admin-API (Rolle `import`, Import-Sitzung mit
 kontoweiter Sperre), der UIDVALIDITY, UIDs samt Lücken, UIDNEXT, Flags,
@@ -258,7 +259,7 @@ Keywords, INTERNALDATE/SAVEDATE und MODSEQ übernimmt; `h:modseq` und
 Caches der Clients gültig bleiben. Der Quellleser `shardpostctl migrate imap`
 liest Dovecot per IMAP mit Master-User (UID FETCH mit MODSEQ), kopiert
 initial und in wiederholbaren Deltas; nur der letzte Delta liegt im
-Director-Hold. Voraussetzung ist der mTLS-Listener mit eigenem Issuer.
+Director-Hold. Umgesetzt über einen Sidecar im Server-Pod am Admin-Socket (kein mTLS nötig).
 Abnahmekriterium: vorher synchronisierte Clients (Thunderbird, Apple Mail,
 iOS) laden nach der Umschaltung nichts vollständig neu.
 

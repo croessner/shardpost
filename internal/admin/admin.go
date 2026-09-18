@@ -7,6 +7,7 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -31,8 +32,15 @@ const (
 	RoleDeliverNoEnforce = "deliver:noenforce"
 )
 
-// labelCode names the result code in the metric and the audit line.
-const labelCode = "code"
+// labelCode names the result code in the metric and the audit line;
+// opOther is the operation label of unknown paths.
+const (
+	labelCode = "code"
+	opOther   = "other"
+)
+
+// mimeRFC822 is the media type of a message.
+const mimeRFC822 = "message/rfc822"
 
 var requests = promauto.NewCounterVec(prometheus.CounterOpts{Name: "shardpost_admin_requests_total", Help: "Admin API requests by operation and result code."}, []string{"operation", labelCode})
 
@@ -52,6 +60,23 @@ type Options struct {
 	// Clients map client certificate identities to roles (TCP listener);
 	// identities compare case-insensitively.
 	Clients map[string][]string
+	// Import opens accounts for imports; unlike the protocol store it
+	// does not refuse accounts under an import lock. nil disables the
+	// import operations.
+	Import delivery.Store
+	// ImportLockTTL is how long an import lock lasts without renewal.
+	ImportLockTTL time.Duration
+	// ImportMaxBatchBytes and ImportMaxBatchMessages bound one
+	// importMessages request; ImportMaxInventory one inventory page.
+	ImportMaxBatchBytes    int64
+	ImportMaxBatchMessages int
+	ImportMaxInventory     int
+	// ImportMaxChanges bounds the flag changes plus expunges of one
+	// importChanges request.
+	ImportMaxChanges int
+	// ImportShardSize is the shard size of mailboxes an import creates
+	// (0 = the store's).
+	ImportShardSize uint32
 }
 
 // Server implements the generated adminapi.ServerInterface.
@@ -71,6 +96,12 @@ func New(o Options) *Server {
 	if o.Hostname == "" {
 		o.Hostname = "shardpost"
 	}
+
+	o.ImportLockTTL = cmp.Or(o.ImportLockTTL, 15*time.Minute)
+	o.ImportMaxBatchBytes = cmp.Or(o.ImportMaxBatchBytes, 64<<20)
+	o.ImportMaxBatchMessages = cmp.Or(o.ImportMaxBatchMessages, 500)
+	o.ImportMaxInventory = cmp.Or(o.ImportMaxInventory, defaultPageSize)
+	o.ImportMaxChanges = cmp.Or(o.ImportMaxChanges, 10000)
 
 	clients := make(map[string][]string, len(o.Clients))
 	for id, roles := range o.Clients {
@@ -252,7 +283,36 @@ func operation(path string) string {
 	case "/admin/v1/deliveries":
 		return "deliver"
 	default:
-		return "other"
+		if strings.HasPrefix(path, "/admin/v1/accounts/") {
+			return importOperation(path)
+		}
+
+		return opOther
+	}
+}
+
+// importOperation is the metric label of an import path (account and
+// mailbox ids are not labels).
+func importOperation(path string) string {
+	switch {
+	case strings.HasSuffix(path, "/import"):
+		return "import_session"
+	case strings.HasSuffix(path, "/import/mailboxes"):
+		return "import_mailboxes"
+	case strings.HasSuffix(path, "/messages"):
+		return "import_messages"
+	case strings.HasSuffix(path, "/changes"):
+		return "import_changes"
+	case strings.HasSuffix(path, "/finalize"):
+		return "import_finalize"
+	case strings.HasSuffix(path, "/acl"):
+		return "import_acl"
+	case strings.HasSuffix(path, "/import/sieve"):
+		return "import_sieve"
+	case strings.Contains(path, "/import/mailboxes/"):
+		return "import_mailbox"
+	default:
+		return opOther
 	}
 }
 

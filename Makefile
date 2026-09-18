@@ -1,6 +1,6 @@
 IMAGE      ?= docker.io/chrroessner/shardpost
 TOOLS      ?= docker.io/chrroessner/shardpost-tools
-TAG        ?= 0.16.0
+TAG        ?= 0.17.0
 TOOLS_TAG  ?= 0.13.0
 CONTEXT    ?= croessner
 OVERLAY    ?= deploy/overlays/croessner-nauthilus
@@ -68,7 +68,7 @@ lint-local:
 	golangci-lint run --build-tags tentacle ./...
 
 test:
-	go test -race ./internal/config ./internal/logging ./internal/auth ./internal/imapproto ./internal/pop3proto ./internal/sieve ./internal/imapsieve ./internal/extprograms ./internal/delivery ./internal/admin ./cmd/shardpostctl ./internal/quota ./internal/provision ./internal/fts ./internal/postings ./internal/telemetry
+	go test -race ./internal/config ./internal/logging ./internal/auth ./internal/imapproto ./internal/pop3proto ./internal/sieve ./internal/imapsieve ./internal/extprograms ./internal/delivery ./internal/admin ./cmd/shardpostctl ./internal/migrate ./internal/memstore ./internal/quota ./internal/provision ./internal/fts ./internal/postings ./internal/telemetry
 
 # Python programs, in the runtime base image with the same venv as the
 # image (programs/requirements.txt, hash-pinned).

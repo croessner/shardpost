@@ -1,10 +1,13 @@
 package cephstore
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,7 +50,10 @@ type ScrubReport struct {
 	OrphanCandidates int // orphan blobs seen for the first time (deleted next run)
 	QuotaFixed       bool
 	UnknownShards    int
-	UnknownRemoved   int // of those, deleted (older than the grace period)
+	UnknownRemoved   int  // of those, deleted (older than the grace period)
+	ImportSkipped    bool // an import holds the account: nothing was checked
+	RetiredRepaired  int  // mailboxes left retired by an interrupted import replacement
+	UncoveredEntries int  // entries at or above UIDNEXT (interrupted import) removed
 	Errors           []string
 }
 
@@ -132,6 +138,10 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 	rep := &ScrubReport{User: u.name}
 	cutoff := time.Now().Add(-o.Grace)
 
+	if u.importing(rep, log) {
+		return rep, nil
+	}
+
 	boxes, err := u.ListMailboxes()
 	if err != nil {
 		return nil, err
@@ -188,6 +198,28 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 	sr.logDone()
 
 	return rep, nil
+}
+
+// importing reports whether an import holds the account (or its lock is
+// unreadable): an import writes blobs before the entries that make them
+// visible and may leave entries above UIDNEXT until its next step, none
+// of which is an orphan then. The scrub is skipped.
+func (u *User) importing(rep *ScrubReport, log *slog.Logger) bool {
+	locked, err := u.ImportLocked()
+
+	switch {
+	case err != nil:
+		log.Warn("scrub: import lock not readable, skipped", "err", err)
+		rep.Errors = append(rep.Errors, "import lock: "+err.Error())
+	case locked:
+		log.Info("scrub: account import in progress, skipped")
+	default:
+		return false
+	}
+
+	rep.ImportSkipped = true
+
+	return true
 }
 
 // logDone logs the final report of a scrub run.
@@ -442,6 +474,11 @@ func (sr *scrubRun) scanIndex(boxes []Mailbox, registryOK bool) (*scrubIndex, bo
 func (sr *scrubRun) scanMailbox(mb Mailbox, idx *scrubIndex) bool {
 	u, rep := sr.u, sr.rep
 
+	if _, ok := u.retired(&mb); ok {
+		sr.unregisterRetired(mb)
+		return true // it was empty
+	}
+
 	info, _, err := u.readHeader(&mb)
 	if err != nil {
 		rep.Errors = append(rep.Errors, fmt.Sprintf("mailbox %q: %v", mb.Name, err))
@@ -451,6 +488,7 @@ func (sr *scrubRun) scanMailbox(mb Mailbox, idx *scrubIndex) bool {
 	rep.Mailboxes++
 
 	complete := sr.markShards(&mb, info, idx.known)
+	sr.removeUncovered(&mb, info)
 
 	metas, err := u.ListMessages(mb.ID)
 	if err != nil {
@@ -463,6 +501,114 @@ func (sr *scrubRun) scanMailbox(mb Mailbox, idx *scrubIndex) bool {
 	}
 
 	return complete
+}
+
+// unregisterRetired removes the registry entry of a mailbox whose index
+// object an interrupted import replacement retired (the scrub does not
+// run while the import holds the account). The mailbox was empty; it is
+// gone now, and the next CREATE (or INBOX autoprovisioning) gets a new
+// UIDVALIDITY above the recorded one.
+func (sr *scrubRun) unregisterRetired(mb Mailbox) {
+	u := sr.u
+
+	sr.log.Warn("mailbox retired by an interrupted import", "mailbox", mb.Name)
+	scrubFinding("retired_mailbox")
+
+	if sr.o.DryRun {
+		return
+	}
+
+	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		var rec MailboxRec
+		if v, ok := cur[regKey(mb.Name)]; !ok || json.Unmarshal(v, &rec) != nil || rec.ID != mb.ID {
+			return nil, nil
+		}
+
+		return nil, []string{regKey(mb.Name)}
+	})
+	if err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("unregister retired %q: %v", mb.Name, err))
+		return
+	}
+
+	u.invalidate()
+
+	sr.rep.RetiredRepaired++
+}
+
+// removeUncovered removes entries at or above UIDNEXT from the shard of
+// UIDNEXT-1: an interrupted import step wrote them before its header
+// update. Readers ignore them, but a later delivery would be assigned
+// such a UID and keep the stale entry (it carries a higher modseq).
+// Their blobs become orphans and go the usual way. Entries on shards
+// above are unknown objects and removed as such.
+//
+// A delivery writes its header (UIDNEXT) before its entry, so reading
+// the header again after the entries covers every entry a delivery has
+// written; the removal only takes values that are still unchanged.
+func (sr *scrubRun) removeUncovered(mb *Mailbox, info *MailboxInfo) {
+	u := sr.u
+	oid := u.shardOID(mb.ID, shardOf(max(info.UIDNext-1, 1), info.ShardSize))
+
+	seen := u.uncovered(mb, oid, info.UIDNext)
+	if len(seen) == 0 {
+		return
+	}
+
+	sr.log.Warn("entries above UIDNEXT (interrupted import)", "mailbox", mb.Name, "count", len(seen))
+	scrubFinding("uncovered_entry")
+
+	// An import that resumed since the scrub started writes such entries
+	// before its header: leave them to it.
+	if locked, err := u.ImportLocked(); sr.o.DryRun || err != nil || locked {
+		return
+	}
+
+	removed := 0
+
+	err := casOmap(u, u.idx, oid, slices.Collect(maps.Keys(seen)), func(cur map[string][]byte) (map[string][]byte, []string) {
+		var rm []string
+
+		for k, v := range cur {
+			if bytes.Equal(v, seen[k]) {
+				rm = append(rm, k)
+			}
+		}
+
+		removed = len(rm)
+
+		return nil, rm
+	})
+	if err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("remove uncovered entries of %q: %v", mb.Name, err))
+		return
+	}
+
+	sr.rep.UncoveredEntries += removed
+}
+
+// uncovered returns the entries of shard oid at or above UIDNEXT, as
+// read before the header is read again.
+func (u *User) uncovered(mb *Mailbox, oid string, uidNext uint32) map[string][]byte {
+	vals, err := u.idx.GetOmapValues(oid, uidKey(uidNext-1), keyMsgPrefix, omapPageSize)
+	if err != nil || len(vals) == 0 {
+		return nil
+	}
+
+	fresh, _, err := u.readHeader(mb)
+	if err != nil {
+		return nil
+	}
+
+	seen := map[string][]byte{}
+
+	for k, v := range vals {
+		if uidOfKey(k) >= fresh.UIDNext {
+			seen[k] = v
+		}
+	}
+
+	return seen
 }
 
 // markShards records the shard objects of mb as known. It returns false

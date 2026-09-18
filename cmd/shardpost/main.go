@@ -41,10 +41,29 @@ import (
 )
 
 // storeAdapter exposes the RADOS store through the protocol layer's
-// interface.
+// interface. Accounts under an import lock are refused (temporary
+// failure on every protocol); the admin import uses importStore.
 type storeAdapter struct{ *cephstore.Store }
 
-func (s storeAdapter) User(name string) (model.User, error) { return s.Store.User(name) }
+func (s storeAdapter) User(name string) (model.User, error) {
+	u, err := s.Store.User(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := model.RefuseDuringImport(u); err != nil {
+		u.Close()
+		return nil, err
+	}
+
+	return u, nil
+}
+
+// importStore is the RADOS store without the import refusal, for the
+// admin import that holds the lock.
+type importStore struct{ *cephstore.Store }
+
+func (s importStore) User(name string) (model.User, error) { return s.Store.User(name) }
 
 // draining flips readiness to "not ready" during shutdown.
 var draining atomic.Bool
@@ -313,7 +332,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 
 	srv.http = newHTTPServer(settings, store)
 
-	srv.admin, err = newAdminServers(log, settings, authn, srv.delivery)
+	srv.admin, err = newAdminServers(log, settings, authn, srv.delivery, importStore{store})
 	if err != nil {
 		return err
 	}

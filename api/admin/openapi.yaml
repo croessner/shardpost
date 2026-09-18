@@ -90,14 +90,287 @@ paths:
                 $ref: "#/components/schemas/DeliveryResult"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    post:
+      operationId: openImport
+      summary: Open or renew an import session
+      description: |
+        Takes the account's import lock for the session (or renews it).
+        While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+        delivery refuse the account temporarily. The account must be the
+        canonical account the recipient lookup resolves it to. The lock
+        expires after the configured TTL unless renewed; every import
+        call renews it. Requires the role `import`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportSessionRequest"
+      responses:
+        "200":
+          description: The session holds the lock.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportSession"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: closeImport
+      summary: Release the import lock
+      parameters:
+        - $ref: "#/components/parameters/ImportSessionHeader"
+      responses:
+        "204":
+          description: Released (or not held by this session).
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    get:
+      operationId: listImportMailboxes
+      summary: Mailboxes of the account with their identity state
+      responses:
+        "200":
+          description: All mailboxes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportMailboxList"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: putImportMailbox
+      summary: Create or adopt a mailbox with the source identity
+      description: |
+        Creates the mailbox with the source UIDVALIDITY (and the source
+        mailbox id if it is 32 hex digits and unused), or adopts an
+        existing one with the same UIDVALIDITY. An existing mailbox with
+        the source id under another name is renamed. An existing empty
+        mailbox with another UIDVALIDITY is replaced; a non-empty one is
+        a conflict unless `replace` is set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportMailboxSpec"
+      responses:
+        "200":
+          description: The mailbox.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportMailboxState"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    delete:
+      operationId: deleteImportMailbox
+      summary: Delete a mailbox that no longer exists in the source
+      responses:
+        "204":
+          description: Deleted.
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    get:
+      operationId: listImportMessages
+      summary: Inventory of a mailbox (UID order, paged)
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: Only UIDs above this one.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            maximum: 4294967295
+        - name: limit
+          in: query
+          required: false
+          description: Page size (bounded by the server).
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: One page; `next_after` is set when more may follow.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportInventory"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: importMessages
+      summary: Store messages at their source UIDs
+      description: |
+        The body is `multipart/mixed`; every part is `message/rfc822` and
+        carries its identity as JSON in the part header `X-Import-Meta`
+        (uid, modseq, flags, internal_date, save_date, guid, pop3_uidl).
+        UIDs must be ascending. A UID that already holds a message of the
+        same size is skipped (resuming a run); one with a different
+        message is a conflict. Quota usage is counted, not enforced.
+      requestBody:
+        required: true
+        content:
+          multipart/mixed:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}/changes:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    post:
+      operationId: importChanges
+      summary: Apply source flag changes and expunges
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportChanges"
+      responses:
+        "200":
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportMailboxState"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    post:
+      operationId: finalizeImportMailbox
+      summary: Set UIDNEXT and HIGHESTMODSEQ to the source values
+      description: |
+        UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+        change log starts after HIGHESTMODSEQ, so clients resuming from a
+        source state get complete answers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportFinalize"
+      responses:
+        "200":
+          description: The resulting state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportMailboxState"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}/acl:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    put:
+      operationId: putImportACL
+      summary: Replace the explicit ACL entries of a mailbox
+      description: Identifiers not listed lose their rights; the owner is implicit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportACL"
+      responses:
+        "204":
+          description: Replaced.
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/sieve:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    put:
+      operationId: putImportSieve
+      summary: Replace the Sieve scripts and the active script
+      description: |
+        Stores the scripts as given (nothing is executed), activates
+        `active` ("" deactivates) and removes scripts not listed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportSieve"
+      responses:
+        "204":
+          description: Replaced.
+        default:
+          $ref: "#/components/responses/Error"
 components:
+  parameters:
+    Account:
+      name: account
+      in: path
+      required: true
+      description: Canonical account.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 320
+    MailboxID:
+      name: id
+      in: path
+      required: true
+      description: Stable mailbox id.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+    ImportSessionHeader:
+      name: X-Import-Session
+      in: header
+      required: true
+      description: The session that holds the import lock.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{16,64}$"
   responses:
     Error:
       description: |
         Failure. `code` is stable: `bad_request` (400), `unauthenticated`
         (401), `forbidden` (403), `no_such_user` and `no_such_mailbox`
         (404), `too_large` (413), `rejected` (422, Sieve reject),
-        `over_quota` (507), `temporary` (503, try again), `internal` (500).
+        `over_quota` (507), `temporary` (503, try again), `internal` (500),
+        `conflict` (409, imported data contradicts the target),
+        `import_locked` (409, another session holds the account),
+        `not_locked` (409, the session does not hold the lock).
       content:
         application/json:
           schema:
@@ -109,7 +382,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked]
         message:
           type: string
     Version:
@@ -146,3 +419,196 @@ components:
         size:
           type: integer
           format: int64
+    ImportSessionRequest:
+      type: object
+      properties:
+        session:
+          type: string
+          description: Resume this session (it must hold the lock or the lock must be free); omitted, the server chooses one.
+          pattern: "^[A-Za-z0-9_-]{16,64}$"
+    ImportSession:
+      type: object
+      required: [account, session, expires_at]
+      properties:
+        account:
+          type: string
+        session:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+    ImportMailboxSpec:
+      type: object
+      required: [name, uidvalidity]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        uidvalidity:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4294967295
+        id:
+          type: string
+          description: Preferred mailbox id (32 lowercase hex digits, e.g. the Dovecot mailbox GUID).
+          maxLength: 64
+        special_use:
+          type: array
+          items:
+            type: string
+        subscribed:
+          type: boolean
+        replace:
+          type: boolean
+          description: |
+            Replace an existing mailbox with another UIDVALIDITY even if it
+            holds messages (they are removed): the source recreated the
+            mailbox and it is imported again.
+    ImportMailboxState:
+      type: object
+      required: [id, name, uidvalidity, uid_next, highest_modseq, subscribed, special_use]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        uidvalidity:
+          type: integer
+          format: int64
+        uid_next:
+          type: integer
+          format: int64
+        highest_modseq:
+          type: integer
+          format: int64
+        subscribed:
+          type: boolean
+        special_use:
+          type: array
+          items:
+            type: string
+    ImportMailboxList:
+      type: object
+      required: [mailboxes]
+      properties:
+        mailboxes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportMailboxState"
+    ImportInventoryEntry:
+      type: object
+      required: [uid, guid, size, modseq, flags]
+      properties:
+        uid:
+          type: integer
+          format: int64
+        guid:
+          type: string
+        size:
+          type: integer
+          format: int64
+        modseq:
+          type: integer
+          format: int64
+        flags:
+          type: array
+          items:
+            type: string
+    ImportInventory:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportInventoryEntry"
+        next_after:
+          type: integer
+          format: int64
+    ImportResult:
+      type: object
+      required: [imported, existing, shared, bytes]
+      properties:
+        imported:
+          type: integer
+        existing:
+          type: integer
+        shared:
+          type: integer
+        bytes:
+          type: integer
+          format: int64
+    ImportFlagChange:
+      type: object
+      required: [uid, modseq, flags]
+      properties:
+        uid:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4294967295
+        modseq:
+          type: integer
+          format: int64
+          minimum: 0
+        flags:
+          type: array
+          items:
+            type: string
+    ImportChanges:
+      type: object
+      properties:
+        flags:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportFlagChange"
+        expunge:
+          type: array
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+            maximum: 4294967295
+    ImportFinalize:
+      type: object
+      required: [uid_next, highest_modseq]
+      properties:
+        uid_next:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4294967295
+        highest_modseq:
+          type: integer
+          format: int64
+          minimum: 0
+    ImportACL:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: object
+          additionalProperties:
+            type: string
+    ImportSieve:
+      type: object
+      required: [scripts, active]
+      properties:
+        scripts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportSieveScript"
+        active:
+          type: string
+    ImportSieveScript:
+      type: object
+      required: [name, script]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        script:
+          type: string

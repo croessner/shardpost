@@ -137,3 +137,100 @@ Abgenommen am 2026-09-18: Operator `version` 200, `deliver` ohne Rolle 403,
 Client der fremden CA und ohne Zertifikat im Handshake abgewiesen, Pod
 ohne Label von der NetworkPolicy blockiert; Audit-Zeilen mit
 `transport=mtls` und der Identität.
+
+## Kontoimport mit erhaltenen IMAP-Identitäten
+
+Kern von Teilpaket 8e ([Stufe 8](development/admin-stage.md)). Ein Konto
+wird so übernommen, dass IMAP-Clients nach der Umschaltung nur inkrementell
+synchronisieren: UIDVALIDITY, UIDs mit ihren Lücken, UIDNEXT, Flags und
+Keywords, INTERNALDATE/SAVEDATE und MODSEQ je Nachricht bleiben erhalten,
+HIGHESTMODSEQ wird mindestens der Quellwert. imapsync kann das nicht, weil
+IMAP-APPEND die UIDs immer neu vergibt.
+
+### Semantik
+
+- **Sperre:** `POST /admin/v1/accounts/{account}/import` (Rolle `import`)
+  nimmt die kontoweite Import-Sperre für eine Sitzung (Header
+  `X-Import-Session` bei allen weiteren Aufrufen; jeder Aufruf verlängert
+  sie, `admin.import.lock_ttl_seconds`). Solange sie besteht, lehnen IMAP,
+  POP3, ManageSieve, LMTP (`451 4.2.1`) und die lokale Zustellung das Konto
+  vorübergehend ab. Nur das kanonische Konto der Userdb wird angenommen.
+- **Ordner:** `PUT .../import/mailboxes` legt den Ordner mit der
+  UIDVALIDITY der Quelle an (Dovecot-Mailbox-GUID als stabile ID, wenn
+  verfügbar) oder übernimmt einen vorhandenen mit gleicher UIDVALIDITY. Ein
+  leerer Ordner mit anderer UIDVALIDITY (etwa ein INBOX vom ersten Login)
+  wird ersetzt, ein nicht leerer ist ein Konflikt (`409 conflict`). Hat die
+  Quelle einen Ordner umbenannt, folgt der Import über die stabile ID.
+  Neue Ordner bekommen `admin.import.shard_size` als Shardgröße.
+- **Nachrichten:** `POST .../mailboxes/{id}/messages` mit
+  `multipart/mixed`; jeder Teil ist `message/rfc822` mit der Identität als
+  JSON im Teil-Header `X-Import-Meta` (`uid`, `modseq`, `flags`,
+  `internal_date`, `save_date`, `guid`, `pop3_uidl`). UIDs aufsteigend. Eine
+  UID mit gleich großer Nachricht wird übersprungen (Wiederaufnahme), mit
+  anderer ist sie ein Konflikt. Quota wird gezählt, nicht durchgesetzt.
+  Gleiche Quell-GUID in mehreren Ordnern teilt sich einen Blob.
+- **Deltas:** `POST .../changes` setzt Flags mit dem Quell-MODSEQ und
+  entfernt UIDs, die die Quelle nicht mehr hat. `GET .../messages`
+  liefert das Inventar seitenweise (`after`, `limit`).
+- **Abschluss je Ordner:** `POST .../finalize` setzt UIDNEXT und
+  HIGHESTMODSEQ auf mindestens die Quellwerte, die \Recent-Marke auf
+  UIDNEXT und den Beginn des Änderungslogs hinter HIGHESTMODSEQ. Ein Client,
+  der mit einem älteren Quellstand per QRESYNC/CONDSTORE wiederkommt, bekommt
+  so die vollständige Antwort (alle neueren Einträge, VANISHED für alle
+  Lücken), einer mit aktuellem Stand nichts.
+- **Sieve und ACL:** `PUT .../import/sieve` ersetzt Skripte und aktives
+  Skript; alle Skripte werden vorher wie bei ManageSieve übersetzt
+  (`422 rejected`, wenn eines nicht geht; dann ändert sich nichts).
+  `PUT .../mailboxes/{id}/acl` ersetzt die expliziten ACL-Einträge.
+- **POP3:** Mit `-pop3-uidl-format` (Dovecot-Syntax 2.3 `%08Xu%08Xv` oder
+  2.4 `%{uid | hex(8)}`) wird je INBOX-Nachricht die UIDL der Quelle
+  gespeichert; POP3 `UIDL` gibt sie statt der GUID aus. COPY/MOVE übernehmen
+  sie nicht (sie muss je Maildrop eindeutig bleiben).
+
+### Migrator `shardpostctl migrate`
+
+Liest die Quelle per IMAP (Master-User, `UID FETCH ... MODSEQ X-GUID
+SAVEDATE`) und ManageSieve (mit PROXY-Kopf, wo der Load-Balancer ihn
+verlangt), vergleicht mit dem Inventar des Ziels und schickt nur die
+Unterschiede. Jeder Lauf ist wiederholbar und prüft am Ende je Ordner, dass
+UIDs, Größen und Flags dem gelesenen Quellstand entsprechen (`verified`).
+Ziel-Ordner, die die Quelle nicht mehr hat, werden entfernt
+(`-no-prune` schaltet das ab; INBOX bleibt immer).
+
+Im Cluster läuft er im Sidecar `import` des Server-Pods (Komponente
+`deploy/components/import-sidecar`) gegen den Admin-Socket. Quelle und
+Sieve-Endpunkt stehen als `SHARDPOST_MIGRATE_*` in der Komponente, das
+Master-Passwort im Secret `shardpost-migrate-source` (Schlüssel
+`password`):
+
+```sh
+kubectl -n shardpost create secret generic shardpost-migrate-source \
+  --from-literal=password="$(kubectl -n director get secret director-backend-master -o jsonpath='{.data.password}' | base64 -d)"
+kubectl -n shardpost exec deploy/shardpost-server -c import -- \
+  shardpostctl -timeout 10m migrate user@example.org
+```
+
+Für lange Läufe losgelöst mit Protokoll unter `/work`:
+
+```sh
+kubectl -n shardpost exec deploy/shardpost-server -c import -- sh -c \
+  'nohup shardpostctl -timeout 10m migrate --json user@example.org >/work/user.json 2>/work/user.log &'
+```
+
+Exitcodes: 0 alles verifiziert, 1 Teile fehlgeschlagen (erneut laufen
+lassen), 64 Aufruf, 69 Lauf abgebrochen.
+
+### Ablauf einer Migration mit dem Director
+
+1. Erstkopie im laufenden Betrieb (Konto noch auf mailstack):
+   `migrate` beliebig oft, bis ein Lauf kaum noch Änderungen meldet.
+2. Director: `users hold`, `users kick`.
+3. Letzter `migrate`-Lauf (Delta, Sieve, ACL); alle Ordner `verified`.
+4. Pin im Director/`director.lua` auf `shardpost`,
+   `users move --to-shard shardpost --strategy kick_existing`,
+   `hold clear`.
+5. Kontrolle mit einem Client: gleiche UIDVALIDITY, kein Voll-Download.
+
+Solange mailstack nach der Umschaltung unverändert bleibt, ist der Rückweg
+ein Zurück-Routen; danach eingegangene Änderungen müssten zurückkopiert
+werden (dann mit Voll-Resync auf dem Rückweg).

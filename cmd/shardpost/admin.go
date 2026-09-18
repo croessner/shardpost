@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"shardpost/internal/admin"
 	"shardpost/internal/auth"
@@ -24,7 +25,7 @@ type adminServers struct {
 
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
-func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service) (*adminServers, error) {
+func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, importer delivery.Store) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
 
@@ -38,7 +39,10 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	}
 
 	s := admin.New(admin.Options{Delivery: deliverer, Auth: authn, Log: log.With("component", "admin"), Version: version.Version,
-		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients})
+		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients,
+		Import: importer, ImportLockTTL: time.Duration(c.Import.LockTTLSeconds) * time.Second,
+		ImportMaxBatchBytes: c.Import.MaxBatchBytes, ImportMaxBatchMessages: c.Import.MaxBatchMessages, ImportMaxInventory: c.Import.MaxInventory, ImportMaxChanges: c.Import.MaxChanges,
+		ImportShardSize: c.Import.ShardSize})
 
 	if c.Addr != "" {
 		srv, err := s.TLSServer(c.TLSCert, c.TLSKey, c.ClientCA)

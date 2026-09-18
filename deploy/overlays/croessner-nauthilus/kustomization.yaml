@@ -10,6 +10,13 @@ components:
   - ../../components/nauthilus
   - ../../components/quota-ldap-renew
   - ../../components/admin-mtls
+  - ../../components/import-sidecar
+# Pinned here as well: the import sidecar of the component above is added
+# after ../croessner has pinned its images.
+images:
+  - name: docker.io/chrroessner/shardpost
+    newTag: 0.17.0
+    digest: sha256:e2c6952281a2dad552afb77e2aa01081409cd2a2bdd5d4e135f248ffb029f653
 configMapGenerator:
   - name: shardpost-server-config
     namespace: shardpost

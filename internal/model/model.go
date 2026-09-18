@@ -117,6 +117,19 @@ type Meta struct {
 	Envelope     *imap.Envelope `json:"env,omitempty"`
 	References   []string       `json:"refs,omitempty"` // Message-IDs from References/In-Reply-To
 	Preview      string         `json:"preview,omitempty"`
+	// POP3UIDL is the POP3 unique-id kept from an imported source; ""
+	// means the GUID (see UIDL).
+	POP3UIDL string `json:"pop3uidl,omitempty"`
+}
+
+// UIDL is the POP3 unique-id of the message: the imported one if any,
+// otherwise the GUID.
+func (m *Meta) UIDL() string {
+	if m.POP3UIDL != "" {
+		return m.POP3UIDL
+	}
+
+	return m.GUID
 }
 
 // MailboxInfo is the header of a mailbox index object.
@@ -176,6 +189,13 @@ type Watch interface {
 // setting applies to the view it is called on.
 type QuotaExemptable interface {
 	SetQuotaEnforced(enforced bool)
+}
+
+// QuotaEventSilencer is implemented by user views whose quota changes
+// can be kept from the quota event hook (warnings, over-quota flag), for
+// an import into an account that is not live here yet.
+type QuotaEventSilencer interface {
+	SilenceQuotaEvents()
 }
 
 // User is the per-user storage API the protocol layer talks to.

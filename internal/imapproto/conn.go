@@ -977,6 +977,14 @@ func (c *conn) finishLogin(tag string, req auth.Request, res *auth.Result, err e
 	u, err := c.s.o.Store.User(account)
 	if err != nil {
 		c.s.releaseSlot(account)
+
+		if errors.Is(err, model.ErrImportLocked) {
+			c.log.Info("login refused, account import in progress", "user", account)
+			c.no(tag, "UNAVAILABLE", "Mailbox is being migrated, try again later")
+
+			return nil
+		}
+
 		c.log.Error("open user", "user", account, "err", err)
 		c.no(tag, "UNAVAILABLE", "Storage unavailable")
 

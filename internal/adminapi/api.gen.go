@@ -6,6 +6,7 @@
 package adminapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,17 +15,22 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // Defines values for ErrorCode.
 const (
 	BadRequest      ErrorCode = "bad_request"
+	Conflict        ErrorCode = "conflict"
 	Forbidden       ErrorCode = "forbidden"
+	ImportLocked    ErrorCode = "import_locked"
 	Internal        ErrorCode = "internal"
 	NoSuchMailbox   ErrorCode = "no_such_mailbox"
 	NoSuchUser      ErrorCode = "no_such_user"
+	NotLocked       ErrorCode = "not_locked"
 	OverQuota       ErrorCode = "over_quota"
 	Rejected        ErrorCode = "rejected"
 	Temporary       ErrorCode = "temporary"
@@ -37,13 +43,19 @@ func (e ErrorCode) Valid() bool {
 	switch e {
 	case BadRequest:
 		return true
+	case Conflict:
+		return true
 	case Forbidden:
+		return true
+	case ImportLocked:
 		return true
 	case Internal:
 		return true
 	case NoSuchMailbox:
 		return true
 	case NoSuchUser:
+		return true
+	case NotLocked:
 		return true
 	case OverQuota:
 		return true
@@ -78,6 +90,109 @@ type Error struct {
 // ErrorCode defines model for Error.Code.
 type ErrorCode string
 
+// ImportACL defines model for ImportACL.
+type ImportACL struct {
+	Entries map[string]string `json:"entries"`
+}
+
+// ImportChanges defines model for ImportChanges.
+type ImportChanges struct {
+	Expunge *[]int64            `json:"expunge,omitempty"`
+	Flags   *[]ImportFlagChange `json:"flags,omitempty"`
+}
+
+// ImportFinalize defines model for ImportFinalize.
+type ImportFinalize struct {
+	HighestModseq int64 `json:"highest_modseq"`
+	UidNext       int64 `json:"uid_next"`
+}
+
+// ImportFlagChange defines model for ImportFlagChange.
+type ImportFlagChange struct {
+	Flags  []string `json:"flags"`
+	Modseq int64    `json:"modseq"`
+	Uid    int64    `json:"uid"`
+}
+
+// ImportInventory defines model for ImportInventory.
+type ImportInventory struct {
+	Messages  []ImportInventoryEntry `json:"messages"`
+	NextAfter *int64                 `json:"next_after,omitempty"`
+}
+
+// ImportInventoryEntry defines model for ImportInventoryEntry.
+type ImportInventoryEntry struct {
+	Flags  []string `json:"flags"`
+	Guid   string   `json:"guid"`
+	Modseq int64    `json:"modseq"`
+	Size   int64    `json:"size"`
+	Uid    int64    `json:"uid"`
+}
+
+// ImportMailboxList defines model for ImportMailboxList.
+type ImportMailboxList struct {
+	Mailboxes []ImportMailboxState `json:"mailboxes"`
+}
+
+// ImportMailboxSpec defines model for ImportMailboxSpec.
+type ImportMailboxSpec struct {
+	// Id Preferred mailbox id (32 lowercase hex digits, e.g. the Dovecot mailbox GUID).
+	Id   *string `json:"id,omitempty"`
+	Name string  `json:"name"`
+
+	// Replace Replace an existing mailbox with another UIDVALIDITY even if it
+	// holds messages (they are removed): the source recreated the
+	// mailbox and it is imported again.
+	Replace     *bool     `json:"replace,omitempty"`
+	SpecialUse  *[]string `json:"special_use,omitempty"`
+	Subscribed  *bool     `json:"subscribed,omitempty"`
+	Uidvalidity int64     `json:"uidvalidity"`
+}
+
+// ImportMailboxState defines model for ImportMailboxState.
+type ImportMailboxState struct {
+	HighestModseq int64    `json:"highest_modseq"`
+	Id            string   `json:"id"`
+	Name          string   `json:"name"`
+	SpecialUse    []string `json:"special_use"`
+	Subscribed    bool     `json:"subscribed"`
+	UidNext       int64    `json:"uid_next"`
+	Uidvalidity   int64    `json:"uidvalidity"`
+}
+
+// ImportResult defines model for ImportResult.
+type ImportResult struct {
+	Bytes    int64 `json:"bytes"`
+	Existing int   `json:"existing"`
+	Imported int   `json:"imported"`
+	Shared   int   `json:"shared"`
+}
+
+// ImportSession defines model for ImportSession.
+type ImportSession struct {
+	Account   string    `json:"account"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Session   string    `json:"session"`
+}
+
+// ImportSessionRequest defines model for ImportSessionRequest.
+type ImportSessionRequest struct {
+	// Session Resume this session (it must hold the lock or the lock must be free); omitted, the server chooses one.
+	Session *string `json:"session,omitempty"`
+}
+
+// ImportSieve defines model for ImportSieve.
+type ImportSieve struct {
+	Active  string              `json:"active"`
+	Scripts []ImportSieveScript `json:"scripts"`
+}
+
+// ImportSieveScript defines model for ImportSieveScript.
+type ImportSieveScript struct {
+	Name   string `json:"name"`
+	Script string `json:"script"`
+}
+
 // StoredMessage defines model for StoredMessage.
 type StoredMessage struct {
 	Guid    string `json:"guid"`
@@ -90,6 +205,84 @@ type StoredMessage struct {
 type Version struct {
 	GoVersion string `json:"go_version"`
 	Version   string `json:"version"`
+}
+
+// Account defines model for Account.
+type Account = string
+
+// ImportSessionHeader defines model for ImportSessionHeader.
+type ImportSessionHeader = string
+
+// MailboxID defines model for MailboxID.
+type MailboxID = string
+
+// CloseImportParams defines parameters for CloseImport.
+type CloseImportParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// ListImportMailboxesParams defines parameters for ListImportMailboxes.
+type ListImportMailboxesParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// PutImportMailboxParams defines parameters for PutImportMailbox.
+type PutImportMailboxParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// DeleteImportMailboxParams defines parameters for DeleteImportMailbox.
+type DeleteImportMailboxParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// PutImportACLParams defines parameters for PutImportACL.
+type PutImportACLParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// ImportChangesParams defines parameters for ImportChanges.
+type ImportChangesParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// FinalizeImportMailboxParams defines parameters for FinalizeImportMailbox.
+type FinalizeImportMailboxParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// ListImportMessagesParams defines parameters for ListImportMessages.
+type ListImportMessagesParams struct {
+	// After Only UIDs above this one.
+	After *int64 `form:"after,omitempty" json:"after,omitempty"`
+
+	// Limit Page size (bounded by the server).
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// ImportMessagesMultipartBody defines parameters for ImportMessages.
+type ImportMessagesMultipartBody = openapi_types.File
+
+// ImportMessagesParams defines parameters for ImportMessages.
+type ImportMessagesParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// PutImportSieveParams defines parameters for PutImportSieve.
+type PutImportSieveParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
 }
 
 // DeliverParams defines parameters for Deliver.
@@ -109,6 +302,27 @@ type DeliverParams struct {
 	// EnforceQuota Refuse the message when it does not fit the quota.
 	EnforceQuota *bool `form:"enforce_quota,omitempty" json:"enforce_quota,omitempty"`
 }
+
+// OpenImportJSONRequestBody defines body for OpenImport for application/json ContentType.
+type OpenImportJSONRequestBody = ImportSessionRequest
+
+// PutImportMailboxJSONRequestBody defines body for PutImportMailbox for application/json ContentType.
+type PutImportMailboxJSONRequestBody = ImportMailboxSpec
+
+// PutImportACLJSONRequestBody defines body for PutImportACL for application/json ContentType.
+type PutImportACLJSONRequestBody = ImportACL
+
+// ImportChangesJSONRequestBody defines body for ImportChanges for application/json ContentType.
+type ImportChangesJSONRequestBody = ImportChanges
+
+// FinalizeImportMailboxJSONRequestBody defines body for FinalizeImportMailbox for application/json ContentType.
+type FinalizeImportMailboxJSONRequestBody = ImportFinalize
+
+// ImportMessagesMultipartRequestBody defines body for ImportMessages for multipart/mixed ContentType.
+type ImportMessagesMultipartRequestBody = ImportMessagesMultipartBody
+
+// PutImportSieveJSONRequestBody defines body for PutImportSieve for application/json ContentType.
+type PutImportSieveJSONRequestBody = ImportSieve
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -184,6 +398,170 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 // The interface specification for the client above.
 type ClientInterface interface {
 
+	// CloseImport Release the import lock
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
+	CloseImport(ctx context.Context, account Account, params *CloseImportParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OpenImportWithBody Open or renew an import session
+	//
+	// Takes the account's import lock for the session (or renews it).
+	// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+	// delivery refuse the account temporarily. The account must be the
+	// canonical account the recipient lookup resolves it to. The lock
+	// expires after the configured TTL unless renewed; every import
+	// call renews it. Requires the role `import`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+	OpenImportWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OpenImport Open or renew an import session
+	//
+	// Takes the account's import lock for the session (or renews it).
+	// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+	// delivery refuse the account temporarily. The account must be the
+	// canonical account the recipient lookup resolves it to. The lock
+	// expires after the configured TTL unless renewed; every import
+	// call renews it. Requires the role `import`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+	OpenImport(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListImportMailboxes Mailboxes of the account with their identity state
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes (the `ListImportMailboxes` operationId).
+	ListImportMailboxes(ctx context.Context, account Account, params *ListImportMailboxesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportMailboxWithBody Create or adopt a mailbox with the source identity
+	//
+	// Creates the mailbox with the source UIDVALIDITY (and the source
+	// mailbox id if it is 32 hex digits and unused), or adopts an
+	// existing one with the same UIDVALIDITY. An existing mailbox with
+	// the source id under another name is renamed. An existing empty
+	// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+	// a conflict unless `replace` is set.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+	PutImportMailboxWithBody(ctx context.Context, account Account, params *PutImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportMailbox Create or adopt a mailbox with the source identity
+	//
+	// Creates the mailbox with the source UIDVALIDITY (and the source
+	// mailbox id if it is 32 hex digits and unused), or adopts an
+	// existing one with the same UIDVALIDITY. An existing mailbox with
+	// the source id under another name is renamed. An existing empty
+	// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+	// a conflict unless `replace` is set.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+	PutImportMailbox(ctx context.Context, account Account, params *PutImportMailboxParams, body PutImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteImportMailbox Delete a mailbox that no longer exists in the source
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/import/mailboxes/{id} (the `DeleteImportMailbox` operationId).
+	DeleteImportMailbox(ctx context.Context, account Account, id MailboxID, params *DeleteImportMailboxParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportACLWithBody Replace the explicit ACL entries of a mailbox
+	//
+	// Identifiers not listed lose their rights; the owner is implicit.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+	PutImportACLWithBody(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportACL Replace the explicit ACL entries of a mailbox
+	//
+	// Identifiers not listed lose their rights; the owner is implicit.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+	PutImportACL(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, body PutImportACLJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportChangesWithBody Apply source flag changes and expunges
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+	ImportChangesWithBody(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportChanges Apply source flag changes and expunges
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+	ImportChanges(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, body ImportChangesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FinalizeImportMailboxWithBody Set UIDNEXT and HIGHESTMODSEQ to the source values
+	//
+	// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+	// change log starts after HIGHESTMODSEQ, so clients resuming from a
+	// source state get complete answers.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+	FinalizeImportMailboxWithBody(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FinalizeImportMailbox Set UIDNEXT and HIGHESTMODSEQ to the source values
+	//
+	// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+	// change log starts after HIGHESTMODSEQ, so clients resuming from a
+	// source state get complete answers.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+	FinalizeImportMailbox(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, body FinalizeImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListImportMessages Inventory of a mailbox (UID order, paged)
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ListImportMessages` operationId).
+	ListImportMessages(ctx context.Context, account Account, id MailboxID, params *ListImportMessagesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ImportMessagesWithBody Store messages at their source UIDs
+	//
+	// The body is `multipart/mixed`; every part is `message/rfc822` and
+	// carries its identity as JSON in the part header `X-Import-Meta`
+	// (uid, modseq, flags, internal_date, save_date, guid, pop3_uidl).
+	// UIDs must be ascending. A UID that already holds a message of the
+	// same size is skipped (resuming a run); one with a different
+	// message is a conflict. Quota usage is counted, not enforced.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
+	ImportMessagesWithBody(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportSieveWithBody Replace the Sieve scripts and the active script
+	//
+	// Stores the scripts as given (nothing is executed), activates
+	// `active` ("" deactivates) and removes scripts not listed.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+	PutImportSieveWithBody(ctx context.Context, account Account, params *PutImportSieveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportSieve Replace the Sieve scripts and the active script
+	//
+	// Stores the scripts as given (nothing is executed), activates
+	// `active` ("" deactivates) and removes scripts not listed.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+	PutImportSieve(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeliverWithBody Local delivery (LDA)
 	//
 	// Delivers one message to one recipient like a local delivery agent:
@@ -204,6 +582,340 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/version (the `GetVersion` operationId).
 	GetVersion(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+// CloseImport Release the import lock
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
+func (c *Client) CloseImport(ctx context.Context, account Account, params *CloseImportParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCloseImportRequest(c.Server, account, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// OpenImportWithBody Open or renew an import session
+//
+// Takes the account's import lock for the session (or renews it).
+// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+// delivery refuse the account temporarily. The account must be the
+// canonical account the recipient lookup resolves it to. The lock
+// expires after the configured TTL unless renewed; every import
+// call renews it. Requires the role `import`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+func (c *Client) OpenImportWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOpenImportRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// OpenImport Open or renew an import session
+//
+// Takes the account's import lock for the session (or renews it).
+// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+// delivery refuse the account temporarily. The account must be the
+// canonical account the recipient lookup resolves it to. The lock
+// expires after the configured TTL unless renewed; every import
+// call renews it. Requires the role `import`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+func (c *Client) OpenImport(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOpenImportRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListImportMailboxes Mailboxes of the account with their identity state
+//
+// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes (the `ListImportMailboxes` operationId).
+func (c *Client) ListImportMailboxes(ctx context.Context, account Account, params *ListImportMailboxesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListImportMailboxesRequest(c.Server, account, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportMailboxWithBody Create or adopt a mailbox with the source identity
+//
+// Creates the mailbox with the source UIDVALIDITY (and the source
+// mailbox id if it is 32 hex digits and unused), or adopts an
+// existing one with the same UIDVALIDITY. An existing mailbox with
+// the source id under another name is renamed. An existing empty
+// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+// a conflict unless `replace` is set.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+func (c *Client) PutImportMailboxWithBody(ctx context.Context, account Account, params *PutImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportMailboxRequestWithBody(c.Server, account, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportMailbox Create or adopt a mailbox with the source identity
+//
+// Creates the mailbox with the source UIDVALIDITY (and the source
+// mailbox id if it is 32 hex digits and unused), or adopts an
+// existing one with the same UIDVALIDITY. An existing mailbox with
+// the source id under another name is renamed. An existing empty
+// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+// a conflict unless `replace` is set.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+func (c *Client) PutImportMailbox(ctx context.Context, account Account, params *PutImportMailboxParams, body PutImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportMailboxRequest(c.Server, account, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DeleteImportMailbox Delete a mailbox that no longer exists in the source
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/import/mailboxes/{id} (the `DeleteImportMailbox` operationId).
+func (c *Client) DeleteImportMailbox(ctx context.Context, account Account, id MailboxID, params *DeleteImportMailboxParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteImportMailboxRequest(c.Server, account, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportACLWithBody Replace the explicit ACL entries of a mailbox
+//
+// Identifiers not listed lose their rights; the owner is implicit.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+func (c *Client) PutImportACLWithBody(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportACLRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportACL Replace the explicit ACL entries of a mailbox
+//
+// Identifiers not listed lose their rights; the owner is implicit.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+func (c *Client) PutImportACL(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, body PutImportACLJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportACLRequest(c.Server, account, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ImportChangesWithBody Apply source flag changes and expunges
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+func (c *Client) ImportChangesWithBody(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportChangesRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ImportChanges Apply source flag changes and expunges
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+func (c *Client) ImportChanges(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, body ImportChangesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportChangesRequest(c.Server, account, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// FinalizeImportMailboxWithBody Set UIDNEXT and HIGHESTMODSEQ to the source values
+//
+// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+// change log starts after HIGHESTMODSEQ, so clients resuming from a
+// source state get complete answers.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+func (c *Client) FinalizeImportMailboxWithBody(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFinalizeImportMailboxRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// FinalizeImportMailbox Set UIDNEXT and HIGHESTMODSEQ to the source values
+//
+// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+// change log starts after HIGHESTMODSEQ, so clients resuming from a
+// source state get complete answers.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+func (c *Client) FinalizeImportMailbox(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, body FinalizeImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFinalizeImportMailboxRequest(c.Server, account, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListImportMessages Inventory of a mailbox (UID order, paged)
+//
+// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ListImportMessages` operationId).
+func (c *Client) ListImportMessages(ctx context.Context, account Account, id MailboxID, params *ListImportMessagesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListImportMessagesRequest(c.Server, account, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ImportMessagesWithBody Store messages at their source UIDs
+//
+// The body is `multipart/mixed`; every part is `message/rfc822` and
+// carries its identity as JSON in the part header `X-Import-Meta`
+// (uid, modseq, flags, internal_date, save_date, guid, pop3_uidl).
+// UIDs must be ascending. A UID that already holds a message of the
+// same size is skipped (resuming a run); one with a different
+// message is a conflict. Quota usage is counted, not enforced.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
+func (c *Client) ImportMessagesWithBody(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewImportMessagesRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportSieveWithBody Replace the Sieve scripts and the active script
+//
+// Stores the scripts as given (nothing is executed), activates
+// `active` ("" deactivates) and removes scripts not listed.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+func (c *Client) PutImportSieveWithBody(ctx context.Context, account Account, params *PutImportSieveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportSieveRequestWithBody(c.Server, account, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportSieve Replace the Sieve scripts and the active script
+//
+// Stores the scripts as given (nothing is executed), activates
+// `active` ("" deactivates) and removes scripts not listed.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+func (c *Client) PutImportSieve(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportSieveRequest(c.Server, account, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 // DeliverWithBody Local delivery (LDA)
@@ -245,6 +957,671 @@ func (c *Client) GetVersion(ctx context.Context, reqEditors ...RequestEditorFn) 
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewCloseImportRequest constructs an http.Request for the CloseImport method
+func NewCloseImportRequest(server string, account Account, params *CloseImportParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewOpenImportRequest calls the generic OpenImport builder with application/json body
+func NewOpenImportRequest(server string, account Account, body OpenImportJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewOpenImportRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewOpenImportRequestWithBody constructs an http.Request for the OpenImport method, with any body, and a specified content type
+func NewOpenImportRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewListImportMailboxesRequest constructs an http.Request for the ListImportMailboxes method
+func NewListImportMailboxesRequest(server string, account Account, params *ListImportMailboxesParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewPutImportMailboxRequest calls the generic PutImportMailbox builder with application/json body
+func NewPutImportMailboxRequest(server string, account Account, params *PutImportMailboxParams, body PutImportMailboxJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutImportMailboxRequestWithBody(server, account, params, "application/json", bodyReader)
+}
+
+// NewPutImportMailboxRequestWithBody constructs an http.Request for the PutImportMailbox method, with any body, and a specified content type
+func NewPutImportMailboxRequestWithBody(server string, account Account, params *PutImportMailboxParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteImportMailboxRequest constructs an http.Request for the DeleteImportMailbox method
+func NewDeleteImportMailboxRequest(server string, account Account, id MailboxID, params *DeleteImportMailboxParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewPutImportACLRequest calls the generic PutImportACL builder with application/json body
+func NewPutImportACLRequest(server string, account Account, id MailboxID, params *PutImportACLParams, body PutImportACLJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutImportACLRequestWithBody(server, account, id, params, "application/json", bodyReader)
+}
+
+// NewPutImportACLRequestWithBody constructs an http.Request for the PutImportACL method, with any body, and a specified content type
+func NewPutImportACLRequestWithBody(server string, account Account, id MailboxID, params *PutImportACLParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/acl", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewImportChangesRequest calls the generic ImportChanges builder with application/json body
+func NewImportChangesRequest(server string, account Account, id MailboxID, params *ImportChangesParams, body ImportChangesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewImportChangesRequestWithBody(server, account, id, params, "application/json", bodyReader)
+}
+
+// NewImportChangesRequestWithBody constructs an http.Request for the ImportChanges method, with any body, and a specified content type
+func NewImportChangesRequestWithBody(server string, account Account, id MailboxID, params *ImportChangesParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/changes", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewFinalizeImportMailboxRequest calls the generic FinalizeImportMailbox builder with application/json body
+func NewFinalizeImportMailboxRequest(server string, account Account, id MailboxID, params *FinalizeImportMailboxParams, body FinalizeImportMailboxJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewFinalizeImportMailboxRequestWithBody(server, account, id, params, "application/json", bodyReader)
+}
+
+// NewFinalizeImportMailboxRequestWithBody constructs an http.Request for the FinalizeImportMailbox method, with any body, and a specified content type
+func NewFinalizeImportMailboxRequestWithBody(server string, account Account, id MailboxID, params *FinalizeImportMailboxParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/finalize", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewListImportMessagesRequest constructs an http.Request for the ListImportMessages method
+func NewListImportMessagesRequest(server string, account Account, id MailboxID, params *ListImportMessagesParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/messages", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewImportMessagesRequestWithBody constructs an http.Request for the ImportMessages method, with any body, and a specified content type
+func NewImportMessagesRequestWithBody(server string, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/messages", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewPutImportSieveRequest calls the generic PutImportSieve builder with application/json body
+func NewPutImportSieveRequest(server string, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutImportSieveRequestWithBody(server, account, params, "application/json", bodyReader)
+}
+
+// NewPutImportSieveRequestWithBody constructs an http.Request for the PutImportSieve method, with any body, and a specified content type
+func NewPutImportSieveRequestWithBody(server string, account Account, params *PutImportSieveParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/sieve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
 }
 
 // NewDeliverRequestWithBody constructs an http.Request for the Deliver method, with any body, and a specified content type
@@ -418,6 +1795,178 @@ func WithBaseURL(baseURL string) ClientOption {
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
 
+	// CloseImportWithResponse Release the import lock
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
+	CloseImportWithResponse(ctx context.Context, account Account, params *CloseImportParams, reqEditors ...RequestEditorFn) (*CloseImportResponse, error)
+
+	// OpenImportWithBodyWithResponse Open or renew an import session
+	//
+	// Takes the account's import lock for the session (or renews it).
+	// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+	// delivery refuse the account temporarily. The account must be the
+	// canonical account the recipient lookup resolves it to. The lock
+	// expires after the configured TTL unless renewed; every import
+	// call renews it. Requires the role `import`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+	OpenImportWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OpenImportResponse, error)
+
+	// OpenImportWithResponse Open or renew an import session
+	//
+	// Takes the account's import lock for the session (or renews it).
+	// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+	// delivery refuse the account temporarily. The account must be the
+	// canonical account the recipient lookup resolves it to. The lock
+	// expires after the configured TTL unless renewed; every import
+	// call renews it. Requires the role `import`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+	OpenImportWithResponse(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*OpenImportResponse, error)
+
+	// ListImportMailboxesWithResponse Mailboxes of the account with their identity state
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes (the `ListImportMailboxes` operationId).
+	ListImportMailboxesWithResponse(ctx context.Context, account Account, params *ListImportMailboxesParams, reqEditors ...RequestEditorFn) (*ListImportMailboxesResponse, error)
+
+	// PutImportMailboxWithBodyWithResponse Create or adopt a mailbox with the source identity
+	//
+	// Creates the mailbox with the source UIDVALIDITY (and the source
+	// mailbox id if it is 32 hex digits and unused), or adopts an
+	// existing one with the same UIDVALIDITY. An existing mailbox with
+	// the source id under another name is renamed. An existing empty
+	// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+	// a conflict unless `replace` is set.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+	PutImportMailboxWithBodyWithResponse(ctx context.Context, account Account, params *PutImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportMailboxResponse, error)
+
+	// PutImportMailboxWithResponse Create or adopt a mailbox with the source identity
+	//
+	// Creates the mailbox with the source UIDVALIDITY (and the source
+	// mailbox id if it is 32 hex digits and unused), or adopts an
+	// existing one with the same UIDVALIDITY. An existing mailbox with
+	// the source id under another name is renamed. An existing empty
+	// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+	// a conflict unless `replace` is set.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+	PutImportMailboxWithResponse(ctx context.Context, account Account, params *PutImportMailboxParams, body PutImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportMailboxResponse, error)
+
+	// DeleteImportMailboxWithResponse Delete a mailbox that no longer exists in the source
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/import/mailboxes/{id} (the `DeleteImportMailbox` operationId).
+	DeleteImportMailboxWithResponse(ctx context.Context, account Account, id MailboxID, params *DeleteImportMailboxParams, reqEditors ...RequestEditorFn) (*DeleteImportMailboxResponse, error)
+
+	// PutImportACLWithBodyWithResponse Replace the explicit ACL entries of a mailbox
+	//
+	// Identifiers not listed lose their rights; the owner is implicit.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+	PutImportACLWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportACLResponse, error)
+
+	// PutImportACLWithResponse Replace the explicit ACL entries of a mailbox
+	//
+	// Identifiers not listed lose their rights; the owner is implicit.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+	PutImportACLWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, body PutImportACLJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportACLResponse, error)
+
+	// ImportChangesWithBodyWithResponse Apply source flag changes and expunges
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+	ImportChangesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportChangesResponse, error)
+
+	// ImportChangesWithResponse Apply source flag changes and expunges
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+	ImportChangesWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, body ImportChangesJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportChangesResponse, error)
+
+	// FinalizeImportMailboxWithBodyWithResponse Set UIDNEXT and HIGHESTMODSEQ to the source values
+	//
+	// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+	// change log starts after HIGHESTMODSEQ, so clients resuming from a
+	// source state get complete answers.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+	FinalizeImportMailboxWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FinalizeImportMailboxResponse, error)
+
+	// FinalizeImportMailboxWithResponse Set UIDNEXT and HIGHESTMODSEQ to the source values
+	//
+	// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+	// change log starts after HIGHESTMODSEQ, so clients resuming from a
+	// source state get complete answers.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+	FinalizeImportMailboxWithResponse(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, body FinalizeImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*FinalizeImportMailboxResponse, error)
+
+	// ListImportMessagesWithResponse Inventory of a mailbox (UID order, paged)
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ListImportMessages` operationId).
+	ListImportMessagesWithResponse(ctx context.Context, account Account, id MailboxID, params *ListImportMessagesParams, reqEditors ...RequestEditorFn) (*ListImportMessagesResponse, error)
+
+	// ImportMessagesWithBodyWithResponse Store messages at their source UIDs
+	//
+	// The body is `multipart/mixed`; every part is `message/rfc822` and
+	// carries its identity as JSON in the part header `X-Import-Meta`
+	// (uid, modseq, flags, internal_date, save_date, guid, pop3_uidl).
+	// UIDs must be ascending. A UID that already holds a message of the
+	// same size is skipped (resuming a run); one with a different
+	// message is a conflict. Quota usage is counted, not enforced.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
+	ImportMessagesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportMessagesResponse, error)
+
+	// PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
+	//
+	// Stores the scripts as given (nothing is executed), activates
+	// `active` ("" deactivates) and removes scripts not listed.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+	PutImportSieveWithBodyWithResponse(ctx context.Context, account Account, params *PutImportSieveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportSieveResponse, error)
+
+	// PutImportSieveWithResponse Replace the Sieve scripts and the active script
+	//
+	// Stores the scripts as given (nothing is executed), activates
+	// `active` ("" deactivates) and removes scripts not listed.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+	PutImportSieveWithResponse(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportSieveResponse, error)
+
 	// DeliverWithBodyWithResponse Local delivery (LDA)
 	//
 	// Delivers one message to one recipient like a local delivery agent:
@@ -440,6 +1989,506 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/version (the `GetVersion` operationId).
 	GetVersionWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetVersionResponse, error)
+}
+
+type CloseImportResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CloseImportResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CloseImportResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CloseImportResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CloseImportResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CloseImportResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type OpenImportResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportSession
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r OpenImportResponse) GetJSON200() *ImportSession {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r OpenImportResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r OpenImportResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r OpenImportResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OpenImportResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r OpenImportResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListImportMailboxesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportMailboxList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListImportMailboxesResponse) GetJSON200() *ImportMailboxList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListImportMailboxesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListImportMailboxesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListImportMailboxesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListImportMailboxesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListImportMailboxesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type PutImportMailboxResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportMailboxState
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r PutImportMailboxResponse) GetJSON200() *ImportMailboxState {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r PutImportMailboxResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r PutImportMailboxResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PutImportMailboxResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutImportMailboxResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PutImportMailboxResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DeleteImportMailboxResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DeleteImportMailboxResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DeleteImportMailboxResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteImportMailboxResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteImportMailboxResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DeleteImportMailboxResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type PutImportACLResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r PutImportACLResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r PutImportACLResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PutImportACLResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutImportACLResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PutImportACLResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ImportChangesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportMailboxState
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ImportChangesResponse) GetJSON200() *ImportMailboxState {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ImportChangesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ImportChangesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportChangesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportChangesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ImportChangesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type FinalizeImportMailboxResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportMailboxState
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r FinalizeImportMailboxResponse) GetJSON200() *ImportMailboxState {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r FinalizeImportMailboxResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r FinalizeImportMailboxResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r FinalizeImportMailboxResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FinalizeImportMailboxResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r FinalizeImportMailboxResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListImportMessagesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportInventory
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListImportMessagesResponse) GetJSON200() *ImportInventory {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListImportMessagesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListImportMessagesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListImportMessagesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListImportMessagesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListImportMessagesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ImportMessagesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportResult
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ImportMessagesResponse) GetJSON200() *ImportResult {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ImportMessagesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ImportMessagesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ImportMessagesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ImportMessagesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ImportMessagesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type PutImportSieveResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r PutImportSieveResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r PutImportSieveResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PutImportSieveResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutImportSieveResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PutImportSieveResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type DeliverResponse struct {
@@ -538,6 +2587,280 @@ func (r GetVersionResponse) ContentType() string {
 	return ""
 }
 
+// CloseImportWithResponse Release the import lock
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
+func (c *ClientWithResponses) CloseImportWithResponse(ctx context.Context, account Account, params *CloseImportParams, reqEditors ...RequestEditorFn) (*CloseImportResponse, error) {
+	rsp, err := c.CloseImport(ctx, account, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCloseImportResponse(rsp)
+}
+
+// OpenImportWithBodyWithResponse Open or renew an import session
+//
+// Takes the account's import lock for the session (or renews it).
+// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+// delivery refuse the account temporarily. The account must be the
+// canonical account the recipient lookup resolves it to. The lock
+// expires after the configured TTL unless renewed; every import
+// call renews it. Requires the role `import`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+func (c *ClientWithResponses) OpenImportWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OpenImportResponse, error) {
+	rsp, err := c.OpenImportWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOpenImportResponse(rsp)
+}
+
+// OpenImportWithResponse Open or renew an import session
+//
+// Takes the account's import lock for the session (or renews it).
+// While the lock is held, IMAP, POP3, ManageSieve, LMTP and local
+// delivery refuse the account temporarily. The account must be the
+// canonical account the recipient lookup resolves it to. The lock
+// expires after the configured TTL unless renewed; every import
+// call renews it. Requires the role `import`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
+func (c *ClientWithResponses) OpenImportWithResponse(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*OpenImportResponse, error) {
+	rsp, err := c.OpenImport(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOpenImportResponse(rsp)
+}
+
+// ListImportMailboxesWithResponse Mailboxes of the account with their identity state
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes (the `ListImportMailboxes` operationId).
+func (c *ClientWithResponses) ListImportMailboxesWithResponse(ctx context.Context, account Account, params *ListImportMailboxesParams, reqEditors ...RequestEditorFn) (*ListImportMailboxesResponse, error) {
+	rsp, err := c.ListImportMailboxes(ctx, account, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListImportMailboxesResponse(rsp)
+}
+
+// PutImportMailboxWithBodyWithResponse Create or adopt a mailbox with the source identity
+//
+// Creates the mailbox with the source UIDVALIDITY (and the source
+// mailbox id if it is 32 hex digits and unused), or adopts an
+// existing one with the same UIDVALIDITY. An existing mailbox with
+// the source id under another name is renamed. An existing empty
+// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+// a conflict unless `replace` is set.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+func (c *ClientWithResponses) PutImportMailboxWithBodyWithResponse(ctx context.Context, account Account, params *PutImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportMailboxResponse, error) {
+	rsp, err := c.PutImportMailboxWithBody(ctx, account, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportMailboxResponse(rsp)
+}
+
+// PutImportMailboxWithResponse Create or adopt a mailbox with the source identity
+//
+// Creates the mailbox with the source UIDVALIDITY (and the source
+// mailbox id if it is 32 hex digits and unused), or adopts an
+// existing one with the same UIDVALIDITY. An existing mailbox with
+// the source id under another name is renamed. An existing empty
+// mailbox with another UIDVALIDITY is replaced; a non-empty one is
+// a conflict unless `replace` is set.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes (the `PutImportMailbox` operationId).
+func (c *ClientWithResponses) PutImportMailboxWithResponse(ctx context.Context, account Account, params *PutImportMailboxParams, body PutImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportMailboxResponse, error) {
+	rsp, err := c.PutImportMailbox(ctx, account, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportMailboxResponse(rsp)
+}
+
+// DeleteImportMailboxWithResponse Delete a mailbox that no longer exists in the source
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/import/mailboxes/{id} (the `DeleteImportMailbox` operationId).
+func (c *ClientWithResponses) DeleteImportMailboxWithResponse(ctx context.Context, account Account, id MailboxID, params *DeleteImportMailboxParams, reqEditors ...RequestEditorFn) (*DeleteImportMailboxResponse, error) {
+	rsp, err := c.DeleteImportMailbox(ctx, account, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteImportMailboxResponse(rsp)
+}
+
+// PutImportACLWithBodyWithResponse Replace the explicit ACL entries of a mailbox
+//
+// Identifiers not listed lose their rights; the owner is implicit.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+func (c *ClientWithResponses) PutImportACLWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportACLResponse, error) {
+	rsp, err := c.PutImportACLWithBody(ctx, account, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportACLResponse(rsp)
+}
+
+// PutImportACLWithResponse Replace the explicit ACL entries of a mailbox
+//
+// Identifiers not listed lose their rights; the owner is implicit.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl (the `PutImportACL` operationId).
+func (c *ClientWithResponses) PutImportACLWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportACLParams, body PutImportACLJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportACLResponse, error) {
+	rsp, err := c.PutImportACL(ctx, account, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportACLResponse(rsp)
+}
+
+// ImportChangesWithBodyWithResponse Apply source flag changes and expunges
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+func (c *ClientWithResponses) ImportChangesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportChangesResponse, error) {
+	rsp, err := c.ImportChangesWithBody(ctx, account, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportChangesResponse(rsp)
+}
+
+// ImportChangesWithResponse Apply source flag changes and expunges
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes (the `ImportChanges` operationId).
+func (c *ClientWithResponses) ImportChangesWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportChangesParams, body ImportChangesJSONRequestBody, reqEditors ...RequestEditorFn) (*ImportChangesResponse, error) {
+	rsp, err := c.ImportChanges(ctx, account, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportChangesResponse(rsp)
+}
+
+// FinalizeImportMailboxWithBodyWithResponse Set UIDNEXT and HIGHESTMODSEQ to the source values
+//
+// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+// change log starts after HIGHESTMODSEQ, so clients resuming from a
+// source state get complete answers.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+func (c *ClientWithResponses) FinalizeImportMailboxWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FinalizeImportMailboxResponse, error) {
+	rsp, err := c.FinalizeImportMailboxWithBody(ctx, account, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFinalizeImportMailboxResponse(rsp)
+}
+
+// FinalizeImportMailboxWithResponse Set UIDNEXT and HIGHESTMODSEQ to the source values
+//
+// UIDNEXT and HIGHESTMODSEQ become at least the source values; the
+// change log starts after HIGHESTMODSEQ, so clients resuming from a
+// source state get complete answers.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize (the `FinalizeImportMailbox` operationId).
+func (c *ClientWithResponses) FinalizeImportMailboxWithResponse(ctx context.Context, account Account, id MailboxID, params *FinalizeImportMailboxParams, body FinalizeImportMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*FinalizeImportMailboxResponse, error) {
+	rsp, err := c.FinalizeImportMailbox(ctx, account, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFinalizeImportMailboxResponse(rsp)
+}
+
+// ListImportMessagesWithResponse Inventory of a mailbox (UID order, paged)
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ListImportMessages` operationId).
+func (c *ClientWithResponses) ListImportMessagesWithResponse(ctx context.Context, account Account, id MailboxID, params *ListImportMessagesParams, reqEditors ...RequestEditorFn) (*ListImportMessagesResponse, error) {
+	rsp, err := c.ListImportMessages(ctx, account, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListImportMessagesResponse(rsp)
+}
+
+// ImportMessagesWithBodyWithResponse Store messages at their source UIDs
+//
+// The body is `multipart/mixed`; every part is `message/rfc822` and
+// carries its identity as JSON in the part header `X-Import-Meta`
+// (uid, modseq, flags, internal_date, save_date, guid, pop3_uidl).
+// UIDs must be ascending. A UID that already holds a message of the
+// same size is skipped (resuming a run); one with a different
+// message is a conflict. Quota usage is counted, not enforced.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
+func (c *ClientWithResponses) ImportMessagesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportMessagesResponse, error) {
+	rsp, err := c.ImportMessagesWithBody(ctx, account, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseImportMessagesResponse(rsp)
+}
+
+// PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
+//
+// Stores the scripts as given (nothing is executed), activates
+// `active` ("" deactivates) and removes scripts not listed.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+func (c *ClientWithResponses) PutImportSieveWithBodyWithResponse(ctx context.Context, account Account, params *PutImportSieveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportSieveResponse, error) {
+	rsp, err := c.PutImportSieveWithBody(ctx, account, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportSieveResponse(rsp)
+}
+
+// PutImportSieveWithResponse Replace the Sieve scripts and the active script
+//
+// Stores the scripts as given (nothing is executed), activates
+// `active` ("" deactivates) and removes scripts not listed.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
+func (c *ClientWithResponses) PutImportSieveWithResponse(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportSieveResponse, error) {
+	rsp, err := c.PutImportSieve(ctx, account, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportSieveResponse(rsp)
+}
+
 // DeliverWithBodyWithResponse Local delivery (LDA)
 //
 // Delivers one message to one recipient like a local delivery agent:
@@ -571,6 +2894,353 @@ func (c *ClientWithResponses) GetVersionWithResponse(ctx context.Context, reqEdi
 		return nil, err
 	}
 	return ParseGetVersionResponse(rsp)
+}
+
+// ParseCloseImportResponse parses an HTTP response from a CloseImportWithResponse call
+func ParseCloseImportResponse(rsp *http.Response) (*CloseImportResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CloseImportResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOpenImportResponse parses an HTTP response from a OpenImportWithResponse call
+func ParseOpenImportResponse(rsp *http.Response) (*OpenImportResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OpenImportResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportSession
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListImportMailboxesResponse parses an HTTP response from a ListImportMailboxesWithResponse call
+func ParseListImportMailboxesResponse(rsp *http.Response) (*ListImportMailboxesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListImportMailboxesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportMailboxList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutImportMailboxResponse parses an HTTP response from a PutImportMailboxWithResponse call
+func ParsePutImportMailboxResponse(rsp *http.Response) (*PutImportMailboxResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutImportMailboxResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportMailboxState
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteImportMailboxResponse parses an HTTP response from a DeleteImportMailboxWithResponse call
+func ParseDeleteImportMailboxResponse(rsp *http.Response) (*DeleteImportMailboxResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteImportMailboxResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutImportACLResponse parses an HTTP response from a PutImportACLWithResponse call
+func ParsePutImportACLResponse(rsp *http.Response) (*PutImportACLResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutImportACLResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportChangesResponse parses an HTTP response from a ImportChangesWithResponse call
+func ParseImportChangesResponse(rsp *http.Response) (*ImportChangesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportChangesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportMailboxState
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFinalizeImportMailboxResponse parses an HTTP response from a FinalizeImportMailboxWithResponse call
+func ParseFinalizeImportMailboxResponse(rsp *http.Response) (*FinalizeImportMailboxResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FinalizeImportMailboxResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportMailboxState
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListImportMessagesResponse parses an HTTP response from a ListImportMessagesWithResponse call
+func ParseListImportMessagesResponse(rsp *http.Response) (*ListImportMessagesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListImportMessagesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportInventory
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseImportMessagesResponse parses an HTTP response from a ImportMessagesWithResponse call
+func ParseImportMessagesResponse(rsp *http.Response) (*ImportMessagesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ImportMessagesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutImportSieveResponse parses an HTTP response from a PutImportSieveWithResponse call
+func ParsePutImportSieveResponse(rsp *http.Response) (*PutImportSieveResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutImportSieveResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseDeliverResponse parses an HTTP response from a DeliverWithResponse call
@@ -641,6 +3311,39 @@ func ParseGetVersionResponse(rsp *http.Response) (*GetVersionResponse, error) {
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// CloseImport Release the import lock
+	// (DELETE /admin/v1/accounts/{account}/import)
+	CloseImport(w http.ResponseWriter, r *http.Request, account Account, params CloseImportParams)
+	// OpenImport Open or renew an import session
+	// (POST /admin/v1/accounts/{account}/import)
+	OpenImport(w http.ResponseWriter, r *http.Request, account Account)
+	// ListImportMailboxes Mailboxes of the account with their identity state
+	// (GET /admin/v1/accounts/{account}/import/mailboxes)
+	ListImportMailboxes(w http.ResponseWriter, r *http.Request, account Account, params ListImportMailboxesParams)
+	// PutImportMailbox Create or adopt a mailbox with the source identity
+	// (PUT /admin/v1/accounts/{account}/import/mailboxes)
+	PutImportMailbox(w http.ResponseWriter, r *http.Request, account Account, params PutImportMailboxParams)
+	// DeleteImportMailbox Delete a mailbox that no longer exists in the source
+	// (DELETE /admin/v1/accounts/{account}/import/mailboxes/{id})
+	DeleteImportMailbox(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params DeleteImportMailboxParams)
+	// PutImportACL Replace the explicit ACL entries of a mailbox
+	// (PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/acl)
+	PutImportACL(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params PutImportACLParams)
+	// ImportChanges Apply source flag changes and expunges
+	// (POST /admin/v1/accounts/{account}/import/mailboxes/{id}/changes)
+	ImportChanges(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ImportChangesParams)
+	// FinalizeImportMailbox Set UIDNEXT and HIGHESTMODSEQ to the source values
+	// (POST /admin/v1/accounts/{account}/import/mailboxes/{id}/finalize)
+	FinalizeImportMailbox(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params FinalizeImportMailboxParams)
+	// ListImportMessages Inventory of a mailbox (UID order, paged)
+	// (GET /admin/v1/accounts/{account}/import/mailboxes/{id}/messages)
+	ListImportMessages(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ListImportMessagesParams)
+	// ImportMessages Store messages at their source UIDs
+	// (POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages)
+	ImportMessages(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ImportMessagesParams)
+	// PutImportSieve Replace the Sieve scripts and the active script
+	// (PUT /admin/v1/accounts/{account}/import/sieve)
+	PutImportSieve(w http.ResponseWriter, r *http.Request, account Account, params PutImportSieveParams)
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
@@ -657,6 +3360,652 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// CloseImport operation middleware
+func (siw *ServerInterfaceWrapper) CloseImport(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CloseImportParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CloseImport(w, r, account, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// OpenImport operation middleware
+func (siw *ServerInterfaceWrapper) OpenImport(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.OpenImport(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListImportMailboxes operation middleware
+func (siw *ServerInterfaceWrapper) ListImportMailboxes(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListImportMailboxesParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListImportMailboxes(w, r, account, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutImportMailbox operation middleware
+func (siw *ServerInterfaceWrapper) PutImportMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutImportMailboxParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutImportMailbox(w, r, account, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteImportMailbox operation middleware
+func (siw *ServerInterfaceWrapper) DeleteImportMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteImportMailboxParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteImportMailbox(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutImportACL operation middleware
+func (siw *ServerInterfaceWrapper) PutImportACL(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutImportACLParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutImportACL(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ImportChanges operation middleware
+func (siw *ServerInterfaceWrapper) ImportChanges(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ImportChangesParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ImportChanges(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// FinalizeImportMailbox operation middleware
+func (siw *ServerInterfaceWrapper) FinalizeImportMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params FinalizeImportMailboxParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.FinalizeImportMailbox(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListImportMessages operation middleware
+func (siw *ServerInterfaceWrapper) ListImportMessages(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListImportMessagesParams
+
+	// ------------- Optional query parameter "after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after", r.URL.Query(), &params.After, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListImportMessages(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ImportMessages operation middleware
+func (siw *ServerInterfaceWrapper) ImportMessages(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ImportMessagesParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ImportMessages(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutImportSieve operation middleware
+func (siw *ServerInterfaceWrapper) PutImportSieve(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutImportSieveParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutImportSieve(w, r, account, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // Deliver operation middleware
 func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Request) {
@@ -879,6 +4228,17 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/version", wrapper.GetVersion)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/deliveries", wrapper.Deliver)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.CloseImport)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.OpenImport)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes", wrapper.ListImportMailboxes)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes", wrapper.PutImportMailbox)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}", wrapper.DeleteImportMailbox)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/messages", wrapper.ListImportMessages)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/messages", wrapper.ImportMessages)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/changes", wrapper.ImportChanges)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/finalize", wrapper.FinalizeImportMailbox)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/acl", wrapper.PutImportACL)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/sieve", wrapper.PutImportSieve)
 
 	return m
 }

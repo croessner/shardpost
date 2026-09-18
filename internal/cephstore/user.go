@@ -359,6 +359,11 @@ func (u *User) CreateMailbox(name string, specialUse []string) error {
 // createIndexObject creates the index object (shard 0 with a fresh
 // header) of a new mailbox; it fails if the object exists.
 func (u *User) createIndexObject(rec *MailboxRec) error {
+	return u.createIndexObjectSized(rec, u.shardSize)
+}
+
+// createIndexObjectSized is createIndexObject with the given shard size.
+func (u *User) createIndexObjectSized(rec *MailboxRec, shardSize uint32) error {
 	op := rados.CreateWriteOp()
 	op.Create(rados.CreateExclusive)
 	op.SetOmap(map[string][]byte{
@@ -367,7 +372,7 @@ func (u *User) createIndexObject(rec *MailboxRec) error {
 		keyModSeq:    []byte("1"),
 		keyKeywords:  []byte("[]"),
 		keyLogStart:  []byte("1"),
-		keyShardSize: []byte(strconv.FormatUint(uint64(u.shardSize), 10)),
+		keyShardSize: []byte(strconv.FormatUint(uint64(shardSize), 10)),
 	})
 	err := op.Operate(u.idx, mboxOID(rec.ID), rados.OperationNoFlag)
 	op.Release()
@@ -829,6 +834,9 @@ func (u *User) SetQuotaLimit(l Quota) error {
 // SetQuotaEnforced switches the limit check of this view's reservations
 // (model.QuotaExemptable); the usage is counted either way.
 func (u *User) SetQuotaEnforced(enforced bool) { u.noEnforce = !enforced }
+
+// SilenceQuotaEvents implements model.QuotaEventSilencer for this view.
+func (u *User) SilenceQuotaEvents() { u.onQuota = nil }
 
 // SetStorageLimit stores a per-user storage limit; the message limit
 // keeps following its own setting (or the configured default).
@@ -1404,17 +1412,11 @@ func (u *User) Vanished(id string, since uint64) ([]uint32, error) {
 func (u *User) ListMessages(id string) ([]Meta, error) {
 	defer mh.timer("list_entries")()
 
-	hv, ver, err := u.getKeysVer(u.idx, mboxOID(id), []string{keyUIDNext, keyShardSize})
+	n, ss, err := u.listRange(id)
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w", id, err)
+		return nil, err
 	}
 
-	if ver == 0 {
-		return nil, ErrNoMailbox
-	}
-
-	n, _ := strconv.ParseUint(string(hv[keyUIDNext]), 10, 32)
-	ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32)
 	last := shardOf(uint32(max(n-1, 1)), uint32(ss))
 
 	shards := map[string][]string{}
@@ -1447,7 +1449,11 @@ func (u *User) ListMessages(id string) ([]Meta, error) {
 				return fmt.Errorf("corrupt index record %s in %s", k, oid)
 			}
 
-			metas = append(metas, m)
+			// An entry at or above UIDNEXT is the leftover of an
+			// interrupted import step, not a message yet.
+			if uint64(m.UID) < n {
+				metas = append(metas, m)
+			}
 		}
 
 		return nil
@@ -1459,6 +1465,28 @@ func (u *User) ListMessages(id string) ([]Meta, error) {
 	sort.Slice(metas, func(i, j int) bool { return metas[i].UID < metas[j].UID })
 
 	return metas, nil
+}
+
+// listRange reads UIDNEXT and the shard size of a mailbox; UIDNEXT 0 is
+// an index object retired by an import replacement (no mailbox).
+func (u *User) listRange(id string) (uint64, uint64, error) {
+	hv, ver, err := u.getKeysVer(u.idx, mboxOID(id), []string{keyUIDNext, keyShardSize})
+	if err != nil {
+		return 0, 0, fmt.Errorf("list %s: %w", id, err)
+	}
+
+	if ver == 0 {
+		return 0, 0, ErrNoMailbox
+	}
+
+	n, _ := strconv.ParseUint(string(hv[keyUIDNext]), 10, 32)
+	if n == 0 {
+		return 0, 0, ErrNoMailbox
+	}
+
+	ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32)
+
+	return n, ss, nil
 }
 
 // ListMessagesByName is ListMessages for a mailbox name.
@@ -2717,8 +2745,10 @@ func (u *User) pendingIntents(id string) ([]moveIntent, error) {
 	return out, nil
 }
 
+// relink prepares the entry of a copied or moved message. An imported
+// POP3 UIDL stays with the source entry: it must stay unique per maildrop.
 func relink(m Meta) Meta {
-	m.UID, m.ModSeq = 0, 0
+	m.UID, m.ModSeq, m.POP3UIDL = 0, 0, ""
 	m.SaveDate = time.Now().UTC()
 
 	return m
