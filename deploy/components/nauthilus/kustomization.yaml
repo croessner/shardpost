@@ -1,0 +1,17 @@
+# Kustomize component: authenticate against Nauthilus (gRPC authority via
+# the doppelgaenger sidecar in namespace auth) instead of the static test-profile
+# users, and accept nauthilus-director master-user logins.
+#
+# Requires two Secrets in the namespace, created by the handover targets
+# of the other repositories (never by hand, never in plain text here):
+#   shardpost-nauthilus-oidc   keys client-id, client-secret, token-url
+#                         (nauthilus-tests/kubernetes: make handover-shardpost)
+#   shardpost-director-backend key master-password
+#                         (kubernetes/director: make sync-shardpost-secrets)
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: shardpost-server

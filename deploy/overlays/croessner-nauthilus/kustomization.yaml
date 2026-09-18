@@ -1,0 +1,18 @@
+# The croessner overlay with Nauthilus authentication and the director
+# master user. Apply this instead of ../croessner once the two Secrets
+# named in ../../components/nauthilus exist in the namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../croessner
+  - network-policy.yaml
+components:
+  - ../../components/nauthilus
+  - ../../components/quota-ldap-renew
+configMapGenerator:
+  - name: shardpost-server-config
+    namespace: shardpost
+    files:
+      - server.yaml
+patches:
+  - path: configuration-patch.json

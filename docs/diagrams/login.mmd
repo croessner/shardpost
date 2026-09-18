@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant C as Mailclient
+    participant D as Director
+    participant P as IMAP-Session
+    participant A as Authenticator
+    participant S as Store
+    C->>D: TLS + Anmeldung
+    D->>P: Backend-Verbindung + PROXY-Client-IP
+    P->>P: session_id / connection_open
+    D->>P: Backend-Authentifizierung
+    P->>A: Request mit Mechanismus und Verbindungskontext
+    alt Backend vorübergehend nicht verfügbar
+        A-->>P: ErrTemporary
+        P-->>D: NO UNAVAILABLE
+    else Zugang abgelehnt
+        A-->>P: Fehler
+        P->>P: auth_failed
+        P-->>D: NO AUTHENTICATIONFAILED
+    else Authentifizierung erfolgreich
+        A-->>P: Result.Account + Attributes
+        P->>P: Kontolimit prüfen
+        P->>S: User(kanonisches Konto)
+        S-->>P: model.User
+        P->>P: Provisionierung / Quota anwenden
+        P->>P: auth_success
+        P-->>D: OK
+        D-->>C: angemeldet
+    end
+    C->>D: Logout
+    D->>P: Logout / Verbindung schließen
+    P->>P: Ressourcen freigeben / connection_close

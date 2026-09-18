@@ -1,0 +1,25 @@
+dn: dc=roessner-net,dc=de
+objectClass: dcObject
+objectClass: organization
+o: test
+dc: roessner-net
+
+dn: ou=it,dc=roessner-net,dc=de
+objectClass: organizationalUnit
+ou: it
+
+dn: ou=people,ou=it,dc=roessner-net,dc=de
+objectClass: organizationalUnit
+ou: people
+
+dn: uid=quotatest,ou=people,ou=it,dc=roessner-net,dc=de
+objectClass: inetOrgPerson
+objectClass: rnsMSDovecotAccount
+objectClass: rnsMSPostfixAccount
+uid: quotatest
+cn: quotatest
+sn: quotatest
+rnsMSDovecotUser: quotatest@example.org
+rnsMSRecipientAddress: alias@example.org
+rnsMSQuota: 1073741824
+rnsMSOverQuota: FALSE

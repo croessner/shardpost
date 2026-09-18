@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: shardpost
+spec:
+  selector:
+    app.kubernetes.io/name: shardpost-server
+  ports:
+    - name: imap
+      port: 143
+      targetPort: imap
+    - name: lmtp
+      port: 24
+      targetPort: lmtp
+    - name: imaps
+      port: 993
+      targetPort: imaps
+    - name: pop3
+      port: 110
+      targetPort: pop3
+    - name: pop3s
+      port: 995
+      targetPort: pop3s
+    - name: sieve
+      port: 4190
+      targetPort: sieve

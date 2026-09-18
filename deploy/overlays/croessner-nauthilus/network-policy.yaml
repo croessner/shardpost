@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shardpost-server-ingress
+  namespace: shardpost
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-server
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: director
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nauthilus-director
+        # Operator-controlled protocol test workloads share the proxy trust boundary.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: shardpost
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [mailtest, imaptest]
+      ports:
+        - {protocol: TCP, port: 1143}
+        - {protocol: TCP, port: 1993}
+        - {protocol: TCP, port: 14190}
+        - {protocol: TCP, port: 2424}
+        - {protocol: TCP, port: 1110}
+        - {protocol: TCP, port: 1995}
+    # Health and metrics carry no PROXY identity and remain reachable by monitoring.
+    - ports:
+        - {protocol: TCP, port: 8080}

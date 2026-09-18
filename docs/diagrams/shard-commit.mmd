@@ -1,0 +1,16 @@
+sequenceDiagram
+    participant W as Writer
+    participant H as Mailbox-Header
+    participant E as höherer Entry-Shard
+    participant R as Reader
+    W->>H: CAS: UID / MODSEQ reservieren, Pending-Journal
+    H-->>W: neue Version
+    R->>H: Änderungen seit MODSEQ lesen
+    H-->>R: Pending: Wasserstand nicht überspringen
+    W->>E: Nachrichteneintrag schreiben
+    E-->>W: dauerhaft
+    W->>H: Pending-Änderung abschließen
+    H-->>W: committed
+    R->>H: erneut synchronisieren
+    R->>E: betroffene UID lesen
+    Note over H,E: Keine atomare Transaktion<br/>über beide Objekte

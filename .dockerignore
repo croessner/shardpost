@@ -1,0 +1,6 @@
+.git
+deploy
+hack
+*.md
+temp
+**/__pycache__

@@ -1,0 +1,25 @@
+# croessner-nauthilus with the server scaled to zero and the scrub suspended.
+# Creates namespace, pools, cephx client, certificates and policies before a
+# data migration: a running server would create INBOXes in the empty pools.
+# Applying ../croessner-nauthilus afterwards restores replicas and schedule.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../croessner-nauthilus
+patches:
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: shardpost-server
+        namespace: shardpost
+      spec:
+        replicas: 0
+  - patch: |
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: shardpost-scrub
+        namespace: shardpost
+      spec:
+        suspend: true

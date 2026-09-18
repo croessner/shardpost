@@ -1,0 +1,28 @@
+# Least privilege: the shardpost-server ServiceAccount may read exactly one
+# Secret and one ConfigMap in rook-ceph, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shardpost-ceph-credentials-reader
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rook-ceph-client-shardpost"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["rook-ceph-mon-endpoints"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shardpost-ceph-credentials-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: shardpost-ceph-credentials-reader
+subjects:
+  - kind: ServiceAccount
+    name: shardpost-server
+    namespace: shardpost

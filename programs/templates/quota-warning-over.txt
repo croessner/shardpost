@@ -1,0 +1,12 @@
+Subject: Quota-Warnung: Postfach zu ${percent} % belegt / Quota warning: mailbox ${percent} % full
+
+Ihr Postfach ${account} ist zu ${percent} % belegt
+(${storage_usage_human} von ${storage_limit_human}).
+Bitte löschen Sie nicht mehr benötigte Nachrichten und leeren Sie den
+Papierkorb, damit Sie weiterhin E-Mails empfangen können.
+
+[English]
+Your mailbox ${account} is ${percent} % full
+(${storage_usage_human} of ${storage_limit_human}).
+Please delete messages you no longer need and empty the trash so that
+you can keep receiving mail.

@@ -1,0 +1,20 @@
+# Automatic renewal of the ShardPost LDAP client certificate
+# (shardpost-quota.srvint.net, SASL EXTERNAL for the over-quota flag) with
+# contrib/ucm-cert-renew. Requires, created once outside git:
+#   - Secret shardpost-quota-ldap (kubernetes.io/tls; the job fills it)
+#   - Secret shardpost-quota-ldap-renew-ssh (id_ed25519 of the node1
+#     account ucm-enroll-shardpost)
+#   - Secret shardpost-registry-pull (docker.roessner-net.de)
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - rbac.yaml
+  - cronjob.yaml
+configMapGenerator:
+  # Public trust anchors (rns-server pki/ucm) and the signer's host key.
+  - name: shardpost-ucm-trust
+    namespace: shardpost
+    files:
+      - rns-internal-root-ca-2026.crt
+      - rns-client-authentication-issuing-ca-01.crt
+      - signer-host-key.pub

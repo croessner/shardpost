@@ -1,0 +1,37 @@
+# One-off load test inside the cluster (same image as the server):
+#   kubectl --context croessner -n shardpost apply -f hack/loadtest-job.yaml
+#   kubectl --context croessner -n shardpost logs -f job/shardpost-load
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shardpost-load
+  namespace: shardpost
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 167
+        runAsGroup: 167
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: shardpost-load
+          image: docker.io/chrroessner/shardpost:0.13.0@sha256:2b55934fc0a9bcf34514fde8ae45ef8d59f6238f70ed7e60df11bce393bd1d21
+          command: ["/usr/local/bin/shardpost-load"]
+          args: ["-imap", "shardpost:143", "-lmtp", "shardpost:24", "-users", "20", "-sessions", "3", "-duration", "60s", "-deliver-rate", "25", "-user-pattern", "load%03d", "-password", "test"]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

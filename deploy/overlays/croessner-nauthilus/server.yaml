@@ -1,0 +1,167 @@
+# Loaded by Viper; environment overrides are reserved for Secrets and Go runtime.
+server:
+  auth_backend: "nauthilus"
+  master_user: "nauthilus-director"
+  master_password_file: "/secrets/director-backend/master-password"
+  insecure_auth: false
+  mbox_shard_size: 20
+  # Calico Pod network; mail-port access is restricted by network-policy.yaml.
+  proxy_protocol_trusted_cidrs: "172.16.0.0/12"
+  imap_addr: ":1143"
+  lmtp_addr: ":2424"
+  http_addr: ":8080"
+  imaps_addr: ":1993"
+  quota_bytes: 1073741824
+  quota_msgs: 100000
+  pop3_addr: ":1110"
+  pop3s_addr: ":1995"
+  max_conns_per_ip: 200
+  max_conns_per_user: 50
+  drain_seconds: 20
+  key_poll_seconds: 60
+  quota_attribute: "rnsMSQuota"
+  lmtp_hostname: "shardpost.shardpost.svc.cluster.local"
+nauthilus:
+  transport: "grpc"
+  grpc_addr: "nauthilus-service.auth.svc.cluster.local:8444"
+  grpc_server_name: "login.authserv.me"
+  oidc_client_secret_file: "/secrets/nauthilus-oidc/client-secret"
+  oidc_scopes: "nauthilus:authenticate nauthilus:lookup_identity"
+  bearer_mode: "password"
+smtp:
+  addr: "relay.roessner-net.de:25025"
+  server_name: "relay.roessner-net.de"
+  starttls: true
+  helo: "shardpost.shardpost.svc.cluster.local"
+telemetry:
+  service_name: "shardpost"
+  endpoint: "http://192.168.0.102:4318"
+  protocol: "http/protobuf"
+  sample_ratio: 0.1
+ceph:
+  user: "shardpost"
+  index_pool: "shardpost-index"
+  data_pool: "shardpost-data"
+rook:
+  namespace: "rook-ceph"
+tls:
+  cert: "/tls/tls.crt"
+  key: "/tls/tls.key"
+sieve:
+  addr: ":14190"
+  settings: ""
+  global_dir: ""
+imapsieve:
+  enabled: true
+  user_scripts: true
+  managesieve_url: "sieve://mail.roessner-net.de:4190"
+  timeout_ms: 500
+  max_parallel: 4
+  learning:
+    enabled: true
+    max_attempts: 5
+    max_message_bytes: 4194304
+    rules:
+      - name: to-junk
+        operations: [COPY, MOVE]
+        source_not_special_use: '\Junk'
+        destination_special_use: '\Junk'
+        program: spam
+      - name: from-junk
+        operations: [COPY, MOVE]
+        source_special_use: '\Junk'
+        destination_not_special_use: ['\Junk', '\Trash']
+        program: ham
+# Quota like the mailstack (Dovecot 50-quota.conf): grace, warnings at
+# 95/80 % and when falling below 100 % again, and the over-quota flag
+# rnsMSOverQuota that Postfix checks through pfxhttp/Nauthilus (SASL
+# EXTERNAL as cn=shardpost-quota, then a Nauthilus cache flush).
+quota:
+  grace: "150M"
+  warnings:
+    - name: warn95
+      resource: storage
+      percent: 95
+      program: quota-warning
+    - name: warn80
+      resource: storage
+      percent: 80
+      program: quota-warning
+    - name: warn-under
+      resource: storage
+      percent: 100
+      direction: under
+      program: quota-warning
+  over_flag:
+    enabled: true
+    attribute: "rnsMSOverQuota"
+    over_value: "TRUE"
+    program: quota-flag
+    recheck_seconds: 300
+# External programs (sudoers-like allowlist): a script or a learning rule
+# can only name an entry; the entry is the exact command line. The
+# classifier lives in learn.py, the server knows only the exit code.
+extprograms:
+  bin_dir: "/usr/local/lib/shardpost/programs"
+  programs:
+    spam:
+      command: learn.py
+      args: ["--action", "spam"]
+      kinds: [learning]
+      timeout_ms: 30000
+      max_parallel: 2
+      env:
+        LEARN_BACKEND: rspamd
+        LEARN_URL: "http://192.168.0.2:11336"
+        LEARN_TOKEN_FILE: /run/secrets/learning/password
+    ham:
+      command: learn.py
+      args: ["--action", "ham"]
+      kinds: [learning]
+      timeout_ms: 30000
+      max_parallel: 2
+      env:
+        LEARN_BACKEND: rspamd
+        LEARN_URL: "http://192.168.0.2:11336"
+        LEARN_TOKEN_FILE: /run/secrets/learning/password
+    # Warning mail into the mailbox through the local delivery API
+    # (shardpostctl, no quota enforcement, the user's Sieve runs).
+    quota-warning:
+      command: quota_warning.py
+      kinds: [quota]
+      timeout_ms: 60000
+      max_parallel: 4
+      env:
+        WARN_FROM: "postmaster@mx.roessner-net.de"
+        WARN_MSGID_DOMAIN: "mail.roessner-net.de"
+    # rnsMSOverQuota on the LDAP provider (VLAN, hostAlias), then a
+    # Nauthilus cache flush for the account (OIDC client_credentials,
+    # client shardpost-quota).
+    quota-flag:
+      command: quota_flag.py
+      kinds: [quota]
+      timeout_ms: 30000
+      max_parallel: 2
+      env:
+        FLAG_LDAP_URI: "ldaps://ldap.roessner-net.de:636"
+        FLAG_LDAP_BASE: "ou=people,ou=it,dc=roessner-net,dc=de"
+        FLAG_LDAP_FILTER: "(&(objectClass=rnsMSDovecotAccount)(|(rnsMSDovecotUser={account})(rnsMSRecipientAddress={account})(uniqueIdentifier={account})))"
+        FLAG_LDAP_ATTRIBUTE: "rnsMSOverQuota"
+        FLAG_LDAP_AUTH: "external"
+        FLAG_LDAP_CA_FILE: "/secrets/quota-ldap/ca.crt"
+        FLAG_LDAP_CERT_FILE: "/secrets/quota-ldap/tls.crt"
+        FLAG_LDAP_KEY_FILE: "/secrets/quota-ldap/tls.key"
+        FLAG_FLUSH_URL: "https://login.authserv.me/api/v1/cache/flush"
+        FLAG_OIDC_TOKEN_URL: "https://login.authserv.me/oidc/token"
+        FLAG_OIDC_CLIENT_ID: "shardpost-quota"
+        FLAG_OIDC_CLIENT_SECRET_FILE: "/secrets/quota-oidc/client-secret"
+        FLAG_OIDC_SCOPE: "nauthilus:authenticate nauthilus:security"
+        # The public edge does not route /api/v1/cache: token and flush go
+        # to the in-cluster service, TLS still checks login.authserv.me.
+        FLAG_HTTP_CONNECT_TO: "nauthilus-service.auth.svc.cluster.local:8443"
+# Admin API (stage 8 core): the Unix socket admits only processes of the
+# server user inside the pod (shardpostctl, quota programs). The mTLS
+# listener stays off until its cert-manager issuer exists.
+admin:
+  socket: "/run/shardpost/admin.sock"
+  socket_roles: [diagnose, deliver, "deliver:noenforce"]

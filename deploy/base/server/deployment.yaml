@@ -1,0 +1,182 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-server
+  labels:
+    app.kubernetes.io/name: shardpost-server
+spec:
+  # Stateless: every replica serves every user; scale by adding replicas.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shardpost-server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: shardpost-server
+      automountServiceAccountToken: true # needed to fetch the cephx key from Rook
+      terminationGracePeriodSeconds: 40 # DRAIN_SECONDS + margin
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 167
+        runAsGroup: 167
+        fsGroup: 167
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shardpost-server
+      containers:
+        - name: server
+          image: docker.io/chrroessner/shardpost:0.16.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CEPH_USER
+              value: shardpost
+            - name: CEPH_INDEX_POOL
+              value: shardpost-index
+            - name: CEPH_DATA_POOL
+              value: shardpost-data
+            - name: ROOK_NAMESPACE
+              value: rook-ceph
+            # Authentication: AUTH_BACKEND=static (test-profile) or nauthilus (see cmd/shardpost/auth.go).
+            - name: AUTH_BACKEND
+              value: static
+            - name: USERS
+              value: "test:test,healthcheck:healthcheck,load*:test" # load*: users of hack/loadtest-job.yaml
+            # nauthilus-director master_user backend mode: "<account>*director" + master password.
+            - name: MASTER_USER
+              value: director
+            - name: MASTER_PASSWORD
+              value: director-master-secret # test-profile; production: MASTER_PASSWORD_FILE from a Secret
+            # PROXY protocol from the director (haproxy.enabled): trusted source CIDRs, empty = off.
+            - name: PROXY_PROTOCOL_TRUSTED_CIDRS
+              value: ""
+            - name: IMAP_ADDR
+              value: ":1143"
+            - name: LMTP_ADDR
+              value: ":2424"
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: IMAPS_ADDR
+              value: ":1993"
+            - name: TLS_CERT
+              value: /tls/tls.crt
+            - name: TLS_KEY
+              value: /tls/tls.key
+            - name: INSECURE_AUTH
+              value: "true" # test-profile: LOGIN without TLS allowed (curl tests)
+            - name: QUOTA_BYTES
+              value: "1073741824" # 1 GiB per user
+            - name: QUOTA_MSGS
+              value: "0"
+            - name: POP3_ADDR
+              value: ":1110"
+            - name: POP3S_ADDR
+              value: ":1995"
+            - name: MBOX_SHARD_SIZE
+              value: "100000"
+            - name: MAX_CONNS_PER_IP
+              value: "200"
+            - name: MAX_CONNS_PER_USER
+              value: "50"
+            - name: SIEVE_ADDR
+              value: ":14190"
+            # Sieve settings (Pigeonhole key names, "key=value;key=value") on
+            # top of the defaults in internal/sieve.DefaultConfig: spamtest
+            # from X-Spam-Score (max 15), editheader protects Received,
+            # Auto-Submitted, Return-Path and Delivered-To.
+            - name: SIEVE_SETTINGS
+              value: ""
+            # directory of <name>.sieve files for "include :global" ("" = none)
+            - name: SIEVE_GLOBAL_DIR
+              value: ""
+            - name: DRAIN_SECONDS
+              value: "20"
+            - name: KEY_POLL_SECONDS
+              value: "60"
+            # OpenTelemetry: set OTEL_EXPORTER_OTLP_ENDPOINT (e.g. http://alloy.monitoring:4317)
+            # to enable tracing; unset = no-op.
+            # Outbound relay for Sieve redirect and vacation replies (SMTP
+            # submission; STARTTLS required unless SMTP_RELAY_TLS=true for
+            # implicit TLS). Unset: redirect keeps the message in INBOX and
+            # vacation replies are logged, not sent.
+            - name: QUOTA_ATTRIBUTE
+              value: rnsMSQuota # per-account quota (bytes) from the Nauthilus/LDAP attributes
+            - name: LMTP_HOSTNAME
+              value: shardpost.shardpost.svc.cluster.local
+            - name: SMTP_RELAY_ADDR
+              value: ""
+            - name: SMTP_RELAY_HELO
+              value: "shardpost.shardpost.svc.cluster.local"
+            - name: GOMEMLIMIT
+              value: "700MiB"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ""
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: "0.1"
+          ports:
+            - name: imap
+              containerPort: 1143
+            - name: lmtp
+              containerPort: 2424
+            - name: imaps
+              containerPort: 1993
+            - name: pop3
+              containerPort: 1110
+            - name: pop3s
+              containerPort: 1995
+            - name: sieve
+              containerPort: 14190
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          # librados alone holds about 150 MiB RSS; the message budget
+          # (MEMORY_BUDGET_BYTES, 256 MiB) comes on top. GOMEMLIMIT makes the
+          # Go GC work harder before the container limit is reached.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: tls
+          secret:
+            secretName: shardpost-tls
+            defaultMode: 0440

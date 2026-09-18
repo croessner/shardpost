@@ -1,0 +1,117 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "shardpost-server"
+  },
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "name": "server",
+            "env": [
+              {
+                "$patch": "replace"
+              },
+              {
+                "name": "NAUTHILUS_OIDC_TOKEN_URL",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "token-url",
+                    "name": "shardpost-nauthilus-oidc"
+                  }
+                }
+              },
+              {
+                "name": "NAUTHILUS_OIDC_CLIENT_ID",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "client-id",
+                    "name": "shardpost-nauthilus-oidc"
+                  }
+                }
+              },
+              {
+                "name": "LOG_LEVEL",
+                "value": "info"
+              },
+              {
+                "name": "GOMEMLIMIT",
+                "value": "700MiB"
+              },
+              {
+                "name": "SHARDPOST_CONFIG",
+                "value": "/etc/shardpost/server.yaml"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "server-config",
+                "mountPath": "/etc/shardpost",
+                "readOnly": true
+              },
+              {
+                "name": "learning",
+                "mountPath": "/run/secrets/learning",
+                "readOnly": true
+              },
+              {
+                "name": "admin-socket",
+                "mountPath": "/run/shardpost"
+              },
+              {
+                "name": "quota-ldap",
+                "mountPath": "/secrets/quota-ldap",
+                "readOnly": true
+              },
+              {
+                "name": "quota-oidc",
+                "mountPath": "/secrets/quota-oidc",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "server-config",
+            "configMap": {
+              "name": "shardpost-server-config"
+            }
+          },
+          {
+            "name": "learning",
+            "secret": {
+              "secretName": "shardpost-learning",
+              "defaultMode": 288
+            }
+          },
+          {
+            "name": "admin-socket",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            }
+          },
+          {
+            "name": "quota-ldap",
+            "secret": {
+              "secretName": "shardpost-quota-ldap",
+              "defaultMode": 288,
+              "optional": true
+            }
+          },
+          {
+            "name": "quota-oidc",
+            "secret": {
+              "secretName": "shardpost-quota-oidc",
+              "defaultMode": 288,
+              "optional": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

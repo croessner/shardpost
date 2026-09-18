@@ -1,0 +1,9 @@
+# Generator configuration for the admin API (see Makefile: generate).
+package: adminapi
+output: internal/adminapi/api.gen.go
+generate:
+  models: true
+  std-http-server: true
+  client: true
+output-options:
+  skip-prune: false

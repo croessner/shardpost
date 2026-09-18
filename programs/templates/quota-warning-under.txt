@@ -1,0 +1,10 @@
+Subject: Quota: Postfach wieder unter ${percent} % / Quota: mailbox below ${percent} % again
+
+Ihr Postfach ${account} ist wieder unter ${percent} % belegt
+(${storage_usage_human} von ${storage_limit_human}).
+Sie können wieder E-Mails empfangen.
+
+[English]
+Your mailbox ${account} is below ${percent} % again
+(${storage_usage_human} of ${storage_limit_human}).
+You can receive mail again.

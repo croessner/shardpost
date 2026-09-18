@@ -1,0 +1,16 @@
+# cephx identity for the mail server. Rook creates the Secret
+# rook-ceph-client-shardpost in the rook-ceph namespace; the server reads it via
+# the Kubernetes API (see rbac.yaml) so no secret has to be copied by hand.
+apiVersion: ceph.rook.io/v1
+kind: CephClient
+metadata:
+  name: shardpost
+spec:
+  caps:
+    mon: "allow r"
+    osd: "allow rwx pool=shardpost-index, allow rwx pool=shardpost-data" # x: object classes (cls_lock for the POP3 maildrop lock)
+  security:
+    cephx:
+      keyType: aes256k
+      keyRotationPolicy: KeyGeneration
+      keyGeneration: 1 # bumping this rotates the key; the server picks it up without restart

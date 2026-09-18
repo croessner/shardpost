@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shardpost-quota-ldap-renew
+  namespace: shardpost
+spec:
+  # Daily; the job renews only when less than UCM_RENEW_BEFORE remains, so
+  # a node1 outage of several weeks is survived (90-day certificates).
+  schedule: "17 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: shardpost-quota-ldap-renew
+        spec:
+          serviceAccountName: shardpost-quota-ldap-renew
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: shardpost-registry-pull
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: renew
+              image: docker.roessner-net.de/mail/ucm-cert-renew:0.1.1@sha256:d201e96bb2f5a93a627fae915820bde99612da85f3ac086679e8847d1e5ba299
+              env:
+                - name: UCM_RENEW_SUBJECT
+                  value: "C=DE,DC=de,DC=roessner-net,ST=Hessen,L=Alsfeld,O=R.N.S.,OU=Mail,CN=shardpost-quota.srvint.net,emailAddress=c@roessner-network-solutions.com"
+                - name: UCM_RENEW_SECRET
+                  value: shardpost-quota-ldap
+                - name: UCM_RENEW_BEFORE
+                  value: "1080h"
+                # quota_flag.py verifies the provider with the root.
+                - name: UCM_RENEW_CA_KEY
+                  value: ca.crt
+                - name: UCM_RENEW_ROOT_FILE
+                  value: /trust/rns-internal-root-ca-2026.crt
+                - name: UCM_RENEW_ISSUER_FILE
+                  value: /trust/rns-client-authentication-issuing-ca-01.crt
+                - name: UCM_RENEW_SSH_ADDR
+                  value: "109.230.254.230:50216"
+                - name: UCM_RENEW_SSH_USER
+                  value: ucm-enroll-shardpost
+                - name: UCM_RENEW_SSH_KEY_FILE
+                  value: /ssh/id_ed25519
+                - name: UCM_RENEW_SSH_HOST_KEY_FILE
+                  value: /trust/signer-host-key.pub
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {memory: 128Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: trust
+                  mountPath: /trust
+                  readOnly: true
+                - name: ssh
+                  mountPath: /ssh
+                  readOnly: true
+          volumes:
+            - name: trust
+              configMap:
+                name: shardpost-ucm-trust
+            - name: ssh
+              secret:
+                secretName: shardpost-quota-ldap-renew-ssh
+                defaultMode: 0400

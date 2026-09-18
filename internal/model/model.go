@@ -1,0 +1,318 @@
+// Package model holds the data types shared between the RADOS store and
+// the IMAP protocol layer. It is free of cgo so the protocol layer can be
+// unit-tested against an in-memory backend without librados.
+package model
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+)
+
+// Delim is the mailbox hierarchy delimiter.
+const Delim = "/"
+
+var (
+	// ErrNoMailbox is returned when a mailbox does not exist.
+	ErrNoMailbox = errors.New("no such mailbox")
+	// ErrMailboxExists is returned by CreateMailbox for an existing mailbox.
+	ErrMailboxExists = errors.New("mailbox already exists")
+	// ErrTooLarge is returned for messages above the size limit.
+	ErrTooLarge = errors.New("message too large")
+	// ErrOverQuota is returned when a delivery would exceed the user's quota.
+	ErrOverQuota = errors.New("quota exceeded")
+	// ErrLocked is returned when the maildrop lock is held by someone else.
+	ErrLocked = errors.New("mailbox is locked")
+	// ErrNoScript is returned for an unknown Sieve script.
+	ErrNoScript = errors.New("no such script")
+	// ErrScriptActive is returned when deleting the active Sieve script.
+	ErrScriptActive = errors.New("script is active")
+	// ErrScriptExists is returned when renaming onto an existing script.
+	ErrScriptExists = errors.New("script exists")
+)
+
+// MailboxRec is the registry entry of a mailbox.
+type MailboxRec struct {
+	ID          string   `json:"id"`
+	UIDValidity uint32   `json:"uidvalidity"`
+	Subscribed  bool     `json:"subscribed,omitempty"`
+	SpecialUse  []string `json:"specialuse,omitempty"`
+	// ACL maps an identifier (account name or "anyone") to RFC 4314
+	// rights. The owner has all rights implicitly and is not listed.
+	ACL map[string]string `json:"acl,omitempty"`
+	// ACLGen counts ACL changes; the grantees' pointers carry the
+	// generation they were derived from, so a late pointer write from
+	// an older SETACL/DELETEACL cannot undo a newer one.
+	ACLGen uint64 `json:"aclgen,omitempty"`
+}
+
+// SharedRef is a pointer in a user's registry to a mailbox of another
+// user that granted rights (written by SetACL on the owner's side).
+type SharedRef struct {
+	Owner      string
+	Mailbox    string
+	Subscribed bool
+	Gen        uint64 // ACL generation the pointer was written for (0: legacy)
+}
+
+// AllRights are the RFC 4314 rights, in canonical order.
+const AllRights = "lrswipkxtea"
+
+// NormalizeRights validates a rights string and returns it in canonical
+// order; the obsolete "c" and "d" (RFC 2086) expand to "k" and "xte".
+func NormalizeRights(r string) (string, bool) {
+	set := map[rune]bool{}
+
+	for _, ch := range r {
+		switch ch {
+		case 'c':
+			set['k'] = true
+		case 'd':
+			set['x'], set['t'], set['e'] = true, true, true
+		default:
+			if !strings.ContainsRune(AllRights, ch) {
+				return "", false
+			}
+
+			set[ch] = true
+		}
+	}
+
+	var b strings.Builder
+
+	for _, ch := range AllRights {
+		if set[ch] {
+			b.WriteRune(ch)
+		}
+	}
+
+	return b.String(), true
+}
+
+// HasRight reports whether rights contains r.
+func HasRight(rights string, r byte) bool { return strings.IndexByte(rights, r) >= 0 }
+
+// Mailbox is a registry entry with its name.
+type Mailbox struct {
+	Name string
+	MailboxRec
+}
+
+// Meta is the per-message index record. Besides the location of the blob
+// it caches everything a client list view needs, so FETCH (FLAGS ENVELOPE
+// INTERNALDATE RFC822.SIZE), SORT and THREAD do not read the blob.
+type Meta struct {
+	UID          uint32         `json:"uid"`
+	GUID         string         `json:"guid"`
+	Size         int64          `json:"size"`
+	Chunks       int            `json:"chunks"`
+	Flags        []string       `json:"flags,omitempty"`
+	InternalDate time.Time      `json:"idate"`
+	SaveDate     time.Time      `json:"sdate"`
+	ModSeq       uint64         `json:"modseq"`
+	Envelope     *imap.Envelope `json:"env,omitempty"`
+	References   []string       `json:"refs,omitempty"` // Message-IDs from References/In-Reply-To
+	Preview      string         `json:"preview,omitempty"`
+}
+
+// MailboxInfo is the header of a mailbox index object.
+type MailboxInfo struct {
+	Mailbox
+	// RecentFrom is the \Recent watermark: messages with UID >= RecentFrom
+	// have not been seen by a SELECT yet (0 = all messages). SELECT moves
+	// it to UIDNext after reporting.
+	RecentFrom    uint32
+	UIDNext       uint32
+	HighestModSeq uint64
+	LogStart      uint64 // oldest modseq the change log still covers
+	ShardSize     uint32 // UIDs per index shard, fixed at creation
+	Keywords      []string
+}
+
+// Change is one change log record: the UIDs touched at a modseq. Pending
+// means the writer has announced the change but not yet written all
+// entries; readers must not skip past it yet.
+type Change struct {
+	ModSeq   uint64
+	UIDs     []uint32
+	Expunged bool
+	Pending  bool
+}
+
+// Quota is a storage usage or limit (0 = unlimited for limits).
+type Quota struct {
+	Bytes int64
+	Msgs  int64
+}
+
+// FlagsResult is what SetFlags returns.
+type FlagsResult struct {
+	Updated  []Meta   // records whose flags changed, with their new modseq
+	Modified []uint32 // UIDs skipped because of UNCHANGEDSINCE
+}
+
+// Lease is a held maildrop lock.
+type Lease interface {
+	// Lost reports whether the lock could not be renewed; the holder must
+	// stop mutating the mailbox.
+	Lost() bool
+	Release()
+}
+
+// Watch is a live subscription to changes of one mailbox.
+type Watch interface {
+	Events() <-chan struct{}
+	Errors() <-chan error
+	Close()
+}
+
+// QuotaExemptable is implemented by user views that can store without
+// enforcing the quota limit (the usage is still counted), for local
+// delivery that must not bounce, like dovecot-lda's noenforcing. The
+// setting applies to the view it is called on.
+type QuotaExemptable interface {
+	SetQuotaEnforced(enforced bool)
+}
+
+// User is the per-user storage API the protocol layer talks to.
+type User interface {
+	Close()
+
+	ListMailboxes() ([]Mailbox, error)
+	Lookup(name string) (*Mailbox, error)
+	CreateMailbox(name string, specialUse []string) error
+	EnsureMailbox(name string, specialUse []string) error
+	DeleteMailbox(name string) error
+	RenameMailbox(oldName, newName string) error
+	SetSubscribed(name string, subscribed bool) error
+	Info(name string) (*MailboxInfo, error)
+
+	ListMessages(id string) ([]Meta, error)
+	GetMessages(id string, uids []uint32) ([]Meta, error)
+	Changes(id string, since uint64) (changes []Change, ok bool, err error)
+	Vanished(id string, since uint64) ([]uint32, error)
+	Deliver(name string, raw []byte, flags []string, when time.Time) (*Meta, error)
+	// DeliverGUID is Deliver with a caller-chosen GUID (32 hex digits, see
+	// NewGUID), so a delivery intent can name the message before it exists.
+	DeliverGUID(name, guid string, raw []byte, flags []string, when time.Time) (*Meta, error)
+	Read(m *Meta) ([]byte, error)
+	SetFlags(name string, uids []uint32, unchangedSince uint64, apply func(old []string) []string) (*FlagsResult, error)
+	Expunge(name string, metas []Meta) error
+	Copy(metas []Meta, dest string) ([]Meta, error)
+	Move(src string, metas []Meta, dest string) ([]Meta, error)
+
+	SearchField(field, query string) (map[string]bool, error)
+	SearchFields(fields []string, query string) (map[string]bool, error)
+
+	QuotaUsage() (Quota, error)
+	QuotaLimit() (Quota, error)
+	SetQuotaLimit(Quota) error
+	// SetStorageLimit sets only the storage limit (userdb attribute).
+	SetStorageLimit(bytes int64) error
+
+	Watch(id string) (Watch, error)
+	Lock(id string, ttl time.Duration) (Lease, error)
+	// PendingFloor returns the modseq before the oldest pending change
+	// (ok=false: none), used after a full snapshot load.
+	PendingFloor(id string, highest uint64) (floor uint64, ok bool, err error)
+
+	// MarkRecent moves the \Recent watermark of the mailbox to uidNext.
+	MarkRecent(id string, uidNext uint32) error
+	// ListSubscribedMissing lists subscribed names without a mailbox
+	// (RFC 5258 \NonExistent).
+	ListSubscribedMissing() ([]string, error)
+
+	// Access control (RFC 4314). GetACL returns the explicit entries of a
+	// mailbox; SetACL replaces the rights of one identifier (empty rights
+	// removes it) and maintains the grantee's SharedRef. ListShared lists
+	// the mailboxes of other users this user was granted rights on.
+	GetACL(name string) (map[string]string, error)
+	SetACL(name, identifier, rights string) error
+	ListShared() ([]SharedRef, error)
+	SetSharedSubscribed(owner, mailbox string, subscribed bool) error
+	// RemoveSharedRef drops the pointer ref unless a newer generation
+	// replaced it meanwhile (ref.Gen 0 removes unconditionally).
+	RemoveSharedRef(ref SharedRef) error
+
+	// Annotations (METADATA, RFC 5464). mailbox "" addresses the server
+	// entries. Keys are full entry names ("/shared/comment",
+	// "/private/comment"); private entries belong to the accessing
+	// account. SetMetadata with a nil value removes the entry.
+	GetMetadata(mailbox, accessor string) (map[string]string, error)
+	SetMetadata(mailbox, accessor string, entries map[string]*string) error
+
+	// Delivery intents bracket a delivery that consists of several index
+	// updates (Sieve fileinto into several mailboxes, MULTIAPPEND): what
+	// was stored is recorded, and an intent left behind by a crash is
+	// rolled back by the scrubber. id "" is accepted as "no intent".
+	// RecordDelivery is called before the message is stored: the intent
+	// names mailbox and GUID, so a crash right after the store is covered.
+	// EndDelivery must succeed before the client is told of success.
+	BeginDelivery() (id string, err error)
+	RecordDelivery(id, mailbox, guid string) error
+	EndDelivery(id string) error
+
+	// VacationSeen manages the auto-reply suppression record of key. With
+	// ttl > 0 it records a sent reply valid for ttl and reports whether
+	// an unexpired record already existed; with ttl < 0 it only reports
+	// (nothing is written); with ttl == 0 it removes the record (a
+	// reservation whose send failed).
+	VacationSeen(key string, ttl time.Duration) (already bool, err error)
+
+	// Sieve scripts (ManageSieve, LMTP filtering).
+	ListScripts() (names []string, active string, err error)
+	GetScript(name string) (string, error)
+	ActiveScript() (string, error)
+	PutScript(name, text string) error
+	DeleteScript(name string) error
+	SetActiveScript(name string) error
+	RenameScript(oldName, newName string) error
+}
+
+// HasFlag reports whether flags contains f (case-insensitive).
+func HasFlag(flags []string, f string) bool {
+	for _, x := range flags {
+		if equalFold(x, f) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func equalFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 32
+		}
+
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 32
+		}
+
+		if ca != cb {
+			return false
+		}
+	}
+
+	return true
+}
+
+// NewGUID returns a random message GUID (16 bytes, hex).
+func NewGUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+
+	return hex.EncodeToString(b[:])
+}

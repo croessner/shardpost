@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> Prepared: Payload vor Zielcommit sichern
+    Prepared --> Waiting: Commit-Beleg fehlt
+    Waiting --> Prepared: später prüfen
+    Waiting --> Dead: unbestätigt nach Frist
+    Prepared --> Ready: Commit-Beleg vorhanden
+    Ready --> Running: Lease + Speicherbudget
+    Running --> Retry: temporärer Fehler
+    Retry --> Ready: Backoff abgelaufen
+    Running --> Dead: dauerhaft / Versuche erschöpft
+    Running --> Delivered: externer Erfolg gespeichert
+    Delivered --> Cleanup: Receipt + Job bereinigen
+    Cleanup --> Delivered: Bereinigung fehlgeschlagen
+    Cleanup --> [*]: abgeschlossen
+    Note right of Running: Externer Erfolg vor Update kann bei Crash wiederholt werden

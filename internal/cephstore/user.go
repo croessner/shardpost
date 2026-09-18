@@ -1,0 +1,2871 @@
+package cephstore
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/ceph/go-ceph/rados"
+
+	"shardpost/internal/mailmeta"
+	"shardpost/internal/model"
+	"shardpost/internal/quota"
+)
+
+// Object layout inside a user's RADOS namespace
+//
+//	index pool:
+//	  "mailboxes"          the registry, omap:
+//	                          "m:<name>"  -> MailboxRec JSON (id, uidvalidity, flags)
+//	                          "q:bytes", "q:msgs"    quota usage counters
+//	                          "q:lbytes", "q:lmsgs"  per-user limits (SETQUOTA)
+//	  "mbox/<id>"          shard 0 of a mailbox, keyed by its stable id
+//	                       (rename = registry update only), omap:
+//	                          "h:uidnext", "h:uidvalidity", "h:modseq"
+//	                          "h:keywords" -> JSON list of user keywords
+//	                          "h:logstart" -> oldest modseq still in the change log
+//	                          "c:<modseq>" -> {"u":[uids],"x":bool}   change log
+//	                          "i:<id>"     -> MOVE intent (see Move)
+//	                          "v:<modseq>" -> [uids] expunged (QRESYNC VANISHED)
+//	                          "m:<uid>"    -> Meta JSON (entries of shard 0)
+//	  "mbox/<id>/<n>"      shard n >= 1: "m:<uid>" entries only
+//	  "fts/<shard>", "ftsd/<shard>"   full-text index, see fts.go
+//	data pool:
+//	  "msg/<guid>/<n>"     chunk n of the raw RFC 5322 message, see blob.go
+//
+// Sharding: entry shard = (uid-1) / shardsize, so a mailbox grows into new
+// objects instead of one ever-growing omap (the RGW bucket index model).
+// The shard size is fixed per mailbox at creation and stored in its header
+// (h:shardsize); the configured value only applies to new mailboxes, so a
+// process with a different configuration can never misread an index.
+// The header stays on shard 0. Writes to shard 0 are one atomic CAS;
+// writes to other shards are two-phase (header first, entry second), which
+// a crash can leave as a UID gap or an orphan blob, both reaped by the
+// scrubber. Modseqs are allocated by the header and therefore global.
+const (
+	oidRegistry       = "mailboxes"
+	mboxPrefix        = "mbox/"
+	msgPrefix         = "msg/"
+	keyUIDNext        = "h:uidnext"
+	keyUIDValid       = "h:uidvalidity"
+	keyModSeq         = "h:modseq"
+	keyKeywords       = "h:keywords"
+	keyLogStart       = "h:logstart"
+	keyShardSize      = "h:shardsize"
+	keyRecent         = "h:recent"
+	keyIntentPrefix   = "i:"
+	keyMsgPrefix      = "m:"
+	keyVanPrefix      = "v:"
+	keyChgPrefix      = "c:"
+	regMboxPrefix     = "m:"
+	regDeliveryPrefix = "d:"   // delivery intents (multi-target deliveries)
+	regSubMissing     = "sub:" // subscriptions to names without a mailbox
+	regLastValidity   = "uv:"  // last UIDVALIDITY used for a name
+	regQuotaBytes     = "q:bytes"
+	regQuotaMsgs      = "q:msgs"
+	regQuotaLBytes    = "q:lbytes"
+	regQuotaLMsgs     = "q:lmsgs"
+	inboxName         = "INBOX"
+	casRetries        = 16
+	omapPageSize      = 1024
+	MaxMessageLen     = 256 << 20 // test-profile limit (chunked, see blob.go)
+	Delim             = model.Delim
+	DefaultShardSize  = 100000
+	// LogRetention bounds how many change/vanished records a mailbox keeps.
+	LogRetention   = 10000
+	registryTTL    = 2 * time.Second
+	lockName       = "maildrop"
+	DefaultLockTTL = 10 * time.Minute
+)
+
+// Shared data types live in package model (cgo-free, used by the protocol
+// layer and its tests).
+type (
+	// MailboxRec is the registry record of a mailbox.
+	MailboxRec = model.MailboxRec
+	// Mailbox is a registered mailbox: its name and registry record.
+	Mailbox = model.Mailbox
+	// Meta is the index record of one message.
+	Meta = model.Meta
+	// MailboxInfo is the header state of a mailbox (UIDNEXT, modseq, ...).
+	MailboxInfo = model.MailboxInfo
+	// Quota is a usage or limit in bytes and messages.
+	Quota = model.Quota
+	// QuotaLimit is a quota limit (same representation as Quota).
+	QuotaLimit = model.Quota
+	// Change is one entry of a mailbox change log.
+	Change = model.Change
+)
+
+// Errors returned by the store; they are the ones of package model.
+var (
+	ErrNoMailbox     = model.ErrNoMailbox
+	ErrMailboxExists = model.ErrMailboxExists
+	ErrTooLarge      = model.ErrTooLarge
+	ErrOverQuota     = model.ErrOverQuota
+	ErrLocked        = model.ErrLocked
+	ErrNoScript      = model.ErrNoScript
+	ErrScriptActive  = model.ErrScriptActive
+	ErrScriptExists  = model.ErrScriptExists
+)
+
+// HasFlag reports whether flags contains f (case-insensitive).
+func HasFlag(flags []string, f string) bool { return model.HasFlag(flags, f) }
+
+// User is a per-user view of the store (namespace-scoped IOContexts).
+type User struct {
+	learningHook func(model.Mailbox, model.Meta) (string, error)
+	name         string
+	store        *Store // to open other namespaces (shared folder pointers)
+	idx          *rados.IOContext
+	data         *rados.IOContext
+	log          *slog.Logger
+	chunkSize    int64
+	ftsShards    int
+	shardSize    uint32
+	limit        QuotaLimit
+	rules        *quota.Policy
+	onQuota      func(account string, before, after, limit Quota)
+	noEnforce    bool           // reservations skip the limit check (still counted)
+	inflight     sync.WaitGroup // background work still using the IOContexts
+	release      func()         // drops the reference on the connection
+	idxPool      *verPool       // private contexts for versioned reads
+	dataPool     *verPool
+
+	cacheMu sync.Mutex
+	cache   map[string]cachedMailbox
+}
+
+type cachedMailbox struct {
+	mb  Mailbox
+	exp time.Time
+}
+
+// Close releases the IOContexts once background work (asynchronous
+// notifies, log trimming, watches) has finished. It never blocks the
+// caller: destroying an IOContext that a notify still uses would crash
+// inside librados.
+func (u *User) Close() {
+	go func() {
+		u.inflight.Wait()
+		u.idx.Destroy()
+		u.data.Destroy()
+		u.idxPool.destroy()
+		u.dataPool.destroy()
+
+		if u.release != nil {
+			u.release()
+		}
+	}()
+}
+
+// Name returns the user name.
+func (u *User) Name() string { return u.name }
+
+func mboxOID(id string) string { return mboxPrefix + id }
+func (u *User) shardOID(id string, shard uint32) string {
+	if shard == 0 {
+		return mboxOID(id)
+	}
+
+	return fmt.Sprintf("%s%s/%d", mboxPrefix, id, shard)
+}
+func shardOf(uid, size uint32) uint32 {
+	if size == 0 {
+		size = DefaultShardSize
+	}
+
+	return (uid - 1) / size
+}
+func uidKey(uid uint32) string  { return fmt.Sprintf("%s%010d", keyMsgPrefix, uid) }
+func vanKey(ms uint64) string   { return fmt.Sprintf("%s%020d", keyVanPrefix, ms) }
+func chgKey(ms uint64) string   { return fmt.Sprintf("%s%020d", keyChgPrefix, ms) }
+func regKey(name string) string { return regMboxPrefix + name }
+
+func newGUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+
+	return hex.EncodeToString(b[:])
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+
+// ListMailboxes returns all mailboxes of the user, sorted by name.
+func (u *User) ListMailboxes() ([]Mailbox, error) {
+	vals, err := u.idx.GetAllOmapValues(oidRegistry, "", regMboxPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("list mailboxes: %w", err)
+	}
+
+	out := make([]Mailbox, 0, len(vals))
+	for k, v := range vals {
+		var rec MailboxRec
+		if err := json.Unmarshal(v, &rec); err != nil {
+			continue
+		}
+
+		out = append(out, Mailbox{Name: strings.TrimPrefix(k, regMboxPrefix), MailboxRec: rec})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
+	return out, nil
+}
+
+// Lookup resolves a mailbox name. Results are cached briefly: the name to
+// id mapping only changes on RENAME/DELETE, and a stale hit surfaces as
+// ENOENT on the index object, which callers treat as "no such mailbox".
+func (u *User) Lookup(name string) (*Mailbox, error) {
+	name = canonical(name)
+
+	u.cacheMu.Lock()
+	if c, ok := u.cache[name]; ok && time.Now().Before(c.exp) {
+		u.cacheMu.Unlock()
+
+		mb := c.mb
+
+		return &mb, nil
+	}
+	u.cacheMu.Unlock()
+
+	vals, err := getOmapKeys(u.idx, oidRegistry, []string{regKey(name)})
+	if err != nil {
+		return nil, fmt.Errorf("lookup %q: %w", name, err)
+	}
+
+	v, ok := vals[regKey(name)]
+	if !ok {
+		return nil, ErrNoMailbox
+	}
+
+	var rec MailboxRec
+	if err := json.Unmarshal(v, &rec); err != nil {
+		return nil, fmt.Errorf("lookup %q: corrupt record: %w", name, err)
+	}
+
+	mb := Mailbox{Name: name, MailboxRec: rec}
+
+	u.cacheMu.Lock()
+	if u.cache == nil {
+		u.cache = map[string]cachedMailbox{}
+	}
+
+	u.cache[name] = cachedMailbox{mb: mb, exp: time.Now().Add(registryTTL)}
+	u.cacheMu.Unlock()
+
+	return &mb, nil
+}
+
+func (u *User) invalidate() {
+	u.cacheMu.Lock()
+	u.cache = nil
+	u.cacheMu.Unlock()
+}
+
+func canonical(name string) string {
+	name = strings.Trim(name, Delim)
+	if strings.EqualFold(name, inboxName) {
+		return inboxName
+	}
+
+	if i := strings.Index(name, Delim); i == 5 && strings.EqualFold(name[:5], inboxName) {
+		return inboxName + name[5:]
+	}
+
+	return name
+}
+
+// CreateMailbox creates a mailbox with the given special-use attributes.
+// It is idempotent: an existing mailbox is left untouched and
+// ErrMailboxExists is returned.
+func (u *User) CreateMailbox(name string, specialUse []string) error {
+	name = canonical(name)
+	if name == "" {
+		return fmt.Errorf("empty mailbox name")
+	}
+
+	rec := MailboxRec{ID: newGUID(), UIDValidity: uint32(time.Now().Unix()), SpecialUse: specialUse}
+	// A recreated mailbox must not reuse the UIDVALIDITY of its
+	// predecessor, even within the same second.
+	if vals, err := getOmapKeys(u.idx, oidRegistry, []string{regLastValidity + name}); err == nil {
+		if last, _ := strconv.ParseUint(string(vals[regLastValidity+name]), 10, 32); uint32(last) >= rec.UIDValidity {
+			rec.UIDValidity = uint32(last) + 1
+		}
+	}
+
+	// 1. The index object under its fresh id (nobody can race for it).
+	err := u.createIndexObject(&rec)
+	if err != nil {
+		return fmt.Errorf("create mailbox %q: %w", name, err)
+	}
+
+	// 2. Claim the name in the registry. Concurrent creators on different
+	//    pods race here; exactly one wins, the others see the name taken.
+	exists := false
+	b, _ := json.Marshal(&rec)
+
+	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name), regSubMissing + name}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		if _, ok := cur[regKey(name)]; ok {
+			exists = true
+			return nil, nil
+		}
+
+		set := map[string][]byte{regKey(name): b, regLastValidity + name: []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10))}
+		// A subscription made before the mailbox existed carries over.
+		var rm []string
+
+		if _, ok := cur[regSubMissing+name]; ok {
+			rec.Subscribed = true
+			b, _ = json.Marshal(&rec)
+			set[regKey(name)] = b
+			rm = []string{regSubMissing + name}
+		}
+
+		return set, rm
+	})
+	if err != nil {
+		_ = u.idx.Delete(mboxOID(rec.ID))
+		return fmt.Errorf("register mailbox %q: %w", name, err)
+	}
+
+	if exists {
+		_ = u.idx.Delete(mboxOID(rec.ID))
+		return ErrMailboxExists
+	}
+
+	u.invalidate()
+
+	return nil
+}
+
+// createIndexObject creates the index object (shard 0 with a fresh
+// header) of a new mailbox; it fails if the object exists.
+func (u *User) createIndexObject(rec *MailboxRec) error {
+	op := rados.CreateWriteOp()
+	op.Create(rados.CreateExclusive)
+	op.SetOmap(map[string][]byte{
+		keyUIDNext:   []byte("1"),
+		keyUIDValid:  []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10)),
+		keyModSeq:    []byte("1"),
+		keyKeywords:  []byte("[]"),
+		keyLogStart:  []byte("1"),
+		keyShardSize: []byte(strconv.FormatUint(uint64(u.shardSize), 10)),
+	})
+	err := op.Operate(u.idx, mboxOID(rec.ID), rados.OperationNoFlag)
+	op.Release()
+
+	return err
+}
+
+// EnsureMailbox creates the mailbox if it does not exist yet. The
+// (cached) lookup comes first: every LMTP delivery calls this, and
+// CreateMailbox would otherwise write and delete an index object each
+// time, leaving one behind whenever the process dies in between.
+func (u *User) EnsureMailbox(name string, specialUse []string) error {
+	if _, err := u.Lookup(name); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNoMailbox) {
+		return err
+	}
+
+	err := u.CreateMailbox(name, specialUse)
+	if errors.Is(err, ErrMailboxExists) {
+		return nil
+	}
+
+	return err
+}
+
+// DeleteMailbox removes the mailbox, its index shards and all its messages.
+// Child mailboxes are kept (their parent becomes an implicit \Noselect
+// node), as RFC 9051 requires.
+func (u *User) DeleteMailbox(name string) error {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return err
+	}
+
+	lease, err := u.lockLearning(mb.ID)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+
+	u.invalidate()
+
+	current, err := u.Lookup(name)
+	if err != nil || current.ID != mb.ID {
+		return ErrNoMailbox
+	}
+
+	info, metas, err := u.readForDelete(mb)
+	if err != nil {
+		return err
+	}
+
+	if lease.Lost() {
+		return ErrLocked
+	}
+
+	if err := u.preserveLearningReceipts(mb); err != nil {
+		return err
+	}
+
+	if lease.Lost() {
+		return ErrLocked
+	}
+	// Unregister first: from now on nobody can deliver into it. The CAS
+	// checks that the registry still names this mailbox (same id): of two
+	// concurrent DELETEs exactly one wins and releases the blobs, and a
+	// mailbox re-created under the name meanwhile is left alone. The
+	// subscription and the ACL come from that winning snapshot.
+	snap, lost, err := u.unregisterMailbox(mb, lease)
+	if err != nil {
+		return fmt.Errorf("unregister mailbox %q: %w", name, err)
+	}
+
+	u.invalidate()
+
+	if lost {
+		return ErrNoMailbox
+	}
+
+	u.dropSharedRefs(snap.ACL, mb.Name)
+
+	q := u.releaseMessages(metas)
+
+	if err := u.deleteShards(mb, info, name); err != nil {
+		return err
+	}
+
+	return u.releaseUsage(mb, q)
+}
+
+// readForDelete reads the header and the index entries of a mailbox that
+// is about to be deleted. A mailbox that is already gone is no error.
+func (u *User) readForDelete(mb *Mailbox) (*MailboxInfo, []Meta, error) {
+	info, _, err := u.readHeader(mb)
+	if err != nil && !errors.Is(err, ErrNoMailbox) {
+		return nil, nil, err
+	}
+
+	metas, err := u.ListMessages(mb.ID)
+	if err != nil && !errors.Is(err, ErrNoMailbox) {
+		return nil, nil, err
+	}
+
+	return info, metas, nil
+}
+
+// unregisterMailbox removes the registry entry of mb if it still names
+// this mailbox (same id) and the lease is held. It returns the record it
+// removed and lost=true if it did not remove it.
+func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease) (MailboxRec, bool, error) {
+	var snap MailboxRec
+
+	lost := false
+
+	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		lost = true
+
+		if lease.Lost() {
+			return nil, nil
+		}
+
+		v, ok := cur[regKey(mb.Name)]
+		if !ok || json.Unmarshal(v, &snap) != nil || snap.ID != mb.ID {
+			return nil, nil
+		}
+
+		lost = false
+
+		if snap.Subscribed { // the subscription survives as one to a missing name
+			return map[string][]byte{regSubMissing + mb.Name: []byte("1")}, []string{regKey(mb.Name)}
+		}
+
+		return nil, []string{regKey(mb.Name)}
+	})
+
+	return snap, lost, err
+}
+
+// releaseMessages drops the blob references of the entries of a deleted
+// mailbox and returns the (negative) quota delta.
+func (u *User) releaseMessages(metas []Meta) Quota {
+	var q Quota
+
+	for i := range metas {
+		if err := u.releaseBlob(&metas[i]); err != nil {
+			u.log.Warn("orphan blob", "guid", metas[i].GUID, "err", err)
+		}
+
+		q.Bytes -= metas[i].Size
+		q.Msgs--
+	}
+
+	return q
+}
+
+// deleteShards deletes the index objects of a deleted mailbox; name is
+// the name used in the error.
+func (u *User) deleteShards(mb *Mailbox, info *MailboxInfo, name string) error {
+	for s := uint32(0); info != nil && s <= shardOf(max(info.UIDNext-1, 1), info.ShardSize); s++ {
+		if err := u.idx.Delete(u.shardOID(mb.ID, s)); err != nil && errCode(err) != syscall.ENOENT {
+			return fmt.Errorf("delete index %q shard %d: %w", name, s, err)
+		}
+	}
+
+	return nil
+}
+
+// RenameMailbox renames a mailbox and all its children in one registry
+// write. Renaming INBOX moves its messages into a new mailbox and leaves an
+// empty INBOX behind (RFC 9051 6.3.6).
+func (u *User) RenameMailbox(oldName, newName string) error {
+	oldName, newName = canonical(oldName), canonical(newName)
+
+	defer u.invalidate()
+
+	if oldName == inboxName {
+		return u.renameInbox(newName)
+	}
+
+	all, err := u.ListMailboxes()
+	if err != nil {
+		return err
+	}
+	// The old name may be an implicit \Noselect parent that exists only
+	// through its children; renaming it renames the subtree.
+	keys, subtree := renameKeys(all, oldName, newName)
+
+	if !subtree {
+		return ErrNoMailbox
+	}
+
+	keys = append(keys, regKey(newName))
+
+	var conflict error
+
+	err = casOmap(u, u.idx, oidRegistry, keys, u.renameUpdate(oldName, newName, &conflict))
+	if err != nil {
+		return fmt.Errorf("rename %q: %w", oldName, err)
+	}
+
+	if conflict == nil {
+		// Grantees keep their pointers under the new names.
+		u.moveSubtreeSharedRefs(all, oldName, newName)
+		u.recountRenamed(all, oldName, newName)
+	}
+
+	return conflict
+}
+
+// recountRenamed moves the messages of renamed mailboxes that a name
+// rule now ignores (or no longer ignores) out of (into) the usage. The
+// rename is not refused for it, like a lowered limit; a failure here is
+// left to the scrubber, which recounts from the indexes.
+func (u *User) recountRenamed(all []Mailbox, oldName, newName string) {
+	if !u.rules.RenameMayRecount() {
+		return
+	}
+
+	var d Quota
+
+	for i := range all {
+		m := &all[i]
+		if m.Name != oldName && !strings.HasPrefix(m.Name, oldName+Delim) {
+			continue
+		}
+
+		renamed := Mailbox{Name: newName + m.Name[len(oldName):], MailboxRec: m.MailboxRec}
+
+		was, is := u.rules.Counts(m), u.rules.Counts(&renamed)
+		if was == is {
+			continue
+		}
+
+		metas, err := u.ListMessages(m.ID)
+		if err != nil {
+			u.log.Warn("quota recount after rename failed", "mailbox", renamed.Name, "err", err)
+			continue
+		}
+
+		q := sizeOf(metas)
+		if was {
+			q = Quota{Bytes: -q.Bytes, Msgs: -q.Msgs}
+		}
+
+		d.Bytes += q.Bytes
+		d.Msgs += q.Msgs
+	}
+
+	if err := u.adjustQuota(d); err != nil {
+		u.log.Warn("quota recount after rename failed", "err", err)
+	}
+}
+
+// renameInbox moves the messages of INBOX into the new mailbox newName;
+// INBOX itself stays.
+func (u *User) renameInbox(newName string) error {
+	if err := u.CreateMailbox(newName, nil); err != nil {
+		return err
+	}
+
+	metas, err := u.ListMessagesByName(inboxName)
+	if err != nil {
+		return err
+	}
+
+	_, err = u.Move(inboxName, metas, newName)
+
+	return err
+}
+
+// renameKeys returns the registry keys of the mailboxes in the subtrees
+// of oldName and newName, and whether the oldName subtree is non-empty.
+func renameKeys(all []Mailbox, oldName, newName string) ([]string, bool) {
+	subtree := false
+
+	var keys []string
+
+	for _, m := range all {
+		if m.Name == oldName || strings.HasPrefix(m.Name, oldName+Delim) {
+			subtree = true
+
+			keys = append(keys, regKey(m.Name))
+		}
+
+		if m.Name == newName || strings.HasPrefix(m.Name, newName+Delim) {
+			keys = append(keys, regKey(m.Name))
+		}
+	}
+
+	return keys, subtree
+}
+
+// renameUpdate returns the registry CAS function of a rename of the
+// oldName subtree to newName. *conflict receives why the rename was not
+// done (nil if it was).
+func (u *User) renameUpdate(oldName, newName string, conflict *error) func(map[string][]byte) (map[string][]byte, []string) {
+	return func(_ map[string][]byte) (map[string][]byte, []string) {
+		*conflict = nil
+		// Collision check against the live registry: any create after
+		// this listing bumps the object version and fails the CAS.
+		all, err := u.idx.GetAllOmapValues(oidRegistry, "", regMboxPrefix, omapPageSize)
+		if err != nil {
+			*conflict = err
+			return nil, nil
+		}
+
+		set := map[string][]byte{}
+
+		var rm []string
+
+		for k, v := range all {
+			n := strings.TrimPrefix(k, regMboxPrefix)
+			if n == oldName || strings.HasPrefix(n, oldName+Delim) {
+				target := regKey(newName + n[len(oldName):])
+				// Every resulting name must be free: "X" may be an implicit
+				// parent while "X/B" already exists.
+				if _, taken := all[target]; taken {
+					*conflict = ErrMailboxExists
+					return nil, nil
+				}
+
+				set[target] = v
+
+				rm = append(rm, k)
+			}
+		}
+
+		if len(set) == 0 {
+			*conflict = ErrNoMailbox
+		}
+
+		return set, rm
+	}
+}
+
+// moveSubtreeSharedRefs moves the grantees' pointers of every mailbox of
+// the oldName subtree to its name under newName.
+func (u *User) moveSubtreeSharedRefs(all []Mailbox, oldName, newName string) {
+	for _, m := range all {
+		if m.Name == oldName || strings.HasPrefix(m.Name, oldName+Delim) {
+			u.moveSharedRefs(m.MailboxRec, m.Name, newName+m.Name[len(oldName):])
+		}
+	}
+}
+
+// SetSubscribed changes the subscription flag of a mailbox.
+func (u *User) SetSubscribed(name string, subscribed bool) error {
+	name = canonical(name)
+
+	var missing bool
+
+	err := casOmap(u, u.idx, oidRegistry, []string{regKey(name), regSubMissing + name}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		missing = false
+
+		v, ok := cur[regKey(name)]
+		if !ok {
+			// RFC 5258: subscriptions may name mailboxes that do not exist.
+			missing = true
+
+			if subscribed {
+				if _, has := cur[regSubMissing+name]; has {
+					return nil, nil
+				}
+
+				return map[string][]byte{regSubMissing + name: []byte("1")}, nil
+			}
+
+			if _, has := cur[regSubMissing+name]; has {
+				return nil, []string{regSubMissing + name}
+			}
+
+			return nil, nil
+		}
+
+		var rec MailboxRec
+		if json.Unmarshal(v, &rec) != nil || rec.Subscribed == subscribed {
+			return nil, nil
+		}
+
+		rec.Subscribed = subscribed
+		b, _ := json.Marshal(&rec)
+
+		return map[string][]byte{regKey(name): b}, nil
+	})
+	u.invalidate()
+
+	if err != nil {
+		return err
+	}
+
+	if missing && false {
+		return ErrNoMailbox
+	}
+
+	return nil
+}
+
+// QuotaUsage returns the user's current usage.
+func (u *User) QuotaUsage() (Quota, error) {
+	vals, err := getOmapKeys(u.idx, oidRegistry, []string{regQuotaBytes, regQuotaMsgs})
+	if err != nil {
+		return Quota{}, err
+	}
+
+	b, _ := strconv.ParseInt(string(vals[regQuotaBytes]), 10, 64)
+	m, _ := strconv.ParseInt(string(vals[regQuotaMsgs]), 10, 64)
+
+	return Quota{Bytes: b, Msgs: m}, nil
+}
+
+// QuotaLimit returns the user's limit: a per-user value stored in the
+// registry (SETQUOTA) or, if none, the configured default.
+func (u *User) QuotaLimit() (Quota, error) {
+	vals, err := getOmapKeys(u.idx, oidRegistry, []string{regQuotaLBytes, regQuotaLMsgs})
+	if err != nil {
+		return Quota{}, err
+	}
+
+	_, l := u.quotaState(vals)
+
+	return l, nil
+}
+
+// quotaKeys are the registry keys of the usage counters and the limit.
+var quotaKeys = []string{regQuotaBytes, regQuotaMsgs, regQuotaLBytes, regQuotaLMsgs}
+
+// quotaState reads the usage and the limit (per-user value or the
+// configured default) from registry values.
+func (u *User) quotaState(cur map[string][]byte) (usage, limit Quota) {
+	usage.Bytes, _ = strconv.ParseInt(string(cur[regQuotaBytes]), 10, 64)
+	usage.Msgs, _ = strconv.ParseInt(string(cur[regQuotaMsgs]), 10, 64)
+
+	limit = u.limit
+	if v, ok := cur[regQuotaLBytes]; ok {
+		limit.Bytes, _ = strconv.ParseInt(string(v), 10, 64)
+	}
+
+	if v, ok := cur[regQuotaLMsgs]; ok {
+		limit.Msgs, _ = strconv.ParseInt(string(v), 10, 64)
+	}
+
+	return usage, limit
+}
+
+// usageValues encodes the usage counters for a registry write.
+func usageValues(q Quota) map[string][]byte {
+	return map[string][]byte{
+		regQuotaBytes: []byte(strconv.FormatInt(q.Bytes, 10)),
+		regQuotaMsgs:  []byte(strconv.FormatInt(q.Msgs, 10)),
+	}
+}
+
+// SetQuotaLimit stores a per-user limit (SETQUOTA).
+func (u *User) SetQuotaLimit(l Quota) error {
+	return u.setQuotaPair(regQuotaLBytes, regQuotaLMsgs, l)
+}
+
+// SetQuotaEnforced switches the limit check of this view's reservations
+// (model.QuotaExemptable); the usage is counted either way.
+func (u *User) SetQuotaEnforced(enforced bool) { u.noEnforce = !enforced }
+
+// SetStorageLimit stores a per-user storage limit; the message limit
+// keeps following its own setting (or the configured default).
+func (u *User) SetStorageLimit(bytes int64) error {
+	return casOmap(u, u.idx, oidRegistry, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{regQuotaLBytes: []byte(strconv.FormatInt(bytes, 10))}, nil
+	})
+}
+
+// SetQuotaUsage overwrites the usage counters (used by the scrubber).
+func (u *User) SetQuotaUsage(q Quota) error {
+	return u.setQuotaPair(regQuotaBytes, regQuotaMsgs, q)
+}
+
+// setQuotaPair overwrites the registry keys bytesKey and msgsKey with the
+// values of q.
+func (u *User) setQuotaPair(bytesKey, msgsKey string, q Quota) error {
+	return casOmap(u, u.idx, oidRegistry, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{
+			bytesKey: []byte(strconv.FormatInt(q.Bytes, 10)),
+			msgsKey:  []byte(strconv.FormatInt(q.Msgs, 10)),
+		}, nil
+	})
+}
+
+// adjustQuota adds the delta to the usage counters and reports the
+// change (quota warnings). The counters live on the registry object, so
+// they are eventually consistent with the mailbox indexes (the scrubber
+// recomputes them from the Meta records).
+func (u *User) adjustQuota(d Quota) error { return u.changeQuota(d, true) }
+
+// rollbackQuota gives back the unused part of a reservation; it is not
+// reported, the usage only returns to where it was.
+func (u *User) rollbackQuota(d Quota) {
+	if err := u.changeQuota(d, false); err != nil {
+		u.log.Warn("quota release failed", "err", err)
+	}
+}
+
+// changeQuota adds the delta to the usage counters in one
+// compare-and-swap; with notify the change goes to OnQuotaChange.
+func (u *User) changeQuota(d Quota, notify bool) error {
+	if d.Bytes == 0 && d.Msgs == 0 {
+		return nil
+	}
+
+	var before, after, limit Quota
+
+	err := casOmap(u, u.idx, oidRegistry, quotaKeys, func(cur map[string][]byte) (map[string][]byte, []string) {
+		before, limit = u.quotaState(cur)
+		after = Quota{Bytes: max(before.Bytes+d.Bytes, 0), Msgs: max(before.Msgs+d.Msgs, 0)}
+
+		return usageValues(after), nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if notify {
+		u.quotaChanged(before, after, limit)
+	}
+
+	return nil
+}
+
+// reservation is quota taken for an operation before it writes
+// anything. settle ends it: the used part is kept and reported as one
+// change, the rest is given back silently. The reported change starts
+// at the usage seen when reserving; other writers may have moved the
+// counters since, so "after" is this operation's own step (which is
+// what the edge-triggered warnings need), not the current usage. A reservation for a mailbox
+// that a rule ignores is inactive and settles to nothing.
+type reservation struct {
+	u      *User
+	total  Quota
+	before Quota
+	limit  Quota
+	active bool
+}
+
+// reserve checks the limit for saving total into mb (with the mailbox's
+// extra allowance and the grace) and adds it to the usage in one
+// compare-and-swap on the registry object, so concurrent deliveries and
+// COPY batches cannot jointly overshoot the limit (each sees the
+// reservations of the others). ErrOverQuota leaves the counters
+// untouched.
+func (u *User) reserve(mb *Mailbox, total Quota) (*reservation, error) {
+	r := &reservation{u: u, total: total}
+	if !u.rules.Counts(mb) || (total.Bytes == 0 && total.Msgs == 0) {
+		return r, nil
+	}
+
+	over := false
+
+	err := casOmap(u, u.idx, oidRegistry, quotaKeys, func(cur map[string][]byte) (map[string][]byte, []string) {
+		over = false
+		r.before, r.limit = u.quotaState(cur)
+
+		if !u.noEnforce && !u.rules.Allows(r.before, u.rules.Limit(r.limit, mb), total.Bytes, total.Msgs) {
+			over = true
+			return nil, nil
+		}
+
+		return usageValues(Quota{Bytes: max(r.before.Bytes+total.Bytes, 0), Msgs: max(r.before.Msgs+total.Msgs, 0)}), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if over {
+		return nil, ErrOverQuota
+	}
+
+	r.active = true
+
+	return r, nil
+}
+
+// settle keeps used of the reservation and gives back the rest.
+func (r *reservation) settle(used Quota) {
+	if !r.active {
+		return
+	}
+
+	r.active = false
+
+	if rest := (Quota{Bytes: used.Bytes - r.total.Bytes, Msgs: used.Msgs - r.total.Msgs}); rest != (Quota{}) {
+		r.u.rollbackQuota(rest)
+	}
+
+	if used != (Quota{}) {
+		r.u.quotaChanged(r.before, Quota{Bytes: r.before.Bytes + used.Bytes, Msgs: r.before.Msgs + used.Msgs}, r.limit)
+	}
+}
+
+// moveUsage releases the entries a MOVE removed from src when they now
+// sit in a mailbox that a rule ignores. The opposite direction is
+// reserved up front by Move.
+func (u *User) moveUsage(src, dst *Mailbox, removed Quota) error {
+	if !u.rules.Counts(src) || u.rules.Counts(dst) {
+		return nil
+	}
+
+	return u.adjustQuota(Quota{Bytes: -removed.Bytes, Msgs: -removed.Msgs})
+}
+
+// releaseUsage applies the (negative) delta of entries removed from mb,
+// unless a rule ignores mb.
+func (u *User) releaseUsage(mb *Mailbox, d Quota) error {
+	if !u.rules.Counts(mb) {
+		return nil
+	}
+
+	return u.adjustQuota(d)
+}
+
+// quotaChanged reports a committed change of the usage.
+func (u *User) quotaChanged(before, after, limit Quota) {
+	if u.onQuota != nil && before != after {
+		u.onQuota(u.name, before, after, limit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox header (shard 0)
+
+// readHeader reads the header keys of shard 0 and returns the object
+// version they were read at, for compare-and-swap writes.
+func (u *User) readHeader(mb *Mailbox) (*MailboxInfo, uint64, error) {
+	defer mh.timer("header_read")()
+
+	vals, ver, err := u.getKeysVer(u.idx, mboxOID(mb.ID), []string{keyUIDNext, keyUIDValid, keyModSeq, keyKeywords, keyLogStart, keyShardSize, keyRecent})
+	if err != nil {
+		return nil, 0, fmt.Errorf("read header %q: %w", mb.Name, err)
+	}
+
+	if ver == 0 {
+		return nil, 0, ErrNoMailbox
+	}
+
+	info := &MailboxInfo{Mailbox: *mb}
+	n, _ := strconv.ParseUint(string(vals[keyUIDNext]), 10, 32)
+	info.UIDNext = uint32(n)
+	info.HighestModSeq, _ = strconv.ParseUint(string(vals[keyModSeq]), 10, 64)
+	info.LogStart, _ = strconv.ParseUint(string(vals[keyLogStart]), 10, 64)
+	ss, _ := strconv.ParseUint(string(vals[keyShardSize]), 10, 32)
+	info.ShardSize = uint32(ss)
+	rc, _ := strconv.ParseUint(string(vals[keyRecent]), 10, 32)
+
+	info.RecentFrom = uint32(rc)
+	if info.ShardSize == 0 {
+		info.ShardSize = DefaultShardSize // mailboxes created before sharding
+	}
+
+	_ = json.Unmarshal(vals[keyKeywords], &info.Keywords)
+	if info.UIDNext == 0 {
+		return nil, 0, ErrNoMailbox
+	}
+
+	return info, ver, nil
+}
+
+// Info returns the mailbox header.
+func (u *User) Info(name string) (*MailboxInfo, error) {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+
+	info, _, err := u.readHeader(mb)
+
+	return info, err
+}
+
+// changeRec is a change log entry. Pending marks a two-phase change whose
+// entries on other shards are not yet written; readers wait for it
+// (bounded by pendingMaxAge) instead of skipping the UIDs.
+type changeRec struct {
+	UIDs     []uint32 `json:"u"`
+	Expunged bool     `json:"x,omitempty"`
+	Pending  bool     `json:"p,omitempty"`
+	Time     int64    `json:"t,omitempty"`
+}
+
+// pendingMaxAge bounds how long readers wait for a pending change; after
+// that a crashed writer is assumed and the change is treated as done.
+const pendingMaxAge = 30 * time.Second
+
+// headerChange is what a header mutation wants to do.
+type headerChange struct {
+	set map[string][]byte // omap keys to set on shard 0 (besides the header keys)
+	rm  []string          // omap keys to remove on shard 0
+	chg *changeRec        // change record (nil: no modseq bump, no publish)
+}
+
+// casHeader runs fn against the current header and applies the returned
+// changes to shard 0 atomically, guarded by the object version that the
+// header was read at. If another writer got in between, RADOS rejects the
+// write and we retry (the scheme RGW uses for bucket indexes; no lock
+// service). A change record bumps h:modseq and is logged; fn receives the
+// modseq the change will carry.
+func (u *User) casHeader(mb *Mailbox, fn func(info *MailboxInfo, modseq uint64) (*headerChange, error)) (*MailboxInfo, uint64, error) {
+	for attempt := 0; attempt < casRetries; attempt++ {
+		info, ver, err := u.readHeader(mb)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		modseq := info.HighestModSeq + 1
+
+		hc, err := fn(info, modseq)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		if hc == nil || (len(hc.set) == 0 && len(hc.rm) == 0 && hc.chg == nil) {
+			return info, info.HighestModSeq, nil
+		}
+
+		set := headerSet(hc, modseq)
+
+		err = u.writeHeader(mb, ver, set, hc.rm)
+		if err == nil {
+			return u.headerWritten(mb, info, hc, modseq)
+		}
+
+		if c := errCode(err); c == syscall.ERANGE || c == syscall.EOVERFLOW {
+			mh.casRetry("header")
+			continue
+		}
+
+		return nil, 0, fmt.Errorf("update index %q: %w", mb.Name, err)
+	}
+
+	return nil, 0, fmt.Errorf("update index %q: too many concurrent writers", mb.Name)
+}
+
+// headerSet returns the omap keys a header change sets on shard 0: its
+// own keys plus, for a change record, the new modseq, the change record
+// (stamped with the current time) and, for an expunge, the vanished
+// record.
+func headerSet(hc *headerChange, modseq uint64) map[string][]byte {
+	set := map[string][]byte{}
+	for k, v := range hc.set {
+		set[k] = v
+	}
+
+	if hc.chg != nil {
+		set[keyModSeq] = []byte(strconv.FormatUint(modseq, 10))
+		hc.chg.Time = time.Now().Unix()
+		b, _ := json.Marshal(hc.chg)
+		set[chgKey(modseq)] = b
+
+		if hc.chg.Expunged {
+			vb, _ := json.Marshal(hc.chg.UIDs)
+			set[vanKey(modseq)] = vb
+		}
+	}
+
+	return set
+}
+
+// writeHeader writes set and removes rm on shard 0 of mb, guarded by the
+// object version ver.
+func (u *User) writeHeader(mb *Mailbox, ver uint64, set map[string][]byte, rm []string) error {
+	op := rados.CreateWriteOp()
+	op.AssertVersion(ver)
+
+	if len(set) > 0 {
+		op.SetOmap(set)
+	}
+
+	if len(rm) > 0 {
+		op.RmOmapKeys(rm)
+	}
+
+	done := mh.timer("header_cas")
+	err := op.Operate(u.idx, mboxOID(mb.ID), rados.OperationNoFlag)
+	op.Release()
+	done()
+
+	return err
+}
+
+// headerWritten finishes a successful header write: it updates info,
+// notifies watchers of a committed change and trims the log now and
+// then. It returns what casHeader returns.
+func (u *User) headerWritten(mb *Mailbox, info *MailboxInfo, hc *headerChange, modseq uint64) (*MailboxInfo, uint64, error) {
+	if hc.chg == nil {
+		return info, info.HighestModSeq, nil
+	}
+
+	info.HighestModSeq = modseq
+
+	if !hc.chg.Pending {
+		u.notify(mb.ID)
+	}
+
+	if modseq%256 == 0 {
+		u.background(func() { u.trimLog(mb.ID) })
+	}
+
+	return info, modseq, nil
+}
+
+// commitPending flips a pending change record to committed (and removes
+// extra keys, e.g. a MOVE intent) in one write. It is the second phase of
+// a two-phase change; no modseq is consumed.
+func (u *User) commitPending(mb *Mailbox, modseq uint64, chg *changeRec, rm []string) error {
+	chg.Pending = false
+	b, _ := json.Marshal(chg)
+
+	op := rados.CreateWriteOp()
+	defer op.Release()
+
+	set := map[string][]byte{chgKey(modseq): b}
+
+	if chg.Expunged {
+		vb, _ := json.Marshal(chg.UIDs)
+		set[vanKey(modseq)] = vb
+	}
+
+	op.SetOmap(set)
+
+	if len(rm) > 0 {
+		op.RmOmapKeys(rm)
+	}
+
+	if err := op.Operate(u.idx, mboxOID(mb.ID), rados.OperationNoFlag); err != nil {
+		return fmt.Errorf("commit change %d: %w", modseq, err)
+	}
+
+	u.notify(mb.ID)
+
+	return nil
+}
+
+// background runs f without blocking; Close waits for it.
+func (u *User) background(f func()) {
+	u.inflight.Add(1)
+	go func() {
+		defer u.inflight.Done()
+
+		f()
+	}()
+}
+
+// trimLog keeps the change and vanished logs bounded and moves h:logstart
+// forward (never backward: a slower concurrent trim must not undo a newer
+// one, so the write is a CAS against the current value).
+func (u *User) trimLog(id string) {
+	chg, err := u.idx.GetAllOmapValues(mboxOID(id), "", keyChgPrefix, omapPageSize)
+	if err != nil || len(chg) <= LogRetention {
+		return
+	}
+
+	keys := make([]string, 0, len(chg))
+	for k := range chg {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+	drop := keys[:len(keys)-LogRetention]
+	oldest := strings.TrimPrefix(keys[len(keys)-LogRetention], keyChgPrefix)
+	start, _ := strconv.ParseUint(oldest, 10, 64)
+
+	rm := append([]string{}, drop...)
+	for _, k := range drop {
+		rm = append(rm, keyVanPrefix+strings.TrimPrefix(k, keyChgPrefix))
+	}
+
+	_ = casOmap(u, u.idx, mboxOID(id), []string{keyLogStart}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		have, _ := strconv.ParseUint(string(cur[keyLogStart]), 10, 64)
+		if have >= start {
+			return nil, nil
+		}
+
+		return map[string][]byte{keyLogStart: []byte(strconv.FormatUint(start, 10))}, rm
+	})
+}
+
+// Changes returns the change records after since, oldest first. ok is
+// false when the log no longer covers since (caller reloads fully).
+func (u *User) Changes(id string, since uint64) (changes []Change, ok bool, err error) {
+	vals, err := u.idx.GetAllOmapValues(mboxOID(id), chgKey(since), keyChgPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, false, ErrNoMailbox
+		}
+
+		return nil, false, err
+	}
+
+	hv, err := getOmapKeys(u.idx, mboxOID(id), []string{keyLogStart})
+	if err != nil {
+		return nil, false, err
+	}
+
+	start, _ := strconv.ParseUint(string(hv[keyLogStart]), 10, 64)
+	if since+1 < start {
+		return nil, false, nil
+	}
+
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		var rec changeRec
+		if json.Unmarshal(vals[k], &rec) != nil {
+			continue
+		}
+
+		ms, _ := strconv.ParseUint(strings.TrimPrefix(k, keyChgPrefix), 10, 64)
+		pending := rec.Pending && time.Since(time.Unix(rec.Time, 0)) < pendingMaxAge
+		changes = append(changes, Change{ModSeq: ms, UIDs: rec.UIDs, Expunged: rec.Expunged, Pending: pending})
+	}
+
+	return changes, true, nil
+}
+
+// PendingFloor returns the modseq just before the oldest still-pending
+// change (within pendingMaxAge), so a session that loaded a full snapshot
+// resumes its incremental polling from there and does not miss the
+// change once it is committed. ok is false when nothing is pending.
+//
+// Only records younger than pendingMaxAge can be pending, so the scan
+// starts where the log is older than that: the start is found by probing
+// single records at doubling distances from the head (log2 reads), not by
+// a fixed window, so a busy mailbox with thousands of changes per minute
+// is covered as well as an idle one.
+func (u *User) PendingFloor(id string, highest uint64) (uint64, bool, error) {
+	from, err := u.pendingScanStart(id, highest)
+	if err != nil {
+		return 0, false, err
+	}
+
+	vals, err := u.idx.GetAllOmapValues(mboxOID(id), chgKey(from), keyChgPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return 0, false, ErrNoMailbox
+		}
+
+		return 0, false, err
+	}
+
+	var oldest uint64
+
+	for k, v := range vals {
+		var rec changeRec
+		if json.Unmarshal(v, &rec) != nil || !rec.Pending || time.Since(time.Unix(rec.Time, 0)) >= pendingMaxAge {
+			continue
+		}
+
+		ms, _ := strconv.ParseUint(strings.TrimPrefix(k, keyChgPrefix), 10, 64)
+		if oldest == 0 || ms < oldest {
+			oldest = ms
+		}
+	}
+
+	if oldest == 0 {
+		return 0, false, nil
+	}
+
+	return oldest - 1, true, nil
+}
+
+// pendingScanStart finds a modseq at or before which every change record
+// is older than pendingMaxAge (or the log begins).
+func (u *User) pendingScanStart(id string, highest uint64) (uint64, error) {
+	start := uint64(0)
+
+	for step := uint64(1); step < highest && step < 1<<40; step *= 2 {
+		probe := highest - step
+
+		vals, err := getOmapKeys(u.idx, mboxOID(id), []string{chgKey(probe)})
+		if err != nil {
+			if errCode(err) == syscall.ENOENT {
+				return 0, ErrNoMailbox
+			}
+
+			return 0, err
+		}
+
+		v, ok := vals[chgKey(probe)]
+		if !ok {
+			continue // gap or trimmed: look further back
+		}
+
+		var rec changeRec
+		if json.Unmarshal(v, &rec) == nil && time.Since(time.Unix(rec.Time, 0)) >= pendingMaxAge {
+			start = probe
+			break
+		}
+	}
+
+	return start, nil
+}
+
+// Vanished returns the UIDs expunged after the given modseq, for QRESYNC.
+func (u *User) Vanished(id string, since uint64) ([]uint32, error) {
+	vals, err := u.idx.GetAllOmapValues(mboxOID(id), vanKey(since), keyVanPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, ErrNoMailbox
+		}
+
+		return nil, err
+	}
+
+	var out []uint32
+
+	for _, v := range vals {
+		var uids []uint32
+		if json.Unmarshal(v, &uids) == nil {
+			out = append(out, uids...)
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Entries (all shards)
+
+// ListMessages returns the index records of a mailbox (by id) in UID
+// order, reading all shards in parallel.
+func (u *User) ListMessages(id string) ([]Meta, error) {
+	defer mh.timer("list_entries")()
+
+	hv, ver, err := u.getKeysVer(u.idx, mboxOID(id), []string{keyUIDNext, keyShardSize})
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", id, err)
+	}
+
+	if ver == 0 {
+		return nil, ErrNoMailbox
+	}
+
+	n, _ := strconv.ParseUint(string(hv[keyUIDNext]), 10, 32)
+	ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32)
+	last := shardOf(uint32(max(n-1, 1)), uint32(ss))
+
+	shards := map[string][]string{}
+	for s := uint32(0); s <= last; s++ {
+		shards[u.shardOID(id, s)] = nil
+	}
+
+	var (
+		mu    sync.Mutex
+		metas []Meta
+	)
+
+	err = parallel(shards, func(oid string, _ []string) error {
+		vals, err := u.idx.GetAllOmapValues(oid, "", keyMsgPrefix, omapPageSize)
+		if err != nil {
+			if errCode(err) == syscall.ENOENT {
+				return nil
+			}
+
+			return err
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		for k, v := range vals {
+			var m Meta
+			if err := json.Unmarshal(v, &m); err != nil {
+				u.log.Warn("corrupt index record", "mailbox", id, "key", k, "err", err)
+				return fmt.Errorf("corrupt index record %s in %s", k, oid)
+			}
+
+			metas = append(metas, m)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", id, err)
+	}
+
+	sort.Slice(metas, func(i, j int) bool { return metas[i].UID < metas[j].UID })
+
+	return metas, nil
+}
+
+// ListMessagesByName is ListMessages for a mailbox name.
+func (u *User) ListMessagesByName(name string) ([]Meta, error) {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return u.ListMessages(mb.ID)
+}
+
+// GetMessages returns the records of the given UIDs (missing ones are
+// skipped), grouped by shard and read in parallel.
+func (u *User) GetMessages(id string, uids []uint32) ([]Meta, error) {
+	defer mh.timer("get_entries")()
+
+	if len(uids) == 0 {
+		return nil, nil
+	}
+
+	hv, err := getOmapKeys(u.idx, mboxOID(id), []string{keyShardSize})
+	if err != nil {
+		return nil, err
+	}
+
+	ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32)
+
+	return u.getEntries(id, uint32(ss), uids)
+}
+
+func (u *User) getEntries(id string, shardSize uint32, uids []uint32) ([]Meta, error) {
+	byShard := map[string][]string{}
+
+	for _, uid := range uids {
+		oid := u.shardOID(id, shardOf(uid, shardSize))
+		byShard[oid] = append(byShard[oid], uidKey(uid))
+	}
+
+	var (
+		mu    sync.Mutex
+		metas []Meta
+	)
+
+	err := parallel(byShard, func(oid string, keys []string) error {
+		vals, err := getOmapKeys(u.idx, oid, keys)
+		if err != nil {
+			return err
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		for _, v := range vals {
+			var m Meta
+			if json.Unmarshal(v, &m) == nil {
+				metas = append(metas, m)
+			}
+		}
+
+		return nil
+	})
+
+	sort.Slice(metas, func(i, j int) bool { return metas[i].UID < metas[j].UID })
+
+	return metas, err
+}
+
+// writeEntries sets/removes entries on one shard object (second phase of a
+// two-phase change) with a compare-and-swap on the shard. Records are only
+// replaced when the stored one is older (lower modseq), so a slow writer
+// cannot overtake a newer one; with updateOnly a record that no longer
+// exists is not recreated (a late STORE must not resurrect an expunged
+// message).
+func (u *User) writeEntries(oid string, set map[string][]byte, rm []string, updateOnly bool) error {
+	_, err := u.modifyEntries(oid, set, rm, updateOnly)
+	return err
+}
+
+// modifyEntries is writeEntries returning the keys actually removed.
+func (u *User) modifyEntries(oid string, set map[string][]byte, rm []string, updateOnly bool) ([]string, error) {
+	keys := make([]string, 0, len(set)+len(rm))
+	for k := range set {
+		keys = append(keys, k)
+	}
+
+	keys = append(keys, rm...)
+
+	var removed []string
+
+	err := casOmap(u, u.idx, oid, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+		out := map[string][]byte{}
+
+		for k, v := range set {
+			old, exists := cur[k]
+			if updateOnly && !exists {
+				continue
+			}
+
+			var mine, theirs Meta
+			if exists && json.Unmarshal(old, &theirs) == nil && json.Unmarshal(v, &mine) == nil && theirs.ModSeq >= mine.ModSeq {
+				continue
+			}
+
+			out[k] = v
+		}
+
+		removed = removed[:0]
+
+		for _, k := range rm {
+			if _, ok := cur[k]; ok {
+				removed = append(removed, k)
+			}
+		}
+
+		return out, removed
+	})
+
+	return removed, err
+}
+
+// applyEntries performs a read-modify-write of entries on one higher
+// shard under the shard's own version: fn sees the current records and
+// returns the new ones. This is what makes concurrent STOREs on the same
+// shard serialise correctly.
+func (u *User) applyEntries(oid string, keys []string, fn func(cur map[string]Meta) map[string]Meta) error {
+	return casOmap(u, u.idx, oid, keys, func(raw map[string][]byte) (map[string][]byte, []string) {
+		cur := map[string]Meta{}
+
+		for k, v := range raw {
+			var m Meta
+			if json.Unmarshal(v, &m) == nil {
+				cur[k] = m
+			}
+		}
+
+		set := map[string][]byte{}
+
+		for k, m := range fn(cur) {
+			b, _ := json.Marshal(&m)
+			set[k] = b
+		}
+
+		return set, nil
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Messages
+
+// Deliver stores a message in the mailbox and returns its index record.
+//
+// Order of writes: the immutable blob first, then the FTS postings, then
+// the index update that makes the message visible. A crash before the
+// last step leaves at most an orphan blob (and postings pointing at a
+// GUID no mailbox lists, which searches simply do not match), never a UID
+// without data.
+func (u *User) Deliver(name string, raw []byte, flags []string, when time.Time) (*Meta, error) {
+	return u.DeliverGUID(name, newGUID(), raw, flags, when)
+}
+
+// DeliverGUID is Deliver with a caller-chosen GUID (delivery intents).
+func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when time.Time) (*Meta, error) {
+	if g, err := hex.DecodeString(guid); err != nil || len(g) != guidBytes {
+		return nil, fmt.Errorf("bad guid %q", guid)
+	}
+
+	if int64(len(raw)) > MaxMessageLen {
+		return nil, ErrTooLarge
+	}
+
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	// The quota is reserved before anything is written; a failure below
+	// gives it back. Mailboxes a rule ignores reserve nothing.
+	size := Quota{Bytes: int64(len(raw)), Msgs: 1}
+
+	res, err := u.reserve(mb, size)
+	if err != nil {
+		return nil, err
+	}
+
+	release := func() { res.settle(Quota{}) }
+
+	if when.IsZero() {
+		when = time.Now()
+	}
+
+	chunks, err := u.writeBlob(guid, raw)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("write blob: %w", err)
+	}
+
+	if err := u.ftsIndex(guid, raw); err != nil {
+		u.deleteBlob(guid, chunks)
+		release()
+
+		return nil, err
+	}
+
+	env, refs, preview := mailmeta.Extract(raw)
+	m := Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks, Flags: flags,
+		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: env, References: refs, Preview: preview}
+
+	meta, err := u.link(mb, m)
+	if err != nil {
+		_ = u.ftsRemove(&m)
+		u.deleteBlob(guid, chunks)
+		release()
+
+		return nil, err
+	}
+
+	res.settle(size)
+
+	return meta, nil
+}
+
+// link adds an index entry for an existing blob to the mailbox and
+// allocates its UID. New keywords in the flags are registered. Entries on
+// shard 0 are written in the header CAS; other shards two-phase (pending
+// change, entry write, commit).
+func (u *User) link(mb *Mailbox, m Meta) (*Meta, error) {
+	var learningLease model.Lease
+
+	if u.learningHook != nil {
+		var err error
+
+		learningLease, err = u.lockLearning(mb.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer learningLease.Release()
+
+		u.invalidate()
+
+		if !u.mailboxCurrent(mb) {
+			return nil, ErrNoMailbox
+		}
+	}
+
+	receipt, err := u.learningReceipt(mb, m)
+	if err != nil {
+		return nil, err
+	}
+
+	e := linkEntry{receipt: receipt}
+
+	var chg *changeRec
+
+	_, modseq, err := u.casHeader(mb, func(info *MailboxInfo, modseq uint64) (*headerChange, error) {
+		if leaseLost(learningLease) {
+			return nil, ErrLocked
+		}
+
+		hc, err := u.linkHeader(mb, &m, info, modseq, &e)
+		if err != nil {
+			return nil, err
+		}
+
+		chg = hc.chg
+
+		return hc, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if chg.Pending {
+		if err := u.linkPending(mb, learningLease, e, modseq, chg); err != nil {
+			return nil, err
+		}
+	}
+
+	return &m, nil
+}
+
+// linkHeader builds the header change of one link attempt: it allocates
+// the UID of m, encodes the entry into e.rec and decides its shard e.oid.
+// Entries on shard 0 are part of the header change; others are only
+// announced (pending).
+func (u *User) linkHeader(mb *Mailbox, m *Meta, info *MailboxInfo, modseq uint64, e *linkEntry) (*headerChange, error) {
+	m.UID = info.UIDNext
+	m.ModSeq = modseq
+	e.uid = m.UID
+
+	var err error
+	if e.rec, err = json.Marshal(m); err != nil {
+		return nil, err
+	}
+
+	set := map[string][]byte{keyUIDNext: []byte(strconv.FormatUint(uint64(info.UIDNext+1), 10))}
+	if e.receipt != "" {
+		set["learning:"+e.receipt] = []byte(strconv.FormatUint(uint64(m.UID), 10))
+	}
+
+	e.oid = u.shardOID(mb.ID, shardOf(m.UID, info.ShardSize))
+
+	chg := &changeRec{UIDs: []uint32{m.UID}, Pending: e.oid != mboxOID(mb.ID)}
+	if !chg.Pending {
+		set[uidKey(m.UID)] = e.rec
+	}
+
+	setMergedKeywords(set, info.Keywords, m.Flags)
+
+	return &headerChange{set: set, chg: chg}, nil
+}
+
+// mailboxCurrent reports whether the name of mb still names mb (same id).
+func (u *User) mailboxCurrent(mb *Mailbox) bool {
+	current, err := u.Lookup(mb.Name)
+
+	return err == nil && current.ID == mb.ID
+}
+
+// leaseLost reports whether l is held and was lost; a nil lease is never
+// lost.
+func leaseLost(l model.Lease) bool {
+	return l != nil && l.Lost()
+}
+
+// setMergedKeywords sets the mailbox keyword list in set if flags add
+// keywords to known.
+func setMergedKeywords(set map[string][]byte, known, flags []string) {
+	if kw, changed := mergeKeywords(known, flags); changed {
+		b, _ := json.Marshal(kw)
+		set[keyKeywords] = b
+	}
+}
+
+// learningReceipt runs the learning hook (if any) for a message about to
+// be linked into mb and returns its receipt.
+func (u *User) learningReceipt(mb *Mailbox, m Meta) (string, error) {
+	receipt := ""
+
+	if u.learningHook != nil {
+		var err error
+
+		receipt, err = u.learningHook(*mb, m)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return receipt, nil
+}
+
+// linkEntry is an index entry link writes on a higher shard.
+type linkEntry struct {
+	oid     string // shard object
+	uid     uint32
+	rec     []byte // the encoded Meta
+	receipt string // learning receipt, "" for none
+}
+
+// linkPending is the second phase of link for an entry on a higher
+// shard: write the entry, then commit the pending change.
+func (u *User) linkPending(mb *Mailbox, learningLease model.Lease, e linkEntry, modseq uint64, chg *changeRec) error {
+	if leaseLost(learningLease) {
+		return ErrLocked
+	}
+
+	entrySet := map[string][]byte{uidKey(e.uid): e.rec}
+	if e.receipt != "" {
+		entrySet["learning:"+e.receipt] = []byte("committed")
+	}
+
+	if err := u.writeEntries(e.oid, entrySet, nil, false); err != nil {
+		// The header already announced the UID (pending). Leave the
+		// announcement to expire; the UID stays a gap.
+		return fmt.Errorf("write entry shard: %w", err)
+	}
+
+	if err := u.commitPending(mb, modseq, chg, nil); err != nil {
+		// The entry is durable and visible to full reloads; the
+		// pending mark expires on its own. Not an error for the caller:
+		// undoing (deleting the blob) would leave an entry without data.
+		u.log.Warn("commit of pending change failed, entry is written", "mailbox", mb.Name, "modseq", modseq, "err", err)
+	}
+
+	return nil
+}
+
+// mergeKeywords adds user keywords (flags not starting with a backslash)
+// to the mailbox keyword list.
+func mergeKeywords(known, flags []string) ([]string, bool) {
+	out := append([]string{}, known...)
+	changed := false
+
+	for _, f := range flags {
+		if strings.HasPrefix(f, "\\") || HasFlag(out, f) {
+			continue
+		}
+
+		out = append(out, strings.ToLower(f))
+		changed = true
+	}
+
+	return out, changed
+}
+
+// Read returns the raw message for an index record. Callers account the
+// buffer against membudget for as long as they hold it.
+func (u *User) Read(m *Meta) ([]byte, error) {
+	return u.readBlob(m)
+}
+
+// SetFlags replaces the flags of the given UIDs (apply decides the new
+// set). Messages whose modseq is above unchangedSince (if non-zero) are
+// skipped and reported in Modified, as CONDSTORE requires.
+//
+// Shard 0 entries are read and written inside the header CAS. Entries on
+// higher shards are handled in a second phase as a read-modify-write
+// under the shard's own version: the header CAS only allocates the modseq
+// and announces the UIDs as pending; the decision (flags, UNCHANGEDSINCE,
+// existence) is taken against the shard's current records, so concurrent
+// STOREs on the same message serialise and an expunged message is never
+// recreated. The commit then records what actually changed.
+func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply func(old []string) []string) (*model.FlagsResult, error) {
+	return u.setFlags(name, uids, unchangedSince, apply, false, 0)
+}
+
+// setFlags is SetFlags with restamp: write the record even when the
+// flags do not change, so that it carries a fresh modseq. That is needed
+// after a modseq collision on a higher shard (see phase 2): the record
+// was written with the later writer's modseq, and a client that had seen
+// that modseq would otherwise miss the newer flag state. depth bounds the
+// recursion.
+func (u *User) setFlags(name string, uids []uint32, unchangedSince uint64, apply func(old []string) []string, restamp bool, depth int) (*model.FlagsResult, error) {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &model.FlagsResult{}
+
+	higher := map[string][]string{} // shard oid -> keys of UIDs living there
+
+	updated, chg, modseq, err := u.setFlagsHeader(mb, uids, unchangedSince, apply, res, higher)
+	if err != nil {
+		return nil, err
+	}
+
+	if chg == nil || !chg.Pending {
+		res.Updated = updated
+		return res, nil
+	}
+
+	return u.setFlagsHigher(mb, name, flagsApply{unchangedSince: unchangedSince, apply: apply, restamp: restamp}, higher, modseq, chg, updated, res, depth)
+}
+
+// flagsApply is what a STORE applies: the flag function and its
+// conditions.
+type flagsApply struct {
+	unchangedSince uint64
+	apply          func(old []string) []string
+	restamp        bool
+}
+
+// setFlagsHeader is phase 1 of setFlags: the header CAS allocates the
+// modseq, updates the shard 0 entries and announces the UIDs on higher
+// shards (filled into higher) as pending. It returns the updated shard 0
+// entries and the change record (nil if nothing changed).
+func (u *User) setFlagsHeader(mb *Mailbox, uids []uint32, unchangedSince uint64, apply func(old []string) []string, res *model.FlagsResult, higher map[string][]string) ([]Meta, *changeRec, uint64, error) {
+	var (
+		updated []Meta
+		chg     *changeRec
+	)
+
+	_, modseq, err := u.casHeader(mb, func(info *MailboxInfo, modseq uint64) (*headerChange, error) {
+		updated, res.Modified = updated[:0], nil
+
+		for k := range higher {
+			delete(higher, k)
+		}
+
+		shard0 := u.partitionUIDs(mb, info.ShardSize, uids, higher)
+
+		cur, err := u.getEntries(mb.ID, info.ShardSize, shard0)
+		if err != nil {
+			return nil, err
+		}
+
+		set := map[string][]byte{}
+		kw := info.Keywords
+		chg = &changeRec{Pending: len(higher) > 0}
+
+		for _, m := range cur {
+			if unchangedSince != 0 && m.ModSeq > unchangedSince {
+				res.Modified = append(res.Modified, m.UID)
+				continue
+			}
+
+			nf := apply(m.Flags)
+			if equalFlags(nf, m.Flags) {
+				continue
+			}
+
+			m.Flags = nf
+			m.ModSeq = modseq
+			rec, _ := json.Marshal(&m)
+			set[uidKey(m.UID)] = rec
+			chg.UIDs = append(chg.UIDs, m.UID)
+			updated = append(updated, m)
+			kw, _ = mergeKeywords(kw, nf)
+		}
+
+		announceHigher(chg, higher) // announced; trimmed at commit
+
+		if len(updated) == 0 && len(higher) == 0 {
+			return nil, nil
+		}
+
+		if len(kw) != len(info.Keywords) {
+			b, _ := json.Marshal(kw)
+			set[keyKeywords] = b
+		}
+
+		return &headerChange{set: set, chg: chg}, nil
+	})
+
+	return updated, chg, modseq, err
+}
+
+// partitionUIDs returns the UIDs that live on shard 0 of mb and adds the
+// entry keys of the others to higher (shard oid -> keys).
+func (u *User) partitionUIDs(mb *Mailbox, shardSize uint32, uids []uint32, higher map[string][]string) []uint32 {
+	var shard0 []uint32
+
+	for _, uid := range uids {
+		oid := u.shardOID(mb.ID, shardOf(uid, shardSize))
+		if oid == mboxOID(mb.ID) {
+			shard0 = append(shard0, uid)
+		} else {
+			higher[oid] = append(higher[oid], uidKey(uid))
+		}
+	}
+
+	return shard0
+}
+
+// announceHigher adds the UIDs of the entry keys in higher to the change
+// record.
+func announceHigher(chg *changeRec, higher map[string][]string) {
+	for _, keys := range higher {
+		for _, k := range keys {
+			uid := uidOfKey(k)
+			chg.UIDs = append(chg.UIDs, uid)
+		}
+	}
+}
+
+// flagsShardResult is the outcome of phase 2 of setFlags on one shard.
+type flagsShardResult struct {
+	updated  []Meta
+	modified []uint32
+	keywords []string
+	collided []uint32 // records that already carried a modseq >= ours
+}
+
+// setFlagsHigher is phase 2 of setFlags: it applies the flags on the
+// higher shards, registers new keywords, commits the pending change and
+// restamps records whose modseq collided.
+func (u *User) setFlagsHigher(mb *Mailbox, name string, fa flagsApply, higher map[string][]string, modseq uint64, chg *changeRec, updated []Meta, res *model.FlagsResult, depth int) (*model.FlagsResult, error) {
+	// Phase 2: per shard, against the shard's current records. Each CAS
+	// attempt computes its result from scratch; only the result of the
+	// attempt that succeeded is taken over, so a conflicting first
+	// attempt cannot leave a UID in Updated that the retry skipped.
+	results, err := u.flagsHigherShards(fa, higher, modseq)
+	if err != nil {
+		return nil, fmt.Errorf("write flags shard: %w", err)
+	}
+
+	var (
+		newKeywords []string
+		collided    []uint32
+	)
+
+	for _, r := range results {
+		updated = append(updated, r.updated...)
+		res.Modified = append(res.Modified, r.modified...)
+		newKeywords, _ = mergeKeywords(newKeywords, r.keywords)
+		collided = append(collided, r.collided...)
+	}
+
+	// Commit with what actually changed; register keywords seen on higher shards.
+	chg.UIDs = chg.UIDs[:0]
+	for _, m := range updated {
+		chg.UIDs = append(chg.UIDs, m.UID)
+	}
+
+	if len(newKeywords) > 0 {
+		u.registerKeywords(mb, newKeywords)
+	}
+
+	if err := u.commitPending(mb, modseq, chg, nil); err != nil {
+		u.log.Warn("commit of pending change failed, entries are written", "mailbox", mb.Name, "modseq", modseq, "err", err)
+	}
+
+	if len(collided) > 0 && depth < 3 {
+		if err := u.restampFlags(name, collided, fa.apply, depth, updated); err != nil {
+			return nil, err
+		}
+	}
+
+	sort.Slice(updated, func(i, j int) bool { return updated[i].UID < updated[j].UID })
+	res.Updated = updated
+
+	return res, nil
+}
+
+// flagsHigherShards applies the flags to the entries on the higher
+// shards, each shard as a read-modify-write under its own version.
+func (u *User) flagsHigherShards(fa flagsApply, higher map[string][]string, modseq uint64) (map[string]*flagsShardResult, error) {
+	unchangedSince, apply, restamp := fa.unchangedSince, fa.apply, fa.restamp
+	results := map[string]*flagsShardResult{}
+
+	var mu sync.Mutex
+
+	err := parallel(higher, func(oid string, keys []string) error {
+		var r flagsShardResult
+
+		err := u.applyEntries(oid, keys, func(cur map[string]Meta) map[string]Meta {
+			r = flagsShardResult{}
+			out := map[string]Meta{}
+
+			for _, k := range keys {
+				m, ok := cur[k]
+				if !ok {
+					continue
+				}
+
+				if unchangedSince != 0 && m.ModSeq > unchangedSince {
+					r.modified = append(r.modified, m.UID)
+					continue
+				}
+
+				nf := apply(m.Flags)
+				if equalFlags(nf, m.Flags) && !restamp {
+					continue
+				}
+
+				m.Flags = nf
+				// The modseq was allocated in the header CAS, but a
+				// concurrent STORE with a later modseq may have written
+				// this record first. A message's modseq never goes
+				// backwards: keep the later one for now and note the
+				// collision; the record is then stamped again with a
+				// modseq allocated after it (restamp), so the newer flag
+				// state is visible to CHANGEDSINCE.
+				if m.ModSeq >= modseq {
+					r.collided = append(r.collided, m.UID)
+					m.ModSeq = max(m.ModSeq, modseq)
+				} else {
+					m.ModSeq = modseq
+				}
+
+				out[k] = m
+				r.updated = append(r.updated, m)
+				r.keywords, _ = mergeKeywords(r.keywords, nf)
+			}
+
+			return out
+		})
+		if err != nil {
+			return err
+		}
+
+		mu.Lock()
+		results[oid] = &r
+		mu.Unlock()
+
+		return nil
+	})
+
+	return results, err
+}
+
+// registerKeywords adds keywords to the mailbox keyword list (best
+// effort: a failure is logged).
+func (u *User) registerKeywords(mb *Mailbox, newKeywords []string) {
+	if _, _, err := u.casHeader(mb, func(info *MailboxInfo, _ uint64) (*headerChange, error) {
+		kw, changed := mergeKeywords(info.Keywords, newKeywords)
+		if !changed {
+			return nil, nil
+		}
+
+		b, _ := json.Marshal(kw)
+
+		return &headerChange{set: map[string][]byte{keyKeywords: b}}, nil
+	}); err != nil {
+		u.log.Warn("keyword registration failed", "err", err)
+	}
+}
+
+// restampFlags stamps the collided records again with a fresh modseq and
+// replaces their entries in updated (in place) by the restamped ones.
+func (u *User) restampFlags(name string, collided []uint32, apply func(old []string) []string, depth int, updated []Meta) error {
+	mh.casRetry("modseq_restamp")
+
+	again, err := u.setFlags(name, collided, 0, apply, true, depth+1)
+	if err != nil {
+		return err
+	}
+
+	fresh := map[uint32]Meta{}
+	for _, m := range again.Updated {
+		fresh[m.UID] = m
+	}
+
+	for i := range updated {
+		if m, ok := fresh[updated[i].UID]; ok {
+			updated[i] = m
+		}
+	}
+
+	return nil
+}
+
+// uidOfKey parses the UID out of an index entry key ("m:<uid>"); a key
+// that does not parse yields 0.
+func uidOfKey(k string) uint32 {
+	var uid uint32
+
+	_, _ = fmt.Sscanf(k, keyMsgPrefix+"%d", &uid)
+
+	return uid
+}
+
+func equalFlags(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for _, f := range a {
+		if !HasFlag(b, f) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// Expunge removes the given messages from the index, records them in the
+// change and vanished logs and releases the blobs of the entries that
+// were actually removed (a stale snapshot may name UIDs another session
+// already expunged; their references are not released twice).
+func (u *User) Expunge(name string, metas []Meta) error {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return err
+	}
+
+	if len(metas) == 0 {
+		return nil
+	}
+
+	removed, err := u.unlink(mb, metas, "")
+	if err != nil {
+		return err
+	}
+	// Index no longer references the blobs; drop our reference. A failure
+	// here only leaves orphans, never dangling index entries.
+	var q Quota
+
+	for i := range removed {
+		if err := u.releaseBlob(&removed[i]); err != nil {
+			u.log.Warn("orphan blob", "guid", removed[i].GUID, "err", err)
+		}
+
+		q.Bytes -= removed[i].Size
+		q.Msgs--
+	}
+
+	return u.releaseUsage(mb, q)
+}
+
+// unlink removes index entries and writes the change/vanished records.
+// Shard 0 entries are removed inside the header CAS (only those that
+// still exist); higher shards in a second phase under the shard's own
+// version, and the commit records what was actually removed. intentID,
+// if set, is the MOVE intent to drop with the last durable step. Returns
+// the entries that were removed, so callers release exactly those
+// references.
+func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) ([]Meta, error) {
+	byUID := map[uint32]Meta{}
+	for _, m := range metas {
+		byUID[m.UID] = m
+	}
+
+	higher := map[string][]string{}
+
+	var extraRm []string
+	if intentID != "" {
+		extraRm = []string{keyIntentPrefix + intentID}
+	}
+
+	removed, chg, modseq, err := u.unlinkHeader(mb, metas, extraRm, higher)
+	if err != nil {
+		return nil, err
+	}
+
+	if chg == nil || !chg.Pending {
+		return removed, nil
+	}
+
+	return u.unlinkHigher(mb, byUID, higher, removed, chg, modseq, extraRm)
+}
+
+// unlinkHeader is phase 1 of unlink: the header CAS removes the shard 0
+// entries that still exist and announces the UIDs on higher shards
+// (filled into higher) as pending. It returns the removed shard 0 entries
+// and the change record.
+func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher map[string][]string) ([]Meta, *changeRec, uint64, error) {
+	var (
+		removed []Meta
+		chg     *changeRec
+	)
+
+	_, modseq, err := u.casHeader(mb, func(info *MailboxInfo, _ uint64) (*headerChange, error) {
+		removed = removed[:0]
+
+		for k := range higher {
+			delete(higher, k)
+		}
+
+		shard0 := u.partitionMetas(mb, info.ShardSize, metas, higher)
+
+		cur, err := u.getEntries(mb.ID, info.ShardSize, shard0)
+		if err != nil {
+			return nil, err
+		}
+
+		chg = &changeRec{Expunged: true, Pending: len(higher) > 0}
+
+		var rm []string
+		for _, m := range cur {
+			rm = append(rm, uidKey(m.UID))
+			chg.UIDs = append(chg.UIDs, m.UID)
+			removed = append(removed, m)
+		}
+
+		announceHigher(chg, higher)
+
+		if len(removed) == 0 && len(higher) == 0 {
+			if len(extraRm) > 0 {
+				return &headerChange{rm: extraRm}, nil
+			}
+
+			return nil, nil
+		}
+
+		hc := &headerChange{rm: rm, chg: chg}
+		if !chg.Pending {
+			hc.rm = append(hc.rm, extraRm...)
+		}
+
+		return hc, nil
+	})
+
+	return removed, chg, modseq, err
+}
+
+// partitionMetas returns the UIDs of the entries that live on shard 0 of
+// mb and adds the entry keys of the others to higher (shard oid -> keys).
+func (u *User) partitionMetas(mb *Mailbox, shardSize uint32, metas []Meta, higher map[string][]string) []uint32 {
+	var shard0 []uint32
+
+	for _, m := range metas {
+		oid := u.shardOID(mb.ID, shardOf(m.UID, shardSize))
+		if oid == mboxOID(mb.ID) {
+			shard0 = append(shard0, m.UID)
+		} else {
+			higher[oid] = append(higher[oid], uidKey(m.UID))
+		}
+	}
+
+	return shard0
+}
+
+// unlinkHigher is phase 2 of unlink: it removes the entries on the higher
+// shards under each shard's own version and commits what was actually
+// removed (dropping the entries of extraRm with it).
+func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[string][]string, removed []Meta, chg *changeRec, modseq uint64, extraRm []string) ([]Meta, error) {
+	var mu sync.Mutex
+
+	err := parallel(higher, func(oid string, keys []string) error {
+		gone, err := u.modifyEntries(oid, nil, keys, false)
+		if err != nil {
+			return err
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		for _, k := range gone {
+			uid := uidOfKey(k)
+
+			if m, ok := byUID[uid]; ok {
+				removed = append(removed, m)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("remove entries shard: %w", err)
+	}
+
+	chg.UIDs = chg.UIDs[:0]
+	for _, m := range removed {
+		chg.UIDs = append(chg.UIDs, m.UID)
+	}
+
+	if err := u.commitPending(mb, modseq, chg, extraRm); err != nil {
+		u.log.Warn("commit of pending expunge failed, entries are removed", "mailbox", mb.Name, "modseq", modseq, "err", err)
+	}
+
+	sort.Slice(removed, func(i, j int) bool { return removed[i].UID < removed[j].UID })
+
+	return removed, nil
+}
+
+// Copy links the messages into dest. Only the reference count on the
+// blob and the destination index change; no payload is copied. The quota
+// for the whole batch is reserved up front (atomically against other
+// writers); what a failed batch did not use is given back.
+func (u *User) Copy(metas []Meta, dest string) ([]Meta, error) {
+	mb, err := u.Lookup(dest)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := u.reserve(mb, sizeOf(metas))
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]Meta, 0, len(metas))
+
+	var used Quota
+
+	giveBack := func() { res.settle(used) }
+
+	for _, m := range metas {
+		if _, err := u.blobRef(m.GUID, +1); err != nil {
+			giveBack()
+			return nil, err
+		}
+
+		nm, err := u.link(mb, relink(m))
+		if err != nil {
+			_, _ = u.blobRef(m.GUID, -1)
+
+			giveBack()
+
+			return nil, err
+		}
+
+		out = append(out, *nm)
+		used.Bytes += m.Size
+		used.Msgs++
+	}
+
+	res.settle(used)
+
+	return out, nil
+}
+
+// moveIntent records a MOVE in progress on the source mailbox. If the
+// process dies between the two index updates, the scrubber finds the
+// intent and finishes the move deterministically instead of guessing from
+// reference counts.
+type moveIntent struct {
+	ID      string   `json:"id"`
+	Dest    string   `json:"dest"` // destination mailbox id
+	GUIDs   []string `json:"guids"`
+	UIDs    []uint32 `json:"uids"` // source UIDs
+	Started int64    `json:"started"`
+}
+
+// Move relinks the messages from src to dest. The blob and its reference
+// count are untouched. The two index updates are on two objects and thus
+// not atomic; an intent record on the source object brackets them:
+//
+//  1. write intent i:<id> on src
+//  2. take a blob reference and link the entry into dest (like COPY)
+//  3. unlink entries from src; the intent is removed together with the
+//     last durable step (in the header CAS, or in the commit of the
+//     pending change when higher shards are involved)
+//  4. release the references of the entries step 3 actually removed
+//
+// The destination holds its own reference from step 2 on, so an EXPUNGE
+// of the source that runs between 2 and 3 cannot take the blob's last
+// reference away under the destination entry; it merely makes step 3
+// remove nothing. A message whose blob is already gone (ErrGone) has been
+// expunged and is skipped. A crash after 2 leaves the message in both
+// mailboxes plus the intent; the scrubber completes steps 3 and 4. A
+// crash after 1 leaves only the intent; the scrubber checks dest for the
+// GUIDs and finishes either way. A crash between 2's reference and its
+// link is a refcount too high, which the scrubber's refcount check fixes.
+func (u *User) Move(src string, metas []Meta, dest string) ([]Meta, error) {
+	smb, err := u.Lookup(src)
+	if err != nil {
+		return nil, err
+	}
+
+	dmb, err := u.Lookup(dest)
+	if err != nil {
+		return nil, err
+	}
+	// A move between two counted (or two ignored) mailboxes leaves the
+	// usage alone. Out of an ignored mailbox the batch is reserved like a
+	// COPY; into one the removed source entries are released.
+	var want Quota
+	if !u.rules.Counts(smb) {
+		want = sizeOf(metas)
+	}
+
+	res, err := u.reserve(dmb, want)
+	if err != nil {
+		return nil, err
+	}
+
+	mv, err := u.moveLinks(smb, dmb, metas)
+	if err != nil {
+		// Once the intent is written the scrubber completes the move
+		// into dest, so the reservation stays except for entries that
+		// were expunged meanwhile.
+		if mv.started {
+			res.settle(Quota{Bytes: res.total.Bytes - mv.skipped.Bytes, Msgs: res.total.Msgs - mv.skipped.Msgs})
+		} else {
+			res.settle(Quota{})
+		}
+
+		return nil, err
+	}
+
+	res.settle(sizeOf(mv.out))
+
+	if err := u.moveUsage(smb, dmb, mv.freed); err != nil {
+		u.log.Warn("quota release after move failed", "err", err)
+	}
+
+	return mv.out, nil
+}
+
+// moveResult is what moveLinks did: the entries linked into dest, the
+// size of the source entries it removed and of those it skipped because
+// another session expunged them meanwhile, and whether the intent was
+// written.
+type moveResult struct {
+	out            []Meta
+	freed, skipped Quota
+	started        bool
+}
+
+// moveLinks runs the intent, link, unlink and release steps of Move.
+func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
+	var mv moveResult
+
+	intent := moveIntent{ID: newGUID(), Dest: dmb.ID, Started: time.Now().Unix()}
+	for _, m := range metas {
+		intent.GUIDs = append(intent.GUIDs, m.GUID)
+		intent.UIDs = append(intent.UIDs, m.UID)
+	}
+
+	ib, _ := json.Marshal(&intent)
+
+	if err := casOmap(u, u.idx, mboxOID(smb.ID), nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{keyIntentPrefix + intent.ID: ib}, nil
+	}); err != nil {
+		return mv, fmt.Errorf("move intent: %w", err)
+	}
+
+	mv.started = true
+	mv.out = make([]Meta, 0, len(metas))
+
+	for _, m := range metas {
+		if _, err := u.blobRef(m.GUID, +1); err != nil {
+			if errors.Is(err, ErrGone) {
+				// expunged meanwhile; the source unlink removes nothing
+				mv.skipped.Bytes += m.Size
+				mv.skipped.Msgs++
+
+				continue
+			}
+
+			return mv, err // intent stays; scrubber reconciles
+		}
+
+		nm, err := u.link(dmb, relink(m))
+		if err != nil {
+			_, _ = u.blobRef(m.GUID, -1)
+			return mv, err // intent stays; scrubber reconciles
+		}
+
+		mv.out = append(mv.out, *nm)
+	}
+
+	removed, err := u.unlink(smb, metas, intent.ID)
+	if err != nil {
+		return mv, err
+	}
+
+	for i := range removed {
+		if err := u.releaseBlob(&removed[i]); err != nil {
+			u.log.Warn("release after move", "guid", removed[i].GUID, "err", err)
+		}
+	}
+
+	mv.freed = sizeOf(removed)
+
+	return mv, nil
+}
+
+// sizeOf sums the sizes and the number of the entries.
+func sizeOf(metas []Meta) Quota {
+	var q Quota
+	for _, m := range metas {
+		q.Bytes += m.Size
+		q.Msgs++
+	}
+
+	return q
+}
+
+// ---------------------------------------------------------------------------
+// Delivery intents
+//
+// A delivery that stores one message into several mailboxes (Sieve with
+// several fileinto actions) or several messages in one command
+// (MULTIAPPEND) is all-or-nothing for the client, but consists of
+// several independent index updates. The intent on the registry object
+// records what has been stored so far; the caller removes it when the
+// delivery is complete. An intent that outlives deliveryIntentMaxAge
+// belongs to a crashed process and the scrubber rolls it back (the LMTP
+// client or IMAP client never got a success and retries).
+
+// deliveryIntentMaxAge is how old an intent must be before the scrubber
+// treats it as abandoned.
+const deliveryIntentMaxAge = 10 * time.Minute
+
+type deliveryIntent struct {
+	ID      string          `json:"id"`
+	Started int64           `json:"started"`
+	Entries []deliveryEntry `json:"entries"`
+}
+
+type deliveryEntry struct {
+	MailboxID string `json:"mbox"`    // the mailbox as it was at delivery time
+	Mailbox   string `json:"mailbox"` // its name then (for logs)
+	GUID      string `json:"guid"`    // the message; recorded before it is stored
+}
+
+// BeginDelivery records a new intent and returns its id.
+func (u *User) BeginDelivery() (string, error) {
+	in := deliveryIntent{ID: newGUID(), Started: time.Now().Unix()}
+	b, _ := json.Marshal(&in)
+
+	err := casOmap(u, u.idx, oidRegistry, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{regDeliveryPrefix + in.ID: b}, nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("delivery intent: %w", err)
+	}
+
+	return in.ID, nil
+}
+
+// RecordDelivery adds the message about to be stored to the intent
+// (id "" is a no-op). The mailbox is recorded by id, so a rollback never
+// touches a mailbox that was deleted and recreated under the same name.
+func (u *User) RecordDelivery(id, mailbox, guid string) error {
+	if id == "" {
+		return nil
+	}
+
+	mb, err := u.Lookup(mailbox)
+	if err != nil {
+		return err
+	}
+
+	key := regDeliveryPrefix + id
+
+	return casOmap(u, u.idx, oidRegistry, []string{key}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		var in deliveryIntent
+		if json.Unmarshal(cur[key], &in) != nil || in.ID == "" {
+			in = deliveryIntent{ID: id, Started: time.Now().Unix()}
+		}
+
+		in.Entries = append(in.Entries, deliveryEntry{MailboxID: mb.ID, Mailbox: mailbox, GUID: guid})
+		b, _ := json.Marshal(&in)
+
+		return map[string][]byte{key: b}, nil
+	})
+}
+
+// EndDelivery removes the intent (id "" is a no-op).
+func (u *User) EndDelivery(id string) error {
+	if id == "" {
+		return nil
+	}
+
+	return casOmap(u, u.idx, oidRegistry, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return nil, []string{regDeliveryPrefix + id}
+	})
+}
+
+// deliveryIntents lists the recorded intents (scrubber).
+func (u *User) deliveryIntents() ([]deliveryIntent, error) {
+	vals, err := u.idx.GetAllOmapValues(oidRegistry, "", regDeliveryPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	var out []deliveryIntent
+
+	for _, v := range vals {
+		var in deliveryIntent
+		if json.Unmarshal(v, &in) == nil && in.ID != "" {
+			out = append(out, in)
+		}
+	}
+
+	return out, nil
+}
+
+// pendingIntents lists the MOVE intents recorded on a mailbox.
+func (u *User) pendingIntents(id string) ([]moveIntent, error) {
+	vals, err := u.idx.GetAllOmapValues(mboxOID(id), "", keyIntentPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	var out []moveIntent
+
+	for _, v := range vals {
+		var in moveIntent
+		if json.Unmarshal(v, &in) == nil {
+			out = append(out, in)
+		}
+	}
+
+	return out, nil
+}
+
+func relink(m Meta) Meta {
+	m.UID, m.ModSeq = 0, 0
+	m.SaveDate = time.Now().UTC()
+
+	return m
+}
+
+// ---------------------------------------------------------------------------
+// Maildrop lock (POP3)
+
+// Lock takes the exclusive maildrop lock of a mailbox (RADOS advisory
+// lock on shard 0, auto-expiring after ttl) and renews it every ttl/2
+// until the returned function is called. ErrLocked if held elsewhere.
+// The returned lease reports whether a renewal failed (the session must
+// then stop mutating).
+func (u *User) Lock(id string, ttl time.Duration) (model.Lease, error) {
+	return u.lockNamed(id, lockName, ttl)
+}
+
+// Internal event commit coordination waits briefly for normal concurrent commands.
+func (u *User) lockLearning(id string) (model.Lease, error) {
+	deadline := time.Now().Add(10 * time.Second)
+
+	for {
+		l, err := u.lockNamed(id, "imapsieve-link", 2*time.Minute)
+		if !errors.Is(err, ErrLocked) || !time.Now().Before(deadline) {
+			return l, err
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+func (u *User) lockNamed(id, lockName string, ttl time.Duration) (model.Lease, error) {
+	cookie := newGUID()
+
+	take := func(flags *byte) error {
+		ret, err := u.idx.LockExclusive(mboxOID(id), lockName, cookie, "maildrop", ttl, flags)
+		if err != nil {
+			return err
+		}
+
+		if ret != 0 {
+			if syscall.Errno(-ret) == syscall.EBUSY {
+				return ErrLocked
+			}
+
+			return fmt.Errorf("lock: ret=%d", ret)
+		}
+
+		return nil
+	}
+	if err := take(nil); err != nil {
+		return nil, err
+	}
+
+	l := &lease{stop: make(chan struct{})}
+
+	u.inflight.Add(1)
+	go func() {
+		defer u.inflight.Done()
+
+		renew := byte(1) // LIBRADOS_LOCK_FLAG_MAY_RENEW
+
+		t := time.NewTicker(ttl / 2)
+		defer t.Stop()
+
+		for {
+			select {
+			case <-l.stop:
+				return
+			case <-t.C:
+				if err := take(&renew); err != nil {
+					u.log.Warn("maildrop lock renewal failed", "mailbox", id, "err", err)
+					l.lost.Store(true)
+
+					return
+				}
+			}
+		}
+	}()
+
+	l.unlock = func() { _, _ = u.idx.Unlock(mboxOID(id), lockName, cookie) }
+
+	return l, nil
+}
+
+type lease struct {
+	stop   chan struct{}
+	once   sync.Once
+	lost   atomic.Bool
+	unlock func()
+}
+
+func (l *lease) Lost() bool { return l.lost.Load() }
+func (l *lease) Release() {
+	l.once.Do(func() {
+		close(l.stop)
+		l.unlock()
+	})
+}
+
+// errCode extracts the errno of a go-ceph error (0 if none).
+func errCode(err error) syscall.Errno {
+	var ec interface{ ErrorCode() int }
+	if errors.As(err, &ec) {
+		c := ec.ErrorCode()
+		if c < 0 {
+			c = -c
+		}
+
+		return syscall.Errno(c)
+	}
+
+	return 0
+}
+
+// ListSubscribedMissing implements model.User.
+func (u *User) ListSubscribedMissing() ([]string, error) {
+	vals, err := u.idx.GetAllOmapValues(oidRegistry, "", regSubMissing, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	out := make([]string, 0, len(vals))
+	for k := range vals {
+		out = append(out, strings.TrimPrefix(k, regSubMissing))
+	}
+
+	sort.Strings(out)
+
+	return out, nil
+}
+
+// MarkRecent implements model.User: the \Recent watermark only moves
+// forward.
+func (u *User) MarkRecent(id string, uidNext uint32) error {
+	return casOmap(u, u.idx, mboxOID(id), []string{keyRecent}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		have, _ := strconv.ParseUint(string(cur[keyRecent]), 10, 32)
+		if uint32(have) >= uidNext {
+			return nil, nil
+		}
+
+		return map[string][]byte{keyRecent: []byte(strconv.FormatUint(uint64(uidNext), 10))}, nil
+	})
+}
+
+// SetLearningHook is scoped to one protocol command on this per-session view.
+func (u *User) SetLearningHook(h func(model.Mailbox, model.Meta) (string, error)) { u.learningHook = h }

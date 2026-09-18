@@ -1,0 +1,11 @@
+# ShardPost test client: swaks (LMTP/SMTP) and curl (IMAP).
+FROM debian:trixie-slim
+LABEL org.opencontainers.image.title="ShardPost Tools" \
+      org.opencontainers.image.version="0.13.0"
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends swaks curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -u 1000 -m tools
+USER 1000:1000
+WORKDIR /home/tools
+CMD ["sleep", "infinity"]

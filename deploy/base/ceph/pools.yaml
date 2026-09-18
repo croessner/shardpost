@@ -1,0 +1,33 @@
+# Two RADOS pools. CephBlockPool is Rook's CR for "a plain RADOS pool";
+# nothing here is RBD specific. Deleting the CRs deletes the pools.
+#
+# shardpost-index: mailbox index objects. Their state lives in omap, and omap is
+#             only supported on replicated pools.
+# shardpost-data:  message blobs. Written once with write_full, never modified,
+#             so an erasure coded pool works without ec_overwrites and
+#             brings the raw overhead down (2+1: 1.5x instead of 3x).
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: shardpost-index
+spec:
+  failureDomain: host
+  deviceClass: hdd
+  replicated:
+    size: 3
+    requireSafeReplicaSize: true
+  parameters:
+    pg_autoscale_mode: "on"
+---
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: shardpost-data
+spec:
+  failureDomain: host
+  deviceClass: hdd
+  erasureCoded:
+    dataChunks: 2
+    codingChunks: 1
+  parameters:
+    pg_autoscale_mode: "on"

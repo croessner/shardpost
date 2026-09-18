@@ -1,0 +1,51 @@
+classDiagram
+    class Authenticator {
+        <<interface>>
+        Authenticate(context, Request) Result
+        Lookup(context, address, protocol, client) Result
+    }
+    class User {
+        <<interface>>
+        Lookup(name) Mailbox
+        DeliverGUID(name, guid, raw, flags, when) Meta
+        SetFlags(name, uids, unchangedSince, apply) FlagsResult
+        Copy(metas, destination) MetaList
+        Move(source, metas, destination) MetaList
+        BeginDelivery() string
+        RecordDelivery(id, mailbox, guid)
+        EndDelivery(id)
+        Watch(id) Watch
+        Lock(id, ttl) Lease
+        Close()
+    }
+    class Store {
+        User(name) User
+        Rotate(key, monHost)
+        Ping()
+        Close()
+    }
+    class CephUser
+    class MemoryUser
+    class Nauthilus
+    class Static
+    class ProtocolSession
+    class Watch {
+        <<interface>>
+        Events() channel
+        Errors() channel
+        Close()
+    }
+    class Lease {
+        <<interface>>
+        Lost() bool
+        Release()
+    }
+    Authenticator <|.. Nauthilus
+    Authenticator <|.. Static
+    User <|.. CephUser
+    User <|.. MemoryUser
+    Store --> CephUser : opens
+    ProtocolSession --> Authenticator : authenticates
+    ProtocolSession --> User : owns view
+    User --> Watch : creates
+    User --> Lease : acquires

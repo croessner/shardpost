@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: imaptest
+  namespace: shardpost
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: imaptest
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: imaptest
+          image: docker.io/chrroessner/shardpost-imaptest:0.1@sha256:63722cdf5f921b493293cb51af6c5c630c361e5730e43bff67534794dcd52a44
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec /usr/local/bin/imaptest host=shardpost port=993 ssl=any-cert "user=$IMAP_USER" "pass=$(cat /creds/pass)" mbox=/mbox test=/tests
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          env:
+            - name: IMAP_USER
+              valueFrom: {secretKeyRef: {name: imaptest-creds, key: user}}
+          volumeMounts:
+            - {name: creds, mountPath: /creds, readOnly: true}
+      volumes:
+        - name: creds
+          secret: {secretName: imaptest-creds}

@@ -1,0 +1,47 @@
+# A shell with swaks and curl inside the namespace:
+#   kubectl -n shardpost exec -it deploy/mailtest -- sh
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailtest
+  labels:
+    app.kubernetes.io/name: mailtest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailtest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mailtest
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tools
+          image: docker.io/chrroessner/shardpost-tools:0.13.0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

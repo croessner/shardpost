@@ -1,0 +1,65 @@
+# Nightly scrubber: walks every user namespace and repairs what a crash
+# may have left behind (orphan blobs, entries without blob, refcounts,
+# quota drift). Same image and credentials as the server.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shardpost-scrub
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: shardpost-scrub
+        spec:
+          restartPolicy: Never
+          serviceAccountName: shardpost-server
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 167
+            runAsGroup: 167
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: scrub
+              image: docker.io/chrroessner/shardpost:0.16.0
+              args: ["scrub"]
+              env:
+                - name: CEPH_USER
+                  value: shardpost
+                - name: CEPH_INDEX_POOL
+                  value: shardpost-index
+                - name: CEPH_DATA_POOL
+                  value: shardpost-data
+                - name: ROOK_NAMESPACE
+                  value: rook-ceph
+                - name: SCRUB_GRACE_SECONDS
+                  value: "3600"
+                - name: SCRUB_DRY_RUN
+                  value: "false"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Mi

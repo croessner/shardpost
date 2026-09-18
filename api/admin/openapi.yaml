@@ -1,0 +1,148 @@
+openapi: 3.0.3
+info:
+  title: ShardPost Admin API
+  version: 1.0.0
+  description: |
+    Internal administration interface of ShardPost (roadmap stage 8).
+    Reachable only on the configured admin listeners: a Unix socket inside
+    the pod (the peer's UID is the identity) and optionally TCP with mutual
+    TLS (the client certificate is the identity). Every operation requires
+    a role; roles are assigned to identities in the server configuration.
+servers:
+  - url: /
+security: []
+paths:
+  /admin/v1/version:
+    get:
+      operationId: getVersion
+      summary: Server version
+      description: Requires the role `diagnose`.
+      responses:
+        "200":
+          description: Version information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Version"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/deliveries:
+    post:
+      operationId: deliver
+      summary: Local delivery (LDA)
+      description: |
+        Delivers one message to one recipient like a local delivery agent:
+        the recipient is resolved like an LMTP recipient, the user's Sieve
+        script runs (unless disabled or a mailbox is given) and the message
+        is stored all or nothing. Redirect, vacation and notify behave as
+        for LMTP. Requires the role `deliver`; `enforce_quota=false` also
+        requires `deliver:noenforce` (the usage is still counted).
+      parameters:
+        - name: recipient
+          in: query
+          required: true
+          description: Envelope recipient (address or account).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 320
+        - name: from
+          in: query
+          required: false
+          description: Envelope sender; empty is the null sender.
+          schema:
+            type: string
+            maxLength: 320
+        - name: mailbox
+          in: query
+          required: false
+          description: Store directly into this existing mailbox; Sieve does not run.
+          schema:
+            type: string
+            maxLength: 1024
+        - name: sieve
+          in: query
+          required: false
+          description: Run the user's Sieve script.
+          schema:
+            type: boolean
+            default: true
+        - name: enforce_quota
+          in: query
+          required: false
+          description: Refuse the message when it does not fit the quota.
+          schema:
+            type: boolean
+            default: true
+      requestBody:
+        required: true
+        content:
+          message/rfc822:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Delivered (or discarded by Sieve).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryResult"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  responses:
+    Error:
+      description: |
+        Failure. `code` is stable: `bad_request` (400), `unauthenticated`
+        (401), `forbidden` (403), `no_such_user` and `no_such_mailbox`
+        (404), `too_large` (413), `rejected` (422, Sieve reject),
+        `over_quota` (507), `temporary` (503, try again), `internal` (500).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal]
+        message:
+          type: string
+    Version:
+      type: object
+      required: [version, go_version]
+      properties:
+        version:
+          type: string
+        go_version:
+          type: string
+    DeliveryResult:
+      type: object
+      required: [account, stored]
+      properties:
+        account:
+          type: string
+          description: Canonical account the recipient resolved to.
+        stored:
+          type: array
+          description: Stored copies; empty when Sieve discarded the message.
+          items:
+            $ref: "#/components/schemas/StoredMessage"
+    StoredMessage:
+      type: object
+      required: [mailbox, uid, guid, size]
+      properties:
+        mailbox:
+          type: string
+        uid:
+          type: integer
+          format: int64
+        guid:
+          type: string
+        size:
+          type: integer
+          format: int64

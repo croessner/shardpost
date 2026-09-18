@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: docker.io/chrroessner/shardpost
+    newTag: 0.16.0
+    digest: sha256:3362b401f63fbfd8a4a93d3e56ee0c9a2bde0e6e5d8b216ddcb5ab9108d3b063
+  - name: docker.io/chrroessner/shardpost-tools
+    newTag: 0.13.0
+    digest: sha256:68323de9ec7403ee1c3d54bc3fc698cc4511f8431a494b40cb8911127642f3f3
+# test-profile: small index shards so the sharding path is exercised with a few
+# dozen messages. Production: 100000 (the default).
+patches:
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: shardpost-server
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: http://192.168.0.102:4318
+                  - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                    value: http/protobuf
+                  - name: OTEL_TRACES_SAMPLER_ARG
+                    value: "0.1"
+                  - name: MBOX_SHARD_SIZE
+                    value: "20"

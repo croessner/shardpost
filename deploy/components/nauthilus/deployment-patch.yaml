@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-server
+spec:
+  template:
+    spec:
+      hostAliases:
+        - ip: "192.168.0.2"
+          hostnames: ["relay.roessner-net.de"]
+        # LDAP provider over the VLAN (like Nauthilus), for the over-quota flag.
+        - ip: "192.168.0.101"
+          hostnames: ["ldap.roessner-net.de"]
+      containers:
+        - name: server
+          env:
+            - name: AUTH_BACKEND
+              value: nauthilus
+            - name: NAUTHILUS_TRANSPORT
+              value: grpc
+            # doppelgaenger-grpc sidecar in front of the Nauthilus authority;
+            # public TLS certificate for login.authserv.me (system roots).
+            - name: NAUTHILUS_GRPC_ADDR
+              value: nauthilus-service.auth.svc.cluster.local:8444
+            - name: NAUTHILUS_GRPC_SERVER_NAME
+              value: login.authserv.me
+            # Backchannel caller authentication: OIDC client_credentials.
+            - name: NAUTHILUS_OIDC_TOKEN_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardpost-nauthilus-oidc
+                  key: token-url
+            - name: NAUTHILUS_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: shardpost-nauthilus-oidc
+                  key: client-id
+            - name: NAUTHILUS_OIDC_CLIENT_SECRET_FILE
+              value: /secrets/nauthilus-oidc/client-secret
+            - name: NAUTHILUS_OIDC_SCOPES
+              value: "nauthilus:authenticate nauthilus:lookup_identity"
+            # Bearer tokens replayed by the director (XOAUTH2/OAUTHBEARER) go
+            # to Nauthilus in the password field with the SASL method name.
+            - name: NAUTHILUS_BEARER_MODE
+              value: password
+            # nauthilus-director backend login "<user>*nauthilus-director".
+            - name: MASTER_USER
+              value: nauthilus-director
+            - name: MASTER_PASSWORD
+              $patch: delete
+            - name: MASTER_PASSWORD_FILE
+              value: /secrets/director-backend/master-password
+            # Credentials only over TLS (the director uses STARTTLS).
+            - name: INSECURE_AUTH
+              value: "false"
+            # Outbound relay for Sieve redirect/vacation: the mailstack
+            # VLAN proxy allows only the Kubernetes nodes and preserves the
+            # client IP. STARTTLS and the public-CA hostname check are required;
+            # the relay does not use SMTP AUTH.
+            - name: SMTP_RELAY_ADDR
+              value: relay.roessner-net.de:25025
+            - name: SMTP_RELAY_SERVER_NAME
+              value: relay.roessner-net.de
+            - name: SMTP_RELAY_STARTTLS
+              value: "true"
+          volumeMounts:
+            - name: nauthilus-oidc
+              mountPath: /secrets/nauthilus-oidc
+              readOnly: true
+            - name: director-backend
+              mountPath: /secrets/director-backend
+              readOnly: true
+      volumes:
+        - name: nauthilus-oidc
+          secret:
+            secretName: shardpost-nauthilus-oidc
+            defaultMode: 0440
+        - name: director-backend
+          secret:
+            secretName: shardpost-director-backend
+            defaultMode: 0440

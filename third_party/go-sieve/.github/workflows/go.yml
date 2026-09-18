@@ -1,0 +1,26 @@
+name: "Testing"
+
+on:
+  push:
+    branches: [ master, dev ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ master, dev ]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  test:
+    name: "Build and test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - name: "Unit & module tests"
+        run: |
+          go test ./...

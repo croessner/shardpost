@@ -1,0 +1,7 @@
+require ["imapsieve", "environment", "imap4flags", "ihave"];
+if not ihave "imapsieve" { error "IMAPSieve capability missing"; }
+if allof (environment :is "location" "MS",
+          environment :is "imap.cause" "FLAG",
+          environment :contains "imap.changedflags" "\\Seen") {
+    addflag "processed";
+}

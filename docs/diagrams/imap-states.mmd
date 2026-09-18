@@ -1,0 +1,12 @@
+stateDiagram-v2
+    [*] --> NotAuthenticated: Verbindung / Greeting
+    NotAuthenticated --> Authenticated: erfolgreicher Login
+    state Authenticated {
+        [*] --> Unselected
+        Unselected --> Selected: SELECT / EXAMINE
+        Selected --> Unselected: CLOSE / UNSELECT
+    }
+    Authenticated --> NotAuthenticated: UNAUTHENTICATE
+    NotAuthenticated --> Logout: LOGOUT / Transportende
+    Authenticated --> Logout: LOGOUT / Transportende
+    Logout --> [*]: Ressourcen freigeben

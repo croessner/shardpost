@@ -1,0 +1,22 @@
+flowchart TB
+    Main[cmd/shardpost: Composition Root]
+    Main --> Config[config + logging + telemetry]
+    Main --> Protocols[imapproto / pop3proto / sieve]
+    Main --> LMTP[lmtpd]
+    Main --> Engine[imapsieve.Engine]
+    Protocols --> Auth[auth.Authenticator]
+    LMTP --> Auth
+    Protocols --> Model[model.User]
+    LMTP --> Store[cephstore.Store / User]
+    Store -. implements .-> Model
+    Mem[memstore.Store / User] -. implements .-> Model
+    Protocols --> Engine
+    LMTP --> Sieve[sieve evaluation]
+    Engine --> Sieve
+    Sieve --> Fork[go-sieve fork]
+    Sieve --> Programs[extprograms.Runner]
+    Engine --> Worker[LearningWorker]
+    Worker --> Queue[cephstore.LearningQueue]
+    Worker --> Programs
+    Store --> RADOS[librados / RADOS]
+    Queue --> RADOS

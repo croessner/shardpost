@@ -1,0 +1,18 @@
+# Scratch plans and notes (temp/.gitignore ignores its content as well)
+/temp/
+
+# IDE and OS files
+/.idea/
+.DS_Store
+
+# Python caches (programs/, hack/)
+__pycache__/
+*.pyc
+
+# Local build output
+/shardpost
+/shardpostctl
+/shardpost-load
+/third_party/go-sieve/cmd/sieve-run/sieve-run
+*.test
+*.out
