@@ -4,7 +4,11 @@ server:
   master_user: "nauthilus-director"
   master_password_file: "/secrets/director-backend/master-password"
   insecure_auth: false
-  mbox_shard_size: 20
+  # UIDs per mailbox index shard, fixed when a mailbox is created. 100000
+  # keeps even shard 0 (plus at most 2x10000 change-log keys) below Ceph's
+  # large-omap warning at 200000 keys. Mailboxes created with the former
+  # POC value 20 keep it.
+  mbox_shard_size: 100000
   # Calico Pod network; mail-port access is restricted by network-policy.yaml.
   proxy_protocol_trusted_cidrs: "172.16.0.0/12"
   imap_addr: ":1143"
@@ -175,8 +179,7 @@ admin:
     - identity: "shardpost-admin-operator"
       roles: [diagnose]
   # Account import (sidecar "import", component import-sidecar): imported
-  # mailboxes keep the source UIDs with their gaps, so they get the
-  # production shard size instead of the POC's mbox_shard_size.
+  # mailboxes keep the source UIDs with their gaps; shard size as above.
   import:
     lock_ttl_seconds: 900
     max_batch_bytes: 67108864
