@@ -11,8 +11,12 @@ import (
 	"shardpost/internal/adminapi"
 )
 
-// traceVerbOn is the only verb that takes -for.
-const traceVerbOn = "on"
+// traceVerbOn is the only verb that takes -for; traceOffText is the
+// off verb and the status text.
+const (
+	traceVerbOn  = "on"
+	traceOffText = "off"
+)
 
 const traceUsage = "usage: shardpostctl trace on [-for <duration>] <account> | off <account> | status <account> [--json]"
 
@@ -45,7 +49,7 @@ func traceCmd(client *adminapi.ClientWithResponses, args []string, stdout, stder
 	switch account := fs.Arg(0); verb {
 	case traceVerbOn:
 		return traceOn(client, account, *dur, *asJSON, stdout, stderr)
-	case "off":
+	case traceOffText:
 		return traceOff(client, account, stdout, stderr)
 	case "status":
 		return traceStatus(client, account, *asJSON, stdout, stderr)

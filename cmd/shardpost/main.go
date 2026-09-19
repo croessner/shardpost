@@ -332,7 +332,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 
 	srv.http = newHTTPServer(settings, store)
 
-	srv.admin, err = newAdminServers(log, settings, authn, srv.delivery, importStore{store})
+	srv.admin, err = newAdminServers(log, settings, authn, srv.delivery, store)
 	if err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"path"
 	"runtime"
 	"strconv"
 	"strings"
@@ -60,6 +61,10 @@ type Options struct {
 	// Clients map client certificate identities to roles (TCP listener);
 	// identities compare case-insensitively.
 	Clients map[string][]string
+	// ClientScopes limit the accounts a client certificate identity may
+	// address (path.Match patterns); identities without an entry may
+	// address every account. Socket callers are not limited.
+	ClientScopes map[string][]string
 	// Import opens accounts for imports; unlike the protocol store it
 	// does not refuse accounts under an import lock. nil disables the
 	// import operations.
@@ -85,6 +90,12 @@ type Options struct {
 	// TraceMaxDuration caps every switch-on.
 	TraceDefaultDuration time.Duration
 	TraceMaxDuration     time.Duration
+	// Instance, StartedAt and ConfigFingerprint describe this server in
+	// GET /admin/v1/server; StorePing checks the store (nil: unknown).
+	Instance          string
+	StartedAt         time.Time
+	ConfigFingerprint string
+	StorePing         func() error
 }
 
 // Server implements the generated adminapi.ServerInterface.
@@ -119,6 +130,13 @@ func New(o Options) *Server {
 	}
 
 	o.Clients = clients
+
+	scopes := make(map[string][]string, len(o.ClientScopes))
+	for id, patterns := range o.ClientScopes {
+		scopes[strings.ToLower(id)] = patterns
+	}
+
+	o.ClientScopes = scopes
 	s := &Server{o: o}
 	mux := http.NewServeMux()
 	adminapi.HandlerWithOptions(s, adminapi.StdHTTPServerOptions{
@@ -149,6 +167,30 @@ type principal struct {
 	name      string
 	transport string
 	roles     map[string]bool
+	// accounts limits the addressable accounts (path.Match patterns on
+	// the lower-cased account); empty means all.
+	accounts []string
+}
+
+// inScope reports whether the principal may address account.
+func (p *principal) inScope(account string) bool {
+	if len(p.accounts) == 0 {
+		return true
+	}
+
+	// Store namespaces are case-sensitive while the patterns are not: a
+	// limited client may only address the lower-case (canonical) form.
+	if account != strings.ToLower(account) {
+		return false
+	}
+
+	for _, pattern := range p.accounts {
+		if ok, _ := path.Match(strings.ToLower(pattern), account); ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 type principalKey struct{}
@@ -232,7 +274,10 @@ func (s *Server) certPrincipal(r *http.Request) *principal {
 
 	for _, id := range certIdentities(r.TLS.VerifiedChains[0][0]) {
 		if roles, ok := s.o.Clients[strings.ToLower(id)]; ok {
-			return newPrincipal(id, "mtls", roles)
+			p := newPrincipal(id, "mtls", roles)
+			p.accounts = s.o.ClientScopes[strings.ToLower(id)]
+
+			return p
 		}
 	}
 
@@ -264,6 +309,21 @@ func require(w http.ResponseWriter, r *http.Request, role string) bool {
 	return false
 }
 
+// requireAccount writes 403 unless the caller holds role and may address
+// account (client scope).
+func requireAccount(w http.ResponseWriter, r *http.Request, role, account string) bool {
+	if !require(w, r, role) {
+		return false
+	}
+
+	if !principalOf(r.Context()).inScope(account) {
+		writeError(w, http.StatusForbidden, adminapi.Forbidden, "account outside the client's scope")
+		return false
+	}
+
+	return true
+}
+
 // recorder remembers the status and error code of a response.
 type recorder struct {
 	http.ResponseWriter
@@ -292,15 +352,56 @@ func operation(path string) string {
 		return "version"
 	case "/admin/v1/deliveries":
 		return "deliver"
+	case "/admin/v1/server":
+		return "server"
 	default:
-		if strings.HasPrefix(path, "/admin/v1/accounts/") && strings.HasSuffix(path, "/trace") {
-			return "trace"
+		if rest, ok := strings.CutPrefix(path, "/admin/v1/accounts/"); ok {
+			return accountOperation(path, strings.Split(rest, "/"))
 		}
 
-		if strings.HasPrefix(path, "/admin/v1/accounts/") {
-			return importOperation(path)
-		}
+		return opOther
+	}
+}
 
+// Path segments below an account that are also metric labels.
+const (
+	segMailboxes = "mailboxes"
+	segACL       = "acl"
+)
+
+// accountOperation is the metric label of a path below an account
+// (parts[0] is the account).
+func accountOperation(path string, parts []string) string {
+	if len(parts) == 1 {
+		return "account"
+	}
+
+	switch parts[1] {
+	case "import":
+		return importOperation(path)
+	case "trace", "quota", "shared":
+		if len(parts) == 2 {
+			return parts[1]
+		}
+	case segMailboxes:
+		return mailboxOperation(parts[2:])
+	}
+
+	return opOther
+}
+
+// mailboxOperation labels the paths below /mailboxes.
+func mailboxOperation(parts []string) string {
+	switch {
+	case len(parts) == 0:
+		return segMailboxes
+	case len(parts) == 1:
+		return "mailbox"
+	case len(parts) == 2 && parts[1] == segACL:
+		return segACL
+	case len(parts) == 3 && parts[1] == segACL && parts[2] == "explain":
+		return "acl_explain"
+	default:
 		return opOther
 	}
 }

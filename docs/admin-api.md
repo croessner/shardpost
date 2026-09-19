@@ -38,7 +38,7 @@ eine Rotation durch cert-manager ohne Neustart. Eine defekte neue Version
 wird geloggt, bis dahin bleibt die alte in Gebrauch. Clientzertifikate
 brauchen `extKeyUsage clientAuth`.
 
-Rollen: `diagnose` (Version), `deliver` (Zustellung mit Quota-Durchsetzung),
+Rollen: `diagnose` (Version, Serverstatus und lesende Diagnose), `deliver` (Zustellung mit Quota-Durchsetzung),
 `deliver:noenforce` (zusätzlich für `enforce_quota=false`), `import`
 (Kontoimport) und `trace` (Protokoll-Trace eines Kontos, siehe unten).
 
@@ -53,7 +53,20 @@ admin:
   clients:
     - identity: ops.shardpost.internal
       roles: [diagnose]
+    - identity: support.example.org
+      roles: [diagnose, trace]
+      accounts: ["*@example.org"]      # optional: Konten-Scope
 ```
+
+`clients[].accounts` begrenzt die Konten, die ein mTLS-Client ansprechen
+darf (`path.Match`-Muster auf das kleingeschriebene Konto; leer = alle).
+Der Scope gilt für jede kontobezogene Operation: Diagnose, Trace, Import,
+Zustellung (auf das aufgelöste Konto), bei `account show` zusätzlich für das
+kanonische Konto eines Alias und bei `acl explain` für den erklärten
+Principal. Clients mit Scope dürfen Konten nur kleingeschrieben ansprechen
+(RADOS-Namespaces unterscheiden Groß- und Kleinschreibung). Außerhalb des
+Scopes antwortet die API `403 forbidden`.
+Aufrufer am Unix-Socket sind nicht begrenzt.
 
 Umgebung: `ADMIN_SOCKET`, `ADMIN_ADDR`, `ADMIN_TLS_CERT`, `ADMIN_TLS_KEY`,
 `ADMIN_CLIENT_CA`; Rollen und Clients nur per YAML.
@@ -107,6 +120,67 @@ shardpostctl deliver -d user@example.org --no-enforce-quota --json < warning.eml
 Exitcodes von `deliver` (sysexits): 0 ok, 64 Aufruf, 67 unbekannter Empfänger
 oder Postfach, 69 abgelehnt oder zu groß, 70 unerwartete Antwort, 73 über
 Quota, 75 temporär (erneut versuchen), 77 keine Berechtigung.
+
+## Lesende Diagnose (Stufe 8a)
+
+Alle Operationen lesen nur (Rolle `diagnose`). Ein Test führt jede davon
+gegen einen Store aus, der bei jeder Schreiboperation fehlschlägt.
+
+```sh
+shardpostctl server status                   # Version, Pod, Start, Config-Fingerprint, Store
+shardpostctl account show user@example.org   # Nauthilus-Auflösung, Store, Quota, Importsperre, Trace
+shardpostctl mailbox list [-limit 100] [-after NAME] [-all] user@example.org
+shardpostctl mailbox show user@example.org INBOX            # Name oder Mailbox-ID
+shardpostctl acl list user@example.org Shared
+shardpostctl acl explain user@example.org Shared kollege@example.org
+shardpostctl quota show user@example.org
+shardpostctl shared list kollege@example.org
+```
+
+Jeder Befehl kennt `--json`; Flags dürfen auch hinter den Argumenten stehen.
+Exitcodes wie bei `deliver`: 67 unbekanntes Konto/Postfach, 64 Aufruf (auch
+Alias statt kanonischem Konto), 77 fehlende Rolle oder Scope.
+
+| API | Inhalt | Kosten |
+| --- | --- | --- |
+| `GET /admin/v1/server` | Version, Instanz (Pod), Startzeit, `config_fingerprint`, Store-Ping | ein Ping |
+| `GET /admin/v1/accounts/{account}` | Nauthilus-Lookup (`canonical`, `alias` mit kanonischem Konto, `unknown`, `unavailable`), Store vorhanden, Anzahl Postfächer, Quota, Importsperre, Trace | Registry, Quota |
+| `GET …/mailboxes?after=&limit=&name=` | Postfächer in Namensreihenfolge: ID, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, Shard-Größe, Abo, Special-Use, Zahl der ACL-Einträge; `next` für die Folgeseite | ein Registry-Ausschnitt, ein Header je Postfach |
+| `GET …/mailboxes/{id}` | zusätzlich Nachrichten, ungelesen, gelöscht markiert, Größe, Shards, Log-Beginn (QRESYNC-Horizont), Keywords | liest alle Index-Shards des Postfachs |
+| `GET …/mailboxes/{id}/acl` | explizite Einträge und ACL-Generation (der Eigentümer hat implizit alle Rechte) | Registry |
+| `GET …/mailboxes/{id}/acl/explain?principal=` | Rechte des Principals (dieselbe Funktion wie IMAP), Zeiger in seiner Registry und Befunde im Klartext | zwei Registries |
+| `GET …/quota` | Belegung und Grenze (0 = unbegrenzt) | Quota-Zähler |
+| `GET …/shared` | Freigabe-Zeiger des Kontos (`Other Users/…`) | Registry |
+
+`account show` akzeptiert auch Aliase und nennt dann das kanonische Konto;
+die Store-Felder beschreiben dann den (meist leeren) Namespace unter dem
+angegebenen Namen. Alle anderen Operationen verlangen das kanonische Konto,
+weil die Daten darunter liegen. Postfächer werden in der URL über ihre
+stabile ID adressiert. `shardpostctl` löst Namen selbst auf (`?name=`, ein
+Registry-Schlüssel); die Auflösung einer ID liest die ganze Registry des
+Kontos. Eine Seite endet nach `limit` gelesenen Registry-Einträgen, auch
+unlesbaren; ein defekter Eintrag verschiebt oder beendet die Liste nicht.
+
+`acl explain` beantwortet „Warum sieht X die Freigabe nicht?“ mit Befunden:
+
+- Alias statt kanonischem Konto; ein ACL-Eintrag unter dem Alias greift nie.
+- Keine Rechte, also existiert das Postfach für den Principal nicht (`NONEXISTENT`).
+- Rechte ohne `l`: nicht gelistet, aber per Name ansprechbar.
+- Rechte nur über `anyone`: Dafür werden keine Zeiger geschrieben, LIST
+  zeigt das Postfach nicht.
+- Fehlender Zeiger (LIST zeigt das Postfach nicht; ein SETACL für den
+  Principal schreibt ihn) oder Zeiger ohne Recht `l` (LIST blendet aus, der
+  Zeiger bleibt bis zum Löschen des Postfachs oder bis ein SETACL ihn
+  zurückzieht). Die Generation des Zeigers ist nur Information: SETACLs für
+  andere Identifier erhöhen die Generation des Postfachs, ohne ihn zu
+  berühren.
+
+`config_fingerprint` ist ein SHA-256 über die wirksame Konfiguration ohne
+die Werte der mit `secret:"true"` markierten Felder; ein Test verlangt diese
+Markierung für jedes neue Feld, dessen Name nach Passwort, Secret oder Token
+aussieht. Gleiche Fingerprints bedeuten gleiche Einstellungen der Pods.
+
+Jobstatus folgt mit den Wartungsjobs in Stufe 8c.
 
 ## Protokoll-Trace eines Kontos
 

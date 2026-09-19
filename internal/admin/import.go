@@ -48,7 +48,7 @@ type importCall struct {
 func (s *Server) beginImport(w http.ResponseWriter, r *http.Request, account, session string) (*importCall, bool) {
 	auditf(r, "account", account)
 
-	if !require(w, r, RoleImport) {
+	if !requireAccount(w, r, RoleImport, account) {
 		return nil, false
 	}
 
@@ -96,7 +96,7 @@ func (s *Server) beginImport(w http.ResponseWriter, r *http.Request, account, se
 func (s *Server) OpenImport(w http.ResponseWriter, r *http.Request, account adminapi.Account) {
 	auditf(r, "account", account)
 
-	if !require(w, r, RoleImport) {
+	if !requireAccount(w, r, RoleImport, account) {
 		return
 	}
 

@@ -21,6 +21,54 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for ACLExplanationLookup.
+const (
+	ACLExplanationLookupAlias       ACLExplanationLookup = "alias"
+	ACLExplanationLookupCanonical   ACLExplanationLookup = "canonical"
+	ACLExplanationLookupUnavailable ACLExplanationLookup = "unavailable"
+	ACLExplanationLookupUnknown     ACLExplanationLookup = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the ACLExplanationLookup enum.
+func (e ACLExplanationLookup) Valid() bool {
+	switch e {
+	case ACLExplanationLookupAlias:
+		return true
+	case ACLExplanationLookupCanonical:
+		return true
+	case ACLExplanationLookupUnavailable:
+		return true
+	case ACLExplanationLookupUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AccountStatusLookup.
+const (
+	AccountStatusLookupAlias       AccountStatusLookup = "alias"
+	AccountStatusLookupCanonical   AccountStatusLookup = "canonical"
+	AccountStatusLookupUnavailable AccountStatusLookup = "unavailable"
+	AccountStatusLookupUnknown     AccountStatusLookup = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the AccountStatusLookup enum.
+func (e AccountStatusLookup) Valid() bool {
+	switch e {
+	case AccountStatusLookupAlias:
+		return true
+	case AccountStatusLookupCanonical:
+		return true
+	case AccountStatusLookupUnavailable:
+		return true
+	case AccountStatusLookupUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ErrorCode.
 const (
 	BadRequest      ErrorCode = "bad_request"
@@ -71,6 +119,57 @@ func (e ErrorCode) Valid() bool {
 		return false
 	}
 }
+
+// ACLEntry defines model for ACLEntry.
+type ACLEntry struct {
+	Identifier string `json:"identifier"`
+	Rights     string `json:"rights"`
+}
+
+// ACLExplanation defines model for ACLExplanation.
+type ACLExplanation struct {
+	AnyoneEntry        string               `json:"anyone_entry"`
+	CanonicalPrincipal *string              `json:"canonical_principal,omitempty"`
+	Findings           []string             `json:"findings"`
+	IsOwner            bool                 `json:"is_owner"`
+	Lookup             ACLExplanationLookup `json:"lookup"`
+	Mailbox            string               `json:"mailbox"`
+
+	// OwnEntry Rights of the principal's own ACL entry ("" if none).
+	OwnEntry  string        `json:"own_entry"`
+	Owner     string        `json:"owner"`
+	Pointer   SharedPointer `json:"pointer"`
+	Principal string        `json:"principal"`
+
+	// Rights Effective rights of the canonical principal.
+	Rights string `json:"rights"`
+
+	// Visible The principal can see the mailbox (right l or owner).
+	Visible bool `json:"visible"`
+}
+
+// ACLExplanationLookup defines model for ACLExplanation.Lookup.
+type ACLExplanationLookup string
+
+// AccountStatus defines model for AccountStatus.
+type AccountStatus struct {
+	Account          string  `json:"account"`
+	CanonicalAccount *string `json:"canonical_account,omitempty"`
+	ImportLocked     bool    `json:"import_locked"`
+
+	// Lookup Outcome of the Nauthilus lookup of `account`.
+	Lookup    AccountStatusLookup `json:"lookup"`
+	Mailboxes int                 `json:"mailboxes"`
+	Quota     QuotaStatus         `json:"quota"`
+
+	// StoreExists Whether the store namespace of `account` has mailboxes.
+	StoreExists bool       `json:"store_exists"`
+	TraceActive bool       `json:"trace_active"`
+	TraceUntil  *time.Time `json:"trace_until,omitempty"`
+}
+
+// AccountStatusLookup Outcome of the Nauthilus lookup of `account`.
+type AccountStatusLookup string
 
 // DeliveryResult defines model for DeliveryResult.
 type DeliveryResult struct {
@@ -193,6 +292,106 @@ type ImportSieveScript struct {
 	Script string `json:"script"`
 }
 
+// MailboxACL defines model for MailboxACL.
+type MailboxACL struct {
+	Entries    []ACLEntry `json:"entries"`
+	Generation int64      `json:"generation"`
+	Mailbox    string     `json:"mailbox"`
+	Owner      string     `json:"owner"`
+}
+
+// MailboxDetail defines model for MailboxDetail.
+type MailboxDetail struct {
+	Deleted  int64    `json:"deleted"`
+	Keywords []string `json:"keywords"`
+
+	// LogStart Oldest modseq the change log covers (QRESYNC horizon).
+	LogStart   int64          `json:"log_start"`
+	Mailbox    MailboxSummary `json:"mailbox"`
+	Messages   int64          `json:"messages"`
+	RecentFrom int64          `json:"recent_from"`
+
+	// Shards Index shards covering UIDs below uid_next.
+	Shards    int64 `json:"shards"`
+	SizeBytes int64 `json:"size_bytes"`
+	Unseen    int64 `json:"unseen"`
+}
+
+// MailboxPage defines model for MailboxPage.
+type MailboxPage struct {
+	Items []MailboxSummary `json:"items"`
+
+	// Next Pass as `after` for the next page; absent on the last page.
+	Next *string `json:"next,omitempty"`
+}
+
+// MailboxSummary defines model for MailboxSummary.
+type MailboxSummary struct {
+	AclEntries    int      `json:"acl_entries"`
+	HighestModseq int64    `json:"highest_modseq"`
+	Id            string   `json:"id"`
+	Name          string   `json:"name"`
+	ShardSize     int64    `json:"shard_size"`
+	SpecialUse    []string `json:"special_use"`
+	Subscribed    bool     `json:"subscribed"`
+	UidNext       int64    `json:"uid_next"`
+	Uidvalidity   int64    `json:"uidvalidity"`
+}
+
+// QuotaStatus defines model for QuotaStatus.
+type QuotaStatus struct {
+	// LimitBytes 0 is unlimited.
+	LimitBytes int64 `json:"limit_bytes"`
+
+	// LimitMessages 0 is unlimited.
+	LimitMessages int64 `json:"limit_messages"`
+	UsageBytes    int64 `json:"usage_bytes"`
+	UsageMessages int64 `json:"usage_messages"`
+}
+
+// ServerStatus defines model for ServerStatus.
+type ServerStatus struct {
+	// ConfigFingerprint SHA-256 over the effective configuration without secret values.
+	ConfigFingerprint string `json:"config_fingerprint"`
+	GoVersion         string `json:"go_version"`
+
+	// Instance Host name of the answering server (pod).
+	Instance  string      `json:"instance"`
+	StartedAt time.Time   `json:"started_at"`
+	Store     StoreStatus `json:"store"`
+	Version   string      `json:"version"`
+}
+
+// SharedList defines model for SharedList.
+type SharedList struct {
+	Account string      `json:"account"`
+	Items   []SharedRef `json:"items"`
+}
+
+// SharedPointer defines model for SharedPointer.
+type SharedPointer struct {
+	// Generation ACL generation of the last pointer write for this principal
+	// (informational; SETACLs for other identifiers raise the
+	// mailbox's generation without touching this pointer).
+	Generation *int64 `json:"generation,omitempty"`
+	Present    bool   `json:"present"`
+	Subscribed *bool  `json:"subscribed,omitempty"`
+}
+
+// SharedRef defines model for SharedRef.
+type SharedRef struct {
+	Generation int64  `json:"generation"`
+	Mailbox    string `json:"mailbox"`
+	Owner      string `json:"owner"`
+	Subscribed bool   `json:"subscribed"`
+}
+
+// StoreStatus defines model for StoreStatus.
+type StoreStatus struct {
+	Error *string `json:"error,omitempty"`
+	Ok    bool    `json:"ok"`
+}
+
 // StoredMessage defines model for StoredMessage.
 type StoredMessage struct {
 	Guid    string `json:"guid"`
@@ -302,6 +501,19 @@ type ImportMessagesParams struct {
 type PutImportSieveParams struct {
 	// XImportSession The session that holds the import lock.
 	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// ListMailboxesParams defines parameters for ListMailboxes.
+type ListMailboxesParams struct {
+	After *string `form:"after,omitempty" json:"after,omitempty"`
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Name  *string `form:"name,omitempty" json:"name,omitempty"`
+}
+
+// ExplainMailboxACLParams defines parameters for ExplainMailboxACL.
+type ExplainMailboxACLParams struct {
+	// Principal Account (or alias) whose access is explained.
+	Principal string `form:"principal" json:"principal"`
 }
 
 // DeliverParams defines parameters for Deliver.
@@ -419,6 +631,18 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+
+	// GetAccount Account overview
+	//
+	// Resolves the account through Nauthilus (canonical account) and
+	// shows its store state: whether mailboxes exist, quota usage and
+	// limit, import lock and protocol trace. Aliases are accepted here and
+	// report their canonical account; the store fields then describe
+	// the namespace under the given name. Reads only. Requires the role
+	// `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
+	GetAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CloseImport Release the import lock
 	//
@@ -584,6 +808,60 @@ type ClientInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
 	PutImportSieve(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListMailboxes Mailboxes of an account, page by page
+	//
+	// Mailboxes in name order with registry data and index header (one
+	// read per mailbox; message counts only in getMailbox). `after`
+	// continues after the `next` value of the previous page; `name`
+	// returns only the mailbox with that exact name. The account must be
+	// canonical. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes (the `ListMailboxes` operationId).
+	ListMailboxes(ctx context.Context, account Account, params *ListMailboxesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetMailbox One mailbox in detail
+	//
+	// Registry data, index header and counts over all messages (reads
+	// every index shard of the mailbox). Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
+	GetMailbox(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetMailboxACL ACL of a mailbox
+	//
+	// The explicit entries (the owner has all rights implicitly and is not
+	// listed) and the ACL generation. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl (the `GetMailboxACL` operationId).
+	GetMailboxACL(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExplainMailboxACL Why a principal can (not) use a mailbox
+	//
+	// Resolves the principal to its canonical account, computes its
+	// effective rights with the same function IMAP uses (own entry plus
+	// "anyone") and checks the pointer in the principal's registry that
+	// makes the mailbox appear under "Other Users/". `findings` names
+	// every reason in plain text. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
+	ExplainMailboxACL(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetQuota Quota usage and limit
+	//
+	// Stored usage counters and the effective limit (0 = unlimited).
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/quota (the `GetQuota` operationId).
+	GetQuota(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSharedMailboxes Mailboxes of other accounts shared with this account
+	//
+	// The pointers in the account's registry ("Other Users/<owner>/...").
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
+	ListSharedMailboxes(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ClearTrace Switch the protocol trace off
 	//
 	// Removes the switch; a traced session stops at its next command once
@@ -651,12 +929,43 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBody(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetServerStatus Server status
+	//
+	// Version, instance, start time, a fingerprint of the effective
+	// configuration (secrets excluded) and whether the store answers.
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
+	GetServerStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetVersion Server version
 	//
 	// Requires the role `diagnose`.
 	//
 	// Corresponds with GET /admin/v1/version (the `GetVersion` operationId).
 	GetVersion(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+// GetAccount Account overview
+//
+// Resolves the account through Nauthilus (canonical account) and
+// shows its store state: whether mailboxes exist, quota usage and
+// limit, import lock and protocol trace. Aliases are accepted here and
+// report their canonical account; the store fields then describe
+// the namespace under the given name. Reads only. Requires the role
+// `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
+func (c *Client) GetAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAccountRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 // CloseImport Release the import lock
@@ -993,6 +1302,120 @@ func (c *Client) PutImportSieve(ctx context.Context, account Account, params *Pu
 	return c.Client.Do(req)
 }
 
+// ListMailboxes Mailboxes of an account, page by page
+//
+// Mailboxes in name order with registry data and index header (one
+// read per mailbox; message counts only in getMailbox). `after`
+// continues after the `next` value of the previous page; `name`
+// returns only the mailbox with that exact name. The account must be
+// canonical. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes (the `ListMailboxes` operationId).
+func (c *Client) ListMailboxes(ctx context.Context, account Account, params *ListMailboxesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListMailboxesRequest(c.Server, account, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetMailbox One mailbox in detail
+//
+// Registry data, index header and counts over all messages (reads
+// every index shard of the mailbox). Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
+func (c *Client) GetMailbox(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetMailboxRequest(c.Server, account, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetMailboxACL ACL of a mailbox
+//
+// The explicit entries (the owner has all rights implicitly and is not
+// listed) and the ACL generation. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl (the `GetMailboxACL` operationId).
+func (c *Client) GetMailboxACL(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetMailboxACLRequest(c.Server, account, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ExplainMailboxACL Why a principal can (not) use a mailbox
+//
+// Resolves the principal to its canonical account, computes its
+// effective rights with the same function IMAP uses (own entry plus
+// "anyone") and checks the pointer in the principal's registry that
+// makes the mailbox appear under "Other Users/". `findings` names
+// every reason in plain text. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
+func (c *Client) ExplainMailboxACL(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExplainMailboxACLRequest(c.Server, account, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetQuota Quota usage and limit
+//
+// Stored usage counters and the effective limit (0 = unlimited).
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/quota (the `GetQuota` operationId).
+func (c *Client) GetQuota(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetQuotaRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListSharedMailboxes Mailboxes of other accounts shared with this account
+//
+// The pointers in the account's registry ("Other Users/<owner>/...").
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
+func (c *Client) ListSharedMailboxes(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSharedMailboxesRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ClearTrace Switch the protocol trace off
 //
 // Removes the switch; a traced session stops at its next command once
@@ -1110,6 +1533,25 @@ func (c *Client) DeliverWithBody(ctx context.Context, params *DeliverParams, con
 	return c.Client.Do(req)
 }
 
+// GetServerStatus Server status
+//
+// Version, instance, start time, a fingerprint of the effective
+// configuration (secrets excluded) and whether the store answers.
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
+func (c *Client) GetServerStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetServerStatusRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetVersion Server version
 //
 // Requires the role `diagnose`.
@@ -1125,6 +1567,40 @@ func (c *Client) GetVersion(ctx context.Context, reqEditors ...RequestEditorFn) 
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewGetAccountRequest constructs an http.Request for the GetAccount method
+func NewGetAccountRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewCloseImportRequest constructs an http.Request for the CloseImport method
@@ -1792,6 +2268,305 @@ func NewPutImportSieveRequestWithBody(server string, account Account, params *Pu
 	return req, nil
 }
 
+// NewListMailboxesRequest constructs an http.Request for the ListMailboxes method
+func NewListMailboxesRequest(server string, account Account, params *ListMailboxesParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Name != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "name", *params.Name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetMailboxRequest constructs an http.Request for the GetMailbox method
+func NewGetMailboxRequest(server string, account Account, id MailboxID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetMailboxACLRequest constructs an http.Request for the GetMailboxACL method
+func NewGetMailboxACLRequest(server string, account Account, id MailboxID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/acl", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewExplainMailboxACLRequest constructs an http.Request for the ExplainMailboxACL method
+func NewExplainMailboxACLRequest(server string, account Account, id MailboxID, params *ExplainMailboxACLParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/acl/explain", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "principal", params.Principal, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetQuotaRequest constructs an http.Request for the GetQuota method
+func NewGetQuotaRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/quota", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListSharedMailboxesRequest constructs an http.Request for the ListSharedMailboxes method
+func NewListSharedMailboxesRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/shared", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewClearTraceRequest constructs an http.Request for the ClearTrace method
 func NewClearTraceRequest(server string, account Account) (*http.Request, error) {
 	var err error
@@ -2007,6 +2782,33 @@ func NewDeliverRequestWithBody(server string, params *DeliverParams, contentType
 	return req, nil
 }
 
+// NewGetServerStatusRequest constructs an http.Request for the GetServerStatus method
+func NewGetServerStatusRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/server")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetVersionRequest constructs an http.Request for the GetVersion method
 func NewGetVersionRequest(server string) (*http.Request, error) {
 	var err error
@@ -2077,6 +2879,20 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+
+	// GetAccountWithResponse Account overview
+	//
+	// Resolves the account through Nauthilus (canonical account) and
+	// shows its store state: whether mailboxes exist, quota usage and
+	// limit, import lock and protocol trace. Aliases are accepted here and
+	// report their canonical account; the store fields then describe
+	// the namespace under the given name. Reads only. Requires the role
+	// `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
+	GetAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetAccountResponse, error)
 
 	// CloseImportWithResponse Release the import lock
 	//
@@ -2250,6 +3066,72 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
 	PutImportSieveWithResponse(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportSieveResponse, error)
 
+	// ListMailboxesWithResponse Mailboxes of an account, page by page
+	//
+	// Mailboxes in name order with registry data and index header (one
+	// read per mailbox; message counts only in getMailbox). `after`
+	// continues after the `next` value of the previous page; `name`
+	// returns only the mailbox with that exact name. The account must be
+	// canonical. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes (the `ListMailboxes` operationId).
+	ListMailboxesWithResponse(ctx context.Context, account Account, params *ListMailboxesParams, reqEditors ...RequestEditorFn) (*ListMailboxesResponse, error)
+
+	// GetMailboxWithResponse One mailbox in detail
+	//
+	// Registry data, index header and counts over all messages (reads
+	// every index shard of the mailbox). Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
+	GetMailboxWithResponse(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*GetMailboxResponse, error)
+
+	// GetMailboxACLWithResponse ACL of a mailbox
+	//
+	// The explicit entries (the owner has all rights implicitly and is not
+	// listed) and the ACL generation. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl (the `GetMailboxACL` operationId).
+	GetMailboxACLWithResponse(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*GetMailboxACLResponse, error)
+
+	// ExplainMailboxACLWithResponse Why a principal can (not) use a mailbox
+	//
+	// Resolves the principal to its canonical account, computes its
+	// effective rights with the same function IMAP uses (own entry plus
+	// "anyone") and checks the pointer in the principal's registry that
+	// makes the mailbox appear under "Other Users/". `findings` names
+	// every reason in plain text. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
+	ExplainMailboxACLWithResponse(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*ExplainMailboxACLResponse, error)
+
+	// GetQuotaWithResponse Quota usage and limit
+	//
+	// Stored usage counters and the effective limit (0 = unlimited).
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/quota (the `GetQuota` operationId).
+	GetQuotaWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetQuotaResponse, error)
+
+	// ListSharedMailboxesWithResponse Mailboxes of other accounts shared with this account
+	//
+	// The pointers in the account's registry ("Other Users/<owner>/...").
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
+	ListSharedMailboxesWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSharedMailboxesResponse, error)
+
 	// ClearTraceWithResponse Switch the protocol trace off
 	//
 	// Removes the switch; a traced session stops at its next command once
@@ -2321,6 +3203,17 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBodyWithResponse(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeliverResponse, error)
 
+	// GetServerStatusWithResponse Server status
+	//
+	// Version, instance, start time, a fingerprint of the effective
+	// configuration (secrets excluded) and whether the store answers.
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
+	GetServerStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetServerStatusResponse, error)
+
 	// GetVersionWithResponse Server version
 	//
 	// Requires the role `diagnose`.
@@ -2329,6 +3222,54 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/version (the `GetVersion` operationId).
 	GetVersionWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetVersionResponse, error)
+}
+
+type GetAccountResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AccountStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetAccountResponse) GetJSON200() *AccountStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetAccountResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetAccountResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAccountResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAccountResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetAccountResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type CloseImportResponse struct {
@@ -2831,6 +3772,294 @@ func (r PutImportSieveResponse) ContentType() string {
 	return ""
 }
 
+type ListMailboxesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxPage
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListMailboxesResponse) GetJSON200() *MailboxPage {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListMailboxesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListMailboxesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListMailboxesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListMailboxesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListMailboxesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetMailboxResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxDetail
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetMailboxResponse) GetJSON200() *MailboxDetail {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetMailboxResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetMailboxResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetMailboxResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetMailboxResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetMailboxResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetMailboxACLResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxACL
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetMailboxACLResponse) GetJSON200() *MailboxACL {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetMailboxACLResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetMailboxACLResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetMailboxACLResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetMailboxACLResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetMailboxACLResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ExplainMailboxACLResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ACLExplanation
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ExplainMailboxACLResponse) GetJSON200() *ACLExplanation {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ExplainMailboxACLResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ExplainMailboxACLResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ExplainMailboxACLResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExplainMailboxACLResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ExplainMailboxACLResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetQuotaResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *QuotaStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetQuotaResponse) GetJSON200() *QuotaStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetQuotaResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetQuotaResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetQuotaResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetQuotaResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetQuotaResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListSharedMailboxesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SharedList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListSharedMailboxesResponse) GetJSON200() *SharedList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListSharedMailboxesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListSharedMailboxesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSharedMailboxesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSharedMailboxesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListSharedMailboxesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ClearTraceResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3016,6 +4245,54 @@ func (r DeliverResponse) ContentType() string {
 	return ""
 }
 
+type GetServerStatusResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ServerStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetServerStatusResponse) GetJSON200() *ServerStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetServerStatusResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetServerStatusResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetServerStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetServerStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetServerStatusResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetVersionResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3062,6 +4339,26 @@ func (r GetVersionResponse) ContentType() string {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
+}
+
+// GetAccountWithResponse Account overview
+//
+// Resolves the account through Nauthilus (canonical account) and
+// shows its store state: whether mailboxes exist, quota usage and
+// limit, import lock and protocol trace. Aliases are accepted here and
+// report their canonical account; the store fields then describe
+// the namespace under the given name. Reads only. Requires the role
+// `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
+func (c *ClientWithResponses) GetAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetAccountResponse, error) {
+	rsp, err := c.GetAccount(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAccountResponse(rsp)
 }
 
 // CloseImportWithResponse Release the import lock
@@ -3338,6 +4635,108 @@ func (c *ClientWithResponses) PutImportSieveWithResponse(ctx context.Context, ac
 	return ParsePutImportSieveResponse(rsp)
 }
 
+// ListMailboxesWithResponse Mailboxes of an account, page by page
+//
+// Mailboxes in name order with registry data and index header (one
+// read per mailbox; message counts only in getMailbox). `after`
+// continues after the `next` value of the previous page; `name`
+// returns only the mailbox with that exact name. The account must be
+// canonical. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes (the `ListMailboxes` operationId).
+func (c *ClientWithResponses) ListMailboxesWithResponse(ctx context.Context, account Account, params *ListMailboxesParams, reqEditors ...RequestEditorFn) (*ListMailboxesResponse, error) {
+	rsp, err := c.ListMailboxes(ctx, account, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListMailboxesResponse(rsp)
+}
+
+// GetMailboxWithResponse One mailbox in detail
+//
+// Registry data, index header and counts over all messages (reads
+// every index shard of the mailbox). Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
+func (c *ClientWithResponses) GetMailboxWithResponse(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*GetMailboxResponse, error) {
+	rsp, err := c.GetMailbox(ctx, account, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetMailboxResponse(rsp)
+}
+
+// GetMailboxACLWithResponse ACL of a mailbox
+//
+// The explicit entries (the owner has all rights implicitly and is not
+// listed) and the ACL generation. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl (the `GetMailboxACL` operationId).
+func (c *ClientWithResponses) GetMailboxACLWithResponse(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*GetMailboxACLResponse, error) {
+	rsp, err := c.GetMailboxACL(ctx, account, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetMailboxACLResponse(rsp)
+}
+
+// ExplainMailboxACLWithResponse Why a principal can (not) use a mailbox
+//
+// Resolves the principal to its canonical account, computes its
+// effective rights with the same function IMAP uses (own entry plus
+// "anyone") and checks the pointer in the principal's registry that
+// makes the mailbox appear under "Other Users/". `findings` names
+// every reason in plain text. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
+func (c *ClientWithResponses) ExplainMailboxACLWithResponse(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*ExplainMailboxACLResponse, error) {
+	rsp, err := c.ExplainMailboxACL(ctx, account, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExplainMailboxACLResponse(rsp)
+}
+
+// GetQuotaWithResponse Quota usage and limit
+//
+// Stored usage counters and the effective limit (0 = unlimited).
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/quota (the `GetQuota` operationId).
+func (c *ClientWithResponses) GetQuotaWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetQuotaResponse, error) {
+	rsp, err := c.GetQuota(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetQuotaResponse(rsp)
+}
+
+// ListSharedMailboxesWithResponse Mailboxes of other accounts shared with this account
+//
+// The pointers in the account's registry ("Other Users/<owner>/...").
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
+func (c *ClientWithResponses) ListSharedMailboxesWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSharedMailboxesResponse, error) {
+	rsp, err := c.ListSharedMailboxes(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSharedMailboxesResponse(rsp)
+}
+
 // ClearTraceWithResponse Switch the protocol trace off
 //
 // Removes the switch; a traced session stops at its next command once
@@ -3439,6 +4838,23 @@ func (c *ClientWithResponses) DeliverWithBodyWithResponse(ctx context.Context, p
 	return ParseDeliverResponse(rsp)
 }
 
+// GetServerStatusWithResponse Server status
+//
+// Version, instance, start time, a fingerprint of the effective
+// configuration (secrets excluded) and whether the store answers.
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
+func (c *ClientWithResponses) GetServerStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetServerStatusResponse, error) {
+	rsp, err := c.GetServerStatus(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetServerStatusResponse(rsp)
+}
+
 // GetVersionWithResponse Server version
 //
 // Requires the role `diagnose`.
@@ -3452,6 +4868,39 @@ func (c *ClientWithResponses) GetVersionWithResponse(ctx context.Context, reqEdi
 		return nil, err
 	}
 	return ParseGetVersionResponse(rsp)
+}
+
+// ParseGetAccountResponse parses an HTTP response from a GetAccountWithResponse call
+func ParseGetAccountResponse(rsp *http.Response) (*GetAccountResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAccountResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AccountStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseCloseImportResponse parses an HTTP response from a CloseImportWithResponse call
@@ -3801,6 +5250,204 @@ func ParsePutImportSieveResponse(rsp *http.Response) (*PutImportSieveResponse, e
 	return response, nil
 }
 
+// ParseListMailboxesResponse parses an HTTP response from a ListMailboxesWithResponse call
+func ParseListMailboxesResponse(rsp *http.Response) (*ListMailboxesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListMailboxesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxPage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetMailboxResponse parses an HTTP response from a GetMailboxWithResponse call
+func ParseGetMailboxResponse(rsp *http.Response) (*GetMailboxResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetMailboxResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetMailboxACLResponse parses an HTTP response from a GetMailboxACLWithResponse call
+func ParseGetMailboxACLResponse(rsp *http.Response) (*GetMailboxACLResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetMailboxACLResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxACL
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExplainMailboxACLResponse parses an HTTP response from a ExplainMailboxACLWithResponse call
+func ParseExplainMailboxACLResponse(rsp *http.Response) (*ExplainMailboxACLResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExplainMailboxACLResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ACLExplanation
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetQuotaResponse parses an HTTP response from a GetQuotaWithResponse call
+func ParseGetQuotaResponse(rsp *http.Response) (*GetQuotaResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetQuotaResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest QuotaStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListSharedMailboxesResponse parses an HTTP response from a ListSharedMailboxesWithResponse call
+func ParseListSharedMailboxesResponse(rsp *http.Response) (*ListSharedMailboxesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSharedMailboxesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SharedList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseClearTraceResponse parses an HTTP response from a ClearTraceWithResponse call
 func ParseClearTraceResponse(rsp *http.Response) (*ClearTraceResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -3929,6 +5576,39 @@ func ParseDeliverResponse(rsp *http.Response) (*DeliverResponse, error) {
 	return response, nil
 }
 
+// ParseGetServerStatusResponse parses an HTTP response from a GetServerStatusWithResponse call
+func ParseGetServerStatusResponse(rsp *http.Response) (*GetServerStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetServerStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ServerStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetVersionResponse parses an HTTP response from a GetVersionWithResponse call
 func ParseGetVersionResponse(rsp *http.Response) (*GetVersionResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -3964,6 +5644,9 @@ func ParseGetVersionResponse(rsp *http.Response) (*GetVersionResponse, error) {
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// GetAccount Account overview
+	// (GET /admin/v1/accounts/{account})
+	GetAccount(w http.ResponseWriter, r *http.Request, account Account)
 	// CloseImport Release the import lock
 	// (DELETE /admin/v1/accounts/{account}/import)
 	CloseImport(w http.ResponseWriter, r *http.Request, account Account, params CloseImportParams)
@@ -3997,6 +5680,24 @@ type ServerInterface interface {
 	// PutImportSieve Replace the Sieve scripts and the active script
 	// (PUT /admin/v1/accounts/{account}/import/sieve)
 	PutImportSieve(w http.ResponseWriter, r *http.Request, account Account, params PutImportSieveParams)
+	// ListMailboxes Mailboxes of an account, page by page
+	// (GET /admin/v1/accounts/{account}/mailboxes)
+	ListMailboxes(w http.ResponseWriter, r *http.Request, account Account, params ListMailboxesParams)
+	// GetMailbox One mailbox in detail
+	// (GET /admin/v1/accounts/{account}/mailboxes/{id})
+	GetMailbox(w http.ResponseWriter, r *http.Request, account Account, id MailboxID)
+	// GetMailboxACL ACL of a mailbox
+	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/acl)
+	GetMailboxACL(w http.ResponseWriter, r *http.Request, account Account, id MailboxID)
+	// ExplainMailboxACL Why a principal can (not) use a mailbox
+	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain)
+	ExplainMailboxACL(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ExplainMailboxACLParams)
+	// GetQuota Quota usage and limit
+	// (GET /admin/v1/accounts/{account}/quota)
+	GetQuota(w http.ResponseWriter, r *http.Request, account Account)
+	// ListSharedMailboxes Mailboxes of other accounts shared with this account
+	// (GET /admin/v1/accounts/{account}/shared)
+	ListSharedMailboxes(w http.ResponseWriter, r *http.Request, account Account)
 	// ClearTrace Switch the protocol trace off
 	// (DELETE /admin/v1/accounts/{account}/trace)
 	ClearTrace(w http.ResponseWriter, r *http.Request, account Account)
@@ -4009,6 +5710,9 @@ type ServerInterface interface {
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
+	// GetServerStatus Server status
+	// (GET /admin/v1/server)
+	GetServerStatus(w http.ResponseWriter, r *http.Request)
 	// GetVersion Server version
 	// (GET /admin/v1/version)
 	GetVersion(w http.ResponseWriter, r *http.Request)
@@ -4022,6 +5726,32 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// GetAccount operation middleware
+func (siw *ServerInterfaceWrapper) GetAccount(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAccount(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // CloseImport operation middleware
 func (siw *ServerInterfaceWrapper) CloseImport(w http.ResponseWriter, r *http.Request) {
@@ -4669,6 +6399,247 @@ func (siw *ServerInterfaceWrapper) PutImportSieve(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// ListMailboxes operation middleware
+func (siw *ServerInterfaceWrapper) ListMailboxes(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListMailboxesParams
+
+	// ------------- Optional query parameter "after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after", r.URL.Query(), &params.After, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "name" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "name", r.URL.Query(), &params.Name, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "name"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListMailboxes(w, r, account, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetMailbox operation middleware
+func (siw *ServerInterfaceWrapper) GetMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetMailbox(w, r, account, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetMailboxACL operation middleware
+func (siw *ServerInterfaceWrapper) GetMailboxACL(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetMailboxACL(w, r, account, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ExplainMailboxACL operation middleware
+func (siw *ServerInterfaceWrapper) ExplainMailboxACL(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ExplainMailboxACLParams
+
+	// ------------- Required query parameter "principal" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "principal", r.URL.Query(), &params.Principal, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "principal"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "principal", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ExplainMailboxACL(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetQuota operation middleware
+func (siw *ServerInterfaceWrapper) GetQuota(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetQuota(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListSharedMailboxes operation middleware
+func (siw *ServerInterfaceWrapper) ListSharedMailboxes(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListSharedMailboxes(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ClearTrace operation middleware
 func (siw *ServerInterfaceWrapper) ClearTrace(w http.ResponseWriter, r *http.Request) {
 
@@ -4832,6 +6803,20 @@ func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Reques
 	handler.ServeHTTP(w, r)
 }
 
+// GetServerStatus operation middleware
+func (siw *ServerInterfaceWrapper) GetServerStatus(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetServerStatus(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetVersion operation middleware
 func (siw *ServerInterfaceWrapper) GetVersion(w http.ResponseWriter, r *http.Request) {
 
@@ -4967,6 +6952,14 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/version", wrapper.GetVersion)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/server", wrapper.GetServerStatus)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}", wrapper.GetAccount)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes", wrapper.ListMailboxes)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}", wrapper.GetMailbox)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl", wrapper.GetMailboxACL)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl/explain", wrapper.ExplainMailboxACL)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/quota", wrapper.GetQuota)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/shared", wrapper.ListSharedMailboxes)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/deliveries", wrapper.Deliver)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.CloseImport)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.OpenImport)

@@ -21,7 +21,7 @@ const RoleTrace = "trace"
 func (s *Server) beginTrace(w http.ResponseWriter, r *http.Request, account string) (model.User, model.Tracer, bool) {
 	auditf(r, "account", account)
 
-	if !require(w, r, RoleTrace) {
+	if !requireAccount(w, r, RoleTrace, account) {
 		return nil, nil, false
 	}
 

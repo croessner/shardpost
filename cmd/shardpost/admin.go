@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"shardpost/internal/admin"
@@ -25,7 +26,7 @@ type adminServers struct {
 
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
-func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, importer delivery.Store) (*adminServers, error) {
+func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
 
@@ -33,10 +34,17 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		return a, nil
 	}
 
-	clients := map[string][]string{}
+	clients, scopes := map[string][]string{}, map[string][]string{}
 	for _, cl := range c.Clients {
 		clients[cl.Identity] = cl.Roles
+
+		if len(cl.Accounts) > 0 {
+			scopes[cl.Identity] = cl.Accounts
+		}
 	}
+
+	importer := importStore{store}
+	instance, _ := os.Hostname()
 
 	s := admin.New(admin.Options{Delivery: deliverer, Auth: authn, Log: log.With("component", "admin"), Version: version.Version,
 		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients,
@@ -44,7 +52,9 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		ImportMaxBatchBytes: c.Import.MaxBatchBytes, ImportMaxBatchMessages: c.Import.MaxBatchMessages, ImportMaxInventory: c.Import.MaxInventory, ImportMaxChanges: c.Import.MaxChanges,
 		ImportShardSize: c.Import.ShardSize, Accounts: importer,
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
-		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second})
+		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
+		ClientScopes:         scopes, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
+		StorePing: store.Ping})
 
 	if c.Addr != "" {
 		srv, err := s.TLSServer(c.TLSCert, c.TLSKey, c.ClientCA)

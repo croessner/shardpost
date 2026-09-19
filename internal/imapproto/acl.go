@@ -107,24 +107,7 @@ func (c *conn) rightsOf(t *target) (string, error) {
 		return "", err
 	}
 
-	return effectiveRights(acl, c.name), nil
-}
-
-func effectiveRights(acl map[string]string, account string) string {
-	set := map[rune]bool{}
-	for _, r := range acl[account] + acl["anyone"] {
-		set[r] = true
-	}
-
-	var b strings.Builder
-
-	for _, r := range model.AllRights {
-		if set[r] {
-			b.WriteRune(r)
-		}
-	}
-
-	return b.String()
+	return model.EffectiveRights(acl, c.name), nil
 }
 
 // needRight checks one right on the target and answers the client on
@@ -168,7 +151,7 @@ func (c *conn) parentRights(t *target, name string) (string, error) {
 
 		acl, err := t.u.GetACL(n)
 		if err == nil {
-			return effectiveRights(acl, c.name), nil
+			return model.EffectiveRights(acl, c.name), nil
 		}
 
 		if !errors.Is(err, model.ErrNoMailbox) {

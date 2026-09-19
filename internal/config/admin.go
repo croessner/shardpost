@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -67,6 +68,10 @@ type AdminImport struct {
 type AdminClient struct {
 	Identity string   `mapstructure:"identity" validate:"required"`
 	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace"`
+	// Accounts limits the accounts the client may address (path.Match
+	// patterns on the lower-cased canonical account, e.g. "*@example.org");
+	// empty means all accounts.
+	Accounts []string `mapstructure:"accounts" validate:"dive,required"`
 }
 
 // Validate checks the listener settings and refuses settings without
@@ -119,6 +124,12 @@ func (c Admin) validateTLS() error {
 		}
 
 		seen[id] = true
+
+		for _, p := range cl.Accounts {
+			if _, err := path.Match(p, ""); err != nil {
+				return fmt.Errorf("admin client %q: invalid account pattern %q", cl.Identity, p)
+			}
+		}
 	}
 
 	return nil

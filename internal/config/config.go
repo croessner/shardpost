@@ -55,7 +55,7 @@ type Telemetry struct {
 // Ceph configures the RADOS connection and pools.
 type Ceph struct {
 	User      string `mapstructure:"user" env:"CEPH_USER"`
-	Key       string `mapstructure:"key" env:"CEPH_KEY"`
+	Key       string `mapstructure:"key" env:"CEPH_KEY" secret:"true"`
 	MonHost   string `mapstructure:"mon_host" env:"CEPH_MON_HOST"`
 	IndexPool string `mapstructure:"index_pool" env:"CEPH_INDEX_POOL"`
 	DataPool  string `mapstructure:"data_pool" env:"CEPH_DATA_POOL"`
@@ -81,15 +81,15 @@ type Server struct {
 	LmtpAddr                  string `mapstructure:"lmtp_addr" env:"LMTP_ADDR"`
 	LmtpHostname              string `mapstructure:"lmtp_hostname" env:"LMTP_HOSTNAME"`
 	LmtpAuthUser              string `mapstructure:"lmtp_auth_user" env:"LMTP_AUTH_USER"`
-	LmtpAuthPassword          string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD"`
+	LmtpAuthPassword          string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD" secret:"true"`
 	HTTPAddr                  string `mapstructure:"http_addr" env:"HTTP_ADDR"`
 	ImapAddr                  string `mapstructure:"imap_addr" env:"IMAP_ADDR"`
 	ImapsAddr                 string `mapstructure:"imaps_addr" env:"IMAPS_ADDR"`
 	DrainSeconds              int64  `mapstructure:"drain_seconds" env:"DRAIN_SECONDS" validate:"gte=0,lte=86400"`
 	AuthBackend               string `mapstructure:"auth_backend" env:"AUTH_BACKEND" validate:"oneof=static nauthilus"`
-	Users                     string `mapstructure:"users" env:"USERS"`
+	Users                     string `mapstructure:"users" env:"USERS" secret:"true"`
 	MasterUser                string `mapstructure:"master_user" env:"MASTER_USER"`
-	MasterPassword            string `mapstructure:"master_password" env:"MASTER_PASSWORD"`
+	MasterPassword            string `mapstructure:"master_password" env:"MASTER_PASSWORD" secret:"true"`
 	MasterUserSeparator       string `mapstructure:"master_user_separator" env:"MASTER_USER_SEPARATOR"`
 	ProxyProtocolTrustedCidrs string `mapstructure:"proxy_protocol_trusted_cidrs" env:"PROXY_PROTOCOL_TRUSTED_CIDRS"`
 	LmtpAuthPasswordFile      string `mapstructure:"lmtp_auth_password_file" env:"LMTP_AUTH_PASSWORD_FILE"`
@@ -99,7 +99,7 @@ type Server struct {
 // Rook locates the Ceph client credentials in a Rook-managed cluster.
 type Rook struct {
 	Namespace    string `mapstructure:"namespace" env:"ROOK_NAMESPACE"`
-	ClientSecret string `mapstructure:"client_secret" env:"ROOK_CLIENT_SECRET"`
+	ClientSecret string `mapstructure:"client_secret" env:"ROOK_CLIENT_SECRET" secret:"true"`
 }
 
 // TLS names the certificate and key for STARTTLS and implicit TLS.
@@ -122,7 +122,7 @@ type SMTP struct {
 	Starttls     bool   `mapstructure:"starttls" env:"SMTP_RELAY_STARTTLS"`
 	TLS          bool   `mapstructure:"tls" env:"SMTP_RELAY_TLS"`
 	User         string `mapstructure:"user" env:"SMTP_RELAY_USER"`
-	Password     string `mapstructure:"password" env:"SMTP_RELAY_PASSWORD"`
+	Password     string `mapstructure:"password" env:"SMTP_RELAY_PASSWORD" secret:"true"`
 	ServerName   string `mapstructure:"server_name" env:"SMTP_RELAY_SERVER_NAME"`
 	PasswordFile string `mapstructure:"password_file" env:"SMTP_RELAY_PASSWORD_FILE"`
 }
@@ -138,13 +138,13 @@ type Scrub struct {
 type Nauthilus struct {
 	URL                  string `mapstructure:"url" env:"NAUTHILUS_URL"`
 	User                 string `mapstructure:"user" env:"NAUTHILUS_USER"`
-	Password             string `mapstructure:"password" env:"NAUTHILUS_PASSWORD"`
-	Token                string `mapstructure:"token" env:"NAUTHILUS_TOKEN"`
+	Password             string `mapstructure:"password" env:"NAUTHILUS_PASSWORD" secret:"true"`
+	Token                string `mapstructure:"token" env:"NAUTHILUS_TOKEN" secret:"true"`
 	BearerMode           string `mapstructure:"bearer_mode" env:"NAUTHILUS_BEARER_MODE" validate:"oneof=password introspect"`
 	MaxWait              int64  `mapstructure:"max_wait" env:"NAUTHILUS_MAX_WAIT" validate:"gte=0,lte=86400"`
 	IntrospectURL        string `mapstructure:"introspect_url" env:"NAUTHILUS_INTROSPECT_URL"`
 	OidcClientID         string `mapstructure:"oidc_client_id" env:"NAUTHILUS_OIDC_CLIENT_ID"`
-	OidcClientSecret     string `mapstructure:"oidc_client_secret" env:"NAUTHILUS_OIDC_CLIENT_SECRET"`
+	OidcClientSecret     string `mapstructure:"oidc_client_secret" env:"NAUTHILUS_OIDC_CLIENT_SECRET" secret:"true"`
 	OidcAudience         string `mapstructure:"oidc_audience" env:"NAUTHILUS_OIDC_AUDIENCE"`
 	OidcScope            string `mapstructure:"oidc_scope" env:"NAUTHILUS_OIDC_SCOPE"`
 	AccountClaims        string `mapstructure:"account_claims" env:"NAUTHILUS_ACCOUNT_CLAIMS"`

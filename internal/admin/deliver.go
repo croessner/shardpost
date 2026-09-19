@@ -59,17 +59,10 @@ func (s *Server) Deliver(w http.ResponseWriter, r *http.Request, p adminapi.Deli
 
 	detached := context.WithoutCancel(r.Context())
 
-	lctx, cancel := context.WithTimeout(detached, lookupTimeout)
-	res, err := s.o.Auth.Lookup(lctx, p.Recipient, "lmtp", clientAddr(r))
-
-	cancel()
-
-	if err != nil {
-		s.deliveryError(w, r, err)
+	res, ok := s.resolveRecipient(w, r, p.Recipient)
+	if !ok {
 		return
 	}
-
-	auditf(r, "account", res.Account)
 
 	rcpt := strings.Trim(p.Recipient, "<>")
 	msg := append(s.received(r, rcpt), raw...)
@@ -190,4 +183,27 @@ func deref(p *string) string {
 	}
 
 	return *p
+}
+
+// resolveRecipient looks the recipient up like an LMTP recipient and
+// checks the client scope on its account; ok false means the response
+// is written.
+func (s *Server) resolveRecipient(w http.ResponseWriter, r *http.Request, recipient string) (*auth.Result, bool) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), lookupTimeout)
+	defer cancel()
+
+	res, err := s.o.Auth.Lookup(ctx, recipient, "lmtp", clientAddr(r))
+	if err != nil {
+		s.deliveryError(w, r, err)
+		return nil, false
+	}
+
+	auditf(r, "account", res.Account)
+
+	if !principalOf(r.Context()).inScope(res.Account) {
+		writeError(w, http.StatusForbidden, adminapi.Forbidden, "account outside the client's scope")
+		return nil, false
+	}
+
+	return res, true
 }

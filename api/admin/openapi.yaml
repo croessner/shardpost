@@ -26,6 +26,193 @@ paths:
                 $ref: "#/components/schemas/Version"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/server:
+    get:
+      operationId: getServerStatus
+      summary: Server status
+      description: |
+        Version, instance, start time, a fingerprint of the effective
+        configuration (secrets excluded) and whether the store answers.
+        Requires the role `diagnose`.
+      responses:
+        "200":
+          description: Status of this server instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerStatus"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: getAccount
+      summary: Account overview
+      description: |
+        Resolves the account through Nauthilus (canonical account) and
+        shows its store state: whether mailboxes exist, quota usage and
+        limit, import lock and protocol trace. Aliases are accepted here and
+        report their canonical account; the store fields then describe
+        the namespace under the given name. Reads only. Requires the role
+        `diagnose`.
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountStatus"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: listMailboxes
+      summary: Mailboxes of an account, page by page
+      description: |
+        Mailboxes in name order with registry data and index header (one
+        read per mailbox; message counts only in getMailbox). `after`
+        continues after the `next` value of the previous page; `name`
+        returns only the mailbox with that exact name. The account must be
+        canonical. Requires the role `diagnose`.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 1024
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxPage"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+    get:
+      operationId: getMailbox
+      summary: One mailbox in detail
+      description: |
+        Registry data, index header and counts over all messages (reads
+        every index shard of the mailbox). Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The mailbox.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxDetail"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/acl:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+    get:
+      operationId: getMailboxACL
+      summary: ACL of a mailbox
+      description: |
+        The explicit entries (the owner has all rights implicitly and is not
+        listed) and the ACL generation. Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The ACL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxACL"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+    get:
+      operationId: explainMailboxACL
+      summary: Why a principal can (not) use a mailbox
+      description: |
+        Resolves the principal to its canonical account, computes its
+        effective rights with the same function IMAP uses (own entry plus
+        "anyone") and checks the pointer in the principal's registry that
+        makes the mailbox appear under "Other Users/". `findings` names
+        every reason in plain text. Requires the role `diagnose`.
+      parameters:
+        - name: principal
+          in: query
+          required: true
+          description: Account (or alias) whose access is explained.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 320
+      responses:
+        "200":
+          description: The explanation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ACLExplanation"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/quota:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: getQuota
+      summary: Quota usage and limit
+      description: |
+        Stored usage counters and the effective limit (0 = unlimited).
+        Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The quota.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaStatus"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/shared:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: listSharedMailboxes
+      summary: Mailboxes of other accounts shared with this account
+      description: |
+        The pointers in the account's registry ("Other Users/<owner>/...").
+        Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The pointers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SharedList"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/deliveries:
     post:
       operationId: deliver
@@ -695,3 +882,241 @@ components:
         set_at:
           type: string
           format: date-time
+    ServerStatus:
+      type: object
+      required: [version, go_version, instance, started_at, config_fingerprint, store]
+      properties:
+        version:
+          type: string
+        go_version:
+          type: string
+        instance:
+          type: string
+          description: Host name of the answering server (pod).
+        started_at:
+          type: string
+          format: date-time
+        config_fingerprint:
+          type: string
+          description: SHA-256 over the effective configuration without secret values.
+        store:
+          $ref: "#/components/schemas/StoreStatus"
+    StoreStatus:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+    AccountStatus:
+      type: object
+      required: [account, lookup, store_exists, mailboxes, quota, import_locked, trace_active]
+      properties:
+        account:
+          type: string
+        lookup:
+          type: string
+          enum: [canonical, alias, unknown, unavailable]
+          description: Outcome of the Nauthilus lookup of `account`.
+        canonical_account:
+          type: string
+        store_exists:
+          type: boolean
+          description: Whether the store namespace of `account` has mailboxes.
+        mailboxes:
+          type: integer
+        quota:
+          $ref: "#/components/schemas/QuotaStatus"
+        import_locked:
+          type: boolean
+        trace_active:
+          type: boolean
+        trace_until:
+          type: string
+          format: date-time
+    MailboxSummary:
+      type: object
+      required: [id, name, uidvalidity, uid_next, highest_modseq, shard_size, subscribed, special_use, acl_entries]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        uidvalidity:
+          type: integer
+          format: int64
+        uid_next:
+          type: integer
+          format: int64
+        highest_modseq:
+          type: integer
+          format: int64
+        shard_size:
+          type: integer
+          format: int64
+        subscribed:
+          type: boolean
+        special_use:
+          type: array
+          items:
+            type: string
+        acl_entries:
+          type: integer
+    MailboxPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MailboxSummary"
+        next:
+          type: string
+          description: Pass as `after` for the next page; absent on the last page.
+    MailboxDetail:
+      type: object
+      required: [mailbox, messages, unseen, deleted, size_bytes, shards, log_start, recent_from, keywords]
+      properties:
+        mailbox:
+          $ref: "#/components/schemas/MailboxSummary"
+        messages:
+          type: integer
+          format: int64
+        unseen:
+          type: integer
+          format: int64
+        deleted:
+          type: integer
+          format: int64
+        size_bytes:
+          type: integer
+          format: int64
+        shards:
+          type: integer
+          format: int64
+          description: Index shards covering UIDs below uid_next.
+        log_start:
+          type: integer
+          format: int64
+          description: Oldest modseq the change log covers (QRESYNC horizon).
+        recent_from:
+          type: integer
+          format: int64
+        keywords:
+          type: array
+          items:
+            type: string
+    ACLEntry:
+      type: object
+      required: [identifier, rights]
+      properties:
+        identifier:
+          type: string
+        rights:
+          type: string
+    MailboxACL:
+      type: object
+      required: [owner, mailbox, generation, entries]
+      properties:
+        owner:
+          type: string
+        mailbox:
+          type: string
+        generation:
+          type: integer
+          format: int64
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/ACLEntry"
+    ACLExplanation:
+      type: object
+      required: [owner, mailbox, principal, lookup, rights, is_owner, own_entry, anyone_entry, visible, pointer, findings]
+      properties:
+        owner:
+          type: string
+        mailbox:
+          type: string
+        principal:
+          type: string
+        lookup:
+          type: string
+          enum: [canonical, alias, unknown, unavailable]
+        canonical_principal:
+          type: string
+        rights:
+          type: string
+          description: Effective rights of the canonical principal.
+        is_owner:
+          type: boolean
+        own_entry:
+          type: string
+          description: Rights of the principal's own ACL entry ("" if none).
+        anyone_entry:
+          type: string
+        visible:
+          type: boolean
+          description: The principal can see the mailbox (right l or owner).
+        pointer:
+          $ref: "#/components/schemas/SharedPointer"
+        findings:
+          type: array
+          items:
+            type: string
+    SharedPointer:
+      type: object
+      required: [present]
+      properties:
+        present:
+          type: boolean
+        subscribed:
+          type: boolean
+        generation:
+          type: integer
+          format: int64
+          description: |
+            ACL generation of the last pointer write for this principal
+            (informational; SETACLs for other identifiers raise the
+            mailbox's generation without touching this pointer).
+    SharedRef:
+      type: object
+      required: [owner, mailbox, subscribed, generation]
+      properties:
+        owner:
+          type: string
+        mailbox:
+          type: string
+        subscribed:
+          type: boolean
+        generation:
+          type: integer
+          format: int64
+    SharedList:
+      type: object
+      required: [account, items]
+      properties:
+        account:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SharedRef"
+    QuotaStatus:
+      type: object
+      required: [usage_bytes, usage_messages, limit_bytes, limit_messages]
+      properties:
+        usage_bytes:
+          type: integer
+          format: int64
+        usage_messages:
+          type: integer
+          format: int64
+        limit_bytes:
+          type: integer
+          format: int64
+          description: 0 is unlimited.
+        limit_messages:
+          type: integer
+          format: int64
+          description: 0 is unlimited.

@@ -6,6 +6,7 @@
 //	shardpostctl [connection flags] deliver -d <recipient> [-f <sender>] [-m <mailbox>] [--no-sieve] [--no-enforce-quota] < message
 //	shardpostctl [connection flags] migrate [flags] <account>
 //	shardpostctl [connection flags] trace on [-for 30m] | off | status <account>
+//	shardpostctl [connection flags] server status | account show | mailbox list|show | acl list|explain | quota show | shared list
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -13,7 +14,8 @@
 // unexpected answer. migrate copies an account from an IMAP source with
 // its UIDs (see migrate -h) and exits 0 when everything was verified, 1
 // when parts failed, 64 on usage errors and 69 when the run failed. trace
-// switches the protocol trace of an account (lines in the server log).
+// switches the protocol trace of an account (lines in the server log);
+// the diagnosis commands only read (see diagnose.go).
 package main
 
 import (
@@ -43,6 +45,14 @@ const (
 
 const defaultSocket = "/run/shardpost/admin.sock"
 
+// Command nouns that also label output rows.
+const (
+	cmdVersion = "version"
+	cmdTrace   = "trace"
+	cmdAccount = "account"
+	cmdQuota   = "quota"
+)
+
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 // connection are the global flags that select the listener.
@@ -64,7 +74,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account>")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ...")
 		return exUsage
 	}
 
@@ -75,14 +85,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	switch fs.Arg(0) {
-	case "version":
+	case cmdVersion:
 		return version(client, stdout, stderr)
 	case "deliver":
 		return deliver(client, fs.Args()[1:], stdin, stdout, stderr)
 	case "migrate":
 		return migrateCmd(client, fs.Args()[1:], stdout, stderr)
-	case "trace":
+	case cmdTrace:
 		return traceCmd(client, fs.Args()[1:], stdout, stderr)
+	case "server", cmdAccount, "mailbox", "acl", cmdQuota, "shared":
+		return diagCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
 	default:
 		sayln(stderr, "shardpostctl: unknown command", fs.Arg(0))
 		return exUsage

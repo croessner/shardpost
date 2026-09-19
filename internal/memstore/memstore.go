@@ -121,6 +121,27 @@ func (u *User) ListMailboxes() ([]model.Mailbox, error) {
 	return out, nil
 }
 
+var _ model.MailboxPager = (*User)(nil)
+
+// ListMailboxesAfter implements model.MailboxPager.
+func (u *User) ListMailboxesAfter(after string, limit int) ([]model.Mailbox, []string, error) {
+	all, err := u.ListMailboxes()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	i := sort.Search(len(all), func(i int) bool { return all[i].Name > after })
+	all = all[i:]
+	all = all[:min(limit, len(all))]
+
+	scanned := make([]string, len(all))
+	for i := range all {
+		scanned[i] = all[i].Name
+	}
+
+	return all, scanned, nil
+}
+
 func (u *User) lookup(name string) (*box, string, error) {
 	if strings.EqualFold(name, inboxName) {
 		name = inboxName

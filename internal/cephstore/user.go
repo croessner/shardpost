@@ -230,6 +230,46 @@ func (u *User) ListMailboxes() ([]Mailbox, error) {
 	return out, nil
 }
 
+var _ model.MailboxPager = (*User)(nil)
+
+// ListMailboxesAfter implements model.MailboxPager: one bounded omap read
+// of the registry, whose keys sort like the names.
+func (u *User) ListMailboxesAfter(after string, limit int) ([]Mailbox, []string, error) {
+	start := ""
+	if after != "" {
+		start = regMboxPrefix + after
+	}
+
+	vals, err := u.idx.GetOmapValues(oidRegistry, start, regMboxPrefix, int64(limit))
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, nil, nil
+		}
+
+		return nil, nil, fmt.Errorf("list mailboxes: %w", err)
+	}
+
+	out := make([]Mailbox, 0, len(vals))
+	scanned := make([]string, 0, len(vals))
+
+	for k, v := range vals {
+		name := strings.TrimPrefix(k, regMboxPrefix)
+		scanned = append(scanned, name)
+
+		var rec MailboxRec
+		if err := json.Unmarshal(v, &rec); err != nil {
+			continue
+		}
+
+		out = append(out, Mailbox{Name: name, MailboxRec: rec})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Strings(scanned)
+
+	return out, scanned, nil
+}
+
 // Lookup resolves a mailbox name. Results are cached briefly: the name to
 // id mapping only changes on RENAME/DELETE, and a stale hit surfaces as
 // ENOENT on the index object, which callers treat as "no such mailbox".

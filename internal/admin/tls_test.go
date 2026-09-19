@@ -62,9 +62,22 @@ func (ca *testCA) write(t *testing.T, name, typ string, der []byte) string {
 func (ca *testCA) issue(t *testing.T, name, cn string, serial int64, usage x509.ExtKeyUsage) (string, string) {
 	t.Helper()
 
+	return ca.issueFor(t, name, cn, serial, usage, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+}
+
+// issueValid writes a client key pair valid from notBefore to notAfter.
+func (ca *testCA) issueValid(t *testing.T, name, cn string, serial int64, notBefore, notAfter time.Time) (string, string) {
+	t.Helper()
+
+	return ca.issueFor(t, name, cn, serial, x509.ExtKeyUsageClientAuth, notBefore, notAfter)
+}
+
+func (ca *testCA) issueFor(t *testing.T, name, cn string, serial int64, usage x509.ExtKeyUsage, notBefore, notAfter time.Time) (string, string) {
+	t.Helper()
+
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: cn},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		NotBefore: notBefore, NotAfter: notAfter,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage},
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}}
 
