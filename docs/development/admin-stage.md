@@ -23,7 +23,12 @@ Nachrichten auflisten, begrenzt suchen, Kopfzeilen zeigen, exportieren
 (Rolle `content`), Flags, Kopieren/Verschieben (Rolle `support`),
 geplantes Expunge (Job `expunge`, Rolle `delete`), Sieve
 list/show/put/delete/activate und eine Prüfung ohne Nebenwirkungen,
-Lernqueue list/show/retry, siehe [Admin-API: Supportwerkzeuge](../admin-api.md#supportwerkzeuge-stufe-8d). Entwurf vom 16.09.2026 auf Basis
+Lernqueue list/show/retry, siehe [Admin-API: Supportwerkzeuge](../admin-api.md#supportwerkzeuge-stufe-8d).
+**8e** (0.23.0): Kontoexport als versioniertes Archiv mit Prüfsummen
+(Rolle `export`), `archive verify` und `restore` über den Kontoimport,
+isolierter Restore ohne ACL und aktives Sieve, siehe
+[Admin-API: Export und Wiederherstellung](../admin-api.md#export-und-wiederherstellung-stufe-8e).
+Damit ist Stufe 8 abgeschlossen. Entwurf vom 16.09.2026 auf Basis
 von ShardPost 0.12.0. Die Nummer setzt die bisherigen Stufen 6/7 für JMAP
 fort; sie schreibt keine zeitliche Abhängigkeit von JMAP vor. Die ersten
 Teilpakete dieser Stufe sollten vor einer größeren Backend-Migration kommen.

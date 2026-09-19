@@ -460,6 +460,11 @@ type ImportMailboxState struct {
 	Uidvalidity   int64    `json:"uidvalidity"`
 }
 
+// ImportMetadata defines model for ImportMetadata.
+type ImportMetadata struct {
+	Entries map[string]string `json:"entries"`
+}
+
 // ImportResult defines model for ImportResult.
 type ImportResult struct {
 	Bytes    int64 `json:"bytes"`
@@ -1009,6 +1014,12 @@ type ImportMessagesParams struct {
 	XImportSession ImportSessionHeader `json:"X-Import-Session"`
 }
 
+// PutImportMetadataParams defines parameters for PutImportMetadata.
+type PutImportMetadataParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
 // PutImportSieveParams defines parameters for PutImportSieve.
 type PutImportSieveParams struct {
 	// XImportSession The session that holds the import lock.
@@ -1137,6 +1148,9 @@ type FinalizeImportMailboxJSONRequestBody = ImportFinalize
 // ImportMessagesMultipartRequestBody defines body for ImportMessages for multipart/mixed ContentType.
 type ImportMessagesMultipartRequestBody = ImportMessagesMultipartBody
 
+// PutImportMetadataJSONRequestBody defines body for PutImportMetadata for application/json ContentType.
+type PutImportMetadataJSONRequestBody = ImportMetadata
+
 // PutImportSieveJSONRequestBody defines body for PutImportSieve for application/json ContentType.
 type PutImportSieveJSONRequestBody = ImportSieve
 
@@ -1264,6 +1278,21 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
 	GetAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExportAccount Export the account as an archive
+	//
+	// Streams the account as a versioned tar archive (format
+	// `shardpost-account-export` 1): per mailbox its identity, state,
+	// ACL, subscription, special-use and annotations, per message the
+	// message with UID, GUID, flags, MODSEQ, dates, POP3 UIDL and
+	// SHA-256, the Sieve scripts, and last a manifest with every entry's
+	// checksum. The export does not lock the account; messages that
+	// vanish meanwhile are listed as skipped. An export that fails midway
+	// ends with an incomplete manifest. Restore with `shardpostctl
+	// restore` (import API). Requires the role `export`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/export (the `ExportAccount` operationId).
+	ExportAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CloseImport Release the import lock
 	//
@@ -1408,6 +1437,28 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
 	ImportMessagesWithBody(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportMetadataWithBody Replace the annotations (METADATA) of a mailbox
+	//
+	// Entry names are full (`/shared/comment`, `/private/comment`);
+	// private entries belong to the account. Entries not listed are
+	// removed.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+	PutImportMetadataWithBody(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportMetadata Replace the annotations (METADATA) of a mailbox
+	//
+	// Entry names are full (`/shared/comment`, `/private/comment`);
+	// private entries belong to the account. Entries not listed are
+	// removed.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+	PutImportMetadata(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutImportSieveWithBody Replace the Sieve scripts and the active script
 	//
@@ -1999,6 +2050,31 @@ func (c *Client) GetAccount(ctx context.Context, account Account, reqEditors ...
 	return c.Client.Do(req)
 }
 
+// ExportAccount Export the account as an archive
+//
+// Streams the account as a versioned tar archive (format
+// `shardpost-account-export` 1): per mailbox its identity, state,
+// ACL, subscription, special-use and annotations, per message the
+// message with UID, GUID, flags, MODSEQ, dates, POP3 UIDL and
+// SHA-256, the Sieve scripts, and last a manifest with every entry's
+// checksum. The export does not lock the account; messages that
+// vanish meanwhile are listed as skipped. An export that fails midway
+// ends with an incomplete manifest. Restore with `shardpostctl
+// restore` (import API). Requires the role `export`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/export (the `ExportAccount` operationId).
+func (c *Client) ExportAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportAccountRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // CloseImport Release the import lock
 //
 // Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
@@ -2283,6 +2359,48 @@ func (c *Client) ListImportMessages(ctx context.Context, account Account, id Mai
 // Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
 func (c *Client) ImportMessagesWithBody(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewImportMessagesRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportMetadataWithBody Replace the annotations (METADATA) of a mailbox
+//
+// Entry names are full (`/shared/comment`, `/private/comment`);
+// private entries belong to the account. Entries not listed are
+// removed.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+func (c *Client) PutImportMetadataWithBody(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportMetadataRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportMetadata Replace the annotations (METADATA) of a mailbox
+//
+// Entry names are full (`/shared/comment`, `/private/comment`);
+// private entries belong to the account. Entries not listed are
+// removed.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+func (c *Client) PutImportMetadata(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportMetadataRequest(c.Server, account, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3414,6 +3532,40 @@ func NewGetAccountRequest(server string, account Account) (*http.Request, error)
 	return req, nil
 }
 
+// NewExportAccountRequest constructs an http.Request for the ExportAccount method
+func NewExportAccountRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/export", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewCloseImportRequest constructs an http.Request for the CloseImport method
 func NewCloseImportRequest(server string, account Account, params *CloseImportParams) (*http.Request, error) {
 	var err error
@@ -3997,6 +4149,73 @@ func NewImportMessagesRequestWithBody(server string, account Account, id Mailbox
 	}
 
 	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewPutImportMetadataRequest calls the generic PutImportMetadata builder with application/json body
+func NewPutImportMetadataRequest(server string, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutImportMetadataRequestWithBody(server, account, id, params, "application/json", bodyReader)
+}
+
+// NewPutImportMetadataRequestWithBody constructs an http.Request for the PutImportMetadata method, with any body, and a specified content type
+func NewPutImportMetadataRequestWithBody(server string, account Account, id MailboxID, params *PutImportMetadataParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/metadata", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -6107,6 +6326,23 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
 	GetAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetAccountResponse, error)
 
+	// ExportAccountWithResponse Export the account as an archive
+	//
+	// Streams the account as a versioned tar archive (format
+	// `shardpost-account-export` 1): per mailbox its identity, state,
+	// ACL, subscription, special-use and annotations, per message the
+	// message with UID, GUID, flags, MODSEQ, dates, POP3 UIDL and
+	// SHA-256, the Sieve scripts, and last a manifest with every entry's
+	// checksum. The export does not lock the account; messages that
+	// vanish meanwhile are listed as skipped. An export that fails midway
+	// ends with an incomplete manifest. Restore with `shardpostctl
+	// restore` (import API). Requires the role `export`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/export (the `ExportAccount` operationId).
+	ExportAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ExportAccountResponse, error)
+
 	// CloseImportWithResponse Release the import lock
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -6258,6 +6494,28 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages (the `ImportMessages` operationId).
 	ImportMessagesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *ImportMessagesParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ImportMessagesResponse, error)
+
+	// PutImportMetadataWithBodyWithResponse Replace the annotations (METADATA) of a mailbox
+	//
+	// Entry names are full (`/shared/comment`, `/private/comment`);
+	// private entries belong to the account. Entries not listed are
+	// removed.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+	PutImportMetadataWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportMetadataResponse, error)
+
+	// PutImportMetadataWithResponse Replace the annotations (METADATA) of a mailbox
+	//
+	// Entry names are full (`/shared/comment`, `/private/comment`);
+	// private entries belong to the account. Entries not listed are
+	// removed.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+	PutImportMetadataWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportMetadataResponse, error)
 
 	// PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
 	//
@@ -6921,6 +7179,47 @@ func (r GetAccountResponse) ContentType() string {
 	return ""
 }
 
+type ExportAccountResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ExportAccountResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ExportAccountResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportAccountResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportAccountResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ExportAccountResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type CloseImportResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -7374,6 +7673,47 @@ func (r ImportMessagesResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ImportMessagesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type PutImportMetadataResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r PutImportMetadataResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r PutImportMetadataResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PutImportMetadataResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutImportMetadataResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PutImportMetadataResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -9259,6 +9599,29 @@ func (c *ClientWithResponses) GetAccountWithResponse(ctx context.Context, accoun
 	return ParseGetAccountResponse(rsp)
 }
 
+// ExportAccountWithResponse Export the account as an archive
+//
+// Streams the account as a versioned tar archive (format
+// `shardpost-account-export` 1): per mailbox its identity, state,
+// ACL, subscription, special-use and annotations, per message the
+// message with UID, GUID, flags, MODSEQ, dates, POP3 UIDL and
+// SHA-256, the Sieve scripts, and last a manifest with every entry's
+// checksum. The export does not lock the account; messages that
+// vanish meanwhile are listed as skipped. An export that fails midway
+// ends with an incomplete manifest. Restore with `shardpostctl
+// restore` (import API). Requires the role `export`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/export (the `ExportAccount` operationId).
+func (c *ClientWithResponses) ExportAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ExportAccountResponse, error) {
+	rsp, err := c.ExportAccount(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportAccountResponse(rsp)
+}
+
 // CloseImportWithResponse Release the import lock
 //
 // Returns a wrapper object for the known response body format(s).
@@ -9499,6 +9862,40 @@ func (c *ClientWithResponses) ImportMessagesWithBodyWithResponse(ctx context.Con
 		return nil, err
 	}
 	return ParseImportMessagesResponse(rsp)
+}
+
+// PutImportMetadataWithBodyWithResponse Replace the annotations (METADATA) of a mailbox
+//
+// Entry names are full (`/shared/comment`, `/private/comment`);
+// private entries belong to the account. Entries not listed are
+// removed.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+func (c *ClientWithResponses) PutImportMetadataWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportMetadataResponse, error) {
+	rsp, err := c.PutImportMetadataWithBody(ctx, account, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportMetadataResponse(rsp)
+}
+
+// PutImportMetadataWithResponse Replace the annotations (METADATA) of a mailbox
+//
+// Entry names are full (`/shared/comment`, `/private/comment`);
+// private entries belong to the account. Entries not listed are
+// removed.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
+func (c *ClientWithResponses) PutImportMetadataWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportMetadataResponse, error) {
+	rsp, err := c.PutImportMetadata(ctx, account, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportMetadataResponse(rsp)
 }
 
 // PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
@@ -10459,6 +10856,32 @@ func ParseGetAccountResponse(rsp *http.Response) (*GetAccountResponse, error) {
 	return response, nil
 }
 
+// ParseExportAccountResponse parses an HTTP response from a ExportAccountWithResponse call
+func ParseExportAccountResponse(rsp *http.Response) (*ExportAccountResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportAccountResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseCloseImportResponse parses an HTTP response from a CloseImportWithResponse call
 func ParseCloseImportResponse(rsp *http.Response) (*CloseImportResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -10764,6 +11187,35 @@ func ParseImportMessagesResponse(rsp *http.Response) (*ImportMessagesResponse, e
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutImportMetadataResponse parses an HTTP response from a PutImportMetadataWithResponse call
+func ParsePutImportMetadataResponse(rsp *http.Response) (*PutImportMetadataResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutImportMetadataResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -12119,6 +12571,9 @@ type ServerInterface interface {
 	// GetAccount Account overview
 	// (GET /admin/v1/accounts/{account})
 	GetAccount(w http.ResponseWriter, r *http.Request, account Account)
+	// ExportAccount Export the account as an archive
+	// (GET /admin/v1/accounts/{account}/export)
+	ExportAccount(w http.ResponseWriter, r *http.Request, account Account)
 	// CloseImport Release the import lock
 	// (DELETE /admin/v1/accounts/{account}/import)
 	CloseImport(w http.ResponseWriter, r *http.Request, account Account, params CloseImportParams)
@@ -12149,6 +12604,9 @@ type ServerInterface interface {
 	// ImportMessages Store messages at their source UIDs
 	// (POST /admin/v1/accounts/{account}/import/mailboxes/{id}/messages)
 	ImportMessages(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ImportMessagesParams)
+	// PutImportMetadata Replace the annotations (METADATA) of a mailbox
+	// (PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata)
+	PutImportMetadata(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params PutImportMetadataParams)
 	// PutImportSieve Replace the Sieve scripts and the active script
 	// (PUT /admin/v1/accounts/{account}/import/sieve)
 	PutImportSieve(w http.ResponseWriter, r *http.Request, account Account, params PutImportSieveParams)
@@ -12291,6 +12749,32 @@ func (siw *ServerInterfaceWrapper) GetAccount(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetAccount(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ExportAccount operation middleware
+func (siw *ServerInterfaceWrapper) ExportAccount(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ExportAccount(w, r, account)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -12883,6 +13367,69 @@ func (siw *ServerInterfaceWrapper) ImportMessages(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ImportMessages(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutImportMetadata operation middleware
+func (siw *ServerInterfaceWrapper) PutImportMetadata(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutImportMetadataParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutImportMetadata(w, r, account, id, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -14615,6 +15162,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages/flags", wrapper.SetMessageFlags)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages/copy", wrapper.CopyMessages)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/search", wrapper.SearchMessages)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/export", wrapper.ExportAccount)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve", wrapper.ListSieveScripts)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve/{name}", wrapper.DeleteSieveScript)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve/{name}", wrapper.GetSieveScript)
@@ -14635,6 +15183,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/changes", wrapper.ImportChanges)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/finalize", wrapper.FinalizeImportMailbox)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/acl", wrapper.PutImportACL)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/metadata", wrapper.PutImportMetadata)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/sieve", wrapper.PutImportSieve)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.ClearTrace)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.GetTrace)

@@ -653,6 +653,32 @@ paths:
                 $ref: "#/components/schemas/SearchResult"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/export:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: exportAccount
+      summary: Export the account as an archive
+      description: |
+        Streams the account as a versioned tar archive (format
+        `shardpost-account-export` 1): per mailbox its identity, state,
+        ACL, subscription, special-use and annotations, per message the
+        message with UID, GUID, flags, MODSEQ, dates, POP3 UIDL and
+        SHA-256, the Sieve scripts, and last a manifest with every entry's
+        checksum. The export does not lock the account; messages that
+        vanish meanwhile are listed as skipped. An export that fails midway
+        ends with an incomplete manifest. Restore with `shardpostctl
+        restore` (import API). Requires the role `export`.
+      responses:
+        "200":
+          description: The archive.
+          content:
+            application/x-tar:
+              schema:
+                type: string
+                format: binary
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/sieve:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1156,6 +1182,29 @@ paths:
           description: Replaced.
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    put:
+      operationId: putImportMetadata
+      summary: Replace the annotations (METADATA) of a mailbox
+      description: |
+        Entry names are full (`/shared/comment`, `/private/comment`);
+        private entries belong to the account. Entries not listed are
+        removed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportMetadata"
+      responses:
+        "204":
+          description: Replaced.
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/import/sieve:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1546,6 +1595,14 @@ components:
           format: int64
           minimum: 0
     ImportACL:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: object
+          additionalProperties:
+            type: string
+    ImportMetadata:
       type: object
       required: [entries]
       properties:

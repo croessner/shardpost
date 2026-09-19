@@ -9,6 +9,7 @@
 //	shardpostctl [connection flags] server status | account show | mailbox list|show | acl list|explain | quota show | shared list
 //	shardpostctl [connection flags] plan <kind> <account> | apply <plan> | check <account> | job list|show|wait|cancel
 //	shardpostctl [connection flags] messages | search | message show|export | flags | copy | move | sieve ... | learning ...
+//	shardpostctl [connection flags] export -o file.tar <account> | archive verify <file> | restore [-account A] <file>
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -93,11 +94,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ...")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ...")
 		return exUsage
 	}
 
-	client, err := c.client()
+	client, err := c.client(transportOptions(fs.Arg(0))...)
 	if err != nil {
 		sayln(stderr, "shardpostctl:", err)
 		return exUsage
@@ -118,23 +119,35 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return jobsCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
 	case cmdMessages, cmdSearch, cmdMessage, cmdFlags, cmdCopy, cmdMove, cmdSieve, cmdLearning:
 		return supportCmd(client, fs.Arg(0), fs.Args()[1:], stdin, stdout, stderr)
+	case cmdExport, cmdArchive, cmdRestore:
+		return archiveCmd(client, fs.Arg(0), fs.Args()[1:], c.timeout, stdout, stderr)
 	default:
 		sayln(stderr, "shardpostctl: unknown command", fs.Arg(0))
 		return exUsage
 	}
 }
 
+// transportOptions: an export streams without an overall timeout
+// (-timeout bounds the headers and each idle read).
+func transportOptions(cmd string) []adminapi.TransportOption {
+	if cmd == cmdExport {
+		return []adminapi.TransportOption{adminapi.Streaming}
+	}
+
+	return nil
+}
+
 // client builds the API client for the selected listener.
-func (c connection) client() (*adminapi.ClientWithResponses, error) {
+func (c connection) client(opts ...adminapi.TransportOption) (*adminapi.ClientWithResponses, error) {
 	if c.url == "" {
-		return adminapi.NewSocketClient(c.socket, c.timeout)
+		return adminapi.NewSocketClient(c.socket, c.timeout, opts...)
 	}
 
 	if c.cert == "" || c.key == "" || c.ca == "" {
 		return nil, errors.New("-url needs -cert, -key and -ca")
 	}
 
-	return adminapi.NewTLSClient(c.url, c.cert, c.key, c.ca, c.timeout)
+	return adminapi.NewTLSClient(c.url, c.cert, c.key, c.ca, c.timeout, opts...)
 }
 
 func version(client *adminapi.ClientWithResponses, stdout, stderr io.Writer) int {

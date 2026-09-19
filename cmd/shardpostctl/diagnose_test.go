@@ -47,9 +47,10 @@ func serveFilled(t *testing.T, roles ...string) string {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: store, Log: log},
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
-	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw"},
+	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw", "carol": "pw"},
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr})
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr,
+		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ended := make(chan struct{})

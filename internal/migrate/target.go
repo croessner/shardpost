@@ -203,11 +203,7 @@ func (t *APITarget) PutACL(ctx context.Context, id string, entries map[string]st
 		return err
 	}
 
-	if resp.StatusCode() != 204 {
-		return apiError(resp.StatusCode(), resp.JSONDefault)
-	}
-
-	return nil
+	return noContent(resp.StatusCode(), resp.JSONDefault)
 }
 
 // PutSieve implements Target.
@@ -219,6 +215,31 @@ func (t *APITarget) PutSieve(ctx context.Context, scripts []adminapi.ImportSieve
 
 	if resp.StatusCode() != 204 {
 		return apiError(resp.StatusCode(), resp.JSONDefault)
+	}
+
+	return nil
+}
+
+// MetadataTarget is a target that also takes mailbox annotations.
+type MetadataTarget interface {
+	PutMetadata(ctx context.Context, id string, entries map[string]string) error
+}
+
+// PutMetadata implements MetadataTarget.
+func (t *APITarget) PutMetadata(ctx context.Context, id string, entries map[string]string) error {
+	resp, err := t.C.PutImportMetadataWithResponse(ctx, t.account, id, &adminapi.PutImportMetadataParams{XImportSession: t.session},
+		adminapi.ImportMetadata{Entries: entries})
+	if err != nil {
+		return err
+	}
+
+	return noContent(resp.StatusCode(), resp.JSONDefault)
+}
+
+// noContent is nil for 204, the API error otherwise.
+func noContent(status int, doc *adminapi.Error) error {
+	if status != 204 {
+		return apiError(status, doc)
 	}
 
 	return nil

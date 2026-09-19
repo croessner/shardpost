@@ -46,7 +46,8 @@ Rollen: `diagnose` (Version, Serverstatus und lesende Diagnose), `deliver` (Zust
 (Postfach, Nachrichten und Konto endgültig löschen), `content`
 (Nachrichteninhalte lesen: Suche, Kopfzeilen, Export, Sieve-Skripte) und
 `support` (Flags, Kopieren/Verschieben, Sieve-Skripte ändern und
-aktivieren). `content` ist bewusst von `diagnose` getrennt: Diagnose sieht
+aktivieren) und `export` (ganze Konten als Archiv exportieren; der
+Restore läuft über `import`). `content` ist bewusst von `diagnose` getrennt: Diagnose sieht
 Metadaten, aber keine Inhalte.
 
 ```yaml
@@ -387,6 +388,68 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
   wurde (kein Beleg), lässt sich nicht wiederholen.
 - Clients mit Konten-Scope sehen Lernjobs nur mit Kontoangabe. Jobs
   anderer Konten gelten für sie als nicht vorhanden (404).
+
+## Export und Wiederherstellung (Stufe 8e)
+
+Ein Konto lässt sich als versioniertes Archiv sichern und über den
+Kontoimport wiederherstellen, mit denselben IMAP-Identitäten.
+
+```sh
+shardpostctl export -o alice.tar alice@example.org          # Rolle export, prüft das Archiv nach dem Schreiben
+shardpostctl archive verify alice.tar                       # offline, ohne Server
+shardpostctl restore alice.tar                              # Rolle import, ins exportierte Konto
+shardpostctl restore -account restore-test@example.org alice.tar   # isolierter Restore
+```
+
+**Format** `shardpost-account-export`, Version 1: ein tar-Strom mit
+
+| Eintrag | Inhalt |
+| --- | --- |
+| `shardpost-export.json` | Format, Version, Konto, Zeitpunkt, Serverversion |
+| `mailboxes/<id>/mailbox.json` | ID, Name, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, Abo, Special-Use, ACL, Annotationen (METADATA) |
+| `mailboxes/<id>/<uid>.json` | UID, GUID, Flags, MODSEQ, INTERNALDATE, SAVEDATE, POP3-UIDL, Größe, SHA-256 |
+| `mailboxes/<id>/<uid>.eml` | die Nachricht, wie gespeichert |
+| `sieve/<name>.sieve` | ein Sieve-Skript |
+| `manifest.json` | vollständig ja/nein, Zähler, aktives Skript, übersprungene Nachrichten, Größe und SHA-256 jedes Eintrags |
+
+Der Volltextindex ist nicht enthalten, er wird aus den Nachrichten neu
+aufgebaut.
+
+- **Konsistenz:** Der Export sperrt das Konto nicht. Jedes Postfach wird in
+  dem Stand gelesen, den es beim Export hatte. Nachrichten, die inzwischen
+  gelöscht wurden, stehen im Manifest unter `skipped`, ebenso gelöschte
+  Ordner unter `skipped_mailboxes`. Scheitert ein Export
+  mittendrin, endet das Archiv mit `complete: false` und wird bei Prüfung
+  und Restore abgelehnt. Für einen exakten Stand vorher `users hold` im
+  Director setzen.
+- **Prüfung:** Jede Nachricht wird gegen Größe und SHA-256 ihrer
+  Beschreibung geprüft, am Ende jeder Eintrag gegen das Manifest.
+  `restore` liest das ganze Archiv vorher einmal und stellt ein
+  beschädigtes oder unvollständiges Archiv gar nicht erst her (Exit 65).
+- **Restore** nutzt den Kontoimport (Sitzung mit Kontosperre): Ordner mit
+  UIDVALIDITY und ID, Nachrichten mit UIDs, Flags, MODSEQ, Daten und
+  POP3-UIDL, danach je Ordner UIDNEXT/HIGHESTMODSEQ (Finalize), ACL und
+  Annotationen und zum Schluss die Sieve-Skripte. Jeder Ordner wird gegen
+  das Inventar des Ziels geprüft (`verified`). Ein Restore ist
+  wiederholbar, vorhandene Nachrichten werden übersprungen. Das Ziel muss
+  leer sein oder denselben Stand haben. Ein Ordner mit anderer UIDVALIDITY
+  und Nachrichten ist ein Konflikt.
+- **Isolierter Restore** (anderes Zielkonto, etwa für den
+  Wiederherstellungsnachweis): ACLs werden nicht übernommen (sie würden
+  echten Konten Rechte auf die Kopie geben) und kein Sieve-Skript wird
+  aktiviert (keine Abwesenheitsnotizen oder Weiterleitungen aus der
+  Kopie). `-acl` und `-activate-sieve` schalten das ausdrücklich ein.
+- Der Export schiebt die Schreibfrist des Admin-Listeners mit dem
+  Fortschritt weiter und läuft deshalb auch bei großen Konten durch.
+  `shardpostctl export` hat keinen Gesamt-Timeout. `-timeout` begrenzt nur
+  die Wartezeit auf den Beginn der Antwort und jede Pause ohne Daten. Ein
+  abgebrochener Export hinterlässt keine Datei.
+- **Nicht im Archiv:** Abos auf nicht vorhandene Ordner, Server-Annotationen
+  (METADATA ohne Postfach), der Trace-Schalter und das Quota-Limit (kommt
+  aus LDAP). Der Volltextindex wird aus den Nachrichten neu aufgebaut.
+- Exitcodes: 0 in Ordnung, 1 Restore teilweise gescheitert (erneut
+  ausführen), 65 Archiv beschädigt oder unvollständig, 64 Aufruf, 69
+  Export gescheitert, 73 Zieldatei existiert.
 
 ## Protokoll-Trace eines Kontos
 

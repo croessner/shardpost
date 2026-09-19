@@ -15,7 +15,7 @@ type Admin struct {
 	// Socket is the path of the Unix socket ("" disables it).
 	Socket string `mapstructure:"socket" env:"ADMIN_SOCKET"`
 	// SocketRoles are the roles of local callers on the socket.
-	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete content support"`
+	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete content support export"`
 	// Addr is the mutual-TLS listener ("" disables it).
 	Addr string `mapstructure:"addr" env:"ADMIN_ADDR"`
 	// TLSCert, TLSKey and ClientCA are files; they are re-read when they
@@ -91,7 +91,7 @@ type AdminImport struct {
 // common name or one of whose DNS or URI SANs equals Identity.
 type AdminClient struct {
 	Identity string   `mapstructure:"identity" validate:"required"`
-	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete content support"`
+	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete content support export"`
 	// Accounts limits the accounts the client may address (path.Match
 	// patterns on the lower-cased canonical account, e.g. "*@example.org");
 	// empty means all accounts.
