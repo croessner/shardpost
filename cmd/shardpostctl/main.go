@@ -9,7 +9,7 @@
 //	shardpostctl [connection flags] server status | account show | mailbox list|show | acl list|explain | quota show | shared list
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
-// 64 usage, 67 unknown recipient or mailbox, 73 over quota, 75 temporary
+// 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
 // failure (try again), 77 not permitted, 69 rejected or too large, 70
 // unexpected answer. migrate copies an account from an IMAP source with
 // its UIDs (see migrate -h) and exits 0 when everything was verified, 1
@@ -35,6 +35,7 @@ import (
 const (
 	exOK          = 0
 	exUsage       = 64
+	exDataErr     = 65
 	exNoUser      = 67
 	exUnavailable = 69
 	exSoftware    = 70
@@ -207,6 +208,8 @@ func failure(stderr io.Writer, e *adminapi.Error, status int) int {
 		return exUsage
 	case adminapi.Rejected, adminapi.TooLarge:
 		return exUnavailable
+	case adminapi.Conflict, adminapi.PreconditionFailed:
+		return exDataErr
 	default:
 		return exSoftware
 	}

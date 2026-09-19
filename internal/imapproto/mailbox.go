@@ -708,26 +708,8 @@ func (c *conn) mayCreateShared(tag string, t *target) bool {
 }
 
 func canonicalAttr(a string) string {
-	switch strings.ToLower(a) {
-	case `\drafts`:
-		return useDrafts
-	case `\sent`:
-		return useSent
-	case `\trash`:
-		return useTrash
-	case `\junk`:
-		return useJunk
-	case `\archive`:
-		return useArchive
-	case `\flagged`:
-		return flagFlagged
-	case `\all`:
-		return `\All`
-	case `\important`:
-		return `\Important`
-	}
-
-	return a
+	c, _ := model.CanonicalSpecialUse(a)
+	return c
 }
 
 func (c *conn) cmdDelete(tag string) error {

@@ -5,6 +5,8 @@ package memstore
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -113,7 +115,7 @@ func (u *User) ListMailboxes() ([]model.Mailbox, error) {
 
 	var out []model.Mailbox
 	for n, b := range u.boxes {
-		out = append(out, model.Mailbox{Name: n, MailboxRec: b.MailboxRec})
+		out = append(out, model.Mailbox{Name: n, MailboxRec: b.rec()})
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -165,7 +167,7 @@ func (u *User) Lookup(name string) (*model.Mailbox, error) {
 		return nil, err
 	}
 
-	return &model.Mailbox{Name: n, MailboxRec: b.MailboxRec}, nil
+	return &model.Mailbox{Name: n, MailboxRec: b.rec()}, nil
 }
 
 // CreateMailbox creates a mailbox with the given special-use attributes;
@@ -376,7 +378,7 @@ func (u *User) Info(name string) (*model.MailboxInfo, error) {
 		return nil, err
 	}
 
-	return &model.MailboxInfo{Mailbox: model.Mailbox{Name: n, MailboxRec: b.MailboxRec}, RecentFrom: b.recentFrom, UIDNext: b.uidNext, HighestModSeq: b.modseq, LogStart: b.logStart, Keywords: b.keywords}, nil
+	return &model.MailboxInfo{Mailbox: model.Mailbox{Name: n, MailboxRec: b.rec()}, RecentFrom: b.recentFrom, UIDNext: b.uidNext, HighestModSeq: b.modseq, LogStart: b.logStart, Keywords: slices.Clone(b.keywords)}, nil
 }
 
 // ListMessages returns a copy of the index entries of the mailbox.
@@ -970,19 +972,19 @@ func (u *User) SetACL(name, identifier, rights string) error {
 		return err
 	}
 
-	if rights == "" {
-		delete(b.ACL, identifier)
-	} else {
-		if b.ACL == nil {
-			b.ACL = map[string]string{}
-		}
-
-		b.ACL[identifier] = rights
-	}
+	setACLEntry(b, identifier, rights)
 	u.mu.Unlock()
 
+	u.syncPointer(canon, identifier, rights)
+
+	return nil
+}
+
+// syncPointer writes or removes the grantee's shared pointer ("anyone"
+// has none).
+func (u *User) syncPointer(canon, identifier, rights string) {
 	if identifier == identAnyone {
-		return nil
+		return
 	}
 
 	g := u.store.user(identifier)
@@ -995,8 +997,83 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	} else if _, ok := g.shared[key]; !ok {
 		g.shared[key] = &model.SharedRef{Owner: u.name, Mailbox: canon}
 	}
+}
 
-	return nil
+// rec returns a copy of the registry record: callers read it without
+// the lock (cephstore decodes a fresh one every time).
+func (b *box) rec() model.MailboxRec {
+	r := b.MailboxRec
+	r.ACL = maps.Clone(b.ACL)
+	r.SpecialUse = slices.Clone(b.SpecialUse)
+
+	return r
+}
+
+// setACLEntry sets or removes one entry and counts the generation; it
+// reports whether anything changed.
+func setACLEntry(b *box, identifier, rights string) bool {
+	if b.ACL[identifier] == rights {
+		return false
+	}
+
+	if rights == "" {
+		delete(b.ACL, identifier)
+	} else {
+		if b.ACL == nil {
+			b.ACL = map[string]string{}
+		}
+
+		b.ACL[identifier] = rights
+	}
+
+	b.ACLGen++
+
+	return true
+}
+
+var _ model.ACLModifier = (*User)(nil)
+
+// ModifyACL implements model.ACLModifier: read, check and change happen
+// under one lock.
+func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(old string) string) (string, uint64, error) {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
+	if identifier == "" || identifier == u.name {
+		return "", 0, fmt.Errorf("invalid identifier")
+	}
+
+	u.mu.Lock()
+
+	b, canon, err := u.lookup(name)
+	if err != nil {
+		u.mu.Unlock()
+		return "", 0, err
+	}
+
+	if expectGen >= 0 && b.ACLGen != uint64(expectGen) {
+		u.mu.Unlock()
+		return "", 0, model.ErrVersionConflict
+	}
+
+	rights := change(b.ACL[identifier])
+	if rights != "" {
+		r, ok := model.NormalizeRights(rights)
+		if !ok {
+			u.mu.Unlock()
+			return "", 0, fmt.Errorf("invalid rights %q", rights)
+		}
+
+		rights = r
+	}
+
+	changed := setACLEntry(b, identifier, rights)
+	gen := b.ACLGen
+	u.mu.Unlock()
+
+	if changed || rights != "" {
+		u.syncPointer(canon, identifier, rights)
+	}
+
+	return rights, gen, nil
 }
 
 // ListShared returns the pointers to mailboxes other users shared.

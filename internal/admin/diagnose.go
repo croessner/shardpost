@@ -75,13 +75,13 @@ func (s *Server) lookupState(r *http.Request, account string) (state, canonical 
 	}
 }
 
-// openAccount checks role, account and scope and opens the account for
-// reading; with canonical, the account must be the canonical one (store
-// data lives under it). The caller closes the user.
-func (s *Server) openAccount(w http.ResponseWriter, r *http.Request, account string, canonical bool) (model.User, bool) {
+// openAccount checks role, account and scope and opens the account; with
+// canonical, the account must be the canonical one (store data lives
+// under it). The caller closes the user.
+func (s *Server) openAccount(w http.ResponseWriter, r *http.Request, role, account string, canonical bool) (model.User, bool) {
 	auditf(r, "account", account)
 
-	if !requireAccount(w, r, RoleDiagnose, account) {
+	if !requireAccount(w, r, role, account) {
 		return nil, false
 	}
 
@@ -110,7 +110,7 @@ func (s *Server) openAccount(w http.ResponseWriter, r *http.Request, account str
 
 // GetAccount shows the lookup result and the store state of an account.
 func (s *Server) GetAccount(w http.ResponseWriter, r *http.Request, account adminapi.Account) {
-	u, ok := s.openAccount(w, r, account, false)
+	u, ok := s.openAccount(w, r, RoleDiagnose, account, false)
 	if !ok {
 		return
 	}
@@ -181,7 +181,7 @@ func quotaStatus(u model.User) (adminapi.QuotaStatus, error) {
 
 // GetQuota shows usage and limit of an account.
 func (s *Server) GetQuota(w http.ResponseWriter, r *http.Request, account adminapi.Account) {
-	u, ok := s.openAccount(w, r, account, true)
+	u, ok := s.openAccount(w, r, RoleDiagnose, account, true)
 	if !ok {
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Server) ListMailboxes(w http.ResponseWriter, r *http.Request, account a
 		return
 	}
 
-	u, ok := s.openAccount(w, r, account, true)
+	u, ok := s.openAccount(w, r, RoleDiagnose, account, true)
 	if !ok {
 		return
 	}
@@ -324,8 +324,8 @@ func mailboxByID(u model.User, id string) (*model.Mailbox, error) {
 
 // openMailbox opens the canonical account and resolves the mailbox id;
 // the caller closes the user.
-func (s *Server) openMailbox(w http.ResponseWriter, r *http.Request, account, id string) (model.User, *model.MailboxInfo, bool) {
-	u, ok := s.openAccount(w, r, account, true)
+func (s *Server) openMailbox(w http.ResponseWriter, r *http.Request, role, account, id string) (model.User, *model.MailboxInfo, bool) {
+	u, ok := s.openAccount(w, r, role, account, true)
 	if !ok {
 		return nil, nil, false
 	}
@@ -348,7 +348,7 @@ func (s *Server) openMailbox(w http.ResponseWriter, r *http.Request, account, id
 
 // GetMailbox shows one mailbox with counts over all its messages.
 func (s *Server) GetMailbox(w http.ResponseWriter, r *http.Request, account adminapi.Account, id adminapi.MailboxID) {
-	u, info, ok := s.openMailbox(w, r, account, id)
+	u, info, ok := s.openMailbox(w, r, RoleDiagnose, account, id)
 	if !ok {
 		return
 	}
@@ -383,24 +383,20 @@ func (s *Server) GetMailbox(w http.ResponseWriter, r *http.Request, account admi
 		out.Shards = int64((info.UIDNext-2)/info.ShardSize) + 1
 	}
 
+	w.Header().Set("ETag", mailboxETag(info))
 	writeJSON(w, http.StatusOK, out)
 }
 
 // GetMailboxACL shows the explicit ACL entries of a mailbox.
 func (s *Server) GetMailboxACL(w http.ResponseWriter, r *http.Request, account adminapi.Account, id adminapi.MailboxID) {
-	u, info, ok := s.openMailbox(w, r, account, id)
+	u, info, ok := s.openMailbox(w, r, RoleDiagnose, account, id)
 	if !ok {
 		return
 	}
 	defer u.Close()
 
-	out := adminapi.MailboxACL{Owner: account, Mailbox: info.Name, Generation: int64(info.ACLGen), Entries: []adminapi.ACLEntry{}}
-
-	for _, ident := range sortedIdentifiers(info.ACL) {
-		out.Entries = append(out.Entries, adminapi.ACLEntry{Identifier: ident, Rights: info.ACL[ident]})
-	}
-
-	writeJSON(w, http.StatusOK, out)
+	w.Header().Set("ETag", aclETag(info.ACLGen))
+	writeJSON(w, http.StatusOK, mailboxACL(account, info))
 }
 
 func sortedIdentifiers(acl map[string]string) []string {
@@ -416,7 +412,7 @@ func sortedIdentifiers(acl map[string]string) []string {
 
 // ListSharedMailboxes lists the shared-mailbox pointers of an account.
 func (s *Server) ListSharedMailboxes(w http.ResponseWriter, r *http.Request, account adminapi.Account) {
-	u, ok := s.openAccount(w, r, account, true)
+	u, ok := s.openAccount(w, r, RoleDiagnose, account, true)
 	if !ok {
 		return
 	}

@@ -401,6 +401,8 @@ func mailboxOperation(parts []string) string {
 		return segACL
 	case len(parts) == 3 && parts[1] == segACL && parts[2] == "explain":
 		return "acl_explain"
+	case len(parts) == 3 && parts[1] == segACL:
+		return "acl_entry"
 	default:
 		return opOther
 	}

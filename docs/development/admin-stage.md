@@ -9,7 +9,9 @@ Protokoll-Trace pro Konto (0.18.0, Rolle `trace`) als erstes Supportwerkzeug
 und **8a** (0.19.0): lesende Diagnose für Server, Konto, Postfächer
 (paginiert), ACL mit Erklärung, Quota und Freigaben sowie ein Konten-Scope
 je mTLS-Client, siehe [Admin-API: Diagnose](../admin-api.md#lesende-diagnose-stufe-8a).
-Der Jobstatus aus 8a folgt mit den Jobs in 8c. Entwurf vom 16.09.2026 auf Basis
+Der Jobstatus aus 8a folgt mit den Jobs in 8c. **8b** (0.20.0):
+Postfächer anlegen, umbenennen, abonnieren und ACLs versioniert ändern
+(Rolle `provision`), siehe [Admin-API: Provisionierung](../admin-api.md#provisionierung-und-berechtigungen-stufe-8b). Entwurf vom 16.09.2026 auf Basis
 von ShardPost 0.12.0. Die Nummer setzt die bisherigen Stufen 6/7 für JMAP
 fort; sie schreibt keine zeitliche Abhängigkeit von JMAP vor. Die ersten
 Teilpakete dieser Stufe sollten vor einer größeren Backend-Migration kommen.
@@ -269,14 +271,22 @@ Director-Hold. Umgesetzt über einen Sidecar im Server-Pod am Admin-Socket (kein
 Abnahmekriterium: vorher synchronisierte Clients (Thunderbird, Apple Mail,
 iOS) laden nach der Umschaltung nichts vollständig neu.
 
-## Vor Implementierungsbeginn zu entscheiden
+## Entscheidungen (19.09.2026)
 
-1. Betreiberidentitäten, Zertifikatsausstellung, Rollen und Audit-Aufbewahrung.
-2. Jobdatenlayout und Übernahme-/Fencing-Vertrag; Schema und Upgrade/Rollback.
-3. FTS-Generationen oder zunächst expliziter Wartungsmodus.
-4. Maßgebliche Quota-Quelle und kanonische Kontenauflösung.
-5. Importformat, unterstützte Dovecot-Quellversionen und Identitätserhaltung
-   (Vorschlag für den IMAP-Quellleser siehe Kontoimport unter 8e).
+1. Betreiberidentitäten und Rollen wie bisher: Unix-Socket (Peer-UID) und
+   mTLS-Clientzertifikate mit Rollen und Konten-Scope; Audit ist die
+   Logzeile `admin_request`, aufbewahrt im zentralen Logsystem.
+2. Jobdaten im Indexpool (eigener Namespace), Übernahme per Lease mit
+   Generation, konto-exklusive Jobs zusätzlich unter der Kontosperre.
+3. FTS-Neuaufbau zunächst im **Wartungsmodus** (Kontosperre), keine
+   Indexgenerationen.
+4. **LDAP (`rnsMSQuota`) bleibt maßgeblich** für Quota-Grenzen; die Admin-API
+   setzt keine Grenzen und gleicht nur die Belegung ab. Konten werden über
+   Nauthilus kanonisch aufgelöst.
+5. Import wie umgesetzt (Dovecot 2.4 per IMAP-Master-User); Export und
+   Backup als **eigenes versioniertes Archiv**, Restore über den Import.
+6. Konto-Löschung (purge) gehört zur Stufe; eine Rückmigration zu Dovecot
+   nicht.
 
 Kein Teilpaket setzt einen CAS-Umbau voraus. Zusätzliche Schreibserialisierung
 oder FTS-Optimierung wird erst durch Messungen begründet. Diese Stufe baut

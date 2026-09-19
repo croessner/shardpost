@@ -108,6 +108,41 @@ paths:
                 $ref: "#/components/schemas/MailboxPage"
         default:
           $ref: "#/components/responses/Error"
+    post:
+      operationId: createMailbox
+      summary: Create a mailbox
+      description: |
+        Creates the mailbox (parents are implicit). Repeating the request
+        for an existing mailbox with the same special-use answers 200 with
+        it (idempotent); a different special-use is a conflict (409). The
+        account must be canonical. Requires the role `provision`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailboxCreate"
+      responses:
+        "201":
+          description: Created.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxSummary"
+        "200":
+          description: Existed already as requested.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxSummary"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/mailboxes/{id}:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -127,6 +162,35 @@ paths:
                 $ref: "#/components/schemas/MailboxDetail"
         default:
           $ref: "#/components/responses/Error"
+    patch:
+      operationId: updateMailbox
+      summary: Rename a mailbox or change its subscription
+      description: |
+        `name` renames the mailbox together with its children (INBOX
+        cannot be renamed; an existing target is a conflict), `subscribed`
+        sets the subscription. Renaming to the current name is a no-op.
+        `If-Match` (the mailbox's ETag) makes the change conditional (412
+        on mismatch). Requires the role `provision`.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailboxUpdate"
+      responses:
+        "200":
+          description: The mailbox after the change.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxSummary"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/mailboxes/{id}/acl:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -140,6 +204,57 @@ paths:
       responses:
         "200":
           description: The ACL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxACL"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/Identifier"
+      - $ref: "#/components/parameters/IfMatch"
+    put:
+      operationId: setACLEntry
+      summary: Change the rights of one identifier
+      description: |
+        `mode` replace sets the rights, add and remove change them
+        relative to the current entry; the change is computed and stored
+        in one versioned step on the server, so concurrent changes do not
+        lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+        The identifier must be a canonical account or `anyone`, not the
+        owner. The grantee's shared pointer follows. Requires the role
+        `provision`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ACLChange"
+      responses:
+        "200":
+          description: The ACL after the change.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxACL"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteACLEntry
+      summary: Remove the entry of one identifier
+      description: Like setACLEntry with empty rights. Requires the role `provision`.
+      responses:
+        "200":
+          description: The ACL after the change.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
@@ -606,6 +721,28 @@ components:
       schema:
         type: string
         pattern: "^[A-Za-z0-9_-]{16,64}$"
+    Identifier:
+      name: identifier
+      in: path
+      required: true
+      description: Canonical account or `anyone`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 320
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: ETag of the version the change is based on.
+      schema:
+        type: string
+        maxLength: 128
+  headers:
+    ETag:
+      description: Version of the resource (use in If-Match).
+      schema:
+        type: string
   responses:
     Error:
       description: |
@@ -615,7 +752,8 @@ components:
         `over_quota` (507), `temporary` (503, try again), `internal` (500),
         `conflict` (409, imported data contradicts the target),
         `import_locked` (409, another session holds the account),
-        `not_locked` (409, the session does not hold the lock).
+        `not_locked` (409, the session does not hold the lock),
+        `precondition_failed` (412, If-Match does not match).
       content:
         application/json:
           schema:
@@ -627,7 +765,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked, precondition_failed]
         message:
           type: string
     Version:
@@ -1120,3 +1258,36 @@ components:
           type: integer
           format: int64
           description: 0 is unlimited.
+    MailboxCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        special_use:
+          type: array
+          items:
+            type: string
+    MailboxUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        subscribed:
+          type: boolean
+    ACLChange:
+      type: object
+      required: [rights]
+      properties:
+        rights:
+          type: string
+          maxLength: 32
+          description: RFC 4314 rights (c and d expand as usual).
+        mode:
+          type: string
+          enum: [replace, add, remove]
+          default: replace

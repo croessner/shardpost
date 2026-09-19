@@ -21,6 +21,27 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for ACLChangeMode.
+const (
+	Add     ACLChangeMode = "add"
+	Remove  ACLChangeMode = "remove"
+	Replace ACLChangeMode = "replace"
+)
+
+// Valid indicates whether the value is a known member of the ACLChangeMode enum.
+func (e ACLChangeMode) Valid() bool {
+	switch e {
+	case Add:
+		return true
+	case Remove:
+		return true
+	case Replace:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ACLExplanationLookup.
 const (
 	ACLExplanationLookupAlias       ACLExplanationLookup = "alias"
@@ -71,19 +92,20 @@ func (e AccountStatusLookup) Valid() bool {
 
 // Defines values for ErrorCode.
 const (
-	BadRequest      ErrorCode = "bad_request"
-	Conflict        ErrorCode = "conflict"
-	Forbidden       ErrorCode = "forbidden"
-	ImportLocked    ErrorCode = "import_locked"
-	Internal        ErrorCode = "internal"
-	NoSuchMailbox   ErrorCode = "no_such_mailbox"
-	NoSuchUser      ErrorCode = "no_such_user"
-	NotLocked       ErrorCode = "not_locked"
-	OverQuota       ErrorCode = "over_quota"
-	Rejected        ErrorCode = "rejected"
-	Temporary       ErrorCode = "temporary"
-	TooLarge        ErrorCode = "too_large"
-	Unauthenticated ErrorCode = "unauthenticated"
+	BadRequest         ErrorCode = "bad_request"
+	Conflict           ErrorCode = "conflict"
+	Forbidden          ErrorCode = "forbidden"
+	ImportLocked       ErrorCode = "import_locked"
+	Internal           ErrorCode = "internal"
+	NoSuchMailbox      ErrorCode = "no_such_mailbox"
+	NoSuchUser         ErrorCode = "no_such_user"
+	NotLocked          ErrorCode = "not_locked"
+	OverQuota          ErrorCode = "over_quota"
+	PreconditionFailed ErrorCode = "precondition_failed"
+	Rejected           ErrorCode = "rejected"
+	Temporary          ErrorCode = "temporary"
+	TooLarge           ErrorCode = "too_large"
+	Unauthenticated    ErrorCode = "unauthenticated"
 )
 
 // Valid indicates whether the value is a known member of the ErrorCode enum.
@@ -107,6 +129,8 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case OverQuota:
 		return true
+	case PreconditionFailed:
+		return true
 	case Rejected:
 		return true
 	case Temporary:
@@ -119,6 +143,17 @@ func (e ErrorCode) Valid() bool {
 		return false
 	}
 }
+
+// ACLChange defines model for ACLChange.
+type ACLChange struct {
+	Mode *ACLChangeMode `json:"mode,omitempty"`
+
+	// Rights RFC 4314 rights (c and d expand as usual).
+	Rights string `json:"rights"`
+}
+
+// ACLChangeMode defines model for ACLChange.Mode.
+type ACLChangeMode string
 
 // ACLEntry defines model for ACLEntry.
 type ACLEntry struct {
@@ -300,6 +335,12 @@ type MailboxACL struct {
 	Owner      string     `json:"owner"`
 }
 
+// MailboxCreate defines model for MailboxCreate.
+type MailboxCreate struct {
+	Name       string    `json:"name"`
+	SpecialUse *[]string `json:"special_use,omitempty"`
+}
+
 // MailboxDetail defines model for MailboxDetail.
 type MailboxDetail struct {
 	Deleted  int64    `json:"deleted"`
@@ -336,6 +377,12 @@ type MailboxSummary struct {
 	Subscribed    bool     `json:"subscribed"`
 	UidNext       int64    `json:"uid_next"`
 	Uidvalidity   int64    `json:"uidvalidity"`
+}
+
+// MailboxUpdate defines model for MailboxUpdate.
+type MailboxUpdate struct {
+	Name       *string `json:"name,omitempty"`
+	Subscribed *bool   `json:"subscribed,omitempty"`
 }
 
 // QuotaStatus defines model for QuotaStatus.
@@ -428,6 +475,12 @@ type Version struct {
 // Account defines model for Account.
 type Account = string
 
+// Identifier defines model for Identifier.
+type Identifier = string
+
+// IfMatch defines model for IfMatch.
+type IfMatch = string
+
 // ImportSessionHeader defines model for ImportSessionHeader.
 type ImportSessionHeader = string
 
@@ -510,10 +563,28 @@ type ListMailboxesParams struct {
 	Name  *string `form:"name,omitempty" json:"name,omitempty"`
 }
 
+// UpdateMailboxParams defines parameters for UpdateMailbox.
+type UpdateMailboxParams struct {
+	// IfMatch ETag of the version the change is based on.
+	IfMatch *IfMatch `json:"If-Match,omitempty"`
+}
+
 // ExplainMailboxACLParams defines parameters for ExplainMailboxACL.
 type ExplainMailboxACLParams struct {
 	// Principal Account (or alias) whose access is explained.
 	Principal string `form:"principal" json:"principal"`
+}
+
+// DeleteACLEntryParams defines parameters for DeleteACLEntry.
+type DeleteACLEntryParams struct {
+	// IfMatch ETag of the version the change is based on.
+	IfMatch *IfMatch `json:"If-Match,omitempty"`
+}
+
+// SetACLEntryParams defines parameters for SetACLEntry.
+type SetACLEntryParams struct {
+	// IfMatch ETag of the version the change is based on.
+	IfMatch *IfMatch `json:"If-Match,omitempty"`
 }
 
 // DeliverParams defines parameters for Deliver.
@@ -554,6 +625,15 @@ type ImportMessagesMultipartRequestBody = ImportMessagesMultipartBody
 
 // PutImportSieveJSONRequestBody defines body for PutImportSieve for application/json ContentType.
 type PutImportSieveJSONRequestBody = ImportSieve
+
+// CreateMailboxJSONRequestBody defines body for CreateMailbox for application/json ContentType.
+type CreateMailboxJSONRequestBody = MailboxCreate
+
+// UpdateMailboxJSONRequestBody defines body for UpdateMailbox for application/json ContentType.
+type UpdateMailboxJSONRequestBody = MailboxUpdate
+
+// SetACLEntryJSONRequestBody defines body for SetACLEntry for application/json ContentType.
+type SetACLEntryJSONRequestBody = ACLChange
 
 // SetTraceJSONRequestBody defines body for SetTrace for application/json ContentType.
 type SetTraceJSONRequestBody = TraceRequest
@@ -819,6 +899,30 @@ type ClientInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes (the `ListMailboxes` operationId).
 	ListMailboxes(ctx context.Context, account Account, params *ListMailboxesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// CreateMailboxWithBody Create a mailbox
+	//
+	// Creates the mailbox (parents are implicit). Repeating the request
+	// for an existing mailbox with the same special-use answers 200 with
+	// it (idempotent); a different special-use is a conflict (409). The
+	// account must be canonical. Requires the role `provision`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+	CreateMailboxWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateMailbox Create a mailbox
+	//
+	// Creates the mailbox (parents are implicit). Repeating the request
+	// for an existing mailbox with the same special-use answers 200 with
+	// it (idempotent); a different special-use is a conflict (409). The
+	// account must be canonical. Requires the role `provision`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+	CreateMailbox(ctx context.Context, account Account, body CreateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetMailbox One mailbox in detail
 	//
 	// Registry data, index header and counts over all messages (reads
@@ -826,6 +930,32 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
 	GetMailbox(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateMailboxWithBody Rename a mailbox or change its subscription
+	//
+	// `name` renames the mailbox together with its children (INBOX
+	// cannot be renamed; an existing target is a conflict), `subscribed`
+	// sets the subscription. Renaming to the current name is a no-op.
+	// `If-Match` (the mailbox's ETag) makes the change conditional (412
+	// on mismatch). Requires the role `provision`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+	UpdateMailboxWithBody(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateMailbox Rename a mailbox or change its subscription
+	//
+	// `name` renames the mailbox together with its children (INBOX
+	// cannot be renamed; an existing target is a conflict), `subscribed`
+	// sets the subscription. Renaming to the current name is a no-op.
+	// `If-Match` (the mailbox's ETag) makes the change conditional (412
+	// on mismatch). Requires the role `provision`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+	UpdateMailbox(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, body UpdateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetMailboxACL ACL of a mailbox
 	//
@@ -845,6 +975,43 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
 	ExplainMailboxACL(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteACLEntry Remove the entry of one identifier
+	//
+	// Like setACLEntry with empty rights. Requires the role `provision`.
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `DeleteACLEntry` operationId).
+	DeleteACLEntry(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *DeleteACLEntryParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetACLEntryWithBody Change the rights of one identifier
+	//
+	// `mode` replace sets the rights, add and remove change them
+	// relative to the current entry; the change is computed and stored
+	// in one versioned step on the server, so concurrent changes do not
+	// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+	// The identifier must be a canonical account or `anyone`, not the
+	// owner. The grantee's shared pointer follows. Requires the role
+	// `provision`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+	SetACLEntryWithBody(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetACLEntry Change the rights of one identifier
+	//
+	// `mode` replace sets the rights, add and remove change them
+	// relative to the current entry; the change is computed and stored
+	// in one versioned step on the server, so concurrent changes do not
+	// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+	// The identifier must be a canonical account or `anyone`, not the
+	// owner. The grantee's shared pointer follows. Requires the role
+	// `provision`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+	SetACLEntry(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetQuota Quota usage and limit
 	//
@@ -1323,6 +1490,50 @@ func (c *Client) ListMailboxes(ctx context.Context, account Account, params *Lis
 	return c.Client.Do(req)
 }
 
+// CreateMailboxWithBody Create a mailbox
+//
+// Creates the mailbox (parents are implicit). Repeating the request
+// for an existing mailbox with the same special-use answers 200 with
+// it (idempotent); a different special-use is a conflict (409). The
+// account must be canonical. Requires the role `provision`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+func (c *Client) CreateMailboxWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateMailboxRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateMailbox Create a mailbox
+//
+// Creates the mailbox (parents are implicit). Repeating the request
+// for an existing mailbox with the same special-use answers 200 with
+// it (idempotent); a different special-use is a conflict (409). The
+// account must be canonical. Requires the role `provision`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+func (c *Client) CreateMailbox(ctx context.Context, account Account, body CreateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateMailboxRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetMailbox One mailbox in detail
 //
 // Registry data, index header and counts over all messages (reads
@@ -1331,6 +1542,52 @@ func (c *Client) ListMailboxes(ctx context.Context, account Account, params *Lis
 // Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
 func (c *Client) GetMailbox(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetMailboxRequest(c.Server, account, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateMailboxWithBody Rename a mailbox or change its subscription
+//
+// `name` renames the mailbox together with its children (INBOX
+// cannot be renamed; an existing target is a conflict), `subscribed`
+// sets the subscription. Renaming to the current name is a no-op.
+// `If-Match` (the mailbox's ETag) makes the change conditional (412
+// on mismatch). Requires the role `provision`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+func (c *Client) UpdateMailboxWithBody(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateMailboxRequestWithBody(c.Server, account, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateMailbox Rename a mailbox or change its subscription
+//
+// `name` renames the mailbox together with its children (INBOX
+// cannot be renamed; an existing target is a conflict), `subscribed`
+// sets the subscription. Renaming to the current name is a no-op.
+// `If-Match` (the mailbox's ETag) makes the change conditional (412
+// on mismatch). Requires the role `provision`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+func (c *Client) UpdateMailbox(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, body UpdateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateMailboxRequest(c.Server, account, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1370,6 +1627,73 @@ func (c *Client) GetMailboxACL(ctx context.Context, account Account, id MailboxI
 // Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
 func (c *Client) ExplainMailboxACL(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewExplainMailboxACLRequest(c.Server, account, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DeleteACLEntry Remove the entry of one identifier
+//
+// Like setACLEntry with empty rights. Requires the role `provision`.
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `DeleteACLEntry` operationId).
+func (c *Client) DeleteACLEntry(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *DeleteACLEntryParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteACLEntryRequest(c.Server, account, id, identifier, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetACLEntryWithBody Change the rights of one identifier
+//
+// `mode` replace sets the rights, add and remove change them
+// relative to the current entry; the change is computed and stored
+// in one versioned step on the server, so concurrent changes do not
+// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+// The identifier must be a canonical account or `anyone`, not the
+// owner. The grantee's shared pointer follows. Requires the role
+// `provision`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+func (c *Client) SetACLEntryWithBody(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetACLEntryRequestWithBody(c.Server, account, id, identifier, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetACLEntry Change the rights of one identifier
+//
+// `mode` replace sets the rights, add and remove change them
+// relative to the current entry; the change is computed and stored
+// in one versioned step on the server, so concurrent changes do not
+// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+// The identifier must be a canonical account or `anyone`, not the
+// owner. The grantee's shared pointer follows. Requires the role
+// `provision`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+func (c *Client) SetACLEntry(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetACLEntryRequest(c.Server, account, id, identifier, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2353,6 +2677,53 @@ func NewListMailboxesRequest(server string, account Account, params *ListMailbox
 	return req, nil
 }
 
+// NewCreateMailboxRequest calls the generic CreateMailbox builder with application/json body
+func NewCreateMailboxRequest(server string, account Account, body CreateMailboxJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateMailboxRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewCreateMailboxRequestWithBody constructs an http.Request for the CreateMailbox method, with any body, and a specified content type
+func NewCreateMailboxRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetMailboxRequest constructs an http.Request for the GetMailbox method
 func NewGetMailboxRequest(server string, account Account, id MailboxID) (*http.Request, error) {
 	var err error
@@ -2389,6 +2760,75 @@ func NewGetMailboxRequest(server string, account Account, id MailboxID) (*http.R
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUpdateMailboxRequest calls the generic UpdateMailbox builder with application/json body
+func NewUpdateMailboxRequest(server string, account Account, id MailboxID, params *UpdateMailboxParams, body UpdateMailboxJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateMailboxRequestWithBody(server, account, id, params, "application/json", bodyReader)
+}
+
+// NewUpdateMailboxRequestWithBody constructs an http.Request for the UpdateMailbox method, with any body, and a specified content type
+func NewUpdateMailboxRequestWithBody(server string, account Account, id MailboxID, params *UpdateMailboxParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.IfMatch != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "If-Match", *params.IfMatch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("If-Match", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -2494,6 +2934,145 @@ func NewExplainMailboxACLRequest(server string, account Account, id MailboxID, p
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDeleteACLEntryRequest constructs an http.Request for the DeleteACLEntry method
+func NewDeleteACLEntryRequest(server string, account Account, id MailboxID, identifier Identifier, params *DeleteACLEntryParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "identifier", identifier, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/acl/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.IfMatch != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "If-Match", *params.IfMatch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("If-Match", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetACLEntryRequest calls the generic SetACLEntry builder with application/json body
+func NewSetACLEntryRequest(server string, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetACLEntryRequestWithBody(server, account, id, identifier, params, "application/json", bodyReader)
+}
+
+// NewSetACLEntryRequestWithBody constructs an http.Request for the SetACLEntry method, with any body, and a specified content type
+func NewSetACLEntryRequestWithBody(server string, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "identifier", identifier, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/acl/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.IfMatch != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "If-Match", *params.IfMatch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("If-Match", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -3079,6 +3658,30 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes (the `ListMailboxes` operationId).
 	ListMailboxesWithResponse(ctx context.Context, account Account, params *ListMailboxesParams, reqEditors ...RequestEditorFn) (*ListMailboxesResponse, error)
 
+	// CreateMailboxWithBodyWithResponse Create a mailbox
+	//
+	// Creates the mailbox (parents are implicit). Repeating the request
+	// for an existing mailbox with the same special-use answers 200 with
+	// it (idempotent); a different special-use is a conflict (409). The
+	// account must be canonical. Requires the role `provision`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+	CreateMailboxWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateMailboxResponse, error)
+
+	// CreateMailboxWithResponse Create a mailbox
+	//
+	// Creates the mailbox (parents are implicit). Repeating the request
+	// for an existing mailbox with the same special-use answers 200 with
+	// it (idempotent); a different special-use is a conflict (409). The
+	// account must be canonical. Requires the role `provision`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+	CreateMailboxWithResponse(ctx context.Context, account Account, body CreateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateMailboxResponse, error)
+
 	// GetMailboxWithResponse One mailbox in detail
 	//
 	// Registry data, index header and counts over all messages (reads
@@ -3088,6 +3691,32 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id} (the `GetMailbox` operationId).
 	GetMailboxWithResponse(ctx context.Context, account Account, id MailboxID, reqEditors ...RequestEditorFn) (*GetMailboxResponse, error)
+
+	// UpdateMailboxWithBodyWithResponse Rename a mailbox or change its subscription
+	//
+	// `name` renames the mailbox together with its children (INBOX
+	// cannot be renamed; an existing target is a conflict), `subscribed`
+	// sets the subscription. Renaming to the current name is a no-op.
+	// `If-Match` (the mailbox's ETag) makes the change conditional (412
+	// on mismatch). Requires the role `provision`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+	UpdateMailboxWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateMailboxResponse, error)
+
+	// UpdateMailboxWithResponse Rename a mailbox or change its subscription
+	//
+	// `name` renames the mailbox together with its children (INBOX
+	// cannot be renamed; an existing target is a conflict), `subscribed`
+	// sets the subscription. Renaming to the current name is a no-op.
+	// `If-Match` (the mailbox's ETag) makes the change conditional (412
+	// on mismatch). Requires the role `provision`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+	UpdateMailboxWithResponse(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, body UpdateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateMailboxResponse, error)
 
 	// GetMailboxACLWithResponse ACL of a mailbox
 	//
@@ -3111,6 +3740,45 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
 	ExplainMailboxACLWithResponse(ctx context.Context, account Account, id MailboxID, params *ExplainMailboxACLParams, reqEditors ...RequestEditorFn) (*ExplainMailboxACLResponse, error)
+
+	// DeleteACLEntryWithResponse Remove the entry of one identifier
+	//
+	// Like setACLEntry with empty rights. Requires the role `provision`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `DeleteACLEntry` operationId).
+	DeleteACLEntryWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *DeleteACLEntryParams, reqEditors ...RequestEditorFn) (*DeleteACLEntryResponse, error)
+
+	// SetACLEntryWithBodyWithResponse Change the rights of one identifier
+	//
+	// `mode` replace sets the rights, add and remove change them
+	// relative to the current entry; the change is computed and stored
+	// in one versioned step on the server, so concurrent changes do not
+	// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+	// The identifier must be a canonical account or `anyone`, not the
+	// owner. The grantee's shared pointer follows. Requires the role
+	// `provision`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+	SetACLEntryWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetACLEntryResponse, error)
+
+	// SetACLEntryWithResponse Change the rights of one identifier
+	//
+	// `mode` replace sets the rights, add and remove change them
+	// relative to the current entry; the change is computed and stored
+	// in one versioned step on the server, so concurrent changes do not
+	// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+	// The identifier must be a canonical account or `anyone`, not the
+	// owner. The grantee's shared pointer follows. Requires the role
+	// `provision`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+	SetACLEntryWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*SetACLEntryResponse, error)
 
 	// GetQuotaWithResponse Quota usage and limit
 	//
@@ -3820,6 +4488,75 @@ func (r ListMailboxesResponse) ContentType() string {
 	return ""
 }
 
+// CreateMailboxResponse200Headers the declared response headers of an HTTP 200 response for CreateMailbox
+type CreateMailboxResponse200Headers struct {
+	ETag *string
+}
+
+// CreateMailboxResponse201Headers the declared response headers of an HTTP 201 response for CreateMailbox
+type CreateMailboxResponse201Headers struct {
+	ETag *string
+}
+
+type CreateMailboxResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxSummary
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *MailboxSummary
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *CreateMailboxResponse200Headers
+	// Headers201 the parsed response headers for an HTTP 201 response
+	Headers201 *CreateMailboxResponse201Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CreateMailboxResponse) GetJSON200() *MailboxSummary {
+	return r.JSON200
+}
+
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r CreateMailboxResponse) GetJSON201() *MailboxSummary {
+	return r.JSON201
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CreateMailboxResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CreateMailboxResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateMailboxResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateMailboxResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CreateMailboxResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetMailboxResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3862,6 +4599,61 @@ func (r GetMailboxResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetMailboxResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// UpdateMailboxResponse200Headers the declared response headers of an HTTP 200 response for UpdateMailbox
+type UpdateMailboxResponse200Headers struct {
+	ETag *string
+}
+
+type UpdateMailboxResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxSummary
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *UpdateMailboxResponse200Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r UpdateMailboxResponse) GetJSON200() *MailboxSummary {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r UpdateMailboxResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r UpdateMailboxResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateMailboxResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateMailboxResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r UpdateMailboxResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -3958,6 +4750,116 @@ func (r ExplainMailboxACLResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ExplainMailboxACLResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// DeleteACLEntryResponse200Headers the declared response headers of an HTTP 200 response for DeleteACLEntry
+type DeleteACLEntryResponse200Headers struct {
+	ETag *string
+}
+
+type DeleteACLEntryResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxACL
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *DeleteACLEntryResponse200Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DeleteACLEntryResponse) GetJSON200() *MailboxACL {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DeleteACLEntryResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DeleteACLEntryResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteACLEntryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteACLEntryResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DeleteACLEntryResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// SetACLEntryResponse200Headers the declared response headers of an HTTP 200 response for SetACLEntry
+type SetACLEntryResponse200Headers struct {
+	ETag *string
+}
+
+type SetACLEntryResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MailboxACL
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *SetACLEntryResponse200Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetACLEntryResponse) GetJSON200() *MailboxACL {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetACLEntryResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetACLEntryResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetACLEntryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetACLEntryResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetACLEntryResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -4654,6 +5556,42 @@ func (c *ClientWithResponses) ListMailboxesWithResponse(ctx context.Context, acc
 	return ParseListMailboxesResponse(rsp)
 }
 
+// CreateMailboxWithBodyWithResponse Create a mailbox
+//
+// Creates the mailbox (parents are implicit). Repeating the request
+// for an existing mailbox with the same special-use answers 200 with
+// it (idempotent); a different special-use is a conflict (409). The
+// account must be canonical. Requires the role `provision`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+func (c *ClientWithResponses) CreateMailboxWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateMailboxResponse, error) {
+	rsp, err := c.CreateMailboxWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateMailboxResponse(rsp)
+}
+
+// CreateMailboxWithResponse Create a mailbox
+//
+// Creates the mailbox (parents are implicit). Repeating the request
+// for an existing mailbox with the same special-use answers 200 with
+// it (idempotent); a different special-use is a conflict (409). The
+// account must be canonical. Requires the role `provision`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes (the `CreateMailbox` operationId).
+func (c *ClientWithResponses) CreateMailboxWithResponse(ctx context.Context, account Account, body CreateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateMailboxResponse, error) {
+	rsp, err := c.CreateMailbox(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateMailboxResponse(rsp)
+}
+
 // GetMailboxWithResponse One mailbox in detail
 //
 // Registry data, index header and counts over all messages (reads
@@ -4668,6 +5606,44 @@ func (c *ClientWithResponses) GetMailboxWithResponse(ctx context.Context, accoun
 		return nil, err
 	}
 	return ParseGetMailboxResponse(rsp)
+}
+
+// UpdateMailboxWithBodyWithResponse Rename a mailbox or change its subscription
+//
+// `name` renames the mailbox together with its children (INBOX
+// cannot be renamed; an existing target is a conflict), `subscribed`
+// sets the subscription. Renaming to the current name is a no-op.
+// `If-Match` (the mailbox's ETag) makes the change conditional (412
+// on mismatch). Requires the role `provision`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+func (c *ClientWithResponses) UpdateMailboxWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateMailboxResponse, error) {
+	rsp, err := c.UpdateMailboxWithBody(ctx, account, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateMailboxResponse(rsp)
+}
+
+// UpdateMailboxWithResponse Rename a mailbox or change its subscription
+//
+// `name` renames the mailbox together with its children (INBOX
+// cannot be renamed; an existing target is a conflict), `subscribed`
+// sets the subscription. Renaming to the current name is a no-op.
+// `If-Match` (the mailbox's ETag) makes the change conditional (412
+// on mismatch). Requires the role `provision`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /admin/v1/accounts/{account}/mailboxes/{id} (the `UpdateMailbox` operationId).
+func (c *ClientWithResponses) UpdateMailboxWithResponse(ctx context.Context, account Account, id MailboxID, params *UpdateMailboxParams, body UpdateMailboxJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateMailboxResponse, error) {
+	rsp, err := c.UpdateMailbox(ctx, account, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateMailboxResponse(rsp)
 }
 
 // GetMailboxACLWithResponse ACL of a mailbox
@@ -4703,6 +5679,63 @@ func (c *ClientWithResponses) ExplainMailboxACLWithResponse(ctx context.Context,
 		return nil, err
 	}
 	return ParseExplainMailboxACLResponse(rsp)
+}
+
+// DeleteACLEntryWithResponse Remove the entry of one identifier
+//
+// Like setACLEntry with empty rights. Requires the role `provision`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `DeleteACLEntry` operationId).
+func (c *ClientWithResponses) DeleteACLEntryWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *DeleteACLEntryParams, reqEditors ...RequestEditorFn) (*DeleteACLEntryResponse, error) {
+	rsp, err := c.DeleteACLEntry(ctx, account, id, identifier, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteACLEntryResponse(rsp)
+}
+
+// SetACLEntryWithBodyWithResponse Change the rights of one identifier
+//
+// `mode` replace sets the rights, add and remove change them
+// relative to the current entry; the change is computed and stored
+// in one versioned step on the server, so concurrent changes do not
+// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+// The identifier must be a canonical account or `anyone`, not the
+// owner. The grantee's shared pointer follows. Requires the role
+// `provision`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+func (c *ClientWithResponses) SetACLEntryWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetACLEntryResponse, error) {
+	rsp, err := c.SetACLEntryWithBody(ctx, account, id, identifier, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetACLEntryResponse(rsp)
+}
+
+// SetACLEntryWithResponse Change the rights of one identifier
+//
+// `mode` replace sets the rights, add and remove change them
+// relative to the current entry; the change is computed and stored
+// in one versioned step on the server, so concurrent changes do not
+// lose each other. `If-Match` is the ACL ETag (412 on mismatch).
+// The identifier must be a canonical account or `anyone`, not the
+// owner. The grantee's shared pointer follows. Requires the role
+// `provision`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
+func (c *ClientWithResponses) SetACLEntryWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*SetACLEntryResponse, error) {
+	rsp, err := c.SetACLEntry(ctx, account, id, identifier, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetACLEntryResponse(rsp)
 }
 
 // GetQuotaWithResponse Quota usage and limit
@@ -5283,6 +6316,69 @@ func ParseListMailboxesResponse(rsp *http.Response) (*ListMailboxesResponse, err
 	return response, nil
 }
 
+// ParseCreateMailboxResponse parses an HTTP response from a CreateMailboxWithResponse call
+func ParseCreateMailboxResponse(rsp *http.Response) (*CreateMailboxResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateMailboxResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxSummary
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest MailboxSummary
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers CreateMailboxResponse200Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers200 = &headers
+	case rsp.StatusCode == 201:
+		var headers CreateMailboxResponse201Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers201 = &headers
+	}
+
+	return response, nil
+}
+
 // ParseGetMailboxResponse parses an HTTP response from a GetMailboxWithResponse call
 func ParseGetMailboxResponse(rsp *http.Response) (*GetMailboxResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -5311,6 +6407,52 @@ func ParseGetMailboxResponse(rsp *http.Response) (*GetMailboxResponse, error) {
 		}
 		response.JSONDefault = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUpdateMailboxResponse parses an HTTP response from a UpdateMailboxWithResponse call
+func ParseUpdateMailboxResponse(rsp *http.Response) (*UpdateMailboxResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateMailboxResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxSummary
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers UpdateMailboxResponse200Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers200 = &headers
 	}
 
 	return response, nil
@@ -5377,6 +6519,98 @@ func ParseExplainMailboxACLResponse(rsp *http.Response) (*ExplainMailboxACLRespo
 		}
 		response.JSONDefault = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseDeleteACLEntryResponse parses an HTTP response from a DeleteACLEntryWithResponse call
+func ParseDeleteACLEntryResponse(rsp *http.Response) (*DeleteACLEntryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteACLEntryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxACL
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers DeleteACLEntryResponse200Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers200 = &headers
+	}
+
+	return response, nil
+}
+
+// ParseSetACLEntryResponse parses an HTTP response from a SetACLEntryWithResponse call
+func ParseSetACLEntryResponse(rsp *http.Response) (*SetACLEntryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetACLEntryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MailboxACL
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers SetACLEntryResponse200Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers200 = &headers
 	}
 
 	return response, nil
@@ -5683,15 +6917,27 @@ type ServerInterface interface {
 	// ListMailboxes Mailboxes of an account, page by page
 	// (GET /admin/v1/accounts/{account}/mailboxes)
 	ListMailboxes(w http.ResponseWriter, r *http.Request, account Account, params ListMailboxesParams)
+	// CreateMailbox Create a mailbox
+	// (POST /admin/v1/accounts/{account}/mailboxes)
+	CreateMailbox(w http.ResponseWriter, r *http.Request, account Account)
 	// GetMailbox One mailbox in detail
 	// (GET /admin/v1/accounts/{account}/mailboxes/{id})
 	GetMailbox(w http.ResponseWriter, r *http.Request, account Account, id MailboxID)
+	// UpdateMailbox Rename a mailbox or change its subscription
+	// (PATCH /admin/v1/accounts/{account}/mailboxes/{id})
+	UpdateMailbox(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params UpdateMailboxParams)
 	// GetMailboxACL ACL of a mailbox
 	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/acl)
 	GetMailboxACL(w http.ResponseWriter, r *http.Request, account Account, id MailboxID)
 	// ExplainMailboxACL Why a principal can (not) use a mailbox
 	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain)
 	ExplainMailboxACL(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ExplainMailboxACLParams)
+	// DeleteACLEntry Remove the entry of one identifier
+	// (DELETE /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier})
+	DeleteACLEntry(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, identifier Identifier, params DeleteACLEntryParams)
+	// SetACLEntry Change the rights of one identifier
+	// (PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier})
+	SetACLEntry(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, identifier Identifier, params SetACLEntryParams)
 	// GetQuota Quota usage and limit
 	// (GET /admin/v1/accounts/{account}/quota)
 	GetQuota(w http.ResponseWriter, r *http.Request, account Account)
@@ -6467,6 +7713,32 @@ func (siw *ServerInterfaceWrapper) ListMailboxes(w http.ResponseWriter, r *http.
 	handler.ServeHTTP(w, r)
 }
 
+// CreateMailbox operation middleware
+func (siw *ServerInterfaceWrapper) CreateMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateMailbox(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetMailbox operation middleware
 func (siw *ServerInterfaceWrapper) GetMailbox(w http.ResponseWriter, r *http.Request) {
 
@@ -6493,6 +7765,65 @@ func (siw *ServerInterfaceWrapper) GetMailbox(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetMailbox(w, r, account, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateMailbox operation middleware
+func (siw *ServerInterfaceWrapper) UpdateMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params UpdateMailboxParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-Match")]; found {
+		var IfMatch IfMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-Match", valueList[0], &IfMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-Match", Err: err})
+			return
+		}
+
+		params.IfMatch = &IfMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateMailbox(w, r, account, id, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6579,6 +7910,142 @@ func (siw *ServerInterfaceWrapper) ExplainMailboxACL(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ExplainMailboxACL(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteACLEntry operation middleware
+func (siw *ServerInterfaceWrapper) DeleteACLEntry(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "identifier" -------------
+	var identifier Identifier
+
+	err = runtime.BindStyledParameterWithOptions("simple", "identifier", r.PathValue("identifier"), &identifier, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteACLEntryParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-Match")]; found {
+		var IfMatch IfMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-Match", valueList[0], &IfMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-Match", Err: err})
+			return
+		}
+
+		params.IfMatch = &IfMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteACLEntry(w, r, account, id, identifier, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetACLEntry operation middleware
+func (siw *ServerInterfaceWrapper) SetACLEntry(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "identifier" -------------
+	var identifier Identifier
+
+	err = runtime.BindStyledParameterWithOptions("simple", "identifier", r.PathValue("identifier"), &identifier, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params SetACLEntryParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-Match")]; found {
+		var IfMatch IfMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-Match", valueList[0], &IfMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-Match", Err: err})
+			return
+		}
+
+		params.IfMatch = &IfMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetACLEntry(w, r, account, id, identifier, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6955,8 +8422,12 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/server", wrapper.GetServerStatus)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}", wrapper.GetAccount)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes", wrapper.ListMailboxes)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes", wrapper.CreateMailbox)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}", wrapper.GetMailbox)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}", wrapper.UpdateMailbox)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl", wrapper.GetMailboxACL)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier}", wrapper.DeleteACLEntry)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier}", wrapper.SetACLEntry)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl/explain", wrapper.ExplainMailboxACL)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/quota", wrapper.GetQuota)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/shared", wrapper.ListSharedMailboxes)

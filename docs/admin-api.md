@@ -40,7 +40,8 @@ brauchen `extKeyUsage clientAuth`.
 
 Rollen: `diagnose` (Version, Serverstatus und lesende Diagnose), `deliver` (Zustellung mit Quota-Durchsetzung),
 `deliver:noenforce` (zusätzlich für `enforce_quota=false`), `import`
-(Kontoimport) und `trace` (Protokoll-Trace eines Kontos, siehe unten).
+(Kontoimport), `trace` (Protokoll-Trace eines Kontos, siehe unten) und
+`provision` (Postfächer anlegen, umbenennen, abonnieren; ACLs ändern).
 
 ```yaml
 admin:
@@ -181,6 +182,56 @@ Markierung für jedes neue Feld, dessen Name nach Passwort, Secret oder Token
 aussieht. Gleiche Fingerprints bedeuten gleiche Einstellungen der Pods.
 
 Jobstatus folgt mit den Wartungsjobs in Stufe 8c.
+
+## Provisionierung und Berechtigungen (Stufe 8b)
+
+Rolle `provision`. Quota-Grenzen setzt die Admin-API nicht: maßgeblich ist
+LDAP (`rnsMSQuota`), übernommen bei der Anmeldung (Entscheidung 19.09.2026).
+
+```sh
+shardpostctl mailbox create [-special-use '\Archive'] user@example.org "Projekte/2026"
+shardpostctl mailbox rename [-if-match '"m-…"'] user@example.org "Projekte/2026" "Archiv/2026"
+shardpostctl mailbox subscribe|unsubscribe user@example.org "Archiv/2026"
+shardpostctl acl set [-mode replace|add|remove] [-if-match '"acl-3"'] user@example.org Shared kollege@example.org lr
+shardpostctl acl delete user@example.org Shared kollege@example.org
+```
+
+| API | Semantik |
+| --- | --- |
+| `POST …/mailboxes` `{name, special_use}` | 201 angelegt. Existiert das Postfach schon mit gleichem Special-Use: 200 (Wiederholung nach verlorener Antwort), sonst 409. Special-Use wird wie bei IMAP CREATE in Standardschreibweise gespeichert (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`), andere Attribute lehnt die API ab. |
+| `PATCH …/mailboxes/{id}` `{name?, subscribed?}` | Umbenennen samt Unterordnern (INBOX nicht, belegtes Ziel 409), Abo setzen; gleicher Name ist ein No-op. |
+| `PUT …/mailboxes/{id}/acl/{identifier}` `{rights, mode}` | `replace` setzt, `add`/`remove` ändern relativ; der Server rechnet und schreibt in einem versionierten Schritt, parallele Änderungen gehen nicht verloren. |
+| `DELETE …/mailboxes/{id}/acl/{identifier}` | Eintrag entfernen. |
+
+- **Versionen:** `GET …/mailboxes/{id}` und Änderungen liefern das
+  Postfach-ETag (`"m-…"`), `GET …/acl` und ACL-Änderungen das ACL-ETag
+  (`"acl-<Generation>"`). Mit `If-Match` wird eine Änderung bedingt;
+  passt die Version nicht, antwortet die API `412 precondition_failed`.
+  Die ACL-Version wird im selben Schreibschritt geprüft. Beim Postfach
+  (Umbenennen, Abo) wird sie unmittelbar vor der Änderung geprüft; das
+  Postfach-ETag umfasst auch die ACL, eine ACL-Änderung macht es also
+  ebenfalls ungültig. Ein ungültig geformtes `If-Match` ergibt 400.
+- **Identifier** sind kanonische Konten (Nauthilus) oder `anyone`: Aliase
+  werden mit dem kanonischen Namen abgelehnt, unbekannte Konten mit 404,
+  der Eigentümer mit 400. Der Freigabe-Zeiger des Empfängers folgt wie bei
+  IMAP SETACL (für `anyone` gibt es keinen); eine Änderung ohne Wirkung
+  schreibt keinen. Scheitert nur das Schreiben des Zeigers, gilt die
+  Änderung trotzdem (maßgeblich ist die ACL; Warnung im Log, `acl explain`
+  zeigt den fehlenden Zeiger, ein `replace` mit denselben Rechten schreibt
+  ihn nach).
+- **Namen** speichert der Server so, wie sie ankommen (UTF-8). IMAP-Clients
+  mit `UTF8=ACCEPT` sehen dieselben Namen; ältere Clients mit modified
+  UTF-7 senden `&AOQ-…`-Formen und sehen Admin-angelegte Umlautnamen
+  nicht unter derselben Bezeichnung.
+- **Idempotenz** ergibt sich aus der Semantik: absolute Werte, Postfächer
+  über ihre stabile ID. Eine wiederholte Anfrage nach verlorener Antwort
+  liefert denselben Zustand. Relative ACL-Änderungen dafür mit `If-Match`
+  schicken.
+- Laufende IMAP-Sitzungen sehen die Änderungen wie die eines anderen
+  Clients: Rechte gelten ab dem nächsten Befehl, neue oder umbenannte
+  Ordner beim nächsten LIST.
+- Exitcodes von `shardpostctl`: 65 bei Konflikt oder veralteter Version
+  (409/412), sonst wie bei der Diagnose.
 
 ## Protokoll-Trace eines Kontos
 

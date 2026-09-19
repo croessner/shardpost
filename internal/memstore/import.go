@@ -79,7 +79,7 @@ func (u *User) MailboxByID(id string) (*model.Mailbox, error) {
 
 	for n, b := range u.boxes {
 		if b.ID == id {
-			return &model.Mailbox{Name: n, MailboxRec: b.MailboxRec}, nil
+			return &model.Mailbox{Name: n, MailboxRec: b.rec()}, nil
 		}
 	}
 
@@ -107,7 +107,7 @@ func (u *User) ImportMailbox(spec model.ImportMailbox) (*model.Mailbox, error) {
 	b, ok := u.boxes[name]
 	if ok && b.UIDValidity == spec.UIDValidity {
 		b.Subscribed, b.SpecialUse = spec.Subscribed, spec.SpecialUse
-		return &model.Mailbox{Name: name, MailboxRec: b.MailboxRec}, nil
+		return &model.Mailbox{Name: name, MailboxRec: b.rec()}, nil
 	}
 
 	if ok {
@@ -125,7 +125,7 @@ func (u *User) ImportMailbox(spec model.ImportMailbox) (*model.Mailbox, error) {
 	u.boxes[name] = nb
 	delete(u.subMiss, name)
 
-	return &model.Mailbox{Name: name, MailboxRec: nb.MailboxRec}, nil
+	return &model.Mailbox{Name: name, MailboxRec: nb.rec()}, nil
 }
 
 // dropForReplace accounts the messages of a mailbox that is replaced;

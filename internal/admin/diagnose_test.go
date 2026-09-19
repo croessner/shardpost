@@ -467,6 +467,7 @@ func TestDiagnoseOperationLabels(t *testing.T) {
 		"/admin/v1/accounts/a@b/mailboxes/x":                    "mailbox",
 		"/admin/v1/accounts/a@b/mailboxes/x/acl":                "acl",
 		"/admin/v1/accounts/a@b/mailboxes/x/acl/explain":        "acl_explain",
+		"/admin/v1/accounts/a@b/mailboxes/x/acl/bob":            "acl_entry",
 		"/admin/v1/accounts/a@b/import/mailboxes/x/messages":    "import_messages",
 		"/admin/v1/accounts/a@b/mailboxes/x/acl/explain/deeper": opOther,
 	} {

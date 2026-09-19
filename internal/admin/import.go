@@ -648,7 +648,7 @@ func (s *Server) desiredACL(r *http.Request, entries map[string]string, owner st
 // aclAccount resolves an ACL identifier to the canonical account
 // ("anyone" stays).
 func (s *Server) aclAccount(r *http.Request, ident string) (string, error) {
-	if ident == "anyone" {
+	if ident == identAnyone {
 		return ident, nil
 	}
 
@@ -867,10 +867,13 @@ func (s *Server) importError(w http.ResponseWriter, r *http.Request, err error) 
 
 // checkMailboxSpec validates a mailbox specification; it returns the
 // problem or "".
+// msgInvalidMailbox answers an unusable mailbox name.
+const msgInvalidMailbox = "invalid mailbox name"
+
 func checkMailboxSpec(name string, uidValidity int64, uses []string) string {
 	switch {
 	case name == "" || len(name) > maxMailbox || hasControl(name) || strings.Contains(name, "//"):
-		return "invalid mailbox name"
+		return msgInvalidMailbox
 	case uidValidity < 1 || uidValidity > math.MaxUint32:
 		return "invalid uidvalidity"
 	}

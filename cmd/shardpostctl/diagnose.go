@@ -29,7 +29,10 @@ import (
 
 const diagnoseUsage = `usage: shardpostctl server status | account show <account> | mailbox list [-limit n] [-after name] [-all] <account> |
   mailbox show <account> <mailbox> | acl list <account> <mailbox> | acl explain <account> <mailbox> <principal> |
-  quota show <account> | shared list <account>   (each with --json)`
+  quota show <account> | shared list <account>   (each with --json) |
+  mailbox create [-special-use \Archive] <account> <name> | mailbox rename [-if-match E] <account> <mailbox> <new> |
+  mailbox subscribe|unsubscribe <account> <mailbox> | acl set [-mode add|remove] [-if-match E] <account> <mailbox> <identifier> <rights> |
+  acl delete [-if-match E] <account> <mailbox> <identifier>`
 
 // labelStore labels the store row.
 const labelStore = "store"
@@ -41,6 +44,10 @@ type diagArgs struct {
 	limit  int
 	after  string
 	all    bool
+	// provisioning flags
+	specialUse string
+	mode       string
+	ifMatch    string
 }
 
 // diagCmd dispatches "<noun> <verb> ...".
@@ -61,13 +68,16 @@ func diagCmd(client *adminapi.ClientWithResponses, noun string, args []string, s
 	fs.IntVar(&a.limit, "limit", 100, "mailboxes per page (mailbox list)")
 	fs.StringVar(&a.after, "after", "", "continue after this mailbox name (mailbox list)")
 	fs.BoolVar(&a.all, "all", false, "fetch all pages (mailbox list)")
+	fs.StringVar(&a.specialUse, "special-use", "", `special-use of a new mailbox, comma-separated (e.g. \Archive)`)
+	fs.StringVar(&a.mode, "mode", "replace", "acl set: replace, add or remove")
+	fs.StringVar(&a.ifMatch, "if-match", "", "ETag the change is based on (412 if it changed)")
 
 	var err error
 	if a.args, err = parseInterleaved(fs, args[1:]); err != nil {
 		return exUsage
 	}
 
-	run, n := diagCommand(verb)
+	run, n := command(verb)
 	if run == nil || len(a.args) != n {
 		sayln(stderr, diagnoseUsage)
 		return exUsage
@@ -96,6 +106,16 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 }
 
 type diagFunc func(context.Context, *adminapi.ClientWithResponses, diagArgs, io.Writer, io.Writer) int
+
+// command returns a diagnosis or provisioning command and its number of
+// positional arguments.
+func command(verb string) (diagFunc, int) {
+	if run, n := provisionCommand(verb); run != nil {
+		return run, n
+	}
+
+	return diagCommand(verb)
+}
 
 // diagCommand returns the command and its number of positional arguments.
 func diagCommand(verb string) (diagFunc, int) {
@@ -340,17 +360,22 @@ func aclList(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs, s
 		return failure(stderr, resp.JSONDefault, resp.StatusCode())
 	}
 
+	return printACL(stdout, a, resp.JSON200, resp.HTTPResponse.Header.Get("ETag"))
+}
+
+// printACL prints an ACL with its ETag.
+func printACL(stdout io.Writer, a diagArgs, acl *adminapi.MailboxACL, etag string) int {
 	if a.asJSON {
-		return printJSON(stdout, resp.JSON200)
+		return printJSON(stdout, acl)
 	}
 
-	rows := [][2]string{{resp.JSON200.Owner, model.AllRights + " (owner)"}}
-	for _, e := range resp.JSON200.Entries {
+	rows := [][2]string{{acl.Owner, model.AllRights + " (owner)"}}
+	for _, e := range acl.Entries {
 		rows = append(rows, [2]string{e.Identifier, e.Rights})
 	}
 
 	table(stdout, rows)
-	sayf(stdout, "generation %d\n", resp.JSON200.Generation)
+	sayf(stdout, "generation %d, etag %s\n", acl.Generation, etag)
 
 	return exOK
 }

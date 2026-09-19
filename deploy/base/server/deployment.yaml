@@ -38,7 +38,7 @@ spec:
               app.kubernetes.io/name: shardpost-server
       containers:
         - name: server
-          image: docker.io/chrroessner/shardpost:0.19.0
+          image: docker.io/chrroessner/shardpost:0.20.0
           imagePullPolicy: IfNotPresent
           env:
             - name: CEPH_USER

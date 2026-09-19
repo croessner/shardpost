@@ -21,7 +21,7 @@ func (s *Server) ExplainMailboxACL(w http.ResponseWriter, r *http.Request, accou
 		return
 	}
 
-	u, info, ok := s.openMailbox(w, r, account, id)
+	u, info, ok := s.openMailbox(w, r, RoleDiagnose, account, id)
 	if !ok {
 		return
 	}

@@ -108,6 +108,88 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	return u.syncSharedRef(name, identifier)
 }
 
+var _ model.ACLModifier = (*User)(nil)
+
+// ModifyACL implements model.ACLModifier: the change is computed from the
+// record read in the same CAS round, so concurrent relative changes do
+// not lose each other.
+func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(old string) string) (string, uint64, error) {
+	name = canonical(name)
+
+	identifier = canonicalIdentifier(identifier)
+	if identifier == "" || identifier == u.name {
+		return "", 0, fmt.Errorf("invalid identifier")
+	}
+
+	var out aclOutcome
+
+	err := casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		out = aclOutcome{}
+		return out.apply(cur, regKey(name), identifier, expectGen, change)
+	})
+	u.invalidate()
+
+	switch {
+	case err != nil:
+		return "", 0, fmt.Errorf("modify acl %q: %w", name, err)
+	case out.missing:
+		return "", 0, ErrNoMailbox
+	case out.conflict:
+		return "", 0, model.ErrVersionConflict
+	case out.bad != nil:
+		return "", 0, out.bad
+	}
+
+	// A pointer is written whenever rights remain (idempotent; this also
+	// repairs a missing one). An unchanged removal writes nothing: its
+	// tombstone could even create the registry of an account without store.
+	if identifier != identAnyone && (out.changed || out.rights != "") {
+		if err := u.syncSharedRef(name, identifier); err != nil {
+			return out.rights, out.gen, fmt.Errorf("%w: %v", model.ErrPointerSync, err)
+		}
+	}
+
+	return out.rights, out.gen, nil
+}
+
+// aclOutcome is the result of one ModifyACL CAS round.
+type aclOutcome struct {
+	missing, conflict, changed bool
+	bad                        error
+	rights                     string
+	gen                        uint64
+}
+
+// apply computes the new registry record for one CAS round.
+func (o *aclOutcome) apply(cur map[string][]byte, key, identifier string, expectGen int64, change func(string) string) (map[string][]byte, []string) {
+	var rec MailboxRec
+	if v, ok := cur[key]; !ok || json.Unmarshal(v, &rec) != nil {
+		o.missing = true
+		return nil, nil
+	}
+
+	if expectGen >= 0 && rec.ACLGen != uint64(expectGen) {
+		o.conflict = true
+		return nil, nil
+	}
+
+	if o.rights, o.bad = normalizeACLRights(change(rec.ACL[identifier])); o.bad != nil {
+		return nil, nil
+	}
+
+	o.gen = rec.ACLGen
+
+	if !applyACLChange(&rec, identifier, o.rights) {
+		return nil, nil
+	}
+
+	rec.ACLGen++
+	o.gen, o.changed = rec.ACLGen, true
+	b, _ := json.Marshal(&rec)
+
+	return map[string][]byte{key: b}, nil
+}
+
 // syncSharedRef writes or removes the grantee's pointer to the mailbox.
 // The pointer follows the ACL as it is now, not as the calling SetACL
 // wrote it, and carries the record's generation: of two concurrent
