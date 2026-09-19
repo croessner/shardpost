@@ -42,7 +42,9 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients,
 		Import: importer, ImportLockTTL: time.Duration(c.Import.LockTTLSeconds) * time.Second,
 		ImportMaxBatchBytes: c.Import.MaxBatchBytes, ImportMaxBatchMessages: c.Import.MaxBatchMessages, ImportMaxInventory: c.Import.MaxInventory, ImportMaxChanges: c.Import.MaxChanges,
-		ImportShardSize: c.Import.ShardSize})
+		ImportShardSize: c.Import.ShardSize, Accounts: importer,
+		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
+		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second})
 
 	if c.Addr != "" {
 		srv, err := s.TLSServer(c.TLSCert, c.TLSKey, c.ClientCA)

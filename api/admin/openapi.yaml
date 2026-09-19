@@ -333,6 +333,64 @@ paths:
           description: Replaced.
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/trace:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: getTrace
+      summary: Protocol trace switch of an account
+      description: The account must be the canonical account. Requires the role `trace`.
+      responses:
+        "200":
+          description: The current switch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceStatus"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setTrace
+      summary: Switch the protocol trace on
+      description: |
+        Switches the protocol trace of the account on for a bounded time
+        (the configured default without `duration_seconds`, at most the
+        configured maximum). Every server of the cluster traces new
+        sessions of the account after their authentication: each protocol
+        line of both directions is logged (event `protocol_trace`) with the
+        session id; literal contents only by size, long lines cut. Running
+        sessions of the account are not affected until they log in again.
+        Authentication commands end the trace unlogged; PREVIEW texts are
+        masked. The account must be the canonical account. Requires the
+        role `trace`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TraceRequest"
+      responses:
+        "200":
+          description: The trace is on.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceStatus"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: clearTrace
+      summary: Switch the protocol trace off
+      description: |
+        Removes the switch; a traced session stops at its next command once
+        the configured recheck interval has passed (an idling session at
+        the end of IDLE or when the trace expires). Requires the role
+        `trace`.
+      responses:
+        "204":
+          description: Off (or it was not on).
+        default:
+          $ref: "#/components/responses/Error"
 components:
   parameters:
     Account:
@@ -612,3 +670,28 @@ components:
           maxLength: 255
         script:
           type: string
+    TraceRequest:
+      type: object
+      properties:
+        duration_seconds:
+          type: integer
+          minimum: 1
+          description: How long the trace lasts (capped at the configured maximum).
+    TraceStatus:
+      type: object
+      required: [account, active]
+      properties:
+        account:
+          type: string
+        active:
+          type: boolean
+        until:
+          type: string
+          format: date-time
+          description: End of the trace (only while active).
+        set_by:
+          type: string
+          description: Admin principal that switched it on.
+        set_at:
+          type: string
+          format: date-time

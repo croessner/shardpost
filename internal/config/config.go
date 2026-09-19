@@ -35,6 +35,8 @@ type Config struct {
 	Quota Quota `mapstructure:"quota"`
 	// Admin configures the internal admin API listeners.
 	Admin Admin `mapstructure:"admin"`
+	// Trace bounds the per-account protocol trace.
+	Trace Trace `mapstructure:"trace"`
 }
 
 // Logging configures the log output.
@@ -197,6 +199,10 @@ var defaults = []struct {
 	{"admin.import.max_inventory", 5000},
 	{"admin.import.max_changes", 10000},
 	{"admin.import.shard_size", 0},
+	{"trace.max_line_bytes", 2048},
+	{"trace.max_duration_seconds", 86400},
+	{"trace.default_duration_seconds", 1800},
+	{"trace.recheck_seconds", 60},
 	{"quota.over_flag.enabled", false},
 	{"quota.over_flag.attribute", ""},
 	{"quota.over_flag.over_value", "TRUE"},

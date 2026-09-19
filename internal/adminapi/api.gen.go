@@ -201,6 +201,25 @@ type StoredMessage struct {
 	Uid     int64  `json:"uid"`
 }
 
+// TraceRequest defines model for TraceRequest.
+type TraceRequest struct {
+	// DurationSeconds How long the trace lasts (capped at the configured maximum).
+	DurationSeconds *int `json:"duration_seconds,omitempty"`
+}
+
+// TraceStatus defines model for TraceStatus.
+type TraceStatus struct {
+	Account string     `json:"account"`
+	Active  bool       `json:"active"`
+	SetAt   *time.Time `json:"set_at,omitempty"`
+
+	// SetBy Admin principal that switched it on.
+	SetBy *string `json:"set_by,omitempty"`
+
+	// Until End of the trace (only while active).
+	Until *time.Time `json:"until,omitempty"`
+}
+
 // Version defines model for Version.
 type Version struct {
 	GoVersion string `json:"go_version"`
@@ -323,6 +342,9 @@ type ImportMessagesMultipartRequestBody = ImportMessagesMultipartBody
 
 // PutImportSieveJSONRequestBody defines body for PutImportSieve for application/json ContentType.
 type PutImportSieveJSONRequestBody = ImportSieve
+
+// SetTraceJSONRequestBody defines body for SetTrace for application/json ContentType.
+type SetTraceJSONRequestBody = TraceRequest
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -561,6 +583,59 @@ type ClientInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
 	PutImportSieve(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClearTrace Switch the protocol trace off
+	//
+	// Removes the switch; a traced session stops at its next command once
+	// the configured recheck interval has passed (an idling session at
+	// the end of IDLE or when the trace expires). Requires the role
+	// `trace`.
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/trace (the `ClearTrace` operationId).
+	ClearTrace(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetTrace Protocol trace switch of an account
+	//
+	// The account must be the canonical account. Requires the role `trace`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/trace (the `GetTrace` operationId).
+	GetTrace(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetTraceWithBody Switch the protocol trace on
+	//
+	// Switches the protocol trace of the account on for a bounded time
+	// (the configured default without `duration_seconds`, at most the
+	// configured maximum). Every server of the cluster traces new
+	// sessions of the account after their authentication: each protocol
+	// line of both directions is logged (event `protocol_trace`) with the
+	// session id; literal contents only by size, long lines cut. Running
+	// sessions of the account are not affected until they log in again.
+	// Authentication commands end the trace unlogged; PREVIEW texts are
+	// masked. The account must be the canonical account. Requires the
+	// role `trace`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+	SetTraceWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetTrace Switch the protocol trace on
+	//
+	// Switches the protocol trace of the account on for a bounded time
+	// (the configured default without `duration_seconds`, at most the
+	// configured maximum). Every server of the cluster traces new
+	// sessions of the account after their authentication: each protocol
+	// line of both directions is logged (event `protocol_trace`) with the
+	// session id; literal contents only by size, long lines cut. Running
+	// sessions of the account are not affected until they log in again.
+	// Authentication commands end the trace unlogged; PREVIEW texts are
+	// masked. The account must be the canonical account. Requires the
+	// role `trace`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+	SetTrace(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeliverWithBody Local delivery (LDA)
 	//
@@ -908,6 +983,99 @@ func (c *Client) PutImportSieveWithBody(ctx context.Context, account Account, pa
 // Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
 func (c *Client) PutImportSieve(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutImportSieveRequest(c.Server, account, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ClearTrace Switch the protocol trace off
+//
+// Removes the switch; a traced session stops at its next command once
+// the configured recheck interval has passed (an idling session at
+// the end of IDLE or when the trace expires). Requires the role
+// `trace`.
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/trace (the `ClearTrace` operationId).
+func (c *Client) ClearTrace(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearTraceRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetTrace Protocol trace switch of an account
+//
+// The account must be the canonical account. Requires the role `trace`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/trace (the `GetTrace` operationId).
+func (c *Client) GetTrace(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetTraceRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetTraceWithBody Switch the protocol trace on
+//
+// Switches the protocol trace of the account on for a bounded time
+// (the configured default without `duration_seconds`, at most the
+// configured maximum). Every server of the cluster traces new
+// sessions of the account after their authentication: each protocol
+// line of both directions is logged (event `protocol_trace`) with the
+// session id; literal contents only by size, long lines cut. Running
+// sessions of the account are not affected until they log in again.
+// Authentication commands end the trace unlogged; PREVIEW texts are
+// masked. The account must be the canonical account. Requires the
+// role `trace`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+func (c *Client) SetTraceWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTraceRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetTrace Switch the protocol trace on
+//
+// Switches the protocol trace of the account on for a bounded time
+// (the configured default without `duration_seconds`, at most the
+// configured maximum). Every server of the cluster traces new
+// sessions of the account after their authentication: each protocol
+// line of both directions is logged (event `protocol_trace`) with the
+// session id; literal contents only by size, long lines cut. Running
+// sessions of the account are not affected until they log in again.
+// Authentication commands end the trace unlogged; PREVIEW texts are
+// masked. The account must be the canonical account. Requires the
+// role `trace`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+func (c *Client) SetTrace(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTraceRequest(c.Server, account, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1624,6 +1792,121 @@ func NewPutImportSieveRequestWithBody(server string, account Account, params *Pu
 	return req, nil
 }
 
+// NewClearTraceRequest constructs an http.Request for the ClearTrace method
+func NewClearTraceRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/trace", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetTraceRequest constructs an http.Request for the GetTrace method
+func NewGetTraceRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/trace", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetTraceRequest calls the generic SetTrace builder with application/json body
+func NewSetTraceRequest(server string, account Account, body SetTraceJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetTraceRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewSetTraceRequestWithBody constructs an http.Request for the SetTrace method, with any body, and a specified content type
+func NewSetTraceRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/trace", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewDeliverRequestWithBody constructs an http.Request for the Deliver method, with any body, and a specified content type
 func NewDeliverRequestWithBody(server string, params *DeliverParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
@@ -1966,6 +2249,63 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/import/sieve (the `PutImportSieve` operationId).
 	PutImportSieveWithResponse(ctx context.Context, account Account, params *PutImportSieveParams, body PutImportSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportSieveResponse, error)
+
+	// ClearTraceWithResponse Switch the protocol trace off
+	//
+	// Removes the switch; a traced session stops at its next command once
+	// the configured recheck interval has passed (an idling session at
+	// the end of IDLE or when the trace expires). Requires the role
+	// `trace`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/trace (the `ClearTrace` operationId).
+	ClearTraceWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ClearTraceResponse, error)
+
+	// GetTraceWithResponse Protocol trace switch of an account
+	//
+	// The account must be the canonical account. Requires the role `trace`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/trace (the `GetTrace` operationId).
+	GetTraceWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetTraceResponse, error)
+
+	// SetTraceWithBodyWithResponse Switch the protocol trace on
+	//
+	// Switches the protocol trace of the account on for a bounded time
+	// (the configured default without `duration_seconds`, at most the
+	// configured maximum). Every server of the cluster traces new
+	// sessions of the account after their authentication: each protocol
+	// line of both directions is logged (event `protocol_trace`) with the
+	// session id; literal contents only by size, long lines cut. Running
+	// sessions of the account are not affected until they log in again.
+	// Authentication commands end the trace unlogged; PREVIEW texts are
+	// masked. The account must be the canonical account. Requires the
+	// role `trace`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+	SetTraceWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTraceResponse, error)
+
+	// SetTraceWithResponse Switch the protocol trace on
+	//
+	// Switches the protocol trace of the account on for a bounded time
+	// (the configured default without `duration_seconds`, at most the
+	// configured maximum). Every server of the cluster traces new
+	// sessions of the account after their authentication: each protocol
+	// line of both directions is logged (event `protocol_trace`) with the
+	// session id; literal contents only by size, long lines cut. Running
+	// sessions of the account are not affected until they log in again.
+	// Authentication commands end the trace unlogged; PREVIEW texts are
+	// masked. The account must be the canonical account. Requires the
+	// role `trace`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+	SetTraceWithResponse(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTraceResponse, error)
 
 	// DeliverWithBodyWithResponse Local delivery (LDA)
 	//
@@ -2491,6 +2831,143 @@ func (r PutImportSieveResponse) ContentType() string {
 	return ""
 }
 
+type ClearTraceResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ClearTraceResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ClearTraceResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearTraceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearTraceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ClearTraceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetTraceResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *TraceStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetTraceResponse) GetJSON200() *TraceStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetTraceResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetTraceResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetTraceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetTraceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetTraceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetTraceResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *TraceStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetTraceResponse) GetJSON200() *TraceStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetTraceResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetTraceResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetTraceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetTraceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetTraceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type DeliverResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -2859,6 +3336,87 @@ func (c *ClientWithResponses) PutImportSieveWithResponse(ctx context.Context, ac
 		return nil, err
 	}
 	return ParsePutImportSieveResponse(rsp)
+}
+
+// ClearTraceWithResponse Switch the protocol trace off
+//
+// Removes the switch; a traced session stops at its next command once
+// the configured recheck interval has passed (an idling session at
+// the end of IDLE or when the trace expires). Requires the role
+// `trace`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/trace (the `ClearTrace` operationId).
+func (c *ClientWithResponses) ClearTraceWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ClearTraceResponse, error) {
+	rsp, err := c.ClearTrace(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearTraceResponse(rsp)
+}
+
+// GetTraceWithResponse Protocol trace switch of an account
+//
+// The account must be the canonical account. Requires the role `trace`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/trace (the `GetTrace` operationId).
+func (c *ClientWithResponses) GetTraceWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetTraceResponse, error) {
+	rsp, err := c.GetTrace(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetTraceResponse(rsp)
+}
+
+// SetTraceWithBodyWithResponse Switch the protocol trace on
+//
+// Switches the protocol trace of the account on for a bounded time
+// (the configured default without `duration_seconds`, at most the
+// configured maximum). Every server of the cluster traces new
+// sessions of the account after their authentication: each protocol
+// line of both directions is logged (event `protocol_trace`) with the
+// session id; literal contents only by size, long lines cut. Running
+// sessions of the account are not affected until they log in again.
+// Authentication commands end the trace unlogged; PREVIEW texts are
+// masked. The account must be the canonical account. Requires the
+// role `trace`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+func (c *ClientWithResponses) SetTraceWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTraceResponse, error) {
+	rsp, err := c.SetTraceWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTraceResponse(rsp)
+}
+
+// SetTraceWithResponse Switch the protocol trace on
+//
+// Switches the protocol trace of the account on for a bounded time
+// (the configured default without `duration_seconds`, at most the
+// configured maximum). Every server of the cluster traces new
+// sessions of the account after their authentication: each protocol
+// line of both directions is logged (event `protocol_trace`) with the
+// session id; literal contents only by size, long lines cut. Running
+// sessions of the account are not affected until they log in again.
+// Authentication commands end the trace unlogged; PREVIEW texts are
+// masked. The account must be the canonical account. Requires the
+// role `trace`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
+func (c *ClientWithResponses) SetTraceWithResponse(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTraceResponse, error) {
+	rsp, err := c.SetTrace(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTraceResponse(rsp)
 }
 
 // DeliverWithBodyWithResponse Local delivery (LDA)
@@ -3243,6 +3801,101 @@ func ParsePutImportSieveResponse(rsp *http.Response) (*PutImportSieveResponse, e
 	return response, nil
 }
 
+// ParseClearTraceResponse parses an HTTP response from a ClearTraceWithResponse call
+func ParseClearTraceResponse(rsp *http.Response) (*ClearTraceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearTraceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetTraceResponse parses an HTTP response from a GetTraceWithResponse call
+func ParseGetTraceResponse(rsp *http.Response) (*GetTraceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetTraceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TraceStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetTraceResponse parses an HTTP response from a SetTraceWithResponse call
+func ParseSetTraceResponse(rsp *http.Response) (*SetTraceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetTraceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TraceStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeliverResponse parses an HTTP response from a DeliverWithResponse call
 func ParseDeliverResponse(rsp *http.Response) (*DeliverResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -3344,6 +3997,15 @@ type ServerInterface interface {
 	// PutImportSieve Replace the Sieve scripts and the active script
 	// (PUT /admin/v1/accounts/{account}/import/sieve)
 	PutImportSieve(w http.ResponseWriter, r *http.Request, account Account, params PutImportSieveParams)
+	// ClearTrace Switch the protocol trace off
+	// (DELETE /admin/v1/accounts/{account}/trace)
+	ClearTrace(w http.ResponseWriter, r *http.Request, account Account)
+	// GetTrace Protocol trace switch of an account
+	// (GET /admin/v1/accounts/{account}/trace)
+	GetTrace(w http.ResponseWriter, r *http.Request, account Account)
+	// SetTrace Switch the protocol trace on
+	// (PUT /admin/v1/accounts/{account}/trace)
+	SetTrace(w http.ResponseWriter, r *http.Request, account Account)
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
@@ -4007,6 +4669,84 @@ func (siw *ServerInterfaceWrapper) PutImportSieve(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// ClearTrace operation middleware
+func (siw *ServerInterfaceWrapper) ClearTrace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ClearTrace(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTrace operation middleware
+func (siw *ServerInterfaceWrapper) GetTrace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTrace(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetTrace operation middleware
+func (siw *ServerInterfaceWrapper) SetTrace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetTrace(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Deliver operation middleware
 func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Request) {
 
@@ -4239,6 +4979,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/finalize", wrapper.FinalizeImportMailbox)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/acl", wrapper.PutImportACL)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/sieve", wrapper.PutImportSieve)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.ClearTrace)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.GetTrace)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.SetTrace)
 
 	return m
 }

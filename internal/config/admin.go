@@ -14,7 +14,7 @@ type Admin struct {
 	// Socket is the path of the Unix socket ("" disables it).
 	Socket string `mapstructure:"socket" env:"ADMIN_SOCKET"`
 	// SocketRoles are the roles of local callers on the socket.
-	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import"`
+	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace"`
 	// Addr is the mutual-TLS listener ("" disables it).
 	Addr string `mapstructure:"addr" env:"ADMIN_ADDR"`
 	// TLSCert, TLSKey and ClientCA are files; they are re-read when they
@@ -26,6 +26,22 @@ type Admin struct {
 	Clients []AdminClient `mapstructure:"clients" validate:"dive"`
 	// Import bounds the account import (role import).
 	Import AdminImport `mapstructure:"import"`
+}
+
+// Trace configures the per-account protocol trace (role trace): an
+// operator switches it on for an account and a bounded time, and new
+// sessions of the account log their protocol lines (literals only by
+// size).
+type Trace struct {
+	// MaxLineBytes is the logged length of one line.
+	MaxLineBytes int `mapstructure:"max_line_bytes" validate:"gte=80,lte=65536"`
+	// MaxDurationSeconds bounds how long one switch-on lasts.
+	MaxDurationSeconds int `mapstructure:"max_duration_seconds" validate:"gte=60,lte=604800"`
+	// DefaultDurationSeconds applies when the request names no duration.
+	DefaultDurationSeconds int `mapstructure:"default_duration_seconds" validate:"gte=60,ltefield=MaxDurationSeconds"`
+	// RecheckSeconds is how often a traced session re-reads the switch,
+	// so that switching it off reaches running sessions.
+	RecheckSeconds int `mapstructure:"recheck_seconds" validate:"gte=1,lte=3600"`
 }
 
 // AdminImport configures the account import with preserved identities.
@@ -50,7 +66,7 @@ type AdminImport struct {
 // common name or one of whose DNS or URI SANs equals Identity.
 type AdminClient struct {
 	Identity string   `mapstructure:"identity" validate:"required"`
-	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import"`
+	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace"`
 }
 
 // Validate checks the listener settings and refuses settings without

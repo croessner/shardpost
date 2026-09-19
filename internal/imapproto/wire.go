@@ -71,6 +71,10 @@ type reader struct {
 	maxLiteral  int64
 	nonSyncMax  int64 // LITERAL- limit for {n+}
 	literalPlus bool
+	// onLine and onLiteral report what the parser consumes (protocol
+	// trace): every line read and the size of every literal read.
+	onLine    func(line []byte)
+	onLiteral func(n int64)
 }
 
 func newReader(r io.Reader, maxLiteral int64) *reader {
@@ -109,6 +113,10 @@ func (r *reader) readLine() error {
 
 	r.line = append(r.line[:0], bytes.TrimRight(line, "\r\n")...)
 	r.pos = 0
+
+	if r.onLine != nil {
+		r.onLine(r.line)
+	}
 
 	return nil
 }
@@ -293,6 +301,14 @@ func (r *reader) literal() (string, error) {
 	}
 
 	if err := r.admitLiteral(n, nonSync); err != nil {
+		if nonSync {
+			// The client sent the data without waiting: skip it, or it
+			// would be read as command lines.
+			if derr := r.discardLiteral(n); derr != nil {
+				return "", derr
+			}
+		}
+
 		return "", err
 	}
 
@@ -300,12 +316,41 @@ func (r *reader) literal() (string, error) {
 	if _, err := io.ReadFull(r.br, buf); err != nil {
 		return "", err
 	}
+
+	if r.onLiteral != nil {
+		r.onLiteral(n)
+	}
 	// The rest of the command continues on the following line.
 	if err := r.readLine(); err != nil {
 		return "", err
 	}
 
 	return string(buf), nil
+}
+
+// discardFactor bounds the refused non-synchronising literal that is
+// read and discarded, as a multiple of maxLiteral; a larger one closes
+// the connection (RFC 7888 section 4).
+const discardFactor = 2
+
+var errLiteralNotDiscarded = errors.New("refused non-synchronising literal too large to skip")
+
+// discardLiteral skips a refused non-synchronising literal and reads the
+// line the command continues on.
+func (r *reader) discardLiteral(n int64) error {
+	if n > discardFactor*r.maxLiteral {
+		return errLiteralNotDiscarded
+	}
+
+	if _, err := io.CopyN(io.Discard, r.br, n); err != nil {
+		return err
+	}
+
+	if r.onLiteral != nil {
+		r.onLiteral(n)
+	}
+
+	return r.readLine()
 }
 
 // literalSpec parses the literal header {n}, {n+} or ~{n} at the end of the

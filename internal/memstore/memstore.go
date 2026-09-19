@@ -100,6 +100,7 @@ type User struct {
 	scripts map[string]string
 	active  string
 	imp     *importLock
+	trace   model.TraceState
 }
 
 // Close is a no-op; a memstore user holds no resources.

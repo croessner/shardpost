@@ -39,7 +39,8 @@ wird geloggt, bis dahin bleibt die alte in Gebrauch. Clientzertifikate
 brauchen `extKeyUsage clientAuth`.
 
 Rollen: `diagnose` (Version), `deliver` (Zustellung mit Quota-Durchsetzung),
-`deliver:noenforce` (zusätzlich für `enforce_quota=false`).
+`deliver:noenforce` (zusätzlich für `enforce_quota=false`), `import`
+(Kontoimport) und `trace` (Protokoll-Trace eines Kontos, siehe unten).
 
 ```yaml
 admin:
@@ -106,6 +107,62 @@ shardpostctl deliver -d user@example.org --no-enforce-quota --json < warning.eml
 Exitcodes von `deliver` (sysexits): 0 ok, 64 Aufruf, 67 unbekannter Empfänger
 oder Postfach, 69 abgelehnt oder zu groß, 70 unerwartete Antwort, 73 über
 Quota, 75 temporär (erneut versuchen), 77 keine Berechtigung.
+
+## Protokoll-Trace eines Kontos
+
+Zur Fehlersuche mit einem bestimmten Client lässt sich für ein Konto
+befristet ein Mitschnitt des IMAP-Protokolls einschalten (Rolle `trace`):
+
+```sh
+shardpostctl trace on -for 30m user@example.org   # ohne -for: trace.default_duration_seconds
+shardpostctl trace status user@example.org
+shardpostctl trace off user@example.org
+```
+
+API: `GET`/`PUT`/`DELETE /admin/v1/accounts/{account}/trace`, `PUT` mit
+optionalem `{"duration_seconds": n}`. Der Schalter liegt als Registry-Key
+`trace` im Ceph-Konto und gilt daher für alle Server des Clusters, egal
+welcher Pod die Anfrage bekommt. Er muss auf das kanonische Konto gesetzt
+werden (ein Alias wird wie beim Import mit dem kanonischen Namen
+abgelehnt) und läuft spätestens nach `trace.max_duration_seconds` ab.
+
+Wirkung:
+
+- Neue IMAP-Sitzungen des Kontos protokollieren ab der erfolgreichen
+  Anmeldung jede Zeile beider Richtungen als `event=protocol_trace` mit
+  `dir` (`C` Client→Server, `S` Server→Client), `line`, `session_id` und
+  `user`. Zeilen über `trace.max_line_bytes` werden gekürzt (`cut_bytes`).
+- Literale (Nachrichteninhalte, APPEND-Daten, abgerufene Abschnitte)
+  erscheinen nur als `<literal N bytes>`, der Text von `PREVIEW` als
+  `"<masked>"`. Client-Zeilen und -Literale meldet der IMAP-Parser, also
+  genau das, was der Server verarbeitet; Pipelining, abgelehnte Literale
+  und Lesepuffer verschieben die Sicht nicht. Server-Zeilen stammen aus
+  dem gesendeten Datenstrom.
+- Anmeldedaten erscheinen nie: der Mitschnitt beginnt nach der Anmeldung
+  und endet bei `UNAUTHENTICATE`. Eine Client-Zeile mit `LOGIN` oder
+  `AUTHENTICATE` im angemeldeten Zustand wird durch
+  `<authentication command, trace stopped>` ersetzt und hält den Trace
+  bis zur nächsten Anmeldung an (auch folgende Literale oder SASL-Zeilen
+  erscheinen nicht).
+- Bereits laufende Sitzungen werden erst bei der nächsten Anmeldung
+  erfasst. Der Ablauf wirkt sofort. Ausschalten wirkt in laufenden Sitzungen
+  beim nächsten Befehl, sobald `trace.recheck_seconds` vergangen sind; eine
+  Sitzung in IDLE wird bis zum Ende von IDLE oder bis zum Ablauf weiter
+  mitgeschnitten. Wird der Trace vor dem Ablauf verlängert, setzt eine
+  bereits mitgeschnittene Sitzung ihn nach dem alten Ende fort.
+- `protocol_trace_start` und `protocol_trace_stop` (mit `reason`) markieren
+  Beginn und Ende; das Audit-Log der Admin-API enthält, wer den Trace wann
+  und bis wann eingeschaltet hat.
+
+Der Trace enthält Betreffzeilen, Adressen, Dateinamen (ENVELOPE,
+BODYSTRUCTURE), Suchbegriffe und Ordnernamen des Kontos. Er
+ist deshalb eine eigene Rolle, befristet und nur für die Fehlersuche
+gedacht. Auslesen, zum Beispiel:
+
+```sh
+kubectl -n shardpost logs -l app.kubernetes.io/name=shardpost-server -c server --since=30m \
+  | jq -r 'select(.event=="protocol_trace" and .user=="user@example.org") | "\(.time) \(.session_id[0:8]) \(.dir): \(.line)"'
+```
 
 ## Betrieb im Cluster (mTLS)
 

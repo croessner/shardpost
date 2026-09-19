@@ -31,6 +31,10 @@ linters:
   exclusions:
     paths:
       - vendor/
+      # Go standard library code kept close to upstream (see its package
+      # comment); only the tests are ours.
+      - internal/inflate/inflate\.go
+      - internal/inflate/dict_decoder\.go
 
 issues:
   # report everything: a capped list hides how much is left

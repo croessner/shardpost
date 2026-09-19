@@ -28,8 +28,9 @@ func serve(t *testing.T, roles ...string) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: memstore.New(), Log: log}, Auth: auth.Static{"user": "pw"},
-		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles})
+	store := memstore.New()
+	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"user": "pw"},
+		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store})
 
 	path := filepath.Join(dir, "admin.sock")
 
@@ -102,5 +103,40 @@ func TestConnectionAndFailures(t *testing.T) {
 	var errOut bytes.Buffer
 	if code := failure(&errOut, nil, 404); code != exSoftware || !strings.Contains(errOut.String(), "404") {
 		t.Fatalf("answer without error document: %d %q", code, errOut.String())
+	}
+}
+
+func TestTraceCommand(t *testing.T) {
+	socket := serve(t, admin.RoleTrace)
+
+	if code, out, _ := call(socket, "", "trace", "status", "user"); code != exOK || out != "user: trace off\n" {
+		t.Fatalf("status: %d %q", code, out)
+	}
+
+	code, out, errOut := call(socket, "", "trace", "on", "-for", "15m", "user")
+	if code != exOK || !strings.Contains(out, "user: trace on until ") || !strings.Contains(out, "set by uid:") {
+		t.Fatalf("on: %d %q %q", code, out, errOut)
+	}
+
+	if code, out, _ := call(socket, "", "trace", "status", "--json", "user"); code != exOK || !strings.Contains(out, `"active":true`) {
+		t.Fatalf("status json: %d %q", code, out)
+	}
+
+	if code, out, _ := call(socket, "", "trace", "off", "user"); code != exOK || out != "user: trace off\n" {
+		t.Fatalf("off: %d %q", code, out)
+	}
+}
+
+func TestTraceCommandErrors(t *testing.T) {
+	socket := serve(t, admin.RoleTrace)
+
+	if code, _, errOut := call(socket, "", "trace", "on", "User@Example.org"); code != exUsage || !strings.Contains(errOut, "use user") {
+		t.Fatalf("alias: %d %q", code, errOut)
+	}
+
+	for _, args := range [][]string{{"trace"}, {"trace", "on"}, {"trace", "off", "-for", "1m", "user"}, {"trace", "maybe", "user"}} {
+		if code, _, _ := call(socket, "", args...); code != exUsage {
+			t.Errorf("%v: exit %d", args, code)
+		}
 	}
 }

@@ -19,9 +19,11 @@ import (
 
 	"shardpost/internal/auth"
 	"shardpost/internal/imapsieve"
+	"shardpost/internal/inflate"
 	"shardpost/internal/membudget"
 	"shardpost/internal/metrics"
 	"shardpost/internal/model"
+	"shardpost/internal/prototrace"
 	"shardpost/internal/provision"
 	"shardpost/internal/telemetry"
 )
@@ -63,6 +65,18 @@ type Options struct {
 	MaxConnsPerIP   int
 	MaxConnsPerUser int
 	WriteTimeout    time.Duration // backpressure: slow readers are dropped
+	// Trace bounds the per-account protocol trace (admin API).
+	Trace TraceOptions
+}
+
+// TraceOptions configure the protocol trace of accounts whose trace
+// switch (model.Tracer) is on when they log in.
+type TraceOptions struct {
+	// MaxLine is the logged length of a line (0 = prototrace default).
+	MaxLine int
+	// Recheck is how often a traced session re-reads the switch, so that
+	// switching it off takes effect in running sessions (0 = 1 minute).
+	Recheck time.Duration
 }
 
 // Server accepts IMAP connections.
@@ -96,6 +110,10 @@ func New(o Options) *Server {
 
 	if o.WriteTimeout == 0 {
 		o.WriteTimeout = 2 * time.Minute
+	}
+
+	if o.Trace.Recheck == 0 {
+		o.Trace.Recheck = time.Minute
 	}
 
 	return &Server{o: o, conns: map[*conn]struct{}{}, lns: map[net.Listener]struct{}{}, perIP: map[string]int{}, perUsr: map[string]int{}}
@@ -297,6 +315,14 @@ type conn struct {
 	w          *writer
 	log        *slog.Logger
 	sessionLog *slog.Logger
+	// trace wraps the connection's byte stream; a trace is attached when
+	// the account's trace switch is on (traceRead: last read of it).
+	// traceSeen keeps re-reading the switch of a session that was traced,
+	// so an extension resumes a trace that expired in between.
+	trace      *prototrace.Conn
+	traceRead  time.Time
+	traceUntil time.Time
+	traceSeen  bool
 
 	state   state
 	tls     bool
@@ -353,7 +379,12 @@ func newConn(s *Server, nc net.Conn) *conn {
 }
 
 func (c *conn) setIO(rw io.ReadWriter) {
+	c.trace = prototrace.Wrap(rw, c.trace)
+	rw = c.trace
 	c.r = newReader(rw, c.s.o.MaxLiteral)
+	// Client input is traced as the parser consumes it.
+	c.r.onLine = func(line []byte) { c.trace.Line(line) }
+	c.r.onLiteral = func(n int64) { c.trace.Literal(n) }
 	c.r.literalPlus = true
 	// Literal bytes are accounted against the process memory budget for
 	// the duration of the command (all literals of one command together).
@@ -430,6 +461,7 @@ func (c *conn) serve() {
 		}
 
 		c.cmdMu.Lock()
+		c.recheckTrace()
 		err := c.handleLine()
 		c.cmdMu.Unlock()
 
@@ -505,6 +537,7 @@ func (c *conn) commandResult(tag string, err error) error {
 	switch {
 	case err == nil:
 	case errors.As(err, &lt):
+		c.drain() // further arguments and literals of the command
 		c.w.line("%s NO [TOOBIG] %v", tag, err)
 	case errors.Is(err, errSyntax):
 		c.w.line("%s BAD %v", tag, err)
@@ -1000,9 +1033,116 @@ func (c *conn) finishLogin(tag string, req auth.Request, res *auth.Result, err e
 	}
 
 	c.log.Info("authentication succeeded", "event", "auth_success", "mechanism", req.Mechanism, "tls", c.tls)
+	c.readTrace()
 	c.ok(tag, "CAPABILITY "+strings.Join(c.caps(), " "), "Logged in")
 
 	return nil
+}
+
+// readTrace attaches or detaches the protocol trace according to the
+// account's trace switch.
+func (c *conn) readTrace() {
+	t, ok := c.user.(model.Tracer)
+	if !ok {
+		return
+	}
+
+	c.traceRead = time.Now()
+
+	st, err := t.Trace()
+	switch {
+	case err != nil:
+		c.log.Warn("trace switch not readable", "err", err)
+	case st.Active(c.traceRead):
+		c.traceSeen, c.traceUntil = true, st.Until
+		c.trace.Start(c.log, st.Until, c.s.o.Trace.MaxLine, traceFilter)
+	default:
+		c.traceSeen = false
+		c.trace.Stop("switched off")
+	}
+}
+
+// recheckTrace re-reads the switch of a traced session periodically,
+// and at once when its trace expired (it may have been extended). A
+// trace halted at an authentication command stays off until the next
+// login.
+func (c *conn) recheckTrace() {
+	if c.user == nil || !c.traceSeen || c.trace.Halted() {
+		return
+	}
+
+	// Once at expiry (not read since), otherwise every Recheck: an
+	// unreadable switch does not cost a read per command.
+	expired := !c.trace.Active() && c.traceRead.Before(c.traceUntil)
+	if expired || time.Since(c.traceRead) >= c.s.o.Trace.Recheck {
+		c.readTrace()
+	}
+}
+
+// traceMaskedAuth replaces a client line that starts authentication.
+const traceMaskedAuth = "<authentication command, trace stopped>"
+
+// traceFilter keeps credentials and message text out of the protocol
+// trace: an authentication command (with or without tag) halts the trace
+// unlogged until the next login, so neither its literals nor pipelined
+// SASL data appear. PREVIEW texts, which quote the message body, are
+// masked.
+func traceFilter(dir, line string) (string, bool) {
+	if dir == prototrace.DirClient {
+		f := strings.Fields(line)
+		for i := 0; i < len(f) && i < 2; i++ {
+			if strings.EqualFold(f[i], kwLogin) || strings.EqualFold(f[i], "AUTHENTICATE") {
+				return traceMaskedAuth, true
+			}
+		}
+
+		return line, false
+	}
+
+	return maskPreview(line), false
+}
+
+// maskPreview replaces the quoted text of every PREVIEW item (a
+// PREVIEW literal is skipped like every literal).
+func maskPreview(line string) string {
+	const item = `PREVIEW "`
+
+	var b strings.Builder
+
+	for {
+		i := strings.Index(line, item)
+		if i < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+
+		b.WriteString(line[:i])
+		b.WriteString(`PREVIEW "<masked>"`)
+
+		rest := line[i+len(item):]
+
+		end := closingQuote(rest)
+		if end < 0 { // cut line
+			return b.String()
+		}
+
+		line = rest[end+1:]
+	}
+}
+
+// closingQuote is the index of the quote ending a quoted string whose
+// opening quote precedes s, or -1.
+func closingQuote(s string) int {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"':
+			return i
+		}
+	}
+
+	return -1
 }
 
 // provision creates INBOX and the special-use folders on first login.
@@ -1254,7 +1394,10 @@ func (c *conn) cmdCompress(tag string) error {
 	}
 
 	c.compressed = true
-	c.setIO(&compressedConn{r: flate.NewReader(c.nc), w: fw})
+	// inflate, not compress/flate: it hands out each block at once, so
+	// commands of clients that flush with Z_PARTIAL_FLUSH (iOS Mail) are
+	// read without waiting for more input.
+	c.setIO(&compressedConn{r: inflate.NewReader(c.nc), w: fw})
 
 	return nil
 }
@@ -1262,6 +1405,11 @@ func (c *conn) cmdCompress(tag string) error {
 // UNAUTHENTICATE (RFC 8437): back to the not-authenticated state with all
 // user state discarded (TLS and COMPRESS stay).
 func (c *conn) cmdUnauthenticate(tag string) error {
+	// The next login must not be traced (credentials); it reads the
+	// switch of its own account.
+	c.traceSeen = false
+	c.trace.Stop("unauthenticated")
+
 	if c.mbox != nil {
 		c.unselect()
 	}

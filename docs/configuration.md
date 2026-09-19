@@ -98,9 +98,12 @@ beginnt die Backend-Sitzung nach LHLO. Das `tls`-Feld beschreibt TLS zum
 Backend, nicht einen bereits am Director terminierten TLS-Kanal.
 
 Auch Debug protokolliert keine Befehlsargumente, SASL-Daten, Passwörter,
-Tokens, Skripttexte oder Mailinhalte. Unbekannte Befehle heißen `UNKNOWN`.
-Die Logs enthalten betriebsnotwendige Client-IP-Adressen und Kontonamen;
-diese Felder werden nicht als Metrik-Labels verwendet.
+Tokens, Skripttexte oder Mailinhalte. Die einzige Ausnahme ist der
+ausdrücklich pro Konto eingeschaltete, befristete Protokoll-Trace
+(`event=protocol_trace`, siehe [Admin-API](admin-api.md#protokoll-trace-eines-kontos)):
+er enthält die Protokollzeilen nach der Anmeldung, Literale nur als Größe.
+Unbekannte Befehle heißen `UNKNOWN`. Die Logs enthalten betriebsnotwendige
+Client-IP-Adressen und Kontonamen; diese Felder werden nicht als Metrik-Labels verwendet.
 
 Beispiel für Loki (Client-IP durch die gesuchte öffentliche IP ersetzen):
 
@@ -112,3 +115,15 @@ Für die weitere Korrelation nach `session_id` filtern. Bei `info` erzeugen
 NOOP/FETCH/IDLE keine einzelnen Befehlslogs; Öffnen, Login und Schließen
 bleiben sichtbar. Bereits vor dem Rollout geschlossene Verbindungen lassen
 sich nachträglich nicht rekonstruieren. Leveländerungen erfordern Neustart.
+
+### Protokoll-Trace (`trace`)
+
+| Schlüssel | Standard | Bedeutung |
+| --- | --- | --- |
+| `trace.max_line_bytes` | 2048 | geloggte Länge einer Zeile (80–65536) |
+| `trace.default_duration_seconds` | 1800 | Dauer ohne Angabe im Aufruf |
+| `trace.max_duration_seconds` | 86400 | Obergrenze jeder Einschaltung (60–604800) |
+| `trace.recheck_seconds` | 60 | wie oft eine mitgeschnittene Sitzung den Schalter neu liest |
+
+Nur per YAML. Eingeschaltet wird über die Admin-API (Rolle `trace`), siehe
+[Admin-API](admin-api.md#protokoll-trace-eines-kontos).

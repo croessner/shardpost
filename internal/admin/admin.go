@@ -77,6 +77,14 @@ type Options struct {
 	// ImportShardSize is the shard size of mailboxes an import creates
 	// (0 = the store's).
 	ImportShardSize uint32
+	// Accounts opens accounts for the trace switch (like Import, it does
+	// not refuse accounts under an import lock). nil disables the trace
+	// operations.
+	Accounts delivery.Store
+	// TraceDefaultDuration applies when a request names no duration,
+	// TraceMaxDuration caps every switch-on.
+	TraceDefaultDuration time.Duration
+	TraceMaxDuration     time.Duration
 }
 
 // Server implements the generated adminapi.ServerInterface.
@@ -102,6 +110,8 @@ func New(o Options) *Server {
 	o.ImportMaxBatchMessages = cmp.Or(o.ImportMaxBatchMessages, 500)
 	o.ImportMaxInventory = cmp.Or(o.ImportMaxInventory, defaultPageSize)
 	o.ImportMaxChanges = cmp.Or(o.ImportMaxChanges, 10000)
+	o.TraceMaxDuration = cmp.Or(o.TraceMaxDuration, 24*time.Hour)
+	o.TraceDefaultDuration = min(cmp.Or(o.TraceDefaultDuration, 30*time.Minute), o.TraceMaxDuration)
 
 	clients := make(map[string][]string, len(o.Clients))
 	for id, roles := range o.Clients {
@@ -283,6 +293,10 @@ func operation(path string) string {
 	case "/admin/v1/deliveries":
 		return "deliver"
 	default:
+		if strings.HasPrefix(path, "/admin/v1/accounts/") && strings.HasSuffix(path, "/trace") {
+			return "trace"
+		}
+
 		if strings.HasPrefix(path, "/admin/v1/accounts/") {
 			return importOperation(path)
 		}

@@ -3,7 +3,9 @@
 Status: **geplant; Kern vorgezogen** (18.09.2026): Vertrag mit Generierung,
 Unix-Socket- und mTLS-Listener, Rollen, Audit-Logzeile, `version` und die
 lokale Zustellung (LDA) mit `shardpostctl`, siehe
-[Admin-API und LDA](../admin-api.md). Entwurf vom 16.09.2026 auf Basis
+[Admin-API und LDA](../admin-api.md). Außerdem umgesetzt: der
+identitätserhaltende Kontoimport aus 8e (0.17.0) und ein befristeter
+Protokoll-Trace pro Konto (0.18.0, Rolle `trace`) als erstes Supportwerkzeug. Entwurf vom 16.09.2026 auf Basis
 von ShardPost 0.12.0. Die Nummer setzt die bisherigen Stufen 6/7 für JMAP
 fort; sie schreibt keine zeitliche Abhängigkeit von JMAP vor. Die ersten
 Teilpakete dieser Stufe sollten vor einer größeren Backend-Migration kommen.

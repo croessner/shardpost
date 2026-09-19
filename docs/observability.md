@@ -114,6 +114,8 @@ Auch Director-Healthchecks erzeugen Verbindungslogs. Logs werden nicht durch
 die OTLP-Samplingrate gefiltert.
 
 Debug ergänzt bekannte Befehlsnamen und Laufzeiten ohne Argumente oder
-Mailinhalte. Details, Einschränkungen und Loki-Beispiel stehen in der
+Mailinhalte. Für die Fehlersuche mit einem Client gibt es ab 0.18.0 den
+befristeten Protokoll-Trace pro Konto (`event=protocol_trace`, siehe
+[Admin-API](admin-api.md#protokoll-trace-eines-kontos)). Details, Einschränkungen und Loki-Beispiel stehen in der
 [Konfigurationsdokumentation](configuration.md), der datierte Nachweis im
 [Logging-Bericht](reports/2026-09-16-logging.md).
