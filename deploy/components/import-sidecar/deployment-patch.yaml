@@ -13,7 +13,7 @@ spec:
         #     shardpostctl migrate <account>
         # (see docs/admin-api.md for detached runs and the cutover order).
         - name: import
-          image: docker.io/chrroessner/shardpost:0.20.0
+          image: docker.io/chrroessner/shardpost:0.21.0
           imagePullPolicy: IfNotPresent
           command: ["sleep", "infinity"]
           env:

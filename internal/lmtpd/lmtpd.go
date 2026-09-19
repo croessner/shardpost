@@ -259,7 +259,7 @@ func (s *session) deliveryError(user string, err error) error {
 	case errors.Is(err, delivery.ErrRedirectFailed):
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 4, 0}, Message: "Redirect failed, try again later"}
 	case errors.Is(err, model.ErrImportLocked):
-		s.log.Info("delivery deferred, account import in progress", "user", user)
+		s.log.Info("delivery deferred, account locked (import or maintenance)", "user", user)
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 2, 1}, Message: "Mailbox temporarily unavailable, try again later"}
 	default:
 		s.log.Error("delivery failed", "user", user, "err", err)

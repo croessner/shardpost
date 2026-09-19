@@ -127,3 +127,17 @@ sich nachträglich nicht rekonstruieren. Leveländerungen erfordern Neustart.
 
 Nur per YAML. Eingeschaltet wird über die Admin-API (Rolle `trace`), siehe
 [Admin-API](admin-api.md#protokoll-trace-eines-kontos).
+
+### Wartungsjobs (`jobs`)
+
+| Schlüssel | Standard | Bedeutung |
+| --- | --- | --- |
+| `jobs.enabled` | true | Runner in diesem Server (Jobs teilen sich alle Server) |
+| `jobs.poll_seconds` | 5 | Abstand der Suche nach neuen Jobs |
+| `jobs.lease_seconds` | 60 | Dauer einer Übernahme ohne Erneuerung (Übernahme durch andere danach) |
+| `jobs.retention_days` | 14 | Aufbewahrung beendeter Jobs und Pläne |
+| `jobs.plan_ttl_seconds` | 3600 | Gültigkeit eines Plans |
+| `jobs.max_parallel` | 2 | Jobs je Server gleichzeitig |
+| `jobs.settle_seconds` | 10 | Wartezeit eines exklusiven Jobs nach dem Setzen der Wartungssperre, damit laufende Zustellungen enden und offene IMAP/POP3-Sitzungen die Sperre bemerken (sie prüfen sie höchstens alle 5 s beim Befehlsstart und trennen mit BYE) |
+
+Nur per YAML. Bedienung siehe [Admin-API: Wartungsjobs](admin-api.md#wartungsjobs-stufe-8c).

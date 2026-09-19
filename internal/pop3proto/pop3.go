@@ -161,12 +161,13 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 }
 
 type conn struct {
-	s   *Server
-	nc  net.Conn
-	br  *bufio.Reader
-	bw  *bufio.Writer
-	log *slog.Logger
-	tls bool
+	lockProbe model.LockProbe
+	s         *Server
+	nc        net.Conn
+	br        *bufio.Reader
+	bw        *bufio.Writer
+	log       *slog.Logger
+	tls       bool
 
 	user    model.User
 	name    string
@@ -366,6 +367,13 @@ func (c *conn) handle(cmd, arg string) (quit bool, err error) {
 
 	if c.user == nil {
 		return false, c.handleAuthorization(cmd, arg)
+	}
+
+	if c.lockProbe.Locked(c.user) {
+		c.log.Info("session closed, account locked (import or maintenance)")
+		c.err("[SYS/TEMP] Mailbox maintenance in progress, try again later")
+
+		return true, nil
 	}
 
 	if c.lease != nil && c.lease.Lost() {
@@ -622,8 +630,8 @@ func (c *conn) finishLogin(req auth.Request, res *auth.Result, aerr error) error
 	u, err := c.s.o.Store.User(user)
 	if err != nil {
 		if errors.Is(err, model.ErrImportLocked) {
-			c.log.Info("login refused, account import in progress", "user", user)
-			c.err("[SYS/TEMP] Mailbox is being migrated, try again later")
+			c.log.Info("login refused, account locked (import or maintenance)", "user", user)
+			c.err("[SYS/TEMP] Mailbox maintenance in progress, try again later")
 
 			return nil
 		}

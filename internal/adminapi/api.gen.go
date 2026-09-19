@@ -97,6 +97,7 @@ const (
 	Forbidden          ErrorCode = "forbidden"
 	ImportLocked       ErrorCode = "import_locked"
 	Internal           ErrorCode = "internal"
+	NoSuchJob          ErrorCode = "no_such_job"
 	NoSuchMailbox      ErrorCode = "no_such_mailbox"
 	NoSuchUser         ErrorCode = "no_such_user"
 	NotLocked          ErrorCode = "not_locked"
@@ -121,6 +122,8 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case Internal:
 		return true
+	case NoSuchJob:
+		return true
 	case NoSuchMailbox:
 		return true
 	case NoSuchUser:
@@ -138,6 +141,84 @@ func (e ErrorCode) Valid() bool {
 	case TooLarge:
 		return true
 	case Unauthenticated:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for JobRequestKind.
+const (
+	IndexCheck JobRequestKind = "index_check"
+)
+
+// Valid indicates whether the value is a known member of the JobRequestKind enum.
+func (e JobRequestKind) Valid() bool {
+	switch e {
+	case IndexCheck:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for JobState.
+const (
+	CancelRequested JobState = "cancel_requested"
+	Cancelled       JobState = "cancelled"
+	Failed          JobState = "failed"
+	PartiallyFailed JobState = "partially_failed"
+	Queued          JobState = "queued"
+	Running         JobState = "running"
+	Succeeded       JobState = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the JobState enum.
+func (e JobState) Valid() bool {
+	switch e {
+	case CancelRequested:
+		return true
+	case Cancelled:
+		return true
+	case Failed:
+		return true
+	case PartiallyFailed:
+		return true
+	case Queued:
+		return true
+	case Running:
+		return true
+	case Succeeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PlanRequestKind.
+const (
+	AclReconcile  PlanRequestKind = "acl_reconcile"
+	FtsRebuild    PlanRequestKind = "fts_rebuild"
+	MailboxDelete PlanRequestKind = "mailbox_delete"
+	Purge         PlanRequestKind = "purge"
+	QuotaRecalc   PlanRequestKind = "quota_recalc"
+	Scrub         PlanRequestKind = "scrub"
+)
+
+// Valid indicates whether the value is a known member of the PlanRequestKind enum.
+func (e PlanRequestKind) Valid() bool {
+	switch e {
+	case AclReconcile:
+		return true
+	case FtsRebuild:
+		return true
+	case MailboxDelete:
+		return true
+	case Purge:
+		return true
+	case QuotaRecalc:
+		return true
+	case Scrub:
 		return true
 	default:
 		return false
@@ -327,6 +408,52 @@ type ImportSieveScript struct {
 	Script string `json:"script"`
 }
 
+// Job defines model for Job.
+type Job struct {
+	Account   string                  `json:"account"`
+	Attempts  int                     `json:"attempts"`
+	Created   time.Time               `json:"created"`
+	Errors    []string                `json:"errors"`
+	Finished  *time.Time              `json:"finished,omitempty"`
+	Id        string                  `json:"id"`
+	Kind      string                  `json:"kind"`
+	PlanId    *string                 `json:"plan_id,omitempty"`
+	Principal string                  `json:"principal"`
+	Progress  JobProgress             `json:"progress"`
+	Result    *map[string]interface{} `json:"result,omitempty"`
+
+	// Server The server holding (or last holding) the job.
+	Server  *string    `json:"server,omitempty"`
+	Started *time.Time `json:"started,omitempty"`
+	State   JobState   `json:"state"`
+}
+
+// JobPage defines model for JobPage.
+type JobPage struct {
+	Items []Job   `json:"items"`
+	Next  *string `json:"next,omitempty"`
+}
+
+// JobProgress defines model for JobProgress.
+type JobProgress struct {
+	Done  int64   `json:"done"`
+	Phase *string `json:"phase,omitempty"`
+	Total int64   `json:"total"`
+}
+
+// JobRequest defines model for JobRequest.
+type JobRequest struct {
+	Account *string         `json:"account,omitempty"`
+	Kind    *JobRequestKind `json:"kind,omitempty"`
+	PlanId  *string         `json:"plan_id,omitempty"`
+}
+
+// JobRequestKind defines model for JobRequest.Kind.
+type JobRequestKind string
+
+// JobState defines model for JobState.
+type JobState string
+
 // MailboxACL defines model for MailboxACL.
 type MailboxACL struct {
 	Entries    []ACLEntry `json:"entries"`
@@ -384,6 +511,34 @@ type MailboxUpdate struct {
 	Name       *string `json:"name,omitempty"`
 	Subscribed *bool   `json:"subscribed,omitempty"`
 }
+
+// Plan defines model for Plan.
+type Plan struct {
+	Account    string                  `json:"account"`
+	AppliedJob *string                 `json:"applied_job,omitempty"`
+	Created    time.Time               `json:"created"`
+	Expires    time.Time               `json:"expires"`
+	Id         string                  `json:"id"`
+	Kind       string                  `json:"kind"`
+	Params     *map[string]interface{} `json:"params,omitempty"`
+	Principal  string                  `json:"principal"`
+
+	// Summary What the job would do (kind-specific).
+	Summary map[string]interface{} `json:"summary"`
+}
+
+// PlanRequest defines model for PlanRequest.
+type PlanRequest struct {
+	Kind PlanRequestKind `json:"kind"`
+
+	// Params scrub: `classes` (deliveries, moves, retired, uncovered, entries,
+	// refs, orphans, unknown, quota; empty = all); mailbox_delete:
+	// `mailbox_id`.
+	Params *map[string]interface{} `json:"params,omitempty"`
+}
+
+// PlanRequestKind defines model for PlanRequest.Kind.
+type PlanRequestKind string
 
 // QuotaStatus defines model for QuotaStatus.
 type QuotaStatus struct {
@@ -483,6 +638,9 @@ type IfMatch = string
 
 // ImportSessionHeader defines model for ImportSessionHeader.
 type ImportSessionHeader = string
+
+// JobID defines model for JobID.
+type JobID = string
 
 // MailboxID defines model for MailboxID.
 type MailboxID = string
@@ -605,6 +763,19 @@ type DeliverParams struct {
 	EnforceQuota *bool `form:"enforce_quota,omitempty" json:"enforce_quota,omitempty"`
 }
 
+// ListJobsParams defines parameters for ListJobs.
+type ListJobsParams struct {
+	Account *string   `form:"account,omitempty" json:"account,omitempty"`
+	State   *JobState `form:"state,omitempty" json:"state,omitempty"`
+	After   *string   `form:"after,omitempty" json:"after,omitempty"`
+	Limit   *int      `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// SubmitJobParams defines parameters for SubmitJob.
+type SubmitJobParams struct {
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // OpenImportJSONRequestBody defines body for OpenImport for application/json ContentType.
 type OpenImportJSONRequestBody = ImportSessionRequest
 
@@ -635,8 +806,14 @@ type UpdateMailboxJSONRequestBody = MailboxUpdate
 // SetACLEntryJSONRequestBody defines body for SetACLEntry for application/json ContentType.
 type SetACLEntryJSONRequestBody = ACLChange
 
+// CreatePlanJSONRequestBody defines body for CreatePlan for application/json ContentType.
+type CreatePlanJSONRequestBody = PlanRequest
+
 // SetTraceJSONRequestBody defines body for SetTrace for application/json ContentType.
 type SetTraceJSONRequestBody = TraceRequest
+
+// SubmitJobJSONRequestBody defines body for SubmitJob for application/json ContentType.
+type SubmitJobJSONRequestBody = JobRequest
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -1013,6 +1190,34 @@ type ClientInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
 	SetACLEntry(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// CreatePlanWithBody Plan a maintenance job (dry run)
+	//
+	// Computes what the job would do (target set, effects) and stores the
+	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// that changes other accounts (ACL repairs, purge) needs them in the
+	// client scope. The account must be canonical.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+	CreatePlanWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreatePlan Plan a maintenance job (dry run)
+	//
+	// Computes what the job would do (target set, effects) and stores the
+	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// that changes other accounts (ACL repairs, purge) needs them in the
+	// client scope. The account must be canonical.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+	CreatePlan(ctx context.Context, account Account, body CreatePlanJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetQuota Quota usage and limit
 	//
 	// Stored usage counters and the effective limit (0 = unlimited).
@@ -1095,6 +1300,64 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBody(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListJobs Jobs, oldest first
+	//
+	// Requires the role `diagnose`; a client with an account scope must
+	// name an account.
+	//
+	// Corresponds with GET /admin/v1/jobs (the `ListJobs` operationId).
+	ListJobs(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SubmitJobWithBody Apply a plan or start a check
+	//
+	// With `plan_id` the plan is applied (once, before it expires; the
+	// apply refuses when the account drifted from the plan). Without
+	// it, `kind` `index_check` (role `diagnose`) checks the `account`
+	// read-only. The job runs on any server and survives restarts.
+	// `Idempotency-Key` returns the same job for a repeated request
+	// (200) and refuses the key for another request (409).
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+	SubmitJobWithBody(ctx context.Context, params *SubmitJobParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SubmitJob Apply a plan or start a check
+	//
+	// With `plan_id` the plan is applied (once, before it expires; the
+	// apply refuses when the account drifted from the plan). Without
+	// it, `kind` `index_check` (role `diagnose`) checks the `account`
+	// read-only. The job runs on any server and survives restarts.
+	// `Idempotency-Key` returns the same job for a repeated request
+	// (200) and refuses the key for another request (409).
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+	SubmitJob(ctx context.Context, params *SubmitJobParams, body SubmitJobJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetJob A job with progress and result
+	//
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/jobs/{job} (the `GetJob` operationId).
+	GetJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelJob Ask a job to stop
+	//
+	// A queued job is cancelled at once, a running one at its next safe
+	// point (no rollback of what it did). Requires the role of the kind.
+	//
+	// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
+	CancelJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetPlan A plan
+	//
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
+	GetPlan(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetServerStatus Server status
 	//
@@ -1704,6 +1967,54 @@ func (c *Client) SetACLEntry(ctx context.Context, account Account, id MailboxID,
 	return c.Client.Do(req)
 }
 
+// CreatePlanWithBody Plan a maintenance job (dry run)
+//
+// Computes what the job would do (target set, effects) and stores the
+// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// that changes other accounts (ACL repairs, purge) needs them in the
+// client scope. The account must be canonical.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreatePlanRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreatePlan Plan a maintenance job (dry run)
+//
+// Computes what the job would do (target set, effects) and stores the
+// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// that changes other accounts (ACL repairs, purge) needs them in the
+// client scope. The account must be canonical.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+func (c *Client) CreatePlan(ctx context.Context, account Account, body CreatePlanJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreatePlanRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetQuota Quota usage and limit
 //
 // Stored usage counters and the effective limit (0 = unlimited).
@@ -1847,6 +2158,124 @@ func (c *Client) SetTrace(ctx context.Context, account Account, body SetTraceJSO
 // Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 func (c *Client) DeliverWithBody(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeliverRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListJobs Jobs, oldest first
+//
+// Requires the role `diagnose`; a client with an account scope must
+// name an account.
+//
+// Corresponds with GET /admin/v1/jobs (the `ListJobs` operationId).
+func (c *Client) ListJobs(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListJobsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SubmitJobWithBody Apply a plan or start a check
+//
+// With `plan_id` the plan is applied (once, before it expires; the
+// apply refuses when the account drifted from the plan). Without
+// it, `kind` `index_check` (role `diagnose`) checks the `account`
+// read-only. The job runs on any server and survives restarts.
+// `Idempotency-Key` returns the same job for a repeated request
+// (200) and refuses the key for another request (409).
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+func (c *Client) SubmitJobWithBody(ctx context.Context, params *SubmitJobParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitJobRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SubmitJob Apply a plan or start a check
+//
+// With `plan_id` the plan is applied (once, before it expires; the
+// apply refuses when the account drifted from the plan). Without
+// it, `kind` `index_check` (role `diagnose`) checks the `account`
+// read-only. The job runs on any server and survives restarts.
+// `Idempotency-Key` returns the same job for a repeated request
+// (200) and refuses the key for another request (409).
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+func (c *Client) SubmitJob(ctx context.Context, params *SubmitJobParams, body SubmitJobJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitJobRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetJob A job with progress and result
+//
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/jobs/{job} (the `GetJob` operationId).
+func (c *Client) GetJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetJobRequest(c.Server, job)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CancelJob Ask a job to stop
+//
+// A queued job is cancelled at once, a running one at its next safe
+// point (no rollback of what it did). Requires the role of the kind.
+//
+// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
+func (c *Client) CancelJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelJobRequest(c.Server, job)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetPlan A plan
+//
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
+func (c *Client) GetPlan(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetPlanRequest(c.Server, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -3078,6 +3507,53 @@ func NewSetACLEntryRequestWithBody(server string, account Account, id MailboxID,
 	return req, nil
 }
 
+// NewCreatePlanRequest calls the generic CreatePlan builder with application/json body
+func NewCreatePlanRequest(server string, account Account, body CreatePlanJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreatePlanRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewCreatePlanRequestWithBody constructs an http.Request for the CreatePlan method, with any body, and a specified content type
+func NewCreatePlanRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/plans", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetQuotaRequest constructs an http.Request for the GetQuota method
 func NewGetQuotaRequest(server string, account Account) (*http.Request, error) {
 	var err error
@@ -3357,6 +3833,253 @@ func NewDeliverRequestWithBody(server string, params *DeliverParams, contentType
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewListJobsRequest constructs an http.Request for the ListJobs method
+func NewListJobsRequest(server string, params *ListJobsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/jobs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Account != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "account", *params.Account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "state", *params.State, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSubmitJobRequest calls the generic SubmitJob builder with application/json body
+func NewSubmitJobRequest(server string, params *SubmitJobParams, body SubmitJobJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSubmitJobRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSubmitJobRequestWithBody constructs an http.Request for the SubmitJob method, with any body, and a specified content type
+func NewSubmitJobRequestWithBody(server string, params *SubmitJobParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/jobs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.IdempotencyKey != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetJobRequest constructs an http.Request for the GetJob method
+func NewGetJobRequest(server string, job JobID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "job", job, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/jobs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCancelJobRequest constructs an http.Request for the CancelJob method
+func NewCancelJobRequest(server string, job JobID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "job", job, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/jobs/%s/cancel", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetPlanRequest constructs an http.Request for the GetPlan method
+func NewGetPlanRequest(server string, plan string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "plan", plan, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/plans/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -3780,6 +4503,34 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
 	SetACLEntryWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*SetACLEntryResponse, error)
 
+	// CreatePlanWithBodyWithResponse Plan a maintenance job (dry run)
+	//
+	// Computes what the job would do (target set, effects) and stores the
+	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// that changes other accounts (ACL repairs, purge) needs them in the
+	// client scope. The account must be canonical.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+	CreatePlanWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreatePlanResponse, error)
+
+	// CreatePlanWithResponse Plan a maintenance job (dry run)
+	//
+	// Computes what the job would do (target set, effects) and stores the
+	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// that changes other accounts (ACL repairs, purge) needs them in the
+	// client scope. The account must be canonical.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+	CreatePlanWithResponse(ctx context.Context, account Account, body CreatePlanJSONRequestBody, reqEditors ...RequestEditorFn) (*CreatePlanResponse, error)
+
 	// GetQuotaWithResponse Quota usage and limit
 	//
 	// Stored usage counters and the effective limit (0 = unlimited).
@@ -3870,6 +4621,72 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBodyWithResponse(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeliverResponse, error)
+
+	// ListJobsWithResponse Jobs, oldest first
+	//
+	// Requires the role `diagnose`; a client with an account scope must
+	// name an account.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/jobs (the `ListJobs` operationId).
+	ListJobsWithResponse(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*ListJobsResponse, error)
+
+	// SubmitJobWithBodyWithResponse Apply a plan or start a check
+	//
+	// With `plan_id` the plan is applied (once, before it expires; the
+	// apply refuses when the account drifted from the plan). Without
+	// it, `kind` `index_check` (role `diagnose`) checks the `account`
+	// read-only. The job runs on any server and survives restarts.
+	// `Idempotency-Key` returns the same job for a repeated request
+	// (200) and refuses the key for another request (409).
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+	SubmitJobWithBodyWithResponse(ctx context.Context, params *SubmitJobParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitJobResponse, error)
+
+	// SubmitJobWithResponse Apply a plan or start a check
+	//
+	// With `plan_id` the plan is applied (once, before it expires; the
+	// apply refuses when the account drifted from the plan). Without
+	// it, `kind` `index_check` (role `diagnose`) checks the `account`
+	// read-only. The job runs on any server and survives restarts.
+	// `Idempotency-Key` returns the same job for a repeated request
+	// (200) and refuses the key for another request (409).
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+	SubmitJobWithResponse(ctx context.Context, params *SubmitJobParams, body SubmitJobJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitJobResponse, error)
+
+	// GetJobWithResponse A job with progress and result
+	//
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/jobs/{job} (the `GetJob` operationId).
+	GetJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*GetJobResponse, error)
+
+	// CancelJobWithResponse Ask a job to stop
+	//
+	// A queued job is cancelled at once, a running one at its next safe
+	// point (no rollback of what it did). Requires the role of the kind.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
+	CancelJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*CancelJobResponse, error)
+
+	// GetPlanWithResponse A plan
+	//
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
+	GetPlanWithResponse(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*GetPlanResponse, error)
 
 	// GetServerStatusWithResponse Server status
 	//
@@ -4866,6 +5683,54 @@ func (r SetACLEntryResponse) ContentType() string {
 	return ""
 }
 
+type CreatePlanResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *Plan
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r CreatePlanResponse) GetJSON201() *Plan {
+	return r.JSON201
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CreatePlanResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CreatePlanResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CreatePlanResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreatePlanResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CreatePlanResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetQuotaResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -5141,6 +6006,253 @@ func (r DeliverResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r DeliverResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListJobsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *JobPage
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListJobsResponse) GetJSON200() *JobPage {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListJobsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListJobsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListJobsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListJobsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListJobsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SubmitJobResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Job
+	// JSON202 the response for an HTTP 202 `application/json` response
+	JSON202 *Job
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SubmitJobResponse) GetJSON200() *Job {
+	return r.JSON200
+}
+
+// GetJSON202 returns the response for an HTTP 202 `application/json` response
+func (r SubmitJobResponse) GetJSON202() *Job {
+	return r.JSON202
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SubmitJobResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SubmitJobResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SubmitJobResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SubmitJobResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SubmitJobResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetJobResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Job
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetJobResponse) GetJSON200() *Job {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetJobResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetJobResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetJobResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetJobResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetJobResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CancelJobResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Job
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CancelJobResponse) GetJSON200() *Job {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CancelJobResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CancelJobResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelJobResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelJobResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CancelJobResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetPlanResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Plan
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetPlanResponse) GetJSON200() *Plan {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetPlanResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetPlanResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetPlanResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetPlanResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetPlanResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -5738,6 +6850,46 @@ func (c *ClientWithResponses) SetACLEntryWithResponse(ctx context.Context, accou
 	return ParseSetACLEntryResponse(rsp)
 }
 
+// CreatePlanWithBodyWithResponse Plan a maintenance job (dry run)
+//
+// Computes what the job would do (target set, effects) and stores the
+// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// that changes other accounts (ACL repairs, purge) needs them in the
+// client scope. The account must be canonical.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreatePlanResponse, error) {
+	rsp, err := c.CreatePlanWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreatePlanResponse(rsp)
+}
+
+// CreatePlanWithResponse Plan a maintenance job (dry run)
+//
+// Computes what the job would do (target set, effects) and stores the
+// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// that changes other accounts (ACL repairs, purge) needs them in the
+// client scope. The account must be canonical.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/plans (the `CreatePlan` operationId).
+func (c *ClientWithResponses) CreatePlanWithResponse(ctx context.Context, account Account, body CreatePlanJSONRequestBody, reqEditors ...RequestEditorFn) (*CreatePlanResponse, error) {
+	rsp, err := c.CreatePlan(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreatePlanResponse(rsp)
+}
+
 // GetQuotaWithResponse Quota usage and limit
 //
 // Stored usage counters and the effective limit (0 = unlimited).
@@ -5869,6 +7021,108 @@ func (c *ClientWithResponses) DeliverWithBodyWithResponse(ctx context.Context, p
 		return nil, err
 	}
 	return ParseDeliverResponse(rsp)
+}
+
+// ListJobsWithResponse Jobs, oldest first
+//
+// Requires the role `diagnose`; a client with an account scope must
+// name an account.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/jobs (the `ListJobs` operationId).
+func (c *ClientWithResponses) ListJobsWithResponse(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*ListJobsResponse, error) {
+	rsp, err := c.ListJobs(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListJobsResponse(rsp)
+}
+
+// SubmitJobWithBodyWithResponse Apply a plan or start a check
+//
+// With `plan_id` the plan is applied (once, before it expires; the
+// apply refuses when the account drifted from the plan). Without
+// it, `kind` `index_check` (role `diagnose`) checks the `account`
+// read-only. The job runs on any server and survives restarts.
+// `Idempotency-Key` returns the same job for a repeated request
+// (200) and refuses the key for another request (409).
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+func (c *ClientWithResponses) SubmitJobWithBodyWithResponse(ctx context.Context, params *SubmitJobParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitJobResponse, error) {
+	rsp, err := c.SubmitJobWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSubmitJobResponse(rsp)
+}
+
+// SubmitJobWithResponse Apply a plan or start a check
+//
+// With `plan_id` the plan is applied (once, before it expires; the
+// apply refuses when the account drifted from the plan). Without
+// it, `kind` `index_check` (role `diagnose`) checks the `account`
+// read-only. The job runs on any server and survives restarts.
+// `Idempotency-Key` returns the same job for a repeated request
+// (200) and refuses the key for another request (409).
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/jobs (the `SubmitJob` operationId).
+func (c *ClientWithResponses) SubmitJobWithResponse(ctx context.Context, params *SubmitJobParams, body SubmitJobJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitJobResponse, error) {
+	rsp, err := c.SubmitJob(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSubmitJobResponse(rsp)
+}
+
+// GetJobWithResponse A job with progress and result
+//
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/jobs/{job} (the `GetJob` operationId).
+func (c *ClientWithResponses) GetJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*GetJobResponse, error) {
+	rsp, err := c.GetJob(ctx, job, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetJobResponse(rsp)
+}
+
+// CancelJobWithResponse Ask a job to stop
+//
+// A queued job is cancelled at once, a running one at its next safe
+// point (no rollback of what it did). Requires the role of the kind.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
+func (c *ClientWithResponses) CancelJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*CancelJobResponse, error) {
+	rsp, err := c.CancelJob(ctx, job, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelJobResponse(rsp)
+}
+
+// GetPlanWithResponse A plan
+//
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
+func (c *ClientWithResponses) GetPlanWithResponse(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*GetPlanResponse, error) {
+	rsp, err := c.GetPlan(ctx, plan, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetPlanResponse(rsp)
 }
 
 // GetServerStatusWithResponse Server status
@@ -6616,6 +7870,39 @@ func ParseSetACLEntryResponse(rsp *http.Response) (*SetACLEntryResponse, error) 
 	return response, nil
 }
 
+// ParseCreatePlanResponse parses an HTTP response from a CreatePlanWithResponse call
+func ParseCreatePlanResponse(rsp *http.Response) (*CreatePlanResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreatePlanResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest Plan
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetQuotaResponse parses an HTTP response from a GetQuotaWithResponse call
 func ParseGetQuotaResponse(rsp *http.Response) (*GetQuotaResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -6810,6 +8097,178 @@ func ParseDeliverResponse(rsp *http.Response) (*DeliverResponse, error) {
 	return response, nil
 }
 
+// ParseListJobsResponse parses an HTTP response from a ListJobsWithResponse call
+func ParseListJobsResponse(rsp *http.Response) (*ListJobsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListJobsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest JobPage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSubmitJobResponse parses an HTTP response from a SubmitJobWithResponse call
+func ParseSubmitJobResponse(rsp *http.Response) (*SubmitJobResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SubmitJobResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Job
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest Job
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetJobResponse parses an HTTP response from a GetJobWithResponse call
+func ParseGetJobResponse(rsp *http.Response) (*GetJobResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetJobResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Job
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelJobResponse parses an HTTP response from a CancelJobWithResponse call
+func ParseCancelJobResponse(rsp *http.Response) (*CancelJobResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelJobResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Job
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetPlanResponse parses an HTTP response from a GetPlanWithResponse call
+func ParseGetPlanResponse(rsp *http.Response) (*GetPlanResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetPlanResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Plan
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetServerStatusResponse parses an HTTP response from a GetServerStatusWithResponse call
 func ParseGetServerStatusResponse(rsp *http.Response) (*GetServerStatusResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -6938,6 +8397,9 @@ type ServerInterface interface {
 	// SetACLEntry Change the rights of one identifier
 	// (PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier})
 	SetACLEntry(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, identifier Identifier, params SetACLEntryParams)
+	// CreatePlan Plan a maintenance job (dry run)
+	// (POST /admin/v1/accounts/{account}/plans)
+	CreatePlan(w http.ResponseWriter, r *http.Request, account Account)
 	// GetQuota Quota usage and limit
 	// (GET /admin/v1/accounts/{account}/quota)
 	GetQuota(w http.ResponseWriter, r *http.Request, account Account)
@@ -6956,6 +8418,21 @@ type ServerInterface interface {
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
+	// ListJobs Jobs, oldest first
+	// (GET /admin/v1/jobs)
+	ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams)
+	// SubmitJob Apply a plan or start a check
+	// (POST /admin/v1/jobs)
+	SubmitJob(w http.ResponseWriter, r *http.Request, params SubmitJobParams)
+	// GetJob A job with progress and result
+	// (GET /admin/v1/jobs/{job})
+	GetJob(w http.ResponseWriter, r *http.Request, job JobID)
+	// CancelJob Ask a job to stop
+	// (POST /admin/v1/jobs/{job}/cancel)
+	CancelJob(w http.ResponseWriter, r *http.Request, job JobID)
+	// GetPlan A plan
+	// (GET /admin/v1/plans/{plan})
+	GetPlan(w http.ResponseWriter, r *http.Request, plan string)
 	// GetServerStatus Server status
 	// (GET /admin/v1/server)
 	GetServerStatus(w http.ResponseWriter, r *http.Request)
@@ -8055,6 +9532,32 @@ func (siw *ServerInterfaceWrapper) SetACLEntry(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// CreatePlan operation middleware
+func (siw *ServerInterfaceWrapper) CreatePlan(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreatePlan(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetQuota operation middleware
 func (siw *ServerInterfaceWrapper) GetQuota(w http.ResponseWriter, r *http.Request) {
 
@@ -8270,6 +9773,197 @@ func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Reques
 	handler.ServeHTTP(w, r)
 }
 
+// ListJobs operation middleware
+func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListJobsParams
+
+	// ------------- Optional query parameter "account" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "account", r.URL.Query(), &params.Account, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "account"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after", r.URL.Query(), &params.After, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListJobs(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SubmitJob operation middleware
+func (siw *ServerInterfaceWrapper) SubmitJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params SubmitJobParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SubmitJob(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetJob operation middleware
+func (siw *ServerInterfaceWrapper) GetJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job" -------------
+	var job JobID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job", r.PathValue("job"), &job, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetJob(w, r, job)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CancelJob operation middleware
+func (siw *ServerInterfaceWrapper) CancelJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job" -------------
+	var job JobID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job", r.PathValue("job"), &job, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CancelJob(w, r, job)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetPlan operation middleware
+func (siw *ServerInterfaceWrapper) GetPlan(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "plan" -------------
+	var plan string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "plan", r.PathValue("plan"), &plan, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "plan", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetPlan(w, r, plan)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetServerStatus operation middleware
 func (siw *ServerInterfaceWrapper) GetServerStatus(w http.ResponseWriter, r *http.Request) {
 
@@ -8431,6 +10125,12 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl/explain", wrapper.ExplainMailboxACL)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/quota", wrapper.GetQuota)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/shared", wrapper.ListSharedMailboxes)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/plans", wrapper.CreatePlan)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/plans/{plan}", wrapper.GetPlan)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/jobs", wrapper.ListJobs)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/jobs", wrapper.SubmitJob)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/jobs/{job}", wrapper.GetJob)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/jobs/{job}/cancel", wrapper.CancelJob)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/deliveries", wrapper.Deliver)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.CloseImport)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.OpenImport)

@@ -48,8 +48,8 @@ func (q LearningQueue) Put(j imapsieve.Job, raw []byte) error {
 	return err
 }
 
-// List returns up to 100 live jobs that are due, oldest due time first.
-func (q LearningQueue) List() ([]imapsieve.Job, error) {
+// All returns every job of the queue, due or not, dead ones included.
+func (q LearningQueue) All() ([]imapsieve.Job, error) {
 	u, err := q.Store.User("~learning")
 	if err != nil {
 		return nil, err
@@ -85,11 +85,25 @@ func (q LearningQueue) List() ([]imapsieve.Job, error) {
 			return nil, err
 		}
 
-		if j.Dead || time.Now().Before(j.Next) {
-			continue
-		}
-
 		jobs = append(jobs, j)
+	}
+
+	return jobs, it.Err()
+}
+
+// List returns up to 100 live jobs that are due, oldest due time first.
+func (q LearningQueue) List() ([]imapsieve.Job, error) {
+	all, err := q.All()
+	if err != nil {
+		return nil, err
+	}
+
+	jobs := all[:0]
+
+	for _, j := range all {
+		if !j.Dead && !time.Now().Before(j.Next) {
+			jobs = append(jobs, j)
+		}
 	}
 
 	sort.Slice(jobs, func(i, j int) bool {
@@ -104,7 +118,31 @@ func (q LearningQueue) List() ([]imapsieve.Job, error) {
 		jobs = jobs[:100]
 	}
 
-	return jobs, it.Err()
+	return jobs, nil
+}
+
+// PurgeOwner deletes every learning job of an account (account purge).
+func (q LearningQueue) PurgeOwner(account string) (int, error) {
+	all, err := q.All()
+	if err != nil {
+		return 0, err
+	}
+
+	n := 0
+
+	for _, j := range all {
+		if j.Owner != account {
+			continue
+		}
+
+		if err := q.Delete(j); err != nil && errCode(err) != syscall.ENOENT {
+			return n, err
+		}
+
+		n++
+	}
+
+	return n, nil
 }
 
 // Read returns the raw message stored with the job.

@@ -11,7 +11,14 @@ und **8a** (0.19.0): lesende Diagnose für Server, Konto, Postfächer
 je mTLS-Client, siehe [Admin-API: Diagnose](../admin-api.md#lesende-diagnose-stufe-8a).
 Der Jobstatus aus 8a folgt mit den Jobs in 8c. **8b** (0.20.0):
 Postfächer anlegen, umbenennen, abonnieren und ACLs versioniert ändern
-(Rolle `provision`), siehe [Admin-API: Provisionierung](../admin-api.md#provisionierung-und-berechtigungen-stufe-8b). Entwurf vom 16.09.2026 auf Basis
+(Rolle `provision`), siehe [Admin-API: Provisionierung](../admin-api.md#provisionierung-und-berechtigungen-stufe-8b).
+**8c** (0.21.0): dauerhafte Jobs mit Lease, Fencing, Checkpoints und
+Übernahme, Plan → Apply mit Drift-Prüfung, Idempotency-Key, Jobstatus (Rest
+von 8a); Arten `index_check`, `scrub` (Klassen), `quota_recalc`,
+`acl_reconcile`, `fts_rebuild` (Wartungsmodus), `mailbox_delete`, `purge`
+(Rollen `repair`, `delete`), siehe [Admin-API: Wartungsjobs](../admin-api.md#wartungsjobs-stufe-8c).
+Der periodische Scrub-CronJob bleibt eigenständig; die gemeinsame
+Koordination ist die Kontosperre, die er respektiert. Entwurf vom 16.09.2026 auf Basis
 von ShardPost 0.12.0. Die Nummer setzt die bisherigen Stufen 6/7 für JMAP
 fort; sie schreibt keine zeitliche Abhängigkeit von JMAP vor. Die ersten
 Teilpakete dieser Stufe sollten vor einer größeren Backend-Migration kommen.

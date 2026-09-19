@@ -37,6 +37,8 @@ type Config struct {
 	Admin Admin `mapstructure:"admin"`
 	// Trace bounds the per-account protocol trace.
 	Trace Trace `mapstructure:"trace"`
+	// Jobs configures the maintenance jobs.
+	Jobs Jobs `mapstructure:"jobs"`
 }
 
 // Logging configures the log output.
@@ -199,6 +201,13 @@ var defaults = []struct {
 	{"admin.import.max_inventory", 5000},
 	{"admin.import.max_changes", 10000},
 	{"admin.import.shard_size", 0},
+	{"jobs.enabled", true},
+	{"jobs.poll_seconds", 5},
+	{"jobs.lease_seconds", 60},
+	{"jobs.retention_days", 14},
+	{"jobs.plan_ttl_seconds", 3600},
+	{"jobs.max_parallel", 2},
+	{"jobs.settle_seconds", 10},
 	{"trace.max_line_bytes", 2048},
 	{"trace.max_duration_seconds", 86400},
 	{"trace.default_duration_seconds", 1800},

@@ -190,3 +190,25 @@ func RefuseDuringImport(u User) error {
 
 	return nil
 }
+
+// LockCheckInterval is how often a running protocol session re-checks
+// the account's import/maintenance lock (at command start).
+const LockCheckInterval = 5 * time.Second
+
+// LockProbe re-checks the lock of a running session at most every
+// LockCheckInterval, so a session opened before a maintenance job took
+// the lock stops writing within that interval.
+type LockProbe struct{ next time.Time }
+
+// Locked reports whether u is locked now; unreadable locks count as not
+// locked, the next command checks again.
+func (p *LockProbe) Locked(u User) bool {
+	now := time.Now()
+	if u == nil || now.Before(p.next) {
+		return false
+	}
+
+	p.next = now.Add(LockCheckInterval)
+
+	return errors.Is(RefuseDuringImport(u), ErrImportLocked)
+}

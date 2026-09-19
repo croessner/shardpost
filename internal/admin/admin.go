@@ -24,6 +24,7 @@ import (
 	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
+	"shardpost/internal/jobs"
 )
 
 // Roles of the admin API.
@@ -96,6 +97,9 @@ type Options struct {
 	StartedAt         time.Time
 	ConfigFingerprint string
 	StorePing         func() error
+	// Jobs is the maintenance job system (nil: the job operations answer
+	// 403).
+	Jobs *jobs.Manager
 }
 
 // Server implements the generated adminapi.ServerInterface.
@@ -354,7 +358,21 @@ func operation(path string) string {
 		return "deliver"
 	case "/admin/v1/server":
 		return "server"
+	case "/admin/v1/jobs":
+		return "jobs"
 	default:
+		if rest, ok := strings.CutPrefix(path, "/admin/v1/jobs/"); ok {
+			if strings.HasSuffix(rest, "/cancel") {
+				return "job_cancel"
+			}
+
+			return "job"
+		}
+
+		if strings.HasPrefix(path, "/admin/v1/plans/") {
+			return "plan"
+		}
+
 		if rest, ok := strings.CutPrefix(path, "/admin/v1/accounts/"); ok {
 			return accountOperation(path, strings.Split(rest, "/"))
 		}
@@ -379,7 +397,7 @@ func accountOperation(path string, parts []string) string {
 	switch parts[1] {
 	case "import":
 		return importOperation(path)
-	case "trace", "quota", "shared":
+	case "trace", "quota", "shared", "plans":
 		if len(parts) == 2 {
 			return parts[1]
 		}

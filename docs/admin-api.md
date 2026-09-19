@@ -40,8 +40,10 @@ brauchen `extKeyUsage clientAuth`.
 
 Rollen: `diagnose` (Version, Serverstatus und lesende Diagnose), `deliver` (Zustellung mit Quota-Durchsetzung),
 `deliver:noenforce` (zusätzlich für `enforce_quota=false`), `import`
-(Kontoimport), `trace` (Protokoll-Trace eines Kontos, siehe unten) und
-`provision` (Postfächer anlegen, umbenennen, abonnieren; ACLs ändern).
+(Kontoimport), `trace` (Protokoll-Trace eines Kontos, siehe unten),
+`provision` (Postfächer anlegen, umbenennen, abonnieren; ACLs ändern),
+`repair` (Wartungsjobs, die reparieren) und `delete` (Postfach und Konto
+endgültig löschen).
 
 ```yaml
 admin:
@@ -181,7 +183,7 @@ die Werte der mit `secret:"true"` markierten Felder; ein Test verlangt diese
 Markierung für jedes neue Feld, dessen Name nach Passwort, Secret oder Token
 aussieht. Gleiche Fingerprints bedeuten gleiche Einstellungen der Pods.
 
-Jobstatus folgt mit den Wartungsjobs in Stufe 8c.
+Den Jobstatus liefern die Wartungsjobs (Stufe 8c, unten).
 
 ## Provisionierung und Berechtigungen (Stufe 8b)
 
@@ -232,6 +234,89 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
   Ordner beim nächsten LIST.
 - Exitcodes von `shardpostctl`: 65 bei Konflikt oder veralteter Version
   (409/412), sonst wie bei der Diagnose.
+
+## Wartungsjobs (Stufe 8c)
+
+Langläufer und gefährliche Änderungen laufen als dauerhafte Jobs. Jeder
+Server führt einen Runner; Jobs liegen im gemeinsamen Admin-Speicher
+(Namespace `~admin` im Indexpool, ein Objekt je Job und Plan) und überleben
+Neustarts.
+
+```sh
+shardpostctl check -wait user@example.org                  # Prüfung ohne Reparatur (Rolle diagnose)
+shardpostctl plan scrub -classes refs,orphans user@example.org
+shardpostctl plan quota_recalc user@example.org
+shardpostctl plan acl_reconcile user@example.org
+shardpostctl plan fts_rebuild user@example.org
+shardpostctl plan -mailbox "Archiv/2019" mailbox_delete user@example.org
+shardpostctl plan purge user@example.org
+shardpostctl apply -wait <plan-id>
+shardpostctl job list -account user@example.org
+shardpostctl job show|wait|cancel <job-id>
+```
+
+**Plan → Apply.** `plan` rechnet trocken und zeigt Zielmenge und Wirkung
+(Befunde, Zählerdifferenz, fehlende Zeiger, betroffene Ordner, Nachrichten
+und Bytes). `apply` startet den Plan als Job, einmal und vor Ablauf
+(`jobs.plan_ttl_seconds`). Beim Löschen eines Postfachs und bei purge
+vergleicht der Job vor dem ersten Schreibzugriff den Stand (IDs,
+UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, bei purge auch die Sieve-Skripte) mit
+dem Plan; weicht er ab, endet der Job ohne Änderung mit „the account changed
+since the plan“. Ein Abgleich der Freigaben wendet nur Reparaturen an, die
+geplant und noch nötig sind.
+
+| Art | Rolle | Kontosperre | Wirkung |
+| --- | --- | --- | --- |
+| `index_check` (ohne Plan) | `diagnose` | nein | Scrubber ohne Reparatur, Befunde als Ergebnis |
+| `scrub` | `repair` | nein | Scrubber mit gewählten Klassen: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (ohne Angabe alle) |
+| `quota_recalc` | `repair` | ja | Belegung aus dem Index neu zählen und setzen |
+| `acl_reconcile` | `repair` | nein | fehlende Zeiger bei Empfängern schreiben, eigene Zeiger ohne Rechte entfernen |
+| `fts_rebuild` | `repair` | ja | Volltextindex löschen und aus allen Nachrichten neu aufbauen |
+| `mailbox_delete` | `delete` | ja | Postfach samt Unterordnern löschen (INBOX nicht) |
+| `purge` | `delete` | ja | Freigaben in beide Richtungen entziehen, Lernjobs und alle Objekte des Kontos löschen |
+
+- **Kontosperre** (Wartungsmodus, Entscheidung 19.09.2026): Der Job hält die
+  Sperre, die auch der Import nutzt. IMAP und POP3 antworten solange
+  „Mailbox maintenance in progress“, LMTP mit `451 4.2.1`. Bereits offene
+  IMAP/POP3-Sitzungen prüfen die Sperre höchstens alle 5 Sekunden beim
+  Befehlsstart und trennen dann mit `BYE [UNAVAILABLE]` bzw.
+  `-ERR [SYS/TEMP]`. Der Job wartet nach dem Sperren `jobs.settle_seconds`
+  (Standard 10), bevor er schreibt. Eine Sitzung, die in dieser Zeit
+  keinen Befehl schickt (etwa ein IDLE-Client), schreibt auch nichts.
+  Andere Konto-Jobs, Importe und der periodische Scrub bleiben draußen.
+  Ist das Konto beim Start schon gesperrt (Import, anderer Job), wartet der
+  Job in `running` mit der Phase „waiting for the account lock“ und
+  versucht es je Lease-Periode erneut, höchstens `jobs.plan_ttl_seconds`
+  nach dem Anlegen. Danach endet er `failed`. Verliert ein Job die Sperre,
+  endet er mit „maintenance lock lost“.
+- **Übernahme:** Ein Job gehört dem Server, der ihn übernommen hat (Lease mit
+  Generation, `jobs.lease_seconds`). Vor jedem Schreibschritt prüft der Job
+  seine Lease (Fencing). Stirbt der Server, übernimmt ein anderer nach
+  Ablauf der Lease und setzt am letzten Checkpoint fort. Beim geordneten
+  Herunterfahren gibt der Server laufende Jobs sofort ab. `fts_rebuild`
+  hat keinen Checkpoint und beginnt nach einer Übernahme von vorn.
+  Leases vergleichen Uhrzeiten verschiedener Server, deshalb müssen die
+  Uhren per NTP synchron laufen. Eine Abweichung weit unter
+  `jobs.lease_seconds` ist unkritisch.
+- **Abbrechen** (`job cancel`): Ein wartender Job endet sofort, ein laufender
+  am nächsten sicheren Punkt. Bereits Getanes wird nicht zurückgenommen.
+- **Zustände:** `queued`, `running`, `succeeded`, `partially_failed`,
+  `failed`, `cancel_requested`, `cancelled`. `apply -wait` und `job wait`
+  enden mit 0 (Erfolg), 1 (Teilfehler) oder 69 (Fehler, abgebrochen).
+- **Idempotenz:** `apply -idempotency-key K` bzw. der Header
+  `Idempotency-Key` liefert bei Wiederholung denselben Job (200). Mit einer
+  anderen Anfrage wird der Schlüssel abgelehnt (409). Schlüssel gelten je
+  Aufrufer.
+- **Scope:** Pläne, die andere Konten ändern (Freigabe-Abgleich, purge),
+  brauchen diese im Scope des Clients, beim Anlegen und erneut beim
+  `apply`. Clients mit Scope sehen Jobs nur mit Kontoangabe. Jobs und
+  Pläne außerhalb ihres Scopes gelten für sie als nicht vorhanden (404).
+- Ohne Jobsystem (`jobs.enabled: false`) antworten die Job-Endpunkte mit
+  503 `temporary`.
+- **purge** entfernt nur die Daten im Store. Die Identität (LDAP) gehört
+  ihrem Owner. Meldet sich das Konto danach wieder an, legt ShardPost eine
+  leere INBOX an.
+- Beendete Jobs und Pläne bleiben `jobs.retention_days` lang abrufbar.
 
 ## Protokoll-Trace eines Kontos
 

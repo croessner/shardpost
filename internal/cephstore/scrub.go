@@ -17,6 +17,7 @@ import (
 	"github.com/ceph/go-ceph/rados"
 
 	"shardpost/internal/metrics"
+	"shardpost/internal/model"
 )
 
 // Scrubber
@@ -62,6 +63,34 @@ type ScrubOptions struct {
 	Grace  time.Duration // objects younger than this are skipped
 	DryRun bool
 	Log    *slog.Logger
+	// Repairs selects the repair classes (Repair*); nil repairs all (the
+	// periodic scrub), an empty set none. Findings are reported either way.
+	Repairs map[string]bool
+	// Fence (if set) is checked before each repair; failing, the repair
+	// is skipped.
+	Fence func() error
+}
+
+// Repair classes of the scrubber (model.Repair*).
+const (
+	RepairDeliveries = model.RepairDeliveries
+	RepairMoves      = model.RepairMoves
+	RepairRetired    = model.RepairRetired
+	RepairUncovered  = model.RepairUncovered
+	RepairEntries    = model.RepairEntries
+	RepairRefs       = model.RepairRefs
+	RepairOrphans    = model.RepairOrphans
+	RepairUnknown    = model.RepairUnknown
+	RepairQuota      = model.RepairQuota
+)
+
+// Allowed reports whether a run may repair the class.
+func (o ScrubOptions) Allowed(class string) bool {
+	if o.DryRun || (o.Repairs != nil && !o.Repairs[class]) {
+		return false
+	}
+
+	return o.Fence == nil || o.Fence() == nil
 }
 
 // ListUsers returns all namespaces present in the index pool.
@@ -98,7 +127,7 @@ func (s *Store) ListUsers() ([]string, error) {
 
 	users := make([]string, 0, len(seen))
 	for u := range seen {
-		if u != "" {
+		if u != "" && !model.ReservedNamespace(u) {
 			users = append(users, u)
 		}
 	}
@@ -270,7 +299,7 @@ func (sr *scrubRun) rollbackDeliveries() {
 
 		log.Warn("abandoned delivery, rolling back", "intent", in.ID, "entries", len(in.Entries))
 
-		if o.DryRun {
+		if !o.Allowed(RepairDeliveries) {
 			continue
 		}
 		// Entries name mailbox id and GUID: a mailbox deleted (and
@@ -353,7 +382,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 
 	log.Warn("unfinished MOVE", "mailbox", mb.Name, "intent", in.ID, "uids", in.UIDs)
 
-	if o.DryRun {
+	if !o.Allowed(RepairMoves) {
 		return
 	}
 
@@ -514,7 +543,7 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 	sr.log.Warn("mailbox retired by an interrupted import", "mailbox", mb.Name)
 	scrubFinding("retired_mailbox")
 
-	if sr.o.DryRun {
+	if !sr.o.Allowed(RepairRetired) {
 		return
 	}
 
@@ -560,7 +589,7 @@ func (sr *scrubRun) removeUncovered(mb *Mailbox, info *MailboxInfo) {
 
 	// An import that resumed since the scrub started writes such entries
 	// before its header: leave them to it.
-	if locked, err := u.ImportLocked(); sr.o.DryRun || err != nil || locked {
+	if locked, err := u.ImportLocked(); !sr.o.Allowed(RepairUncovered) || err != nil || locked {
 		return
 	}
 
@@ -656,7 +685,7 @@ func (sr *scrubRun) scanMessage(mb *Mailbox, m Meta, idx *scrubIndex) {
 
 		sr.log.Warn("index entry without blob", "mailbox", mb.Name, "uid", m.UID, "guid", m.GUID)
 
-		if !sr.o.DryRun {
+		if sr.o.Allowed(RepairEntries) {
 			if _, err := u.unlink(mb, []Meta{m}, ""); err != nil {
 				rep.Errors = append(rep.Errors, err.Error())
 			}
@@ -696,7 +725,7 @@ func (sr *scrubRun) fixRefs(refs map[string][]Meta) {
 
 		log.Warn("refcount mismatch", "guid", guid, "xattr", have, "entries", len(entries))
 
-		if !sr.o.DryRun {
+		if sr.o.Allowed(RepairRefs) {
 			op := rados.CreateWriteOp()
 			op.AssertVersion(ver)
 			op.SetXattr(xattrRefs, []byte(strconv.Itoa(len(entries))))
@@ -791,12 +820,12 @@ func (sr *scrubRun) removeOrphans(refs map[string][]Meta) error {
 
 		log.Warn("orphan blob", "guid", guid, "chunks", chunks)
 
-		if !sr.o.DryRun {
+		if sr.o.Allowed(RepairOrphans) {
 			sr.deleteOrphan(guid, chunks, st)
 		}
 	}
 
-	if !sr.o.DryRun {
+	if sr.o.Allowed(RepairOrphans) {
 		if err := u.rememberOrphans(confirmed, forget); err != nil {
 			rep.Errors = append(rep.Errors, err.Error())
 		}
@@ -887,7 +916,7 @@ func (sr *scrubRun) removeUnknownIndex(unknown []string) {
 
 		log.Warn("index object without registry entry", "oid", oid)
 
-		if !sr.o.DryRun {
+		if sr.o.Allowed(RepairUnknown) {
 			if err := u.idx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
 				rep.Errors = append(rep.Errors, fmt.Sprintf("remove %s: %v", oid, err))
 			} else {
@@ -917,7 +946,7 @@ func (sr *scrubRun) fixQuota(quota Quota) {
 
 			log.Warn("quota drift", "counted", quota, "stored", cur)
 
-			if !sr.o.DryRun {
+			if sr.o.Allowed(RepairQuota) {
 				if err := u.SetQuotaUsage(quota); err != nil {
 					rep.Errors = append(rep.Errors, err.Error())
 				}
@@ -926,7 +955,7 @@ func (sr *scrubRun) fixQuota(quota Quota) {
 			log.Info("quota differs from index, confirming next run", "counted", quota, "stored", cur)
 		}
 
-		if !sr.o.DryRun {
+		if sr.o.Allowed(RepairQuota) {
 			_ = u.setScrubState(scrubKeyQuotaCounted, counted)
 		}
 	}

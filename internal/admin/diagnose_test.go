@@ -16,6 +16,7 @@ import (
 	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
+	"shardpost/internal/jobs"
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
 )
@@ -65,9 +66,18 @@ func serveDiag(t *testing.T, wrap func(*memstore.Store) delivery.Store, roles ..
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: accounts, Log: log},
+		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: diagUsers, Log: log, Version: "test",
 		MaxMessageBytes: 4096, SocketRoles: roles, Accounts: accounts, Instance: "pod-1", StartedAt: time.Unix(1000, 0),
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }})
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() { mgr.Run(ctx); close(done) }()
+
+	t.Cleanup(func() { cancel(); <-done })
 
 	path := filepath.Join(socketDir(t), "admin.sock")
 
@@ -411,7 +421,7 @@ func TestDiagnoseScopeAndCertificates(t *testing.T) {
 	caFile := filepath.Join(ca.dir, "ca.crt")
 	opsCert, opsKey := ca.issue(t, "ops", "ops", 20, x509.ExtKeyUsageClientAuth)
 	oldCert, oldKey := ca.issueValid(t, "old", "ops", 21, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
-	url := serveScoped(t, ca, caFile)
+	url, mgr := serveScoped(t, ca, caFile)
 
 	ctx := context.Background()
 
@@ -439,12 +449,18 @@ func TestDiagnoseScopeAndCertificates(t *testing.T) {
 	bob, _ := c.GetAccountWithResponse(ctx, "bob")
 	ex, _ := c.ExplainMailboxACLWithResponse(ctx, "alice", id, &adminapi.ExplainMailboxACLParams{Principal: "bob"})
 	tr, _ := c.SetTraceWithResponse(ctx, "bob", adminapi.TraceRequest{})
+	// alice shares with bob: purging alice would change bob.
+	purge, _ := c.CreatePlanWithResponse(ctx, "alice", adminapi.PlanRequest{Kind: adminapi.PlanRequestKind(jobs.KindPurge)})
+	list, _ := c.ListJobsWithResponse(ctx, nil)
 
-	for name, code := range map[string]int{"account bob": bob.StatusCode(), "explain bob": ex.StatusCode(), "trace bob": tr.StatusCode()} {
+	for name, code := range map[string]int{"account bob": bob.StatusCode(), "explain bob": ex.StatusCode(), "trace bob": tr.StatusCode(),
+		"purge touching bob": purge.StatusCode(), "jobs without account": list.StatusCode()} {
 		if code != http.StatusForbidden {
 			t.Errorf("%s out of scope: %d", name, code)
 		}
 	}
+
+	checkScopeAtApply(t, c, mgr)
 
 	expired, err := adminapi.NewTLSClient(url, oldCert, oldKey, caFile, 5*time.Second)
 	if err != nil {
@@ -479,16 +495,17 @@ func TestDiagnoseOperationLabels(t *testing.T) {
 
 // serveScoped serves the filled store over mTLS for the client "ops",
 // limited to alice, and returns the URL.
-func serveScoped(t *testing.T, ca *testCA, caFile string) string {
+func serveScoped(t *testing.T, ca *testCA, caFile string) (string, *jobs.Manager) {
 	t.Helper()
 
 	store := memstore.New()
 	fillDiagStore(t, store)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: store, Log: log}, jobs.Config{}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: diagUsers, Log: log, Version: "test",
-		MaxMessageBytes: 4096, Accounts: store, Clients: map[string][]string{"ops": {RoleDiagnose, RoleTrace}},
-		ClientScopes: map[string][]string{"OPS": {"alice", "*@alice.org"}}})
+		MaxMessageBytes: 4096, Accounts: store, Clients: map[string][]string{"ops": {RoleDiagnose, RoleTrace, RoleDelete}},
+		ClientScopes: map[string][]string{"OPS": {"alice", "*@alice.org"}}, Jobs: mgr})
 
 	srvCert, srvKey := ca.issue(t, "server", "shardpost", 10, x509.ExtKeyUsageServerAuth)
 
@@ -506,7 +523,38 @@ func serveScoped(t *testing.T, ca *testCA, caFile string) string {
 
 	t.Cleanup(func() { _ = srv.Close() })
 
-	return "https://" + ln.Addr().String()
+	return "https://" + ln.Addr().String(), mgr
+}
+
+// checkScopeAtApply: a plan made by an unscoped client that changes bob
+// cannot be applied by a client limited to alice; bob's jobs do not exist
+// for it.
+func checkScopeAtApply(t *testing.T, c *adminapi.ClientWithResponses, mgr *jobs.Manager) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	purge, _ := mgr.Kind(jobs.KindPurge)
+
+	plan, err := mgr.CreatePlan(ctx, purge, "alice", nil, "root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp, _ := c.SubmitJobWithResponse(ctx, nil, adminapi.JobRequest{PlanId: &plan.ID}); resp.StatusCode() != http.StatusForbidden {
+		t.Errorf("apply of a plan touching bob: %d", resp.StatusCode())
+	}
+
+	check, _ := mgr.Kind(jobs.KindIndexCheck)
+
+	j, _, err := mgr.Submit(check, "bob", nil, "", "root", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp, _ := c.GetJobWithResponse(ctx, j.ID); resp.StatusCode() != http.StatusNotFound {
+		t.Errorf("job of bob: %d", resp.StatusCode())
+	}
 }
 
 // brokenEntryStore adds an unreadable registry entry "B0" between B and C.

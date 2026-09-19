@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
+	"shardpost/internal/jobs"
 	"shardpost/internal/memstore"
 )
 
@@ -43,9 +45,18 @@ func serveFilled(t *testing.T, roles ...string) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: store, Log: log},
+		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw"},
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }})
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan struct{})
+
+	go func() { mgr.Run(ctx); close(ended) }()
+
+	t.Cleanup(func() { cancel(); <-ended })
 
 	path := filepath.Join(dir, "admin.sock")
 

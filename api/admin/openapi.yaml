@@ -328,6 +328,170 @@ paths:
                 $ref: "#/components/schemas/SharedList"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/plans:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    post:
+      operationId: createPlan
+      summary: Plan a maintenance job (dry run)
+      description: |
+        Computes what the job would do (target set, effects) and stores the
+        plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
+        and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
+        (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+        that changes other accounts (ACL repairs, purge) needs them in the
+        client scope. The account must be canonical.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlanRequest"
+      responses:
+        "201":
+          description: The plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Plan"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/plans/{plan}:
+    parameters:
+      - name: plan
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    get:
+      operationId: getPlan
+      summary: A plan
+      description: Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Plan"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/jobs:
+    get:
+      operationId: listJobs
+      summary: Jobs, oldest first
+      description: |
+        Requires the role `diagnose`; a client with an account scope must
+        name an account.
+      parameters:
+        - name: account
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 320
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/JobState"
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 64
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobPage"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: submitJob
+      summary: Apply a plan or start a check
+      description: |
+        With `plan_id` the plan is applied (once, before it expires; the
+        apply refuses when the account drifted from the plan). Without
+        it, `kind` `index_check` (role `diagnose`) checks the `account`
+        read-only. The job runs on any server and survives restarts.
+        `Idempotency-Key` returns the same job for a repeated request
+        (200) and refuses the key for another request (409).
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobRequest"
+      responses:
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "200":
+          description: The job of an earlier request with the same key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/jobs/{job}:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    get:
+      operationId: getJob
+      summary: A job with progress and result
+      description: Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/jobs/{job}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    post:
+      operationId: cancelJob
+      summary: Ask a job to stop
+      description: |
+        A queued job is cancelled at once, a running one at its next safe
+        point (no rollback of what it did). Requires the role of the kind.
+      responses:
+        "200":
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/deliveries:
     post:
       operationId: deliver
@@ -730,6 +894,13 @@ components:
         type: string
         minLength: 1
         maxLength: 320
+    JobID:
+      name: job
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
     IfMatch:
       name: If-Match
       in: header
@@ -753,7 +924,8 @@ components:
         `conflict` (409, imported data contradicts the target),
         `import_locked` (409, another session holds the account),
         `not_locked` (409, the session does not hold the lock),
-        `precondition_failed` (412, If-Match does not match).
+        `precondition_failed` (412, If-Match does not match),
+        `no_such_job` (404, job or plan).
       content:
         application/json:
           schema:
@@ -765,7 +937,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked, precondition_failed]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked, precondition_failed, no_such_job]
         message:
           type: string
     Version:
@@ -1291,3 +1463,120 @@ components:
           type: string
           enum: [replace, add, remove]
           default: replace
+    JobState:
+      type: string
+      enum: [queued, running, succeeded, partially_failed, failed, cancel_requested, cancelled]
+    PlanRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, mailbox_delete, purge]
+        params:
+          type: object
+          additionalProperties: true
+          description: |
+            scrub: `classes` (deliveries, moves, retired, uncovered, entries,
+            refs, orphans, unknown, quota; empty = all); mailbox_delete:
+            `mailbox_id`.
+    Plan:
+      type: object
+      required: [id, kind, account, summary, principal, created, expires]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        account:
+          type: string
+        params:
+          type: object
+          additionalProperties: true
+        summary:
+          type: object
+          additionalProperties: true
+          description: What the job would do (kind-specific).
+        principal:
+          type: string
+        created:
+          type: string
+          format: date-time
+        expires:
+          type: string
+          format: date-time
+        applied_job:
+          type: string
+    JobRequest:
+      type: object
+      properties:
+        plan_id:
+          type: string
+          maxLength: 64
+        kind:
+          type: string
+          enum: [index_check]
+        account:
+          type: string
+          maxLength: 320
+    JobProgress:
+      type: object
+      required: [done, total]
+      properties:
+        phase:
+          type: string
+        done:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    Job:
+      type: object
+      required: [id, kind, account, state, principal, created, progress, attempts, errors]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        account:
+          type: string
+        plan_id:
+          type: string
+        state:
+          $ref: "#/components/schemas/JobState"
+        principal:
+          type: string
+        created:
+          type: string
+          format: date-time
+        started:
+          type: string
+          format: date-time
+        finished:
+          type: string
+          format: date-time
+        progress:
+          $ref: "#/components/schemas/JobProgress"
+        result:
+          type: object
+          additionalProperties: true
+        errors:
+          type: array
+          items:
+            type: string
+        attempts:
+          type: integer
+        server:
+          type: string
+          description: The server holding (or last holding) the job.
+    JobPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        next:
+          type: string

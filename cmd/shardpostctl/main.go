@@ -7,6 +7,7 @@
 //	shardpostctl [connection flags] migrate [flags] <account>
 //	shardpostctl [connection flags] trace on [-for 30m] | off | status <account>
 //	shardpostctl [connection flags] server status | account show | mailbox list|show | acl list|explain | quota show | shared list
+//	shardpostctl [connection flags] plan <kind> <account> | apply <plan> | check <account> | job list|show|wait|cancel
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -52,6 +53,11 @@ const (
 	cmdTrace   = "trace"
 	cmdAccount = "account"
 	cmdQuota   = "quota"
+	cmdServer  = "server"
+	cmdPlan    = "plan"
+	cmdApply   = "apply"
+	cmdCheck   = "check"
+	cmdJob     = "job"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
@@ -75,7 +81,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ...")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ...")
 		return exUsage
 	}
 
@@ -94,8 +100,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return migrateCmd(client, fs.Args()[1:], stdout, stderr)
 	case cmdTrace:
 		return traceCmd(client, fs.Args()[1:], stdout, stderr)
-	case "server", cmdAccount, "mailbox", "acl", cmdQuota, "shared":
+	case cmdServer, cmdAccount, "mailbox", "acl", cmdQuota, "shared":
 		return diagCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
+	case cmdPlan, cmdApply, cmdCheck, cmdJob:
+		return jobsCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
 	default:
 		sayln(stderr, "shardpostctl: unknown command", fs.Arg(0))
 		return exUsage
@@ -196,7 +204,7 @@ func failure(stderr io.Writer, e *adminapi.Error, status int) int {
 	sayf(stderr, "shardpostctl: %s: %s\n", e.Code, e.Message)
 
 	switch e.Code {
-	case adminapi.NoSuchUser, adminapi.NoSuchMailbox:
+	case adminapi.NoSuchUser, adminapi.NoSuchMailbox, adminapi.NoSuchJob:
 		return exNoUser
 	case adminapi.OverQuota:
 		return exCantCreate

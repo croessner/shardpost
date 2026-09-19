@@ -15,7 +15,7 @@ type Admin struct {
 	// Socket is the path of the Unix socket ("" disables it).
 	Socket string `mapstructure:"socket" env:"ADMIN_SOCKET"`
 	// SocketRoles are the roles of local callers on the socket.
-	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace provision"`
+	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete"`
 	// Addr is the mutual-TLS listener ("" disables it).
 	Addr string `mapstructure:"addr" env:"ADMIN_ADDR"`
 	// TLSCert, TLSKey and ClientCA are files; they are re-read when they
@@ -27,6 +27,27 @@ type Admin struct {
 	Clients []AdminClient `mapstructure:"clients" validate:"dive"`
 	// Import bounds the account import (role import).
 	Import AdminImport `mapstructure:"import"`
+}
+
+// Jobs configures the durable maintenance jobs (admin API, roadmap 8c).
+type Jobs struct {
+	// Enabled runs the job runner in this server (jobs are shared by all).
+	Enabled bool `mapstructure:"enabled"`
+	// PollSeconds is how often the runner looks for queued jobs.
+	PollSeconds int `mapstructure:"poll_seconds" validate:"gte=1,lte=300"`
+	// LeaseSeconds is how long a claim lasts without renewal (a job of a
+	// dead server is taken over after it).
+	LeaseSeconds int `mapstructure:"lease_seconds" validate:"gte=10,lte=3600"`
+	// RetentionDays keeps finished jobs and plans for their status.
+	RetentionDays int `mapstructure:"retention_days" validate:"gte=1,lte=365"`
+	// PlanTTLSeconds is how long a plan can be applied.
+	PlanTTLSeconds int `mapstructure:"plan_ttl_seconds" validate:"gte=60,lte=86400"`
+	// MaxParallel bounds the jobs one server runs at once.
+	MaxParallel int `mapstructure:"max_parallel" validate:"gte=1,lte=16"`
+	// SettleSeconds is how long an exclusive job waits after taking the
+	// maintenance lock for deliveries and sessions that opened the
+	// account before (sessions re-check the lock every 5 seconds).
+	SettleSeconds int `mapstructure:"settle_seconds" validate:"gte=0,lte=300"`
 }
 
 // Trace configures the per-account protocol trace (role trace): an
@@ -67,7 +88,7 @@ type AdminImport struct {
 // common name or one of whose DNS or URI SANs equals Identity.
 type AdminClient struct {
 	Identity string   `mapstructure:"identity" validate:"required"`
-	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace provision"`
+	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete"`
 	// Accounts limits the accounts the client may address (path.Match
 	// patterns on the lower-cased canonical account, e.g. "*@example.org");
 	// empty means all accounts.

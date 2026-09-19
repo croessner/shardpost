@@ -120,7 +120,7 @@ func command(verb string) (diagFunc, int) {
 // diagCommand returns the command and its number of positional arguments.
 func diagCommand(verb string) (diagFunc, int) {
 	switch verb {
-	case "server status":
+	case cmdServer + " status":
 		return serverStatus, 0
 	case "account show":
 		return accountShow, 1

@@ -311,6 +311,7 @@ type conn struct {
 	s          *Server
 	nc         net.Conn
 	wmu        sync.Mutex // serialises writes from the command loop and bye()
+	lockProbe  model.LockProbe
 	r          *reader
 	w          *writer
 	log        *slog.Logger
@@ -762,6 +763,14 @@ func (c *conn) dispatch(tag, name string, uid bool) error {
 		return nil
 	}
 
+	if c.lockProbe.Locked(c.user) {
+		c.log.Info("session closed, account locked (import or maintenance)")
+		c.w.untagged("BYE [UNAVAILABLE] Mailbox maintenance in progress, try again later")
+		c.state = stateLogout
+
+		return nil
+	}
+
 	if uid && !uidCommands[name] {
 		c.bad(tag, "UID "+name+" is not a valid command")
 		return nil
@@ -1012,8 +1021,8 @@ func (c *conn) finishLogin(tag string, req auth.Request, res *auth.Result, err e
 		c.s.releaseSlot(account)
 
 		if errors.Is(err, model.ErrImportLocked) {
-			c.log.Info("login refused, account import in progress", "user", account)
-			c.no(tag, "UNAVAILABLE", "Mailbox is being migrated, try again later")
+			c.log.Info("login refused, account locked (import or maintenance)", "user", account)
+			c.no(tag, "UNAVAILABLE", "Mailbox maintenance in progress, try again later")
 
 			return nil
 		}
