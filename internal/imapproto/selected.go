@@ -710,7 +710,7 @@ func (c *conn) storeFetches(seqs []int, metas []model.Meta, byUID map[uint32]mod
 				uidItem = fmt.Sprintf("UID %d ", m.UID)
 			}
 
-			c.w.untagged("%d FETCH (%sFLAGS (%s)%s)", seq, uidItem, strings.Join(m.Flags, " "), c.modseqItem(m))
+			c.w.untagged("%d FETCH (%sFLAGS (%s)%s)", seq, uidItem, flagList(m.Flags), c.modseqItem(m))
 		}
 	}
 }
@@ -1100,9 +1100,9 @@ func (c *conn) announceKeywords(oldKeywords, keywords []string) {
 	}
 
 	flags := append(systemFlags(), keywords...)
-	c.w.untagged("FLAGS (%s)", strings.Join(flags, " "))
+	c.w.untagged("FLAGS (%s)", flagList(flags))
 
 	if !c.readOnly {
-		c.w.untagged(`OK [PERMANENTFLAGS (%s \*)] Flags permitted`, strings.Join(flags, " "))
+		c.w.untagged(`OK [PERMANENTFLAGS (%s \*)] Flags permitted`, flagList(flags))
 	}
 }

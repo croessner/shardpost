@@ -1467,10 +1467,10 @@ func (c *conn) recentCount() int {
 // flagsOut renders the flags of a message including \Recent.
 func (c *conn) flagsOut(m *model.Meta) string {
 	if !c.isRecent(m) {
-		return strings.Join(m.Flags, " ")
+		return flagList(m.Flags)
 	}
 
-	return strings.Join(append(append([]string{}, m.Flags...), `\Recent`), " ")
+	return flagList(append(append([]string{}, m.Flags...), `\Recent`))
 }
 
 // drain consumes the rest of the command line, including literals, so

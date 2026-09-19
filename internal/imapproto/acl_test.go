@@ -215,7 +215,7 @@ func TestACLRoundFiveFixes(t *testing.T) {
 	bob.ok(`APPEND "Other Users/alice/Box" (\Deleted \Seen $kw) {5+}` + "\r\nhello")
 	bob.ok(`SELECT "Other Users/alice/Box"`)
 
-	if lines := bob.ok(`FETCH 2 (FLAGS)`); !has(lines, `FLAGS (\seen`) || has(lines, `\deleted`) || has(lines, `$kw`) {
+	if lines := bob.ok(`FETCH 2 (FLAGS)`); !has(lines, `FLAGS (\Seen`) || has(lines, `\Deleted`) || has(lines, `$kw`) {
 		t.Fatal(lines)
 	}
 	// MYRIGHTS works with i only; existence stays hidden without any right.

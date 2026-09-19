@@ -1398,7 +1398,7 @@ func (c *conn) selectUntagged(rights string) {
 	c.w.untagged("OK [UIDVALIDITY %d] UIDs valid", c.info.UIDValidity)
 	c.w.untagged("OK [UIDNEXT %d] Predicted next UID", c.info.UIDNext)
 	flags := append(systemFlags(), c.info.Keywords...)
-	c.w.untagged("FLAGS (%s)", strings.Join(flags, " "))
+	c.w.untagged("FLAGS (%s)", flagList(flags))
 	c.permanentFlags(rights, flags)
 	c.w.untagged("OK [HIGHESTMODSEQ %d] Highest", c.info.HighestModSeq)
 	c.w.untagged("OK [MAILBOXID (%s)] Ok", c.info.ID)
@@ -1410,7 +1410,7 @@ func (c *conn) permanentFlags(rights string, flags []string) {
 	if c.readOnly {
 		c.w.untagged("OK [PERMANENTFLAGS ()] Read-only")
 	} else if rights == model.AllRights || model.HasRight(rights, 'w') {
-		c.w.untagged(`OK [PERMANENTFLAGS (%s \*)] Flags permitted`, strings.Join(flags, " "))
+		c.w.untagged(`OK [PERMANENTFLAGS (%s \*)] Flags permitted`, flagList(flags))
 	} else {
 		// Only what the rights permit: \Seen with s, \Deleted with t.
 		var perm []string
@@ -1546,7 +1546,7 @@ func (c *conn) qresyncReplayBeyondLog(q *qresyncParams) error {
 func (c *conn) qresyncFlags(since uint64) error {
 	for i, m := range c.msgs {
 		if m.ModSeq > since {
-			c.w.untagged("%d FETCH (UID %d FLAGS (%s) MODSEQ (%d))", i+1, m.UID, strings.Join(m.Flags, " "), m.ModSeq)
+			c.w.untagged("%d FETCH (UID %d FLAGS (%s) MODSEQ (%d))", i+1, m.UID, flagList(m.Flags), m.ModSeq)
 		}
 	}
 

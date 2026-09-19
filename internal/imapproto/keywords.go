@@ -1,5 +1,7 @@
 package imapproto
 
+import "strings"
+
 // Command names as they appear on the wire (upper-cased by the parser).
 const (
 	kwAppend       = "APPEND"
@@ -127,6 +129,36 @@ const (
 	flagSeenLower    = `\seen`
 	flagDeletedLower = `\deleted`
 )
+
+// canonicalFlags maps lower-cased system flags and the keywords RFC 9051
+// (2.3.2) names to their usual spelling. The store keeps flags lower-case
+// for comparisons; clients get the spelling other servers send (flags are
+// case-insensitive, but not every client compares them that way).
+var canonicalFlags = func() map[string]string {
+	m := map[string]string{}
+	for _, f := range []string{flagSeen, flagAnswered, flagFlagged, flagDeleted, flagDraft, `\Recent`,
+		"$Forwarded", "$MDNSent", "$Junk", "$NotJunk", "$Phishing"} {
+		m[strings.ToLower(f)] = f
+	}
+
+	return m
+}()
+
+// flagList renders flags for a response in their canonical spelling;
+// other keywords are sent as stored.
+func flagList(flags []string) string {
+	out := make([]string, len(flags))
+
+	for i, f := range flags {
+		if c, ok := canonicalFlags[strings.ToLower(f)]; ok {
+			f = c
+		}
+
+		out[i] = f
+	}
+
+	return strings.Join(out, " ")
+}
 
 // systemFlags returns the system flags a mailbox always offers, in the
 // order FLAGS and PERMANENTFLAGS list them.

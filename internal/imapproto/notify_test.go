@@ -54,7 +54,7 @@ func TestNotify(t *testing.T) {
 	b.ok(`STORE 1 +FLAGS (\Flagged)`)
 
 	lines = a.unsolicited(time.Second)
-	mustHave(t, lines, `\flagged`)
+	mustHave(t, lines, `\Flagged`)
 	// NOTIFY NONE stops the pushes; a later change arrives with the next command.
 	a.ok("NOTIFY NONE")
 	b.append("INBOX", "x@example.org", "three", "body")

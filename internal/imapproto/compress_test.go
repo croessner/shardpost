@@ -87,3 +87,19 @@ func TestCompressPartialFlush(t *testing.T) {
 		expect(t, c, r, step.tag+" OK")
 	}
 }
+
+func TestFlagSpelling(t *testing.T) {
+	c, _ := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	c.cmd("LOGIN test test")
+	c.cmd(`APPEND INBOX (\seen \FLAGGED $notjunk $mdnsent MyKeyword) {5+}` + "\r\nhello")
+	c.cmd("SELECT INBOX")
+
+	lines := strings.Join(c.cmd("FETCH 1 (FLAGS)"), "\n")
+	for _, want := range []string{`\Seen`, `\Flagged`, `$NotJunk`, `$MDNSent`} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("FETCH lacks %s: %s", want, lines)
+		}
+	}
+}

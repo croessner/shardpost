@@ -212,7 +212,7 @@ func TestFetchSearchStore(t *testing.T) {
 	checkFetchItems(t, c)
 
 	lines = c.ok("FETCH 1 FLAGS")
-	if !has(lines, `FLAGS (\seen`) {
+	if !has(lines, `FLAGS (\Seen`) {
 		t.Fatal("BODY[TEXT] must set \\Seen:", lines)
 	}
 
@@ -234,7 +234,7 @@ func TestFetchSearchStore(t *testing.T) {
 	mustHave(t, lines, "(MODSEQ ")
 
 	lines = c.ok(`STORE 2 +FLAGS ($Forwarded)`)
-	mustHave(t, lines, `FLAGS ($forwarded) MODSEQ (`)
+	mustHave(t, lines, `FLAGS ($Forwarded) MODSEQ (`)
 	// UNCHANGEDSINCE: message 2 was just changed, so an old modseq must fail
 	lines = c.ok(`UID STORE 2 (UNCHANGEDSINCE 1) +FLAGS (\Flagged)`)
 	mustHave(t, lines, "MODIFIED 2")
@@ -302,7 +302,7 @@ func TestQresyncAndMove(t *testing.T) {
 	c.ok("CLOSE")
 
 	lines = c.ok("SELECT INBOX (QRESYNC (%d %d))", v, ms)
-	mustHave(t, lines, "* VANISHED (EARLIER) 2", `FLAGS (\flagged) MODSEQ`)
+	mustHave(t, lines, "* VANISHED (EARLIER) 2", `FLAGS (\Flagged) MODSEQ`)
 
 	lines = c.ok("UID FETCH 1:* (FLAGS) (CHANGEDSINCE %d VANISHED)", ms)
 	if !has(lines, "* VANISHED (EARLIER) 2") || !has(lines, "UID 1 FLAGS") || has(lines, "UID 3 FLAGS") {
