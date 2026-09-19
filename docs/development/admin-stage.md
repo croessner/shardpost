@@ -18,7 +18,12 @@ von 8a); Arten `index_check`, `scrub` (Klassen), `quota_recalc`,
 `acl_reconcile`, `fts_rebuild` (Wartungsmodus), `mailbox_delete`, `purge`
 (Rollen `repair`, `delete`), siehe [Admin-API: Wartungsjobs](../admin-api.md#wartungsjobs-stufe-8c).
 Der periodische Scrub-CronJob bleibt eigenständig; die gemeinsame
-Koordination ist die Kontosperre, die er respektiert. Entwurf vom 16.09.2026 auf Basis
+Koordination ist die Kontosperre, die er respektiert. **8d** (0.22.0):
+Nachrichten auflisten, begrenzt suchen, Kopfzeilen zeigen, exportieren
+(Rolle `content`), Flags, Kopieren/Verschieben (Rolle `support`),
+geplantes Expunge (Job `expunge`, Rolle `delete`), Sieve
+list/show/put/delete/activate und eine Prüfung ohne Nebenwirkungen,
+Lernqueue list/show/retry, siehe [Admin-API: Supportwerkzeuge](../admin-api.md#supportwerkzeuge-stufe-8d). Entwurf vom 16.09.2026 auf Basis
 von ShardPost 0.12.0. Die Nummer setzt die bisherigen Stufen 6/7 für JMAP
 fort; sie schreibt keine zeitliche Abhängigkeit von JMAP vor. Die ersten
 Teilpakete dieser Stufe sollten vor einer größeren Backend-Migration kommen.

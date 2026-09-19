@@ -70,7 +70,7 @@ func serveDiag(t *testing.T, wrap func(*memstore.Store) delivery.Store, roles ..
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: diagUsers, Log: log, Version: "test",
 		MaxMessageBytes: 4096, SocketRoles: roles, Accounts: accounts, Instance: "pod-1", StartedAt: time.Unix(1000, 0),
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr})
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Learning: testLearning})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

@@ -8,6 +8,7 @@
 //	shardpostctl [connection flags] trace on [-for 30m] | off | status <account>
 //	shardpostctl [connection flags] server status | account show | mailbox list|show | acl list|explain | quota show | shared list
 //	shardpostctl [connection flags] plan <kind> <account> | apply <plan> | check <account> | job list|show|wait|cancel
+//	shardpostctl [connection flags] messages | search | message show|export | flags | copy | move | sieve ... | learning ...
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -60,6 +61,17 @@ const (
 	cmdJob     = "job"
 )
 
+// Row labels and flag names used in several commands.
+const (
+	labelID       = "id"
+	labelSize     = "size"
+	labelState    = "state"
+	labelAttempts = "attempts"
+	labelMailbox  = "mailbox"
+	labelName     = "name"
+	labelValidity = "uidvalidity"
+)
+
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 // connection are the global flags that select the listener.
@@ -81,7 +93,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ...")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ...")
 		return exUsage
 	}
 
@@ -100,10 +112,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return migrateCmd(client, fs.Args()[1:], stdout, stderr)
 	case cmdTrace:
 		return traceCmd(client, fs.Args()[1:], stdout, stderr)
-	case cmdServer, cmdAccount, "mailbox", "acl", cmdQuota, "shared":
+	case cmdServer, cmdAccount, labelMailbox, "acl", cmdQuota, "shared":
 		return diagCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
 	case cmdPlan, cmdApply, cmdCheck, cmdJob:
 		return jobsCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
+	case cmdMessages, cmdSearch, cmdMessage, cmdFlags, cmdCopy, cmdMove, cmdSieve, cmdLearning:
+		return supportCmd(client, fs.Arg(0), fs.Args()[1:], stdin, stdout, stderr)
 	default:
 		sayln(stderr, "shardpostctl: unknown command", fs.Arg(0))
 		return exUsage
@@ -204,7 +218,7 @@ func failure(stderr io.Writer, e *adminapi.Error, status int) int {
 	sayf(stderr, "shardpostctl: %s: %s\n", e.Code, e.Message)
 
 	switch e.Code {
-	case adminapi.NoSuchUser, adminapi.NoSuchMailbox, adminapi.NoSuchJob:
+	case adminapi.NoSuchUser, adminapi.NoSuchMailbox, adminapi.NoSuchJob, adminapi.NoSuchMessage, adminapi.NoSuchScript:
 		return exNoUser
 	case adminapi.OverQuota:
 		return exCantCreate

@@ -15,7 +15,7 @@ import (
 
 // Maintenance jobs (roadmap 8c):
 //
-//	plan [-classes a,b] [-mailbox M] <kind> <account>   dry run, prints the plan
+//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account>   dry run, prints the plan
 //	plan show <plan-id>
 //	apply [-wait] [-idempotency-key K] <plan-id>        run the plan as a job
 //	check [-wait] <account>                             read-only index check
@@ -25,10 +25,10 @@ import (
 // With -wait (and for job wait) the exit code is the job's outcome: 0
 // succeeded, 1 partially failed, 69 failed or cancelled.
 
-const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] <kind> <account> | plan show <plan-id> |
+const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
-  kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, mailbox_delete, purge`
+  kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, mailbox_delete, expunge, purge`
 
 // labelKind labels the kind row.
 const labelKind = "kind"
@@ -37,6 +37,8 @@ const labelKind = "kind"
 type jobArgs struct {
 	args             []string
 	asJSON, wait     bool
+	deleted          bool
+	uids             string
 	classes, mailbox string
 	idemKey, account string
 	state, after     string
@@ -53,10 +55,12 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 	fs.BoolVar(&a.asJSON, "json", false, "print JSON")
 	fs.BoolVar(&a.wait, "wait", false, "wait until the job ends")
 	fs.StringVar(&a.classes, "classes", "", "scrub: repair classes, comma-separated (default all)")
-	fs.StringVar(&a.mailbox, "mailbox", "", "mailbox_delete: mailbox name or id")
+	fs.StringVar(&a.mailbox, labelMailbox, "", "mailbox_delete, expunge: mailbox name or id")
+	fs.StringVar(&a.uids, "uids", "", "expunge: UIDs, comma-separated")
+	fs.BoolVar(&a.deleted, "deleted", false, "expunge: every message flagged \\Deleted")
 	fs.StringVar(&a.idemKey, "idempotency-key", "", "reuse the job of an earlier identical request")
 	fs.StringVar(&a.account, "account", "", "job list: only this account")
-	fs.StringVar(&a.state, "state", "", "job list: only this state")
+	fs.StringVar(&a.state, labelState, "", "job list: only this state")
 	fs.StringVar(&a.after, "after", "", "job list: continue after this job id")
 	fs.IntVar(&a.limit, "limit", 50, "job list: jobs per page")
 	fs.DurationVar(&a.poll, "poll", 2*time.Second, "how often -wait polls")
@@ -135,6 +139,20 @@ func planCreate(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs,
 		}
 
 		params["mailbox_id"] = id
+	}
+
+	if a.uids != "" {
+		uids, err := uidList(a.uids)
+		if err != nil {
+			sayln(stderr, "shardpostctl:", err)
+			return exUsage
+		}
+
+		params["uids"] = uids
+	}
+
+	if a.deleted {
+		params["deleted"] = true
 	}
 
 	req := adminapi.PlanRequest{Kind: adminapi.PlanRequestKind(kind)}
@@ -343,8 +361,8 @@ func printJob(stdout io.Writer, a jobArgs, j *adminapi.Job) int {
 		progress = *j.Progress.Phase + " " + progress
 	}
 
-	table(stdout, [][2]string{{cmdJob, j.Id}, {labelKind, j.Kind}, {cmdAccount, j.Account}, {"state", string(j.State)},
-		{"progress", progress}, {cmdServer, deref(j.Server)}, {"attempts", fmt.Sprint(j.Attempts)}})
+	table(stdout, [][2]string{{cmdJob, j.Id}, {labelKind, j.Kind}, {cmdAccount, j.Account}, {labelState, string(j.State)},
+		{"progress", progress}, {cmdServer, deref(j.Server)}, {labelAttempts, fmt.Sprint(j.Attempts)}})
 
 	for _, e := range j.Errors {
 		sayln(stdout, "error: "+e)

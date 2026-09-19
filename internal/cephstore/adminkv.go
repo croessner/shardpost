@@ -17,7 +17,7 @@ import (
 const adminNamespace = "~admin"
 
 // maxAdminValue bounds one admin record (a job with its report).
-const maxAdminValue = 4 << 20
+const maxAdminValue = model.MaxAdminValue
 
 // AdminKV implements model.AdminKV with one RADOS object per key, so
 // updates of different keys (heartbeats of different jobs) never

@@ -44,9 +44,19 @@ func (r *run) runSieve(ctx context.Context) *sieve.Delivery {
 // sieveHooks connects the script to the user's store and, when enabled,
 // to the external programs.
 func (r *run) sieveHooks() sieve.Hooks {
-	u, user := r.u, r.req.Account
+	hooks := r.svc.StoreHooks(r.u, r.req.Account)
+	if r.svc.Programs != nil && r.svc.Programs.Enabled() {
+		hooks.Program = r.svc.Programs.SieveHook(extprograms.Context{Account: r.req.Account, Cause: "DELIVERY"})
+	}
 
-	hooks := sieve.Hooks{
+	return hooks
+}
+
+// StoreHooks connect a script to the user's store: mailbox, metadata and
+// special-use tests, the duplicate query (nothing is recorded) and
+// includes. External programs are not connected.
+func (s *Service) StoreHooks(u model.User, user string) sieve.Hooks {
+	return sieve.Hooks{
 		MailboxExists: func(name string) (bool, error) {
 			_, err := u.Lookup(name)
 			if errors.Is(err, model.ErrNoMailbox) {
@@ -64,14 +74,9 @@ func (r *run) sieveHooks() sieve.Hooks {
 		SpecialUseExists: func(mailbox string, uses []string) (bool, error) {
 			return specialUseExists(u, mailbox, uses)
 		},
-		Include: sieve.IncludeLoader(u, r.svc.GlobalScripts),
-		Config:  r.svc.SieveConfig,
+		Include: sieve.IncludeLoader(u, s.GlobalScripts),
+		Config:  s.SieveConfig,
 	}
-	if r.svc.Programs != nil && r.svc.Programs.Enabled() {
-		hooks.Program = r.svc.Programs.SieveHook(extprograms.Context{Account: user, Cause: "DELIVERY"})
-	}
-
-	return hooks
 }
 
 // metadataEntry backs mboxmetadata/servermetadata; a missing mailbox is

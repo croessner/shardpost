@@ -100,6 +100,10 @@ type Options struct {
 	// Jobs is the maintenance job system (nil: the job operations answer
 	// 403).
 	Jobs *jobs.Manager
+	// Learning is the learning queue (nil: its operations answer 503).
+	Learning LearningAdmin
+	// SearchScanLimit bounds the messages one search request examines.
+	SearchScanLimit int
 }
 
 // Server implements the generated adminapi.ServerInterface.

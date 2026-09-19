@@ -30,6 +30,7 @@ const (
 	KindACLReconcile  = "acl_reconcile"
 	KindFTSRebuild    = "fts_rebuild"
 	KindMailboxDelete = "mailbox_delete"
+	KindExpunge       = "expunge"
 	KindPurge         = "purge"
 )
 
@@ -64,6 +65,7 @@ func Kinds(grace time.Duration) []Kind {
 		&aclReconcile{kindBase{KindACLReconcile, RoleRepair, true, false}},
 		&ftsRebuild{kindBase{KindFTSRebuild, RoleRepair, true, true}},
 		&mailboxDelete{kindBase{KindMailboxDelete, RoleDelete, true, true}},
+		&expunge{kindBase{KindExpunge, RoleDelete, true, false}},
 		&purge{kindBase{KindPurge, RoleDelete, true, true}},
 	}
 }
@@ -618,6 +620,212 @@ func (k *mailboxDelete) Run(_ context.Context, run *Run) (any, error) {
 	}
 
 	return cp, nil
+}
+
+// --- expunge ---------------------------------------------------------------
+
+// Expunge bounds.
+const (
+	maxExpungeTargets = 40000
+	expungeBatch      = 500
+)
+
+type expungeParams struct {
+	MailboxID string   `json:"mailbox_id"`
+	UIDs      []uint32 `json:"uids"`
+	Deleted   bool     `json:"deleted"`
+}
+
+// expungeTarget is one message by its stable identity (UID and GUID).
+type expungeTarget struct {
+	UID  uint32 `json:"uid"`
+	GUID string `json:"guid"`
+}
+
+type expungeSummary struct {
+	MailboxID   string          `json:"mailbox_id"`
+	Mailbox     string          `json:"mailbox"`
+	UIDValidity uint32          `json:"uidvalidity"`
+	Deleted     bool            `json:"only_deleted"`
+	Messages    int             `json:"messages"`
+	Bytes       int64           `json:"bytes"`
+	Missing     []uint32        `json:"missing,omitempty"`
+	Targets     []expungeTarget `json:"targets"`
+}
+
+// expunge removes messages of one mailbox from a plan. Only the messages
+// the plan named (UID and GUID) are removed; with deleted, only those
+// still flagged \Deleted.
+type expunge struct{ kindBase }
+
+func (k *expunge) Plan(_ context.Context, _ *Env, u model.User, _ string, params json.RawMessage) (any, string, error) {
+	var p expungeParams
+	if err := json.Unmarshal(params, &p); err != nil || p.MailboxID == "" || (len(p.UIDs) == 0) == !p.Deleted {
+		return nil, "", fmt.Errorf("%w: mailbox_id and either uids or deleted required", ErrInvalidParams)
+	}
+
+	if len(p.UIDs) > maxExpungeTargets {
+		return nil, "", fmt.Errorf("%w: at most %d uids", ErrInvalidParams, maxExpungeTargets)
+	}
+
+	mb, msgs, err := expungeCandidates(u, p)
+	if err != nil {
+		return nil, "", err
+	}
+
+	s := expungeSummary{MailboxID: mb.ID, Mailbox: mb.Name, UIDValidity: mb.UIDValidity, Deleted: p.Deleted, Targets: []expungeTarget{}}
+	found := map[uint32]bool{}
+
+	for i := range msgs {
+		if p.Deleted && !model.HasFlag(msgs[i].Flags, `\deleted`) {
+			continue
+		}
+
+		found[msgs[i].UID] = true
+		s.Targets = append(s.Targets, expungeTarget{msgs[i].UID, msgs[i].GUID})
+		s.Bytes += msgs[i].Size
+	}
+
+	for _, uid := range p.UIDs {
+		if !found[uid] {
+			s.Missing = append(s.Missing, uid)
+		}
+	}
+
+	if len(s.Targets) > maxExpungeTargets {
+		return nil, "", fmt.Errorf("%w: more than %d messages, narrow the plan", ErrInvalidParams, maxExpungeTargets)
+	}
+
+	s.Messages = len(s.Targets)
+
+	return s, fmt.Sprintf("%s %d", mb.ID, mb.UIDValidity), nil
+}
+
+// expungeCandidates returns the mailbox and the messages named by the
+// parameters (all messages for deleted).
+func expungeCandidates(u model.User, p expungeParams) (*model.Mailbox, []model.Meta, error) {
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	i := slices.IndexFunc(boxes, func(mb model.Mailbox) bool { return mb.ID == p.MailboxID })
+	if i < 0 {
+		return nil, nil, model.ErrNoMailbox
+	}
+
+	mb := &boxes[i]
+
+	var msgs []model.Meta
+	if p.Deleted {
+		msgs, err = u.ListMessages(mb.ID)
+	} else {
+		uids := slices.Clone(p.UIDs)
+		slices.Sort(uids)
+		msgs, err = u.GetMessages(mb.ID, slices.Compact(uids))
+	}
+
+	return mb, msgs, err
+}
+
+type expungeCheckpoint struct {
+	Done     int `json:"done"` // targets handled (in plan order)
+	Expunged int `json:"expunged"`
+	Skipped  int `json:"skipped"` // gone, replaced or no longer \Deleted
+}
+
+func (k *expunge) Run(_ context.Context, run *Run) (any, error) {
+	var s expungeSummary
+	if err := json.Unmarshal(run.Plan.Summary, &s); err != nil {
+		return nil, err
+	}
+
+	var cp expungeCheckpoint
+
+	run.LoadCheckpoint(&cp)
+
+	mb, err := mailboxByID(run.User, s.MailboxID)
+	if err != nil {
+		return nil, err
+	}
+
+	if mb.UIDValidity != s.UIDValidity {
+		return nil, ErrDrift
+	}
+
+	for cp.Done < len(s.Targets) {
+		batch := s.Targets[cp.Done:min(cp.Done+expungeBatch, len(s.Targets))]
+
+		if err := run.Fence(); err != nil {
+			return cp, err
+		}
+
+		n, err := expungeBatchOf(run.User, mb, batch, s.Deleted)
+		if err != nil {
+			return cp, err
+		}
+
+		cp.Done += len(batch)
+		cp.Expunged += n
+		cp.Skipped += len(batch) - n
+
+		if err := run.Checkpoint(cp); err != nil {
+			return cp, err
+		}
+
+		_ = run.Progress("expunge", int64(cp.Done), int64(len(s.Targets)))
+	}
+
+	return cp, nil
+}
+
+// expungeBatchOf expunges the targets that still carry the planned GUID
+// (and \Deleted, if required); it returns how many.
+func expungeBatchOf(u model.User, mb *model.Mailbox, batch []expungeTarget, onlyDeleted bool) (int, error) {
+	want := map[uint32]string{}
+	uids := make([]uint32, 0, len(batch))
+
+	for _, t := range batch {
+		want[t.UID] = t.GUID
+		uids = append(uids, t.UID)
+	}
+
+	slices.Sort(uids)
+
+	msgs, err := u.GetMessages(mb.ID, uids)
+	if err != nil {
+		return 0, err
+	}
+
+	var metas []model.Meta
+
+	for i := range msgs {
+		if want[msgs[i].UID] == msgs[i].GUID && (!onlyDeleted || model.HasFlag(msgs[i].Flags, `\deleted`)) {
+			metas = append(metas, msgs[i])
+		}
+	}
+
+	if len(metas) == 0 {
+		return 0, nil
+	}
+
+	return len(metas), u.Expunge(mb.Name, metas)
+}
+
+// mailboxByID finds a mailbox of the account by its id.
+func mailboxByID(u model.User, id string) (*model.Mailbox, error) {
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range boxes {
+		if boxes[i].ID == id {
+			return &boxes[i], nil
+		}
+	}
+
+	return nil, model.ErrNoMailbox
 }
 
 // --- purge -----------------------------------------------------------------

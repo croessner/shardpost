@@ -336,9 +336,9 @@ func mailboxShow(ctx context.Context, c *adminapi.ClientWithResponses, a diagArg
 	}
 
 	m := d.Mailbox
-	table(stdout, [][2]string{{"name", m.Name}, {"id", m.Id}, {"uidvalidity", fmt.Sprint(m.Uidvalidity)},
+	table(stdout, [][2]string{{labelName, m.Name}, {labelID, m.Id}, {labelValidity, fmt.Sprint(m.Uidvalidity)},
 		{"uidnext", fmt.Sprint(m.UidNext)}, {"highestmodseq", fmt.Sprint(m.HighestModseq)}, {"log start", fmt.Sprint(d.LogStart)},
-		{"messages", fmt.Sprintf("%d (%d unseen, %d deleted)", d.Messages, d.Unseen, d.Deleted)}, {"size", fmt.Sprintf("%d bytes", d.SizeBytes)},
+		{"messages", fmt.Sprintf("%d (%d unseen, %d deleted)", d.Messages, d.Unseen, d.Deleted)}, {labelSize, fmt.Sprintf("%d bytes", d.SizeBytes)},
 		{"shards", fmt.Sprintf("%d of %d UIDs", d.Shards, m.ShardSize)}, {"subscribed", fmt.Sprint(m.Subscribed)},
 		{"special use", strings.Join(m.SpecialUse, ",")}, {"keywords", strings.Join(d.Keywords, " ")}, {"acl entries", fmt.Sprint(m.AclEntries)}})
 

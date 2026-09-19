@@ -500,3 +500,19 @@ func TestDroppedLockStillRenewed(t *testing.T) {
 		t.Fatal("maintenance lock expired while the job ran")
 	}
 }
+
+// bigKind plans a summary larger than an admin record allows.
+type bigKind struct{ stepKind }
+
+func (k *bigKind) Plan(context.Context, *Env, model.User, string, json.RawMessage) (any, string, error) {
+	return map[string]string{"blob": string(make([]byte, model.MaxAdminValue))}, "", nil
+}
+
+func TestPlanTooLarge(t *testing.T) {
+	k := &bigKind{stepKind{name: "big", planned: true}}
+	m := newTestManager(memstore.NewAdminKV(), memstore.New(), "pod-a", k)
+
+	if _, err := m.CreatePlan(context.Background(), k, "alice", nil, "tester", nil); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("oversized plan: %v", err)
+	}
+}

@@ -183,6 +183,62 @@ func (q LearningQueue) Update(j imapsieve.Job) error {
 	return u.data.SetXattr("learning/"+j.ID, "job", b)
 }
 
+// Revive makes a dead job due again (manual retry): attempts start over,
+// Retries counts the retry. The job must still exist (a purged job is
+// not recreated) and be dead; the worker leaves dead jobs alone, so no
+// worker write races this one.
+func (q LearningQueue) Revive(id string) (imapsieve.Job, error) {
+	u, err := q.Store.User("~learning")
+	if err != nil {
+		return imapsieve.Job{}, err
+	}
+	defer u.Close()
+
+	buf := make([]byte, 4096)
+
+	n, err := u.data.GetXattr("learning/"+id, "job", buf)
+	if errCode(err) == syscall.ENOENT {
+		return imapsieve.Job{}, imapsieve.ErrNoJob
+	}
+
+	if err != nil {
+		return imapsieve.Job{}, err
+	}
+
+	var j imapsieve.Job
+	if err := json.Unmarshal(buf[:n], &j); err != nil {
+		return imapsieve.Job{}, err
+	}
+
+	if !j.Dead {
+		return j, imapsieve.ErrNotDead
+	}
+
+	j.Dead, j.Attempts, j.Next = false, 0, time.Now()
+	j.Retries++
+
+	b, err := json.Marshal(j)
+	if err != nil {
+		return imapsieve.Job{}, err
+	}
+
+	op := rados.CreateWriteOp()
+	defer op.Release()
+
+	op.AssertExists()
+	op.SetXattr("job", b)
+
+	if err := op.Operate(u.data, "learning/"+id, rados.OperationNoFlag); err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return imapsieve.Job{}, imapsieve.ErrNoJob
+		}
+
+		return imapsieve.Job{}, err
+	}
+
+	return j, nil
+}
+
 // Delete removes a job and its message from the queue.
 func (q LearningQueue) Delete(j imapsieve.Job) error {
 	u, err := q.Store.User("~learning")

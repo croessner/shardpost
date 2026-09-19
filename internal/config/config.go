@@ -195,6 +195,7 @@ var defaults = []struct {
 	{"admin.tls_cert", ""},
 	{"admin.tls_key", ""},
 	{"admin.client_ca", ""},
+	{"admin.search_scan_limit", 50000},
 	{"admin.import.lock_ttl_seconds", 900},
 	{"admin.import.max_batch_bytes", 64 << 20},
 	{"admin.import.max_batch_messages", 500},

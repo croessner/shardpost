@@ -15,7 +15,7 @@ type Admin struct {
 	// Socket is the path of the Unix socket ("" disables it).
 	Socket string `mapstructure:"socket" env:"ADMIN_SOCKET"`
 	// SocketRoles are the roles of local callers on the socket.
-	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete"`
+	SocketRoles []string `mapstructure:"socket_roles" validate:"dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete content support"`
 	// Addr is the mutual-TLS listener ("" disables it).
 	Addr string `mapstructure:"addr" env:"ADMIN_ADDR"`
 	// TLSCert, TLSKey and ClientCA are files; they are re-read when they
@@ -27,6 +27,9 @@ type Admin struct {
 	Clients []AdminClient `mapstructure:"clients" validate:"dive"`
 	// Import bounds the account import (role import).
 	Import AdminImport `mapstructure:"import"`
+	// SearchScanLimit bounds the messages one message search examines
+	// (role content); a longer search continues with its cursor.
+	SearchScanLimit int `mapstructure:"search_scan_limit" validate:"gte=100,lte=10000000"`
 }
 
 // Jobs configures the durable maintenance jobs (admin API, roadmap 8c).
@@ -88,7 +91,7 @@ type AdminImport struct {
 // common name or one of whose DNS or URI SANs equals Identity.
 type AdminClient struct {
 	Identity string   `mapstructure:"identity" validate:"required"`
-	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete"`
+	Roles    []string `mapstructure:"roles" validate:"required,min=1,dive,oneof=diagnose deliver deliver:noenforce import trace provision repair delete content support"`
 	// Accounts limits the accounts the client may address (path.Match
 	// patterns on the lower-cased canonical account, e.g. "*@example.org");
 	// empty means all accounts.

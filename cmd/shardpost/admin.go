@@ -67,7 +67,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
 		ClientScopes:         scopes, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
-		StorePing: store.Ping, Jobs: a.jobs})
+		StorePing: store.Ping, Jobs: a.jobs, Learning: cephstore.LearningQueue{Store: store}, SearchScanLimit: c.SearchScanLimit})
 
 	if c.Addr != "" {
 		srv, err := s.TLSServer(c.TLSCert, c.TLSKey, c.ClientCA)

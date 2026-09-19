@@ -42,8 +42,12 @@ Rollen: `diagnose` (Version, Serverstatus und lesende Diagnose), `deliver` (Zust
 `deliver:noenforce` (zusätzlich für `enforce_quota=false`), `import`
 (Kontoimport), `trace` (Protokoll-Trace eines Kontos, siehe unten),
 `provision` (Postfächer anlegen, umbenennen, abonnieren; ACLs ändern),
-`repair` (Wartungsjobs, die reparieren) und `delete` (Postfach und Konto
-endgültig löschen).
+`repair` (Wartungsjobs, die reparieren; Lernjobs wiederholen), `delete`
+(Postfach, Nachrichten und Konto endgültig löschen), `content`
+(Nachrichteninhalte lesen: Suche, Kopfzeilen, Export, Sieve-Skripte) und
+`support` (Flags, Kopieren/Verschieben, Sieve-Skripte ändern und
+aktivieren). `content` ist bewusst von `diagnose` getrennt: Diagnose sieht
+Metadaten, aber keine Inhalte.
 
 ```yaml
 admin:
@@ -273,6 +277,7 @@ geplant und noch nötig sind.
 | `acl_reconcile` | `repair` | nein | fehlende Zeiger bei Empfängern schreiben, eigene Zeiger ohne Rechte entfernen |
 | `fts_rebuild` | `repair` | ja | Volltextindex löschen und aus allen Nachrichten neu aufbauen |
 | `mailbox_delete` | `delete` | ja | Postfach samt Unterordnern löschen (INBOX nicht) |
+| `expunge` | `delete` | nein | Nachrichten eines Postfachs endgültig entfernen: `uids` oder `deleted: true` (alle mit `\Deleted`) |
 | `purge` | `delete` | ja | Freigaben in beide Richtungen entziehen, Lernjobs und alle Objekte des Kontos löschen |
 
 - **Kontosperre** (Wartungsmodus, Entscheidung 19.09.2026): Der Job hält die
@@ -317,6 +322,71 @@ geplant und noch nötig sind.
   ihrem Owner. Meldet sich das Konto danach wieder an, legt ShardPost eine
   leere INBOX an.
 - Beendete Jobs und Pläne bleiben `jobs.retention_days` lang abrufbar.
+
+## Supportwerkzeuge (Stufe 8d)
+
+Werkzeuge für den Support an einzelnen Nachrichten, Sieve-Skripten und der
+Lernqueue.
+
+```sh
+shardpostctl messages alice@example.org INBOX                       # Metadaten (diagnose)
+shardpostctl search -subject Rechnung -since 2026-09-01 alice@example.org   # (content)
+shardpostctl message show alice@example.org INBOX 42                # Umschlag + Kopfzeilen (content)
+shardpostctl message export alice@example.org INBOX 42 > 42.eml     # (content)
+shardpostctl flags -add '\Seen' -remove '$Junk' alice@example.org INBOX 42,43   # (support)
+shardpostctl move alice@example.org Junk 42 INBOX                   # copy|move (support)
+shardpostctl plan -mailbox Trash -deleted expunge alice@example.org # dann apply (delete)
+shardpostctl sieve list|show alice@example.org [name]
+shardpostctl sieve put -activate alice@example.org main < main.sieve  # (support)
+shardpostctl sieve check -message INBOX:1789839043:42 alice@example.org
+shardpostctl learning list -state dead
+shardpostctl learning retry -confirm-repeat <id>                   # (repair)
+```
+
+- **Stabile Ziele:** Nachrichten werden über Postfach-ID, UIDVALIDITY und
+  UID adressiert. Passt die UIDVALIDITY nicht (Postfach neu angelegt),
+  antwortet die API mit 412. Ohne `-uidvalidity` nimmt shardpostctl die
+  aktuelle. Für strikte Identität den Wert aus einer vorherigen Liste
+  mitgeben. Nicht mehr vorhandene UIDs meldet die Antwort als `missing`.
+  Kopieren/Verschieben liefert die neue UID je Nachricht (wie UIDPLUS).
+- **Expunge** läuft als geplanter Job. Der Plan hält UID und GUID jeder
+  Nachricht fest. Beim Anwenden wird nur entfernt, was noch dieselbe GUID
+  trägt, bei `deleted` nur, was noch `\Deleted` ist. Eine geänderte
+  UIDVALIDITY bricht ab.
+- **Suche** ist begrenzt: höchstens `admin.search_scan_limit` Nachrichten
+  je Anfrage und 200 Treffer je Seite. `next` setzt fort (in
+  Postfach-ID-Reihenfolge). `from`, `to` (auch Cc) und `subject` sind
+  Teilstrings im Umschlag, `text` nutzt den Volltextindex. Fehlt der Index
+  (nie aufgebaut oder während `fts_rebuild`), findet `text` nichts.
+- **Expunge-Pläne** umfassen höchstens 40 000 Nachrichten. Größere Mengen
+  in mehreren Plänen erledigen (`-uids`).
+- **Datenschutz:** Das Audit-Log nennt bei Suchen nur die Namen der
+  Kriterien, nie ihre Werte. Bei Nachrichten und Skripten nennt es die
+  Identität und Größe, nie den Inhalt.
+- **Sieve** wird vor dem Speichern kompiliert, mit den Includes des Kontos.
+  Ein fehlerhaftes Skript wird nicht gespeichert (400). Versionen laufen
+  über ETags (`If-Match`, `If-None-Match: *` nur anlegen). Das aktive
+  Skript lässt sich nicht löschen.
+- **Sieve-Prüfung ohne Nebenwirkungen:** `sieve check` kompiliert und führt
+  das Skript auf Wunsch über eine gespeicherte Nachricht (Rolle `content`)
+  oder einen mitgeschickten Text (`diagnose`) aus. Dabei wird nichts
+  ausgeführt: kein Redirect, keine Abwesenheitsnotiz, keine
+  Benachrichtigung, kein externes Programm (`execute`/`filter` gelten als
+  mit Exit 0 gelaufen, ohne zu laufen), kein Duplikat- oder
+  Abwesenheitseintrag, kein Ablegen. Die Antwort listet, was geschähe, und
+  unter `suppressed` jede unterdrückte Nebenwirkung. Mit einem
+  mitgeschickten Skript und Text (Rolle `diagnose`) sind die
+  Store-Tests (`mailboxexists`, `mboxmetadata`, `specialuse_exists`)
+  aktiv. So erfährt `diagnose` nicht mehr als über `mailbox list`. Das
+  ist eine bewusste Entscheidung.
+- **Lernqueue:** `learning list|show` zeigt Jobs mit Zustand (`pending`,
+  `dead`, `delivered`), Programm, Versuchen und nächstem Termin. `retry`
+  nimmt nur tote Jobs wieder auf. Lernprogramme sind nicht idempotent:
+  Hat das Programm die Nachricht womöglich schon bekommen (Versuche > 0),
+  ist `-confirm-repeat` nötig. Ein Job, dessen Nachricht nie festgeschrieben
+  wurde (kein Beleg), lässt sich nicht wiederholen.
+- Clients mit Konten-Scope sehen Lernjobs nur mit Kontoangabe. Jobs
+  anderer Konten gelten für sie als nicht vorhanden (404).
 
 ## Protokoll-Trace eines Kontos
 

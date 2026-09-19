@@ -31,7 +31,15 @@ type Job struct {
 	Next             time.Time
 	Dead             bool
 	Size             int64
+	// Retries counts manual retries of a dead job (admin API).
+	Retries int `json:",omitempty"`
 }
+
+// Errors of the learning queue administration.
+var (
+	ErrNoJob   = errors.New("no such learning job")
+	ErrNotDead = errors.New("only dead learning jobs can be retried")
+)
 
 // Queue is the persistent learning job queue with a worker lease.
 type Queue interface {

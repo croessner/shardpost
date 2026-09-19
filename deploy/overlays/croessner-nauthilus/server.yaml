@@ -170,7 +170,7 @@ extprograms:
 # the network policy limits it to pods labelled as admin clients.
 admin:
   socket: "/run/shardpost/admin.sock"
-  socket_roles: [diagnose, deliver, "deliver:noenforce", import, trace, provision, repair, delete]
+  socket_roles: [diagnose, deliver, "deliver:noenforce", import, trace, provision, repair, delete, content, support]
   addr: ":8443"
   tls_cert: "/secrets/admin-tls/tls.crt"
   tls_key: "/secrets/admin-tls/tls.key"

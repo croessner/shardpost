@@ -29,3 +29,6 @@ type AdminKV interface {
 // ReservedNamespace reports whether a name belongs to the store itself
 // ("~admin", "~learning") rather than to an account.
 func ReservedNamespace(name string) bool { return len(name) > 0 && name[0] == '~' }
+
+// MaxAdminValue bounds one admin record (a job with its report, a plan).
+const MaxAdminValue = 4 << 20

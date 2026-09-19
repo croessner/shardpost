@@ -141,3 +141,11 @@ Nur per YAML. Eingeschaltet wird über die Admin-API (Rolle `trace`), siehe
 | `jobs.settle_seconds` | 10 | Wartezeit eines exklusiven Jobs nach dem Setzen der Wartungssperre, damit laufende Zustellungen enden und offene IMAP/POP3-Sitzungen die Sperre bemerken (sie prüfen sie höchstens alle 5 s beim Befehlsstart und trennen mit BYE) |
 
 Nur per YAML. Bedienung siehe [Admin-API: Wartungsjobs](admin-api.md#wartungsjobs-stufe-8c).
+
+### Supportwerkzeuge (`admin.search_scan_limit`)
+
+| Schlüssel | Standard | Bedeutung |
+| --- | --- | --- |
+| `admin.search_scan_limit` | 50000 | höchstens so viele Nachrichten prüft eine Suchanfrage (Rolle `content`); eine längere Suche setzt mit ihrem Cursor fort |
+
+Nur per YAML. Siehe [Admin-API: Supportwerkzeuge](admin-api.md#supportwerkzeuge-stufe-8d).

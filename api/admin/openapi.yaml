@@ -338,7 +338,8 @@ paths:
         Computes what the job would do (target set, effects) and stores the
         plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
         and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-        (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+        (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+        `delete`). A plan
         that changes other accounts (ACL repairs, purge) needs them in the
         client scope. The account must be canonical.
       requestBody:
@@ -490,6 +491,383 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Job"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+    get:
+      operationId: listMessages
+      summary: Messages of a mailbox (metadata only), by UID
+      description: |
+        UID, GUID, size, flags, dates and MODSEQ, without headers or
+        content. Page with `after_uid`. Requires the role `diagnose`.
+      parameters:
+        - name: after_uid
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagePage"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/UID"
+      - $ref: "#/components/parameters/UIDValidity"
+    get:
+      operationId: getMessage
+      summary: One message with envelope and header section
+      description: |
+        The message is named by mailbox id, UIDVALIDITY and UID, so a
+        recreated mailbox cannot answer with another message (412).
+        Requires the role `content`; the audit log records the
+        identity, not the content.
+      responses:
+        "200":
+          description: The message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageDetail"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/UID"
+      - $ref: "#/components/parameters/UIDValidity"
+    get:
+      operationId: exportMessage
+      summary: Export one message (RFC 5322)
+      description: Requires the role `content`.
+      responses:
+        "200":
+          description: The message as stored.
+          content:
+            message/rfc822:
+              schema:
+                type: string
+                format: binary
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+    post:
+      operationId: setMessageFlags
+      summary: Add or remove flags
+      description: |
+        Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+        cannot be set). `uidvalidity` must match (412), UIDs that no
+        longer exist are reported as missing, `unchanged_since`
+        (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+        role `support`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FlagRequest"
+      responses:
+        "200":
+          description: What changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlagResult"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+    post:
+      operationId: copyMessages
+      summary: Copy or move messages to another mailbox of the account
+      description: |
+        Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+        to its UID in the destination. `uidvalidity` must match (412).
+        Requires the role `support`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CopyRequest"
+      responses:
+        "200":
+          description: The copies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CopyResult"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/search:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    post:
+      operationId: searchMessages
+      summary: Bounded message search
+      description: |
+        Searches one mailbox or all mailboxes of the account. Criteria are
+        ANDed; `from`, `to`, `subject` match case-insensitively as
+        substrings of the envelope, `text` uses the full-text index
+        (headers and body). At most `search.scan_limit` messages are
+        examined per request; `next` continues a truncated search.
+        Requires the role `content`; criteria values are not logged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageSearch"
+      responses:
+        "200":
+          description: The hits.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResult"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/sieve:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: listSieveScripts
+      summary: Sieve scripts of the account
+      description: Names, sizes, versions and the active script. Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The scripts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SieveList"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/sieve/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/ScriptName"
+    get:
+      operationId: getSieveScript
+      summary: One Sieve script
+      description: Requires the role `content`.
+      responses:
+        "200":
+          description: The script.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SieveScript"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: putSieveScript
+      summary: Store (and optionally activate) a Sieve script
+      description: |
+        The script is compiled first; a script that does not compile is
+        refused (400) and nothing is stored. `If-Match` is the script's
+        ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+        the role `support`.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: ["*"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SievePut"
+      responses:
+        "200":
+          description: The stored script.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SieveScript"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSieveScript
+      summary: Delete an inactive Sieve script
+      description: The active script cannot be deleted (409). Requires the role `support`.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted.
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/sieve-active:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    put:
+      operationId: setActiveSieveScript
+      summary: Activate a script or deactivate filtering
+      description: An empty name deactivates. Requires the role `support`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SieveActivate"
+      responses:
+        "200":
+          description: The scripts after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SieveList"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/sieve-check:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    post:
+      operationId: checkSieve
+      summary: Compile a script and run it without side effects
+      description: |
+        Compiles `script` (or the stored script `name`, or the active
+        one) with the account's includes and, when a message is given,
+        runs it and reports the actions it would take. Nothing is
+        executed: no redirect, vacation or notification is sent, no
+        external program runs, no duplicate or vacation record is
+        written, nothing is filed. A message from the store (`message`)
+        requires the role `content`, otherwise `diagnose`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SieveCheck"
+      responses:
+        "200":
+          description: The result (also for a script that does not compile).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SieveCheckResult"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/learning:
+    get:
+      operationId: listLearningJobs
+      summary: Learning queue (IMAPSieve learning programs)
+      description: |
+        Requires the role `diagnose`; a client with an account scope must
+        name an account.
+      parameters:
+        - name: account
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 320
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/LearningState"
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 64
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: One page, by job id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningPage"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/learning/{job}:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    get:
+      operationId: getLearningJob
+      summary: One learning job
+      description: Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningJob"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/learning/{job}/retry:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    post:
+      operationId: retryLearningJob
+      summary: Retry a dead learning job
+      description: |
+        Only dead jobs are retried. Learning programs are not idempotent
+        (a message learned twice counts twice): a job that was already
+        attempted needs `confirm_repeat`. A job whose message was never
+        committed (no receipt) cannot be retried. Requires the role
+        `repair`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LearningRetry"
+      responses:
+        "200":
+          description: The job, due now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningJob"
         default:
           $ref: "#/components/responses/Error"
   /admin/v1/deliveries:
@@ -901,6 +1279,33 @@ components:
       schema:
         type: string
         maxLength: 64
+    UID:
+      name: uid
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        maximum: 4294967295
+    UIDValidity:
+      name: uidvalidity
+      in: query
+      required: true
+      description: UIDVALIDITY the UID belongs to.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        maximum: 4294967295
+    ScriptName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
     IfMatch:
       name: If-Match
       in: header
@@ -925,7 +1330,8 @@ components:
         `import_locked` (409, another session holds the account),
         `not_locked` (409, the session does not hold the lock),
         `precondition_failed` (412, If-Match does not match),
-        `no_such_job` (404, job or plan).
+        `no_such_job` (404, job, plan or learning job), `no_such_message`
+        (404), `no_such_script` (404).
       content:
         application/json:
           schema:
@@ -937,7 +1343,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked, precondition_failed, no_such_job]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked, precondition_failed, no_such_job]
         message:
           type: string
     Version:
@@ -1472,14 +1878,15 @@ components:
       properties:
         kind:
           type: string
-          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, mailbox_delete, purge]
+          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, mailbox_delete, expunge, purge]
         params:
           type: object
           additionalProperties: true
           description: |
             scrub: `classes` (deliveries, moves, retired, uncovered, entries,
             refs, orphans, unknown, quota; empty = all); mailbox_delete:
-            `mailbox_id`.
+            `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
+            `deleted: true` (every message flagged \Deleted when planned).
     Plan:
       type: object
       required: [id, kind, account, summary, principal, created, expires]
@@ -1580,3 +1987,455 @@ components:
             $ref: "#/components/schemas/Job"
         next:
           type: string
+    MessageMeta:
+      type: object
+      required: [uid, guid, size, flags, internal_date, modseq]
+      properties:
+        uid:
+          type: integer
+          format: int64
+        guid:
+          type: string
+        size:
+          type: integer
+          format: int64
+        flags:
+          type: array
+          items:
+            type: string
+        internal_date:
+          type: string
+          format: date-time
+        modseq:
+          type: integer
+          format: int64
+    MessagePage:
+      type: object
+      required: [uidvalidity, items]
+      properties:
+        uidvalidity:
+          type: integer
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageMeta"
+        next_uid:
+          type: integer
+          format: int64
+          description: Continue with after_uid=next_uid.
+    MessageEnvelope:
+      type: object
+      required: [subject, from, to, cc, message_id]
+      properties:
+        date:
+          type: string
+          format: date-time
+        subject:
+          type: string
+        from:
+          type: array
+          items:
+            type: string
+        to:
+          type: array
+          items:
+            type: string
+        cc:
+          type: array
+          items:
+            type: string
+        message_id:
+          type: string
+    MessageDetail:
+      type: object
+      required: [mailbox_id, uidvalidity, message, header]
+      properties:
+        mailbox_id:
+          type: string
+        uidvalidity:
+          type: integer
+          format: int64
+        message:
+          $ref: "#/components/schemas/MessageMeta"
+        envelope:
+          $ref: "#/components/schemas/MessageEnvelope"
+        header:
+          type: string
+          description: The header section as stored (at most 64 KiB).
+    FlagRequest:
+      type: object
+      required: [uidvalidity, uids]
+      properties:
+        uidvalidity:
+          type: integer
+          format: int64
+        uids:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: integer
+            format: int64
+        add:
+          type: array
+          items:
+            type: string
+        remove:
+          type: array
+          items:
+            type: string
+        unchanged_since:
+          type: integer
+          format: int64
+    FlagResult:
+      type: object
+      required: [updated, modified, missing]
+      properties:
+        updated:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageMeta"
+        modified:
+          type: array
+          description: UIDs skipped because of unchanged_since.
+          items:
+            type: integer
+            format: int64
+        missing:
+          type: array
+          items:
+            type: integer
+            format: int64
+    CopyRequest:
+      type: object
+      required: [uidvalidity, uids, destination_id]
+      properties:
+        uidvalidity:
+          type: integer
+          format: int64
+        uids:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: integer
+            format: int64
+        destination_id:
+          type: string
+          maxLength: 64
+        move:
+          type: boolean
+          default: false
+    CopyResult:
+      type: object
+      required: [destination_id, destination_uidvalidity, copied, missing]
+      properties:
+        destination_id:
+          type: string
+        destination_uidvalidity:
+          type: integer
+          format: int64
+        copied:
+          type: array
+          items:
+            $ref: "#/components/schemas/CopiedMessage"
+        missing:
+          type: array
+          items:
+            type: integer
+            format: int64
+    CopiedMessage:
+      type: object
+      required: [uid, new_uid]
+      properties:
+        uid:
+          type: integer
+          format: int64
+        new_uid:
+          type: integer
+          format: int64
+    MessageSearch:
+      type: object
+      properties:
+        mailbox_id:
+          type: string
+          maxLength: 64
+        from:
+          type: string
+          maxLength: 256
+        to:
+          type: string
+          maxLength: 256
+        subject:
+          type: string
+          maxLength: 256
+        message_id:
+          type: string
+          maxLength: 256
+        text:
+          type: string
+          maxLength: 256
+        since:
+          type: string
+          format: date-time
+        before:
+          type: string
+          format: date-time
+        min_size:
+          type: integer
+          format: int64
+        max_size:
+          type: integer
+          format: int64
+        flags:
+          type: array
+          description: All of these flags are set.
+          items:
+            type: string
+        not_flags:
+          type: array
+          description: None of these flags is set.
+          items:
+            type: string
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        after:
+          type: string
+          maxLength: 128
+          description: The `next` of the previous page.
+    SearchHit:
+      type: object
+      required: [mailbox_id, mailbox, uidvalidity, message]
+      properties:
+        mailbox_id:
+          type: string
+        mailbox:
+          type: string
+        uidvalidity:
+          type: integer
+          format: int64
+        message:
+          $ref: "#/components/schemas/MessageMeta"
+        envelope:
+          $ref: "#/components/schemas/MessageEnvelope"
+    SearchResult:
+      type: object
+      required: [items, scanned]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchHit"
+        scanned:
+          type: integer
+          format: int64
+        next:
+          type: string
+          description: Set when the search stopped early (limit or scan limit).
+    SieveScriptInfo:
+      type: object
+      required: [name, active, size, etag]
+      properties:
+        name:
+          type: string
+        active:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+        etag:
+          type: string
+    SieveList:
+      type: object
+      required: [scripts]
+      properties:
+        active:
+          type: string
+        scripts:
+          type: array
+          items:
+            $ref: "#/components/schemas/SieveScriptInfo"
+    SieveScript:
+      type: object
+      required: [name, active, script, etag]
+      properties:
+        name:
+          type: string
+        active:
+          type: boolean
+        script:
+          type: string
+        etag:
+          type: string
+    SievePut:
+      type: object
+      required: [script]
+      properties:
+        script:
+          type: string
+          maxLength: 1048576
+        activate:
+          type: boolean
+          default: false
+    SieveActivate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 128
+    SieveMessageRef:
+      type: object
+      required: [mailbox_id, uidvalidity, uid]
+      properties:
+        mailbox_id:
+          type: string
+          maxLength: 64
+        uidvalidity:
+          type: integer
+          format: int64
+        uid:
+          type: integer
+          format: int64
+    SieveCheck:
+      type: object
+      properties:
+        script:
+          type: string
+          maxLength: 1048576
+          description: Script text; without it the stored `name`, or the active script.
+        name:
+          type: string
+          maxLength: 128
+        message:
+          $ref: "#/components/schemas/SieveMessageRef"
+        raw:
+          type: string
+          maxLength: 1048576
+          description: A test message (instead of `message`).
+        envelope_from:
+          type: string
+          maxLength: 320
+        envelope_to:
+          type: string
+          maxLength: 320
+    SieveCheckResult:
+      type: object
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+        error:
+          type: string
+        actions:
+          $ref: "#/components/schemas/SieveActions"
+    SieveActions:
+      type: object
+      required: [keep, fileinto, redirect, notify, programs, suppressed]
+      properties:
+        keep:
+          type: boolean
+          description: The message would be stored in INBOX (implicit or explicit keep).
+        fileinto:
+          type: array
+          items:
+            $ref: "#/components/schemas/SieveFileInto"
+        discard:
+          type: boolean
+        reject:
+          type: string
+        redirect:
+          type: array
+          items:
+            type: string
+        vacation:
+          $ref: "#/components/schemas/SieveVacation"
+        notify:
+          type: array
+          items:
+            type: string
+        programs:
+          type: array
+          items:
+            type: string
+        header_edited:
+          type: boolean
+        suppressed:
+          type: array
+          description: Side effects that were not carried out.
+          items:
+            type: string
+    SieveFileInto:
+      type: object
+      required: [mailbox, flags]
+      properties:
+        mailbox:
+          type: string
+        flags:
+          type: array
+          items:
+            type: string
+    SieveVacation:
+      type: object
+      required: [subject, days]
+      properties:
+        subject:
+          type: string
+        from:
+          type: string
+        days:
+          type: integer
+    LearningState:
+      type: string
+      enum: [pending, dead, delivered]
+    LearningJob:
+      type: object
+      required: [id, account, mailbox_id, program, state, attempts, created, next_attempt, size, retries]
+      properties:
+        id:
+          type: string
+        account:
+          type: string
+        mailbox_id:
+          type: string
+        program:
+          type: string
+        state:
+          $ref: "#/components/schemas/LearningState"
+        prepared:
+          type: boolean
+          description: Waits for the receipt of the stored message.
+        attempts:
+          type: integer
+        retries:
+          type: integer
+          description: Manual retries so far.
+        created:
+          type: string
+          format: date-time
+        next_attempt:
+          type: string
+          format: date-time
+        size:
+          type: integer
+          format: int64
+    LearningPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LearningJob"
+        next:
+          type: string
+    LearningRetry:
+      type: object
+      properties:
+        confirm_repeat:
+          type: boolean
+          default: false

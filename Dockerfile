@@ -37,7 +37,7 @@ RUN python3 -m venv /usr/local/lib/shardpost/venv \
 FROM quay.io/centos/centos:stream9
 LABEL org.opencontainers.image.title="ShardPost" \
       org.opencontainers.image.description="Distributed mail server backed by Ceph RADOS" \
-      org.opencontainers.image.version="0.21.0"
+      org.opencontainers.image.version="0.22.0"
 RUN dnf -y install epel-release centos-release-ceph-tentacle \
  && dnf -y install librados2 python3 \
  && dnf clean all && rm -rf /var/cache/dnf \

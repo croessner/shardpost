@@ -113,6 +113,10 @@ func (m *Manager) Kind(name string) (Kind, error) {
 	return k, nil
 }
 
+// maxPlanSummary bounds the summary of a plan so the plan record fits
+// into one admin record.
+const maxPlanSummary = model.MaxAdminValue * 3 / 4
+
 // ErrNeedsPlan and ErrNoPlan refuse submitting a kind the wrong way.
 var (
 	ErrNeedsPlan = errors.New("this kind runs from a plan")
@@ -153,6 +157,10 @@ func (m *Manager) CreatePlan(ctx context.Context, kind Kind, account string, par
 	b, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(b) > maxPlanSummary {
+		return nil, fmt.Errorf("%w: the plan is too large (%d bytes), narrow it", ErrInvalidParams, len(b))
 	}
 
 	now := m.now()

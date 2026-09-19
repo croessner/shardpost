@@ -99,6 +99,8 @@ const (
 	Internal           ErrorCode = "internal"
 	NoSuchJob          ErrorCode = "no_such_job"
 	NoSuchMailbox      ErrorCode = "no_such_mailbox"
+	NoSuchMessage      ErrorCode = "no_such_message"
+	NoSuchScript       ErrorCode = "no_such_script"
 	NoSuchUser         ErrorCode = "no_such_user"
 	NotLocked          ErrorCode = "not_locked"
 	OverQuota          ErrorCode = "over_quota"
@@ -125,6 +127,10 @@ func (e ErrorCode) Valid() bool {
 	case NoSuchJob:
 		return true
 	case NoSuchMailbox:
+		return true
+	case NoSuchMessage:
+		return true
+	case NoSuchScript:
 		return true
 	case NoSuchUser:
 		return true
@@ -195,9 +201,31 @@ func (e JobState) Valid() bool {
 	}
 }
 
+// Defines values for LearningState.
+const (
+	Dead      LearningState = "dead"
+	Delivered LearningState = "delivered"
+	Pending   LearningState = "pending"
+)
+
+// Valid indicates whether the value is a known member of the LearningState enum.
+func (e LearningState) Valid() bool {
+	switch e {
+	case Dead:
+		return true
+	case Delivered:
+		return true
+	case Pending:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PlanRequestKind.
 const (
 	AclReconcile  PlanRequestKind = "acl_reconcile"
+	Expunge       PlanRequestKind = "expunge"
 	FtsRebuild    PlanRequestKind = "fts_rebuild"
 	MailboxDelete PlanRequestKind = "mailbox_delete"
 	Purge         PlanRequestKind = "purge"
@@ -210,6 +238,8 @@ func (e PlanRequestKind) Valid() bool {
 	switch e {
 	case AclReconcile:
 		return true
+	case Expunge:
+		return true
 	case FtsRebuild:
 		return true
 	case MailboxDelete:
@@ -219,6 +249,21 @@ func (e PlanRequestKind) Valid() bool {
 	case QuotaRecalc:
 		return true
 	case Scrub:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PutSieveScriptParamsIfNoneMatch.
+const (
+	Asterisk PutSieveScriptParamsIfNoneMatch = "*"
+)
+
+// Valid indicates whether the value is a known member of the PutSieveScriptParamsIfNoneMatch enum.
+func (e PutSieveScriptParamsIfNoneMatch) Valid() bool {
+	switch e {
+	case Asterisk:
 		return true
 	default:
 		return false
@@ -287,6 +332,28 @@ type AccountStatus struct {
 // AccountStatusLookup Outcome of the Nauthilus lookup of `account`.
 type AccountStatusLookup string
 
+// CopiedMessage defines model for CopiedMessage.
+type CopiedMessage struct {
+	NewUid int64 `json:"new_uid"`
+	Uid    int64 `json:"uid"`
+}
+
+// CopyRequest defines model for CopyRequest.
+type CopyRequest struct {
+	DestinationId string  `json:"destination_id"`
+	Move          *bool   `json:"move,omitempty"`
+	Uids          []int64 `json:"uids"`
+	Uidvalidity   int64   `json:"uidvalidity"`
+}
+
+// CopyResult defines model for CopyResult.
+type CopyResult struct {
+	Copied                 []CopiedMessage `json:"copied"`
+	DestinationId          string          `json:"destination_id"`
+	DestinationUidvalidity int64           `json:"destination_uidvalidity"`
+	Missing                []int64         `json:"missing"`
+}
+
 // DeliveryResult defines model for DeliveryResult.
 type DeliveryResult struct {
 	// Account Canonical account the recipient resolved to.
@@ -304,6 +371,24 @@ type Error struct {
 
 // ErrorCode defines model for Error.Code.
 type ErrorCode string
+
+// FlagRequest defines model for FlagRequest.
+type FlagRequest struct {
+	Add            *[]string `json:"add,omitempty"`
+	Remove         *[]string `json:"remove,omitempty"`
+	Uids           []int64   `json:"uids"`
+	Uidvalidity    int64     `json:"uidvalidity"`
+	UnchangedSince *int64    `json:"unchanged_since,omitempty"`
+}
+
+// FlagResult defines model for FlagResult.
+type FlagResult struct {
+	Missing []int64 `json:"missing"`
+
+	// Modified UIDs skipped because of unchanged_since.
+	Modified []int64       `json:"modified"`
+	Updated  []MessageMeta `json:"updated"`
+}
 
 // ImportACL defines model for ImportACL.
 type ImportACL struct {
@@ -454,6 +539,39 @@ type JobRequestKind string
 // JobState defines model for JobState.
 type JobState string
 
+// LearningJob defines model for LearningJob.
+type LearningJob struct {
+	Account     string    `json:"account"`
+	Attempts    int       `json:"attempts"`
+	Created     time.Time `json:"created"`
+	Id          string    `json:"id"`
+	MailboxId   string    `json:"mailbox_id"`
+	NextAttempt time.Time `json:"next_attempt"`
+
+	// Prepared Waits for the receipt of the stored message.
+	Prepared *bool  `json:"prepared,omitempty"`
+	Program  string `json:"program"`
+
+	// Retries Manual retries so far.
+	Retries int           `json:"retries"`
+	Size    int64         `json:"size"`
+	State   LearningState `json:"state"`
+}
+
+// LearningPage defines model for LearningPage.
+type LearningPage struct {
+	Items []LearningJob `json:"items"`
+	Next  *string       `json:"next,omitempty"`
+}
+
+// LearningRetry defines model for LearningRetry.
+type LearningRetry struct {
+	ConfirmRepeat *bool `json:"confirm_repeat,omitempty"`
+}
+
+// LearningState defines model for LearningState.
+type LearningState string
+
 // MailboxACL defines model for MailboxACL.
 type MailboxACL struct {
 	Entries    []ACLEntry `json:"entries"`
@@ -512,6 +630,69 @@ type MailboxUpdate struct {
 	Subscribed *bool   `json:"subscribed,omitempty"`
 }
 
+// MessageDetail defines model for MessageDetail.
+type MessageDetail struct {
+	Envelope *MessageEnvelope `json:"envelope,omitempty"`
+
+	// Header The header section as stored (at most 64 KiB).
+	Header      string      `json:"header"`
+	MailboxId   string      `json:"mailbox_id"`
+	Message     MessageMeta `json:"message"`
+	Uidvalidity int64       `json:"uidvalidity"`
+}
+
+// MessageEnvelope defines model for MessageEnvelope.
+type MessageEnvelope struct {
+	Cc        []string   `json:"cc"`
+	Date      *time.Time `json:"date,omitempty"`
+	From      []string   `json:"from"`
+	MessageId string     `json:"message_id"`
+	Subject   string     `json:"subject"`
+	To        []string   `json:"to"`
+}
+
+// MessageMeta defines model for MessageMeta.
+type MessageMeta struct {
+	Flags        []string  `json:"flags"`
+	Guid         string    `json:"guid"`
+	InternalDate time.Time `json:"internal_date"`
+	Modseq       int64     `json:"modseq"`
+	Size         int64     `json:"size"`
+	Uid          int64     `json:"uid"`
+}
+
+// MessagePage defines model for MessagePage.
+type MessagePage struct {
+	Items []MessageMeta `json:"items"`
+
+	// NextUid Continue with after_uid=next_uid.
+	NextUid     *int64 `json:"next_uid,omitempty"`
+	Uidvalidity int64  `json:"uidvalidity"`
+}
+
+// MessageSearch defines model for MessageSearch.
+type MessageSearch struct {
+	// After The `next` of the previous page.
+	After  *string    `json:"after,omitempty"`
+	Before *time.Time `json:"before,omitempty"`
+
+	// Flags All of these flags are set.
+	Flags     *[]string `json:"flags,omitempty"`
+	From      *string   `json:"from,omitempty"`
+	Limit     *int      `json:"limit,omitempty"`
+	MailboxId *string   `json:"mailbox_id,omitempty"`
+	MaxSize   *int64    `json:"max_size,omitempty"`
+	MessageId *string   `json:"message_id,omitempty"`
+	MinSize   *int64    `json:"min_size,omitempty"`
+
+	// NotFlags None of these flags is set.
+	NotFlags *[]string  `json:"not_flags,omitempty"`
+	Since    *time.Time `json:"since,omitempty"`
+	Subject  *string    `json:"subject,omitempty"`
+	Text     *string    `json:"text,omitempty"`
+	To       *string    `json:"to,omitempty"`
+}
+
 // Plan defines model for Plan.
 type Plan struct {
 	Account    string                  `json:"account"`
@@ -533,7 +714,8 @@ type PlanRequest struct {
 
 	// Params scrub: `classes` (deliveries, moves, retired, uncovered, entries,
 	// refs, orphans, unknown, quota; empty = all); mailbox_delete:
-	// `mailbox_id`.
+	// `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
+	// `deleted: true` (every message flagged \Deleted when planned).
 	Params *map[string]interface{} `json:"params,omitempty"`
 }
 
@@ -549,6 +731,24 @@ type QuotaStatus struct {
 	LimitMessages int64 `json:"limit_messages"`
 	UsageBytes    int64 `json:"usage_bytes"`
 	UsageMessages int64 `json:"usage_messages"`
+}
+
+// SearchHit defines model for SearchHit.
+type SearchHit struct {
+	Envelope    *MessageEnvelope `json:"envelope,omitempty"`
+	Mailbox     string           `json:"mailbox"`
+	MailboxId   string           `json:"mailbox_id"`
+	Message     MessageMeta      `json:"message"`
+	Uidvalidity int64            `json:"uidvalidity"`
+}
+
+// SearchResult defines model for SearchResult.
+type SearchResult struct {
+	Items []SearchHit `json:"items"`
+
+	// Next Set when the search stopped early (limit or scan limit).
+	Next    *string `json:"next,omitempty"`
+	Scanned int64   `json:"scanned"`
 }
 
 // ServerStatus defines model for ServerStatus.
@@ -586,6 +786,98 @@ type SharedRef struct {
 	Mailbox    string `json:"mailbox"`
 	Owner      string `json:"owner"`
 	Subscribed bool   `json:"subscribed"`
+}
+
+// SieveActions defines model for SieveActions.
+type SieveActions struct {
+	Discard      *bool           `json:"discard,omitempty"`
+	Fileinto     []SieveFileInto `json:"fileinto"`
+	HeaderEdited *bool           `json:"header_edited,omitempty"`
+
+	// Keep The message would be stored in INBOX (implicit or explicit keep).
+	Keep     bool     `json:"keep"`
+	Notify   []string `json:"notify"`
+	Programs []string `json:"programs"`
+	Redirect []string `json:"redirect"`
+	Reject   *string  `json:"reject,omitempty"`
+
+	// Suppressed Side effects that were not carried out.
+	Suppressed []string       `json:"suppressed"`
+	Vacation   *SieveVacation `json:"vacation,omitempty"`
+}
+
+// SieveActivate defines model for SieveActivate.
+type SieveActivate struct {
+	Name string `json:"name"`
+}
+
+// SieveCheck defines model for SieveCheck.
+type SieveCheck struct {
+	EnvelopeFrom *string          `json:"envelope_from,omitempty"`
+	EnvelopeTo   *string          `json:"envelope_to,omitempty"`
+	Message      *SieveMessageRef `json:"message,omitempty"`
+	Name         *string          `json:"name,omitempty"`
+
+	// Raw A test message (instead of `message`).
+	Raw *string `json:"raw,omitempty"`
+
+	// Script Script text; without it the stored `name`, or the active script.
+	Script *string `json:"script,omitempty"`
+}
+
+// SieveCheckResult defines model for SieveCheckResult.
+type SieveCheckResult struct {
+	Actions *SieveActions `json:"actions,omitempty"`
+	Error   *string       `json:"error,omitempty"`
+	Valid   bool          `json:"valid"`
+}
+
+// SieveFileInto defines model for SieveFileInto.
+type SieveFileInto struct {
+	Flags   []string `json:"flags"`
+	Mailbox string   `json:"mailbox"`
+}
+
+// SieveList defines model for SieveList.
+type SieveList struct {
+	Active  *string           `json:"active,omitempty"`
+	Scripts []SieveScriptInfo `json:"scripts"`
+}
+
+// SieveMessageRef defines model for SieveMessageRef.
+type SieveMessageRef struct {
+	MailboxId   string `json:"mailbox_id"`
+	Uid         int64  `json:"uid"`
+	Uidvalidity int64  `json:"uidvalidity"`
+}
+
+// SievePut defines model for SievePut.
+type SievePut struct {
+	Activate *bool  `json:"activate,omitempty"`
+	Script   string `json:"script"`
+}
+
+// SieveScript defines model for SieveScript.
+type SieveScript struct {
+	Active bool   `json:"active"`
+	Etag   string `json:"etag"`
+	Name   string `json:"name"`
+	Script string `json:"script"`
+}
+
+// SieveScriptInfo defines model for SieveScriptInfo.
+type SieveScriptInfo struct {
+	Active bool   `json:"active"`
+	Etag   string `json:"etag"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+}
+
+// SieveVacation defines model for SieveVacation.
+type SieveVacation struct {
+	Days    int     `json:"days"`
+	From    *string `json:"from,omitempty"`
+	Subject string  `json:"subject"`
 }
 
 // StoreStatus defines model for StoreStatus.
@@ -644,6 +936,15 @@ type JobID = string
 
 // MailboxID defines model for MailboxID.
 type MailboxID = string
+
+// ScriptName defines model for ScriptName.
+type ScriptName = string
+
+// UID defines model for UID.
+type UID = int64
+
+// UIDValidity defines model for UIDValidity.
+type UIDValidity = int64
 
 // CloseImportParams defines parameters for CloseImport.
 type CloseImportParams struct {
@@ -745,6 +1046,40 @@ type SetACLEntryParams struct {
 	IfMatch *IfMatch `json:"If-Match,omitempty"`
 }
 
+// ListMessagesParams defines parameters for ListMessages.
+type ListMessagesParams struct {
+	AfterUid *int64 `form:"after_uid,omitempty" json:"after_uid,omitempty"`
+	Limit    *int   `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// GetMessageParams defines parameters for GetMessage.
+type GetMessageParams struct {
+	// Uidvalidity UIDVALIDITY the UID belongs to.
+	Uidvalidity UIDValidity `form:"uidvalidity" json:"uidvalidity"`
+}
+
+// ExportMessageParams defines parameters for ExportMessage.
+type ExportMessageParams struct {
+	// Uidvalidity UIDVALIDITY the UID belongs to.
+	Uidvalidity UIDValidity `form:"uidvalidity" json:"uidvalidity"`
+}
+
+// DeleteSieveScriptParams defines parameters for DeleteSieveScript.
+type DeleteSieveScriptParams struct {
+	// IfMatch ETag of the version the change is based on.
+	IfMatch *IfMatch `json:"If-Match,omitempty"`
+}
+
+// PutSieveScriptParams defines parameters for PutSieveScript.
+type PutSieveScriptParams struct {
+	// IfMatch ETag of the version the change is based on.
+	IfMatch     *IfMatch                         `json:"If-Match,omitempty"`
+	IfNoneMatch *PutSieveScriptParamsIfNoneMatch `json:"If-None-Match,omitempty"`
+}
+
+// PutSieveScriptParamsIfNoneMatch defines parameters for PutSieveScript.
+type PutSieveScriptParamsIfNoneMatch string
+
 // DeliverParams defines parameters for Deliver.
 type DeliverParams struct {
 	// Recipient Envelope recipient (address or account).
@@ -774,6 +1109,14 @@ type ListJobsParams struct {
 // SubmitJobParams defines parameters for SubmitJob.
 type SubmitJobParams struct {
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// ListLearningJobsParams defines parameters for ListLearningJobs.
+type ListLearningJobsParams struct {
+	Account *string        `form:"account,omitempty" json:"account,omitempty"`
+	State   *LearningState `form:"state,omitempty" json:"state,omitempty"`
+	After   *string        `form:"after,omitempty" json:"after,omitempty"`
+	Limit   *int           `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // OpenImportJSONRequestBody defines body for OpenImport for application/json ContentType.
@@ -806,14 +1149,35 @@ type UpdateMailboxJSONRequestBody = MailboxUpdate
 // SetACLEntryJSONRequestBody defines body for SetACLEntry for application/json ContentType.
 type SetACLEntryJSONRequestBody = ACLChange
 
+// CopyMessagesJSONRequestBody defines body for CopyMessages for application/json ContentType.
+type CopyMessagesJSONRequestBody = CopyRequest
+
+// SetMessageFlagsJSONRequestBody defines body for SetMessageFlags for application/json ContentType.
+type SetMessageFlagsJSONRequestBody = FlagRequest
+
 // CreatePlanJSONRequestBody defines body for CreatePlan for application/json ContentType.
 type CreatePlanJSONRequestBody = PlanRequest
+
+// SearchMessagesJSONRequestBody defines body for SearchMessages for application/json ContentType.
+type SearchMessagesJSONRequestBody = MessageSearch
+
+// SetActiveSieveScriptJSONRequestBody defines body for SetActiveSieveScript for application/json ContentType.
+type SetActiveSieveScriptJSONRequestBody = SieveActivate
+
+// CheckSieveJSONRequestBody defines body for CheckSieve for application/json ContentType.
+type CheckSieveJSONRequestBody = SieveCheck
+
+// PutSieveScriptJSONRequestBody defines body for PutSieveScript for application/json ContentType.
+type PutSieveScriptJSONRequestBody = SievePut
 
 // SetTraceJSONRequestBody defines body for SetTrace for application/json ContentType.
 type SetTraceJSONRequestBody = TraceRequest
 
 // SubmitJobJSONRequestBody defines body for SubmitJob for application/json ContentType.
 type SubmitJobJSONRequestBody = JobRequest
+
+// RetryLearningJobJSONRequestBody defines body for RetryLearningJob for application/json ContentType.
+type RetryLearningJobJSONRequestBody = LearningRetry
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -1190,12 +1554,86 @@ type ClientInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
 	SetACLEntry(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListMessages Messages of a mailbox (metadata only), by UID
+	//
+	// UID, GUID, size, flags, dates and MODSEQ, without headers or
+	// content. Page with `after_uid`. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages (the `ListMessages` operationId).
+	ListMessages(ctx context.Context, account Account, id MailboxID, params *ListMessagesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CopyMessagesWithBody Copy or move messages to another mailbox of the account
+	//
+	// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+	// to its UID in the destination. `uidvalidity` must match (412).
+	// Requires the role `support`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+	CopyMessagesWithBody(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CopyMessages Copy or move messages to another mailbox of the account
+	//
+	// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+	// to its UID in the destination. `uidvalidity` must match (412).
+	// Requires the role `support`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+	CopyMessages(ctx context.Context, account Account, id MailboxID, body CopyMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetMessageFlagsWithBody Add or remove flags
+	//
+	// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+	// cannot be set). `uidvalidity` must match (412), UIDs that no
+	// longer exist are reported as missing, `unchanged_since`
+	// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+	// role `support`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+	SetMessageFlagsWithBody(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetMessageFlags Add or remove flags
+	//
+	// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+	// cannot be set). `uidvalidity` must match (412), UIDs that no
+	// longer exist are reported as missing, `unchanged_since`
+	// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+	// role `support`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+	SetMessageFlags(ctx context.Context, account Account, id MailboxID, body SetMessageFlagsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetMessage One message with envelope and header section
+	//
+	// The message is named by mailbox id, UIDVALIDITY and UID, so a
+	// recreated mailbox cannot answer with another message (412).
+	// Requires the role `content`; the audit log records the
+	// identity, not the content.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid} (the `GetMessage` operationId).
+	GetMessage(ctx context.Context, account Account, id MailboxID, uid UID, params *GetMessageParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExportMessage Export one message (RFC 5322)
+	//
+	// Requires the role `content`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw (the `ExportMessage` operationId).
+	ExportMessage(ctx context.Context, account Account, id MailboxID, uid UID, params *ExportMessageParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// CreatePlanWithBody Plan a maintenance job (dry run)
 	//
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -1209,7 +1647,8 @@ type ClientInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -1226,6 +1665,34 @@ type ClientInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account}/quota (the `GetQuota` operationId).
 	GetQuota(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// SearchMessagesWithBody Bounded message search
+	//
+	// Searches one mailbox or all mailboxes of the account. Criteria are
+	// ANDed; `from`, `to`, `subject` match case-insensitively as
+	// substrings of the envelope, `text` uses the full-text index
+	// (headers and body). At most `search.scan_limit` messages are
+	// examined per request; `next` continues a truncated search.
+	// Requires the role `content`; criteria values are not logged.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+	SearchMessagesWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SearchMessages Bounded message search
+	//
+	// Searches one mailbox or all mailboxes of the account. Criteria are
+	// ANDed; `from`, `to`, `subject` match case-insensitively as
+	// substrings of the envelope, `text` uses the full-text index
+	// (headers and body). At most `search.scan_limit` messages are
+	// examined per request; `next` continues a truncated search.
+	// Requires the role `content`; criteria values are not logged.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+	SearchMessages(ctx context.Context, account Account, body SearchMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListSharedMailboxes Mailboxes of other accounts shared with this account
 	//
 	// The pointers in the account's registry ("Other Users/<owner>/...").
@@ -1233,6 +1700,99 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
 	ListSharedMailboxes(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSieveScripts Sieve scripts of the account
+	//
+	// Names, sizes, versions and the active script. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/sieve (the `ListSieveScripts` operationId).
+	ListSieveScripts(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetActiveSieveScriptWithBody Activate a script or deactivate filtering
+	//
+	// An empty name deactivates. Requires the role `support`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+	SetActiveSieveScriptWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetActiveSieveScript Activate a script or deactivate filtering
+	//
+	// An empty name deactivates. Requires the role `support`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+	SetActiveSieveScript(ctx context.Context, account Account, body SetActiveSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CheckSieveWithBody Compile a script and run it without side effects
+	//
+	// Compiles `script` (or the stored script `name`, or the active
+	// one) with the account's includes and, when a message is given,
+	// runs it and reports the actions it would take. Nothing is
+	// executed: no redirect, vacation or notification is sent, no
+	// external program runs, no duplicate or vacation record is
+	// written, nothing is filed. A message from the store (`message`)
+	// requires the role `content`, otherwise `diagnose`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+	CheckSieveWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CheckSieve Compile a script and run it without side effects
+	//
+	// Compiles `script` (or the stored script `name`, or the active
+	// one) with the account's includes and, when a message is given,
+	// runs it and reports the actions it would take. Nothing is
+	// executed: no redirect, vacation or notification is sent, no
+	// external program runs, no duplicate or vacation record is
+	// written, nothing is filed. A message from the store (`message`)
+	// requires the role `content`, otherwise `diagnose`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+	CheckSieve(ctx context.Context, account Account, body CheckSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteSieveScript Delete an inactive Sieve script
+	//
+	// The active script cannot be deleted (409). Requires the role `support`.
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/sieve/{name} (the `DeleteSieveScript` operationId).
+	DeleteSieveScript(ctx context.Context, account Account, name ScriptName, params *DeleteSieveScriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSieveScript One Sieve script
+	//
+	// Requires the role `content`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/sieve/{name} (the `GetSieveScript` operationId).
+	GetSieveScript(ctx context.Context, account Account, name ScriptName, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutSieveScriptWithBody Store (and optionally activate) a Sieve script
+	//
+	// The script is compiled first; a script that does not compile is
+	// refused (400) and nothing is stored. `If-Match` is the script's
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+	// the role `support`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+	PutSieveScriptWithBody(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutSieveScript Store (and optionally activate) a Sieve script
+	//
+	// The script is compiled first; a script that does not compile is
+	// refused (400) and nothing is stored. `If-Match` is the script's
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+	// the role `support`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+	PutSieveScript(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ClearTrace Switch the protocol trace off
 	//
@@ -1351,6 +1911,47 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
 	CancelJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListLearningJobs Learning queue (IMAPSieve learning programs)
+	//
+	// Requires the role `diagnose`; a client with an account scope must
+	// name an account.
+	//
+	// Corresponds with GET /admin/v1/learning (the `ListLearningJobs` operationId).
+	ListLearningJobs(ctx context.Context, params *ListLearningJobsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetLearningJob One learning job
+	//
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/learning/{job} (the `GetLearningJob` operationId).
+	GetLearningJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RetryLearningJobWithBody Retry a dead learning job
+	//
+	// Only dead jobs are retried. Learning programs are not idempotent
+	// (a message learned twice counts twice): a job that was already
+	// attempted needs `confirm_repeat`. A job whose message was never
+	// committed (no receipt) cannot be retried. Requires the role
+	// `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+	RetryLearningJobWithBody(ctx context.Context, job JobID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RetryLearningJob Retry a dead learning job
+	//
+	// Only dead jobs are retried. Learning programs are not idempotent
+	// (a message learned twice counts twice): a job that was already
+	// attempted needs `confirm_repeat`. A job whose message was never
+	// committed (no receipt) cannot be retried. Requires the role
+	// `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+	RetryLearningJob(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetPlan A plan
 	//
@@ -1967,12 +2568,156 @@ func (c *Client) SetACLEntry(ctx context.Context, account Account, id MailboxID,
 	return c.Client.Do(req)
 }
 
+// ListMessages Messages of a mailbox (metadata only), by UID
+//
+// UID, GUID, size, flags, dates and MODSEQ, without headers or
+// content. Page with `after_uid`. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages (the `ListMessages` operationId).
+func (c *Client) ListMessages(ctx context.Context, account Account, id MailboxID, params *ListMessagesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListMessagesRequest(c.Server, account, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CopyMessagesWithBody Copy or move messages to another mailbox of the account
+//
+// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+// to its UID in the destination. `uidvalidity` must match (412).
+// Requires the role `support`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+func (c *Client) CopyMessagesWithBody(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCopyMessagesRequestWithBody(c.Server, account, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CopyMessages Copy or move messages to another mailbox of the account
+//
+// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+// to its UID in the destination. `uidvalidity` must match (412).
+// Requires the role `support`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+func (c *Client) CopyMessages(ctx context.Context, account Account, id MailboxID, body CopyMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCopyMessagesRequest(c.Server, account, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetMessageFlagsWithBody Add or remove flags
+//
+// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+// cannot be set). `uidvalidity` must match (412), UIDs that no
+// longer exist are reported as missing, `unchanged_since`
+// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+// role `support`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+func (c *Client) SetMessageFlagsWithBody(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetMessageFlagsRequestWithBody(c.Server, account, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetMessageFlags Add or remove flags
+//
+// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+// cannot be set). `uidvalidity` must match (412), UIDs that no
+// longer exist are reported as missing, `unchanged_since`
+// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+// role `support`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+func (c *Client) SetMessageFlags(ctx context.Context, account Account, id MailboxID, body SetMessageFlagsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetMessageFlagsRequest(c.Server, account, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetMessage One message with envelope and header section
+//
+// The message is named by mailbox id, UIDVALIDITY and UID, so a
+// recreated mailbox cannot answer with another message (412).
+// Requires the role `content`; the audit log records the
+// identity, not the content.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid} (the `GetMessage` operationId).
+func (c *Client) GetMessage(ctx context.Context, account Account, id MailboxID, uid UID, params *GetMessageParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetMessageRequest(c.Server, account, id, uid, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ExportMessage Export one message (RFC 5322)
+//
+// Requires the role `content`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw (the `ExportMessage` operationId).
+func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxID, uid UID, params *ExportMessageParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExportMessageRequest(c.Server, account, id, uid, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // CreatePlanWithBody Plan a maintenance job (dry run)
 //
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -1996,7 +2741,8 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -2033,6 +2779,54 @@ func (c *Client) GetQuota(ctx context.Context, account Account, reqEditors ...Re
 	return c.Client.Do(req)
 }
 
+// SearchMessagesWithBody Bounded message search
+//
+// Searches one mailbox or all mailboxes of the account. Criteria are
+// ANDed; `from`, `to`, `subject` match case-insensitively as
+// substrings of the envelope, `text` uses the full-text index
+// (headers and body). At most `search.scan_limit` messages are
+// examined per request; `next` continues a truncated search.
+// Requires the role `content`; criteria values are not logged.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+func (c *Client) SearchMessagesWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMessagesRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SearchMessages Bounded message search
+//
+// Searches one mailbox or all mailboxes of the account. Criteria are
+// ANDed; `from`, `to`, `subject` match case-insensitively as
+// substrings of the envelope, `text` uses the full-text index
+// (headers and body). At most `search.scan_limit` messages are
+// examined per request; `next` continues a truncated search.
+// Requires the role `content`; criteria values are not logged.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+func (c *Client) SearchMessages(ctx context.Context, account Account, body SearchMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMessagesRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ListSharedMailboxes Mailboxes of other accounts shared with this account
 //
 // The pointers in the account's registry ("Other Users/<owner>/...").
@@ -2041,6 +2835,189 @@ func (c *Client) GetQuota(ctx context.Context, account Account, reqEditors ...Re
 // Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
 func (c *Client) ListSharedMailboxes(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListSharedMailboxesRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListSieveScripts Sieve scripts of the account
+//
+// Names, sizes, versions and the active script. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/sieve (the `ListSieveScripts` operationId).
+func (c *Client) ListSieveScripts(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSieveScriptsRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetActiveSieveScriptWithBody Activate a script or deactivate filtering
+//
+// An empty name deactivates. Requires the role `support`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+func (c *Client) SetActiveSieveScriptWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetActiveSieveScriptRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetActiveSieveScript Activate a script or deactivate filtering
+//
+// An empty name deactivates. Requires the role `support`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+func (c *Client) SetActiveSieveScript(ctx context.Context, account Account, body SetActiveSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetActiveSieveScriptRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CheckSieveWithBody Compile a script and run it without side effects
+//
+// Compiles `script` (or the stored script `name`, or the active
+// one) with the account's includes and, when a message is given,
+// runs it and reports the actions it would take. Nothing is
+// executed: no redirect, vacation or notification is sent, no
+// external program runs, no duplicate or vacation record is
+// written, nothing is filed. A message from the store (`message`)
+// requires the role `content`, otherwise `diagnose`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+func (c *Client) CheckSieveWithBody(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCheckSieveRequestWithBody(c.Server, account, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CheckSieve Compile a script and run it without side effects
+//
+// Compiles `script` (or the stored script `name`, or the active
+// one) with the account's includes and, when a message is given,
+// runs it and reports the actions it would take. Nothing is
+// executed: no redirect, vacation or notification is sent, no
+// external program runs, no duplicate or vacation record is
+// written, nothing is filed. A message from the store (`message`)
+// requires the role `content`, otherwise `diagnose`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+func (c *Client) CheckSieve(ctx context.Context, account Account, body CheckSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCheckSieveRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DeleteSieveScript Delete an inactive Sieve script
+//
+// The active script cannot be deleted (409). Requires the role `support`.
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/sieve/{name} (the `DeleteSieveScript` operationId).
+func (c *Client) DeleteSieveScript(ctx context.Context, account Account, name ScriptName, params *DeleteSieveScriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteSieveScriptRequest(c.Server, account, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetSieveScript One Sieve script
+//
+// Requires the role `content`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/sieve/{name} (the `GetSieveScript` operationId).
+func (c *Client) GetSieveScript(ctx context.Context, account Account, name ScriptName, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSieveScriptRequest(c.Server, account, name)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutSieveScriptWithBody Store (and optionally activate) a Sieve script
+//
+// The script is compiled first; a script that does not compile is
+// refused (400) and nothing is stored. `If-Match` is the script's
+// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+// the role `support`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+func (c *Client) PutSieveScriptWithBody(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutSieveScriptRequestWithBody(c.Server, account, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutSieveScript Store (and optionally activate) a Sieve script
+//
+// The script is compiled first; a script that does not compile is
+// refused (400) and nothing is stored. `If-Match` is the script's
+// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+// the role `support`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+func (c *Client) PutSieveScript(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutSieveScriptRequest(c.Server, account, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2259,6 +3236,87 @@ func (c *Client) GetJob(ctx context.Context, job JobID, reqEditors ...RequestEdi
 // Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
 func (c *Client) CancelJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCancelJobRequest(c.Server, job)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListLearningJobs Learning queue (IMAPSieve learning programs)
+//
+// Requires the role `diagnose`; a client with an account scope must
+// name an account.
+//
+// Corresponds with GET /admin/v1/learning (the `ListLearningJobs` operationId).
+func (c *Client) ListLearningJobs(ctx context.Context, params *ListLearningJobsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListLearningJobsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetLearningJob One learning job
+//
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/learning/{job} (the `GetLearningJob` operationId).
+func (c *Client) GetLearningJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetLearningJobRequest(c.Server, job)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RetryLearningJobWithBody Retry a dead learning job
+//
+// Only dead jobs are retried. Learning programs are not idempotent
+// (a message learned twice counts twice): a job that was already
+// attempted needs `confirm_repeat`. A job whose message was never
+// committed (no receipt) cannot be retried. Requires the role
+// `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+func (c *Client) RetryLearningJobWithBody(ctx context.Context, job JobID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetryLearningJobRequestWithBody(c.Server, job, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RetryLearningJob Retry a dead learning job
+//
+// Only dead jobs are retried. Learning programs are not idempotent
+// (a message learned twice counts twice): a job that was already
+// attempted needs `confirm_repeat`. A job whose message was never
+// committed (no receipt) cannot be retried. Requires the role
+// `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+func (c *Client) RetryLearningJob(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetryLearningJobRequest(c.Server, job, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3507,6 +4565,336 @@ func NewSetACLEntryRequestWithBody(server string, account Account, id MailboxID,
 	return req, nil
 }
 
+// NewListMessagesRequest constructs an http.Request for the ListMessages method
+func NewListMessagesRequest(server string, account Account, id MailboxID, params *ListMessagesParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/messages", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.AfterUid != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "after_uid", *params.AfterUid, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCopyMessagesRequest calls the generic CopyMessages builder with application/json body
+func NewCopyMessagesRequest(server string, account Account, id MailboxID, body CopyMessagesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCopyMessagesRequestWithBody(server, account, id, "application/json", bodyReader)
+}
+
+// NewCopyMessagesRequestWithBody constructs an http.Request for the CopyMessages method, with any body, and a specified content type
+func NewCopyMessagesRequestWithBody(server string, account Account, id MailboxID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/messages/copy", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewSetMessageFlagsRequest calls the generic SetMessageFlags builder with application/json body
+func NewSetMessageFlagsRequest(server string, account Account, id MailboxID, body SetMessageFlagsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetMessageFlagsRequestWithBody(server, account, id, "application/json", bodyReader)
+}
+
+// NewSetMessageFlagsRequestWithBody constructs an http.Request for the SetMessageFlags method, with any body, and a specified content type
+func NewSetMessageFlagsRequestWithBody(server string, account Account, id MailboxID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/messages/flags", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetMessageRequest constructs an http.Request for the GetMessage method
+func NewGetMessageRequest(server string, account Account, id MailboxID, uid UID, params *GetMessageParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "uid", uid, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "integer", Format: "int64"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/messages/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "uidvalidity", params.Uidvalidity, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewExportMessageRequest constructs an http.Request for the ExportMessage method
+func NewExportMessageRequest(server string, account Account, id MailboxID, uid UID, params *ExportMessageParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "uid", uid, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "integer", Format: "int64"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/mailboxes/%s/messages/%s/raw", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "uidvalidity", params.Uidvalidity, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewCreatePlanRequest calls the generic CreatePlan builder with application/json body
 func NewCreatePlanRequest(server string, account Account, body CreatePlanJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -3588,6 +4976,53 @@ func NewGetQuotaRequest(server string, account Account) (*http.Request, error) {
 	return req, nil
 }
 
+// NewSearchMessagesRequest calls the generic SearchMessages builder with application/json body
+func NewSearchMessagesRequest(server string, account Account, body SearchMessagesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSearchMessagesRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewSearchMessagesRequestWithBody constructs an http.Request for the SearchMessages method, with any body, and a specified content type
+func NewSearchMessagesRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/search", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewListSharedMailboxesRequest constructs an http.Request for the ListSharedMailboxes method
 func NewListSharedMailboxesRequest(server string, account Account) (*http.Request, error) {
 	var err error
@@ -3617,6 +5052,311 @@ func NewListSharedMailboxesRequest(server string, account Account) (*http.Reques
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListSieveScriptsRequest constructs an http.Request for the ListSieveScripts method
+func NewListSieveScriptsRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/sieve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetActiveSieveScriptRequest calls the generic SetActiveSieveScript builder with application/json body
+func NewSetActiveSieveScriptRequest(server string, account Account, body SetActiveSieveScriptJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetActiveSieveScriptRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewSetActiveSieveScriptRequestWithBody constructs an http.Request for the SetActiveSieveScript method, with any body, and a specified content type
+func NewSetActiveSieveScriptRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/sieve-active", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewCheckSieveRequest calls the generic CheckSieve builder with application/json body
+func NewCheckSieveRequest(server string, account Account, body CheckSieveJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCheckSieveRequestWithBody(server, account, "application/json", bodyReader)
+}
+
+// NewCheckSieveRequestWithBody constructs an http.Request for the CheckSieve method, with any body, and a specified content type
+func NewCheckSieveRequestWithBody(server string, account Account, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/sieve-check", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewDeleteSieveScriptRequest constructs an http.Request for the DeleteSieveScript method
+func NewDeleteSieveScriptRequest(server string, account Account, name ScriptName, params *DeleteSieveScriptParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/sieve/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.IfMatch != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "If-Match", *params.IfMatch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("If-Match", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetSieveScriptRequest constructs an http.Request for the GetSieveScript method
+func NewGetSieveScriptRequest(server string, account Account, name ScriptName) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/sieve/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPutSieveScriptRequest calls the generic PutSieveScript builder with application/json body
+func NewPutSieveScriptRequest(server string, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutSieveScriptRequestWithBody(server, account, name, params, "application/json", bodyReader)
+}
+
+// NewPutSieveScriptRequestWithBody constructs an http.Request for the PutSieveScript method, with any body, and a specified content type
+func NewPutSieveScriptRequestWithBody(server string, account Account, name ScriptName, params *PutSieveScriptParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/sieve/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.IfMatch != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "If-Match", *params.IfMatch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("If-Match", headerParam0)
+		}
+
+		if params.IfNoneMatch != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "If-None-Match", *params.IfNoneMatch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("If-None-Match", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -4046,6 +5786,177 @@ func NewCancelJobRequest(server string, job JobID) (*http.Request, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewListLearningJobsRequest constructs an http.Request for the ListLearningJobs method
+func NewListLearningJobsRequest(server string, params *ListLearningJobsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/learning")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Account != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "account", *params.Account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "state", *params.State, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetLearningJobRequest constructs an http.Request for the GetLearningJob method
+func NewGetLearningJobRequest(server string, job JobID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "job", job, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/learning/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRetryLearningJobRequest calls the generic RetryLearningJob builder with application/json body
+func NewRetryLearningJobRequest(server string, job JobID, body RetryLearningJobJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRetryLearningJobRequestWithBody(server, job, "application/json", bodyReader)
+}
+
+// NewRetryLearningJobRequestWithBody constructs an http.Request for the RetryLearningJob method, with any body, and a specified content type
+func NewRetryLearningJobRequestWithBody(server string, job JobID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "job", job, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/learning/%s/retry", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -4503,12 +6414,92 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier} (the `SetACLEntry` operationId).
 	SetACLEntryWithResponse(ctx context.Context, account Account, id MailboxID, identifier Identifier, params *SetACLEntryParams, body SetACLEntryJSONRequestBody, reqEditors ...RequestEditorFn) (*SetACLEntryResponse, error)
 
+	// ListMessagesWithResponse Messages of a mailbox (metadata only), by UID
+	//
+	// UID, GUID, size, flags, dates and MODSEQ, without headers or
+	// content. Page with `after_uid`. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages (the `ListMessages` operationId).
+	ListMessagesWithResponse(ctx context.Context, account Account, id MailboxID, params *ListMessagesParams, reqEditors ...RequestEditorFn) (*ListMessagesResponse, error)
+
+	// CopyMessagesWithBodyWithResponse Copy or move messages to another mailbox of the account
+	//
+	// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+	// to its UID in the destination. `uidvalidity` must match (412).
+	// Requires the role `support`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+	CopyMessagesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CopyMessagesResponse, error)
+
+	// CopyMessagesWithResponse Copy or move messages to another mailbox of the account
+	//
+	// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+	// to its UID in the destination. `uidvalidity` must match (412).
+	// Requires the role `support`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+	CopyMessagesWithResponse(ctx context.Context, account Account, id MailboxID, body CopyMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*CopyMessagesResponse, error)
+
+	// SetMessageFlagsWithBodyWithResponse Add or remove flags
+	//
+	// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+	// cannot be set). `uidvalidity` must match (412), UIDs that no
+	// longer exist are reported as missing, `unchanged_since`
+	// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+	// role `support`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+	SetMessageFlagsWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetMessageFlagsResponse, error)
+
+	// SetMessageFlagsWithResponse Add or remove flags
+	//
+	// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+	// cannot be set). `uidvalidity` must match (412), UIDs that no
+	// longer exist are reported as missing, `unchanged_since`
+	// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+	// role `support`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+	SetMessageFlagsWithResponse(ctx context.Context, account Account, id MailboxID, body SetMessageFlagsJSONRequestBody, reqEditors ...RequestEditorFn) (*SetMessageFlagsResponse, error)
+
+	// GetMessageWithResponse One message with envelope and header section
+	//
+	// The message is named by mailbox id, UIDVALIDITY and UID, so a
+	// recreated mailbox cannot answer with another message (412).
+	// Requires the role `content`; the audit log records the
+	// identity, not the content.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid} (the `GetMessage` operationId).
+	GetMessageWithResponse(ctx context.Context, account Account, id MailboxID, uid UID, params *GetMessageParams, reqEditors ...RequestEditorFn) (*GetMessageResponse, error)
+
+	// ExportMessageWithResponse Export one message (RFC 5322)
+	//
+	// Requires the role `content`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw (the `ExportMessage` operationId).
+	ExportMessageWithResponse(ctx context.Context, account Account, id MailboxID, uid UID, params *ExportMessageParams, reqEditors ...RequestEditorFn) (*ExportMessageResponse, error)
+
 	// CreatePlanWithBodyWithResponse Plan a maintenance job (dry run)
 	//
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -4522,7 +6513,8 @@ type ClientWithResponsesInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-	// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -4541,6 +6533,34 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account}/quota (the `GetQuota` operationId).
 	GetQuotaWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetQuotaResponse, error)
 
+	// SearchMessagesWithBodyWithResponse Bounded message search
+	//
+	// Searches one mailbox or all mailboxes of the account. Criteria are
+	// ANDed; `from`, `to`, `subject` match case-insensitively as
+	// substrings of the envelope, `text` uses the full-text index
+	// (headers and body). At most `search.scan_limit` messages are
+	// examined per request; `next` continues a truncated search.
+	// Requires the role `content`; criteria values are not logged.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+	SearchMessagesWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMessagesResponse, error)
+
+	// SearchMessagesWithResponse Bounded message search
+	//
+	// Searches one mailbox or all mailboxes of the account. Criteria are
+	// ANDed; `from`, `to`, `subject` match case-insensitively as
+	// substrings of the envelope, `text` uses the full-text index
+	// (headers and body). At most `search.scan_limit` messages are
+	// examined per request; `next` continues a truncated search.
+	// Requires the role `content`; criteria values are not logged.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+	SearchMessagesWithResponse(ctx context.Context, account Account, body SearchMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMessagesResponse, error)
+
 	// ListSharedMailboxesWithResponse Mailboxes of other accounts shared with this account
 	//
 	// The pointers in the account's registry ("Other Users/<owner>/...").
@@ -4550,6 +6570,105 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
 	ListSharedMailboxesWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSharedMailboxesResponse, error)
+
+	// ListSieveScriptsWithResponse Sieve scripts of the account
+	//
+	// Names, sizes, versions and the active script. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/sieve (the `ListSieveScripts` operationId).
+	ListSieveScriptsWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSieveScriptsResponse, error)
+
+	// SetActiveSieveScriptWithBodyWithResponse Activate a script or deactivate filtering
+	//
+	// An empty name deactivates. Requires the role `support`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+	SetActiveSieveScriptWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetActiveSieveScriptResponse, error)
+
+	// SetActiveSieveScriptWithResponse Activate a script or deactivate filtering
+	//
+	// An empty name deactivates. Requires the role `support`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+	SetActiveSieveScriptWithResponse(ctx context.Context, account Account, body SetActiveSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*SetActiveSieveScriptResponse, error)
+
+	// CheckSieveWithBodyWithResponse Compile a script and run it without side effects
+	//
+	// Compiles `script` (or the stored script `name`, or the active
+	// one) with the account's includes and, when a message is given,
+	// runs it and reports the actions it would take. Nothing is
+	// executed: no redirect, vacation or notification is sent, no
+	// external program runs, no duplicate or vacation record is
+	// written, nothing is filed. A message from the store (`message`)
+	// requires the role `content`, otherwise `diagnose`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+	CheckSieveWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CheckSieveResponse, error)
+
+	// CheckSieveWithResponse Compile a script and run it without side effects
+	//
+	// Compiles `script` (or the stored script `name`, or the active
+	// one) with the account's includes and, when a message is given,
+	// runs it and reports the actions it would take. Nothing is
+	// executed: no redirect, vacation or notification is sent, no
+	// external program runs, no duplicate or vacation record is
+	// written, nothing is filed. A message from the store (`message`)
+	// requires the role `content`, otherwise `diagnose`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+	CheckSieveWithResponse(ctx context.Context, account Account, body CheckSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*CheckSieveResponse, error)
+
+	// DeleteSieveScriptWithResponse Delete an inactive Sieve script
+	//
+	// The active script cannot be deleted (409). Requires the role `support`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /admin/v1/accounts/{account}/sieve/{name} (the `DeleteSieveScript` operationId).
+	DeleteSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, params *DeleteSieveScriptParams, reqEditors ...RequestEditorFn) (*DeleteSieveScriptResponse, error)
+
+	// GetSieveScriptWithResponse One Sieve script
+	//
+	// Requires the role `content`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/sieve/{name} (the `GetSieveScript` operationId).
+	GetSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, reqEditors ...RequestEditorFn) (*GetSieveScriptResponse, error)
+
+	// PutSieveScriptWithBodyWithResponse Store (and optionally activate) a Sieve script
+	//
+	// The script is compiled first; a script that does not compile is
+	// refused (400) and nothing is stored. `If-Match` is the script's
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+	// the role `support`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+	PutSieveScriptWithBodyWithResponse(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutSieveScriptResponse, error)
+
+	// PutSieveScriptWithResponse Store (and optionally activate) a Sieve script
+	//
+	// The script is compiled first; a script that does not compile is
+	// refused (400) and nothing is stored. `If-Match` is the script's
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+	// the role `support`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+	PutSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*PutSieveScriptResponse, error)
 
 	// ClearTraceWithResponse Switch the protocol trace off
 	//
@@ -4678,6 +6797,51 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
 	CancelJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*CancelJobResponse, error)
+
+	// ListLearningJobsWithResponse Learning queue (IMAPSieve learning programs)
+	//
+	// Requires the role `diagnose`; a client with an account scope must
+	// name an account.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/learning (the `ListLearningJobs` operationId).
+	ListLearningJobsWithResponse(ctx context.Context, params *ListLearningJobsParams, reqEditors ...RequestEditorFn) (*ListLearningJobsResponse, error)
+
+	// GetLearningJobWithResponse One learning job
+	//
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/learning/{job} (the `GetLearningJob` operationId).
+	GetLearningJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*GetLearningJobResponse, error)
+
+	// RetryLearningJobWithBodyWithResponse Retry a dead learning job
+	//
+	// Only dead jobs are retried. Learning programs are not idempotent
+	// (a message learned twice counts twice): a job that was already
+	// attempted needs `confirm_repeat`. A job whose message was never
+	// committed (no receipt) cannot be retried. Requires the role
+	// `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+	RetryLearningJobWithBodyWithResponse(ctx context.Context, job JobID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetryLearningJobResponse, error)
+
+	// RetryLearningJobWithResponse Retry a dead learning job
+	//
+	// Only dead jobs are retried. Learning programs are not idempotent
+	// (a message learned twice counts twice): a job that was already
+	// attempted needs `confirm_repeat`. A job whose message was never
+	// committed (no receipt) cannot be retried. Requires the role
+	// `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+	RetryLearningJobWithResponse(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*RetryLearningJobResponse, error)
 
 	// GetPlanWithResponse A plan
 	//
@@ -5683,6 +7847,239 @@ func (r SetACLEntryResponse) ContentType() string {
 	return ""
 }
 
+type ListMessagesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MessagePage
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListMessagesResponse) GetJSON200() *MessagePage {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListMessagesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListMessagesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListMessagesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListMessagesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListMessagesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CopyMessagesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *CopyResult
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CopyMessagesResponse) GetJSON200() *CopyResult {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CopyMessagesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CopyMessagesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CopyMessagesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CopyMessagesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CopyMessagesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetMessageFlagsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FlagResult
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetMessageFlagsResponse) GetJSON200() *FlagResult {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetMessageFlagsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetMessageFlagsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetMessageFlagsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetMessageFlagsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetMessageFlagsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetMessageResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *MessageDetail
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetMessageResponse) GetJSON200() *MessageDetail {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetMessageResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetMessageResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetMessageResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetMessageResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetMessageResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ExportMessageResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ExportMessageResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ExportMessageResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ExportMessageResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExportMessageResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ExportMessageResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type CreatePlanResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -5779,6 +8176,54 @@ func (r GetQuotaResponse) ContentType() string {
 	return ""
 }
 
+type SearchMessagesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SearchResult
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SearchMessagesResponse) GetJSON200() *SearchResult {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SearchMessagesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SearchMessagesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchMessagesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchMessagesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SearchMessagesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListSharedMailboxesResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -5821,6 +8266,301 @@ func (r ListSharedMailboxesResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ListSharedMailboxesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListSieveScriptsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SieveList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListSieveScriptsResponse) GetJSON200() *SieveList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListSieveScriptsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListSieveScriptsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSieveScriptsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSieveScriptsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListSieveScriptsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetActiveSieveScriptResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SieveList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetActiveSieveScriptResponse) GetJSON200() *SieveList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetActiveSieveScriptResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetActiveSieveScriptResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetActiveSieveScriptResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetActiveSieveScriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetActiveSieveScriptResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CheckSieveResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SieveCheckResult
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CheckSieveResponse) GetJSON200() *SieveCheckResult {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CheckSieveResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CheckSieveResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CheckSieveResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CheckSieveResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CheckSieveResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DeleteSieveScriptResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DeleteSieveScriptResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DeleteSieveScriptResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteSieveScriptResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteSieveScriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DeleteSieveScriptResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// GetSieveScriptResponse200Headers the declared response headers of an HTTP 200 response for GetSieveScript
+type GetSieveScriptResponse200Headers struct {
+	ETag *string
+}
+
+type GetSieveScriptResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SieveScript
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *GetSieveScriptResponse200Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetSieveScriptResponse) GetJSON200() *SieveScript {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetSieveScriptResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetSieveScriptResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSieveScriptResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSieveScriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetSieveScriptResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// PutSieveScriptResponse200Headers the declared response headers of an HTTP 200 response for PutSieveScript
+type PutSieveScriptResponse200Headers struct {
+	ETag *string
+}
+
+type PutSieveScriptResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SieveScript
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *PutSieveScriptResponse200Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r PutSieveScriptResponse) GetJSON200() *SieveScript {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r PutSieveScriptResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r PutSieveScriptResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PutSieveScriptResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutSieveScriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PutSieveScriptResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -6205,6 +8945,150 @@ func (r CancelJobResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r CancelJobResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListLearningJobsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *LearningPage
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListLearningJobsResponse) GetJSON200() *LearningPage {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListLearningJobsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListLearningJobsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListLearningJobsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListLearningJobsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListLearningJobsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetLearningJobResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *LearningJob
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetLearningJobResponse) GetJSON200() *LearningJob {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetLearningJobResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetLearningJobResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetLearningJobResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetLearningJobResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetLearningJobResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type RetryLearningJobResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *LearningJob
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r RetryLearningJobResponse) GetJSON200() *LearningJob {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r RetryLearningJobResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r RetryLearningJobResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RetryLearningJobResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetryLearningJobResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RetryLearningJobResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -6850,12 +9734,134 @@ func (c *ClientWithResponses) SetACLEntryWithResponse(ctx context.Context, accou
 	return ParseSetACLEntryResponse(rsp)
 }
 
+// ListMessagesWithResponse Messages of a mailbox (metadata only), by UID
+//
+// UID, GUID, size, flags, dates and MODSEQ, without headers or
+// content. Page with `after_uid`. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages (the `ListMessages` operationId).
+func (c *ClientWithResponses) ListMessagesWithResponse(ctx context.Context, account Account, id MailboxID, params *ListMessagesParams, reqEditors ...RequestEditorFn) (*ListMessagesResponse, error) {
+	rsp, err := c.ListMessages(ctx, account, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListMessagesResponse(rsp)
+}
+
+// CopyMessagesWithBodyWithResponse Copy or move messages to another mailbox of the account
+//
+// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+// to its UID in the destination. `uidvalidity` must match (412).
+// Requires the role `support`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+func (c *ClientWithResponses) CopyMessagesWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CopyMessagesResponse, error) {
+	rsp, err := c.CopyMessagesWithBody(ctx, account, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCopyMessagesResponse(rsp)
+}
+
+// CopyMessagesWithResponse Copy or move messages to another mailbox of the account
+//
+// Like IMAP COPY/MOVE with UIDPLUS: the result maps each source UID
+// to its UID in the destination. `uidvalidity` must match (412).
+// Requires the role `support`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy (the `CopyMessages` operationId).
+func (c *ClientWithResponses) CopyMessagesWithResponse(ctx context.Context, account Account, id MailboxID, body CopyMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*CopyMessagesResponse, error) {
+	rsp, err := c.CopyMessages(ctx, account, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCopyMessagesResponse(rsp)
+}
+
+// SetMessageFlagsWithBodyWithResponse Add or remove flags
+//
+// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+// cannot be set). `uidvalidity` must match (412), UIDs that no
+// longer exist are reported as missing, `unchanged_since`
+// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+// role `support`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+func (c *ClientWithResponses) SetMessageFlagsWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetMessageFlagsResponse, error) {
+	rsp, err := c.SetMessageFlagsWithBody(ctx, account, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetMessageFlagsResponse(rsp)
+}
+
+// SetMessageFlagsWithResponse Add or remove flags
+//
+// Changes the flags of the given UIDs like IMAP STORE (`\Recent`
+// cannot be set). `uidvalidity` must match (412), UIDs that no
+// longer exist are reported as missing, `unchanged_since`
+// (CONDSTORE) skips messages changed since that MODSEQ. Requires the
+// role `support`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags (the `SetMessageFlags` operationId).
+func (c *ClientWithResponses) SetMessageFlagsWithResponse(ctx context.Context, account Account, id MailboxID, body SetMessageFlagsJSONRequestBody, reqEditors ...RequestEditorFn) (*SetMessageFlagsResponse, error) {
+	rsp, err := c.SetMessageFlags(ctx, account, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetMessageFlagsResponse(rsp)
+}
+
+// GetMessageWithResponse One message with envelope and header section
+//
+// The message is named by mailbox id, UIDVALIDITY and UID, so a
+// recreated mailbox cannot answer with another message (412).
+// Requires the role `content`; the audit log records the
+// identity, not the content.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid} (the `GetMessage` operationId).
+func (c *ClientWithResponses) GetMessageWithResponse(ctx context.Context, account Account, id MailboxID, uid UID, params *GetMessageParams, reqEditors ...RequestEditorFn) (*GetMessageResponse, error) {
+	rsp, err := c.GetMessage(ctx, account, id, uid, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetMessageResponse(rsp)
+}
+
+// ExportMessageWithResponse Export one message (RFC 5322)
+//
+// Requires the role `content`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw (the `ExportMessage` operationId).
+func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, account Account, id MailboxID, uid UID, params *ExportMessageParams, reqEditors ...RequestEditorFn) (*ExportMessageResponse, error) {
+	rsp, err := c.ExportMessage(ctx, account, id, uid, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExportMessageResponse(rsp)
+}
+
 // CreatePlanWithBodyWithResponse Plan a maintenance job (dry run)
 //
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -6875,7 +9881,8 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-// (role `repair`), `mailbox_delete`, `purge` (role `delete`). A plan
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -6906,6 +9913,46 @@ func (c *ClientWithResponses) GetQuotaWithResponse(ctx context.Context, account 
 	return ParseGetQuotaResponse(rsp)
 }
 
+// SearchMessagesWithBodyWithResponse Bounded message search
+//
+// Searches one mailbox or all mailboxes of the account. Criteria are
+// ANDed; `from`, `to`, `subject` match case-insensitively as
+// substrings of the envelope, `text` uses the full-text index
+// (headers and body). At most `search.scan_limit` messages are
+// examined per request; `next` continues a truncated search.
+// Requires the role `content`; criteria values are not logged.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+func (c *ClientWithResponses) SearchMessagesWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMessagesResponse, error) {
+	rsp, err := c.SearchMessagesWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMessagesResponse(rsp)
+}
+
+// SearchMessagesWithResponse Bounded message search
+//
+// Searches one mailbox or all mailboxes of the account. Criteria are
+// ANDed; `from`, `to`, `subject` match case-insensitively as
+// substrings of the envelope, `text` uses the full-text index
+// (headers and body). At most `search.scan_limit` messages are
+// examined per request; `next` continues a truncated search.
+// Requires the role `content`; criteria values are not logged.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/search (the `SearchMessages` operationId).
+func (c *ClientWithResponses) SearchMessagesWithResponse(ctx context.Context, account Account, body SearchMessagesJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMessagesResponse, error) {
+	rsp, err := c.SearchMessages(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMessagesResponse(rsp)
+}
+
 // ListSharedMailboxesWithResponse Mailboxes of other accounts shared with this account
 //
 // The pointers in the account's registry ("Other Users/<owner>/...").
@@ -6920,6 +9967,159 @@ func (c *ClientWithResponses) ListSharedMailboxesWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseListSharedMailboxesResponse(rsp)
+}
+
+// ListSieveScriptsWithResponse Sieve scripts of the account
+//
+// Names, sizes, versions and the active script. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/sieve (the `ListSieveScripts` operationId).
+func (c *ClientWithResponses) ListSieveScriptsWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSieveScriptsResponse, error) {
+	rsp, err := c.ListSieveScripts(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSieveScriptsResponse(rsp)
+}
+
+// SetActiveSieveScriptWithBodyWithResponse Activate a script or deactivate filtering
+//
+// An empty name deactivates. Requires the role `support`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+func (c *ClientWithResponses) SetActiveSieveScriptWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetActiveSieveScriptResponse, error) {
+	rsp, err := c.SetActiveSieveScriptWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetActiveSieveScriptResponse(rsp)
+}
+
+// SetActiveSieveScriptWithResponse Activate a script or deactivate filtering
+//
+// An empty name deactivates. Requires the role `support`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve-active (the `SetActiveSieveScript` operationId).
+func (c *ClientWithResponses) SetActiveSieveScriptWithResponse(ctx context.Context, account Account, body SetActiveSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*SetActiveSieveScriptResponse, error) {
+	rsp, err := c.SetActiveSieveScript(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetActiveSieveScriptResponse(rsp)
+}
+
+// CheckSieveWithBodyWithResponse Compile a script and run it without side effects
+//
+// Compiles `script` (or the stored script `name`, or the active
+// one) with the account's includes and, when a message is given,
+// runs it and reports the actions it would take. Nothing is
+// executed: no redirect, vacation or notification is sent, no
+// external program runs, no duplicate or vacation record is
+// written, nothing is filed. A message from the store (`message`)
+// requires the role `content`, otherwise `diagnose`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+func (c *ClientWithResponses) CheckSieveWithBodyWithResponse(ctx context.Context, account Account, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CheckSieveResponse, error) {
+	rsp, err := c.CheckSieveWithBody(ctx, account, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCheckSieveResponse(rsp)
+}
+
+// CheckSieveWithResponse Compile a script and run it without side effects
+//
+// Compiles `script` (or the stored script `name`, or the active
+// one) with the account's includes and, when a message is given,
+// runs it and reports the actions it would take. Nothing is
+// executed: no redirect, vacation or notification is sent, no
+// external program runs, no duplicate or vacation record is
+// written, nothing is filed. A message from the store (`message`)
+// requires the role `content`, otherwise `diagnose`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/sieve-check (the `CheckSieve` operationId).
+func (c *ClientWithResponses) CheckSieveWithResponse(ctx context.Context, account Account, body CheckSieveJSONRequestBody, reqEditors ...RequestEditorFn) (*CheckSieveResponse, error) {
+	rsp, err := c.CheckSieve(ctx, account, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCheckSieveResponse(rsp)
+}
+
+// DeleteSieveScriptWithResponse Delete an inactive Sieve script
+//
+// The active script cannot be deleted (409). Requires the role `support`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /admin/v1/accounts/{account}/sieve/{name} (the `DeleteSieveScript` operationId).
+func (c *ClientWithResponses) DeleteSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, params *DeleteSieveScriptParams, reqEditors ...RequestEditorFn) (*DeleteSieveScriptResponse, error) {
+	rsp, err := c.DeleteSieveScript(ctx, account, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteSieveScriptResponse(rsp)
+}
+
+// GetSieveScriptWithResponse One Sieve script
+//
+// Requires the role `content`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/sieve/{name} (the `GetSieveScript` operationId).
+func (c *ClientWithResponses) GetSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, reqEditors ...RequestEditorFn) (*GetSieveScriptResponse, error) {
+	rsp, err := c.GetSieveScript(ctx, account, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSieveScriptResponse(rsp)
+}
+
+// PutSieveScriptWithBodyWithResponse Store (and optionally activate) a Sieve script
+//
+// The script is compiled first; a script that does not compile is
+// refused (400) and nothing is stored. `If-Match` is the script's
+// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+// the role `support`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+func (c *ClientWithResponses) PutSieveScriptWithBodyWithResponse(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutSieveScriptResponse, error) {
+	rsp, err := c.PutSieveScriptWithBody(ctx, account, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutSieveScriptResponse(rsp)
+}
+
+// PutSieveScriptWithResponse Store (and optionally activate) a Sieve script
+//
+// The script is compiled first; a script that does not compile is
+// refused (400) and nothing is stored. `If-Match` is the script's
+// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
+// the role `support`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
+func (c *ClientWithResponses) PutSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*PutSieveScriptResponse, error) {
+	rsp, err := c.PutSieveScript(ctx, account, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutSieveScriptResponse(rsp)
 }
 
 // ClearTraceWithResponse Switch the protocol trace off
@@ -7108,6 +10308,75 @@ func (c *ClientWithResponses) CancelJobWithResponse(ctx context.Context, job Job
 		return nil, err
 	}
 	return ParseCancelJobResponse(rsp)
+}
+
+// ListLearningJobsWithResponse Learning queue (IMAPSieve learning programs)
+//
+// Requires the role `diagnose`; a client with an account scope must
+// name an account.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/learning (the `ListLearningJobs` operationId).
+func (c *ClientWithResponses) ListLearningJobsWithResponse(ctx context.Context, params *ListLearningJobsParams, reqEditors ...RequestEditorFn) (*ListLearningJobsResponse, error) {
+	rsp, err := c.ListLearningJobs(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListLearningJobsResponse(rsp)
+}
+
+// GetLearningJobWithResponse One learning job
+//
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/learning/{job} (the `GetLearningJob` operationId).
+func (c *ClientWithResponses) GetLearningJobWithResponse(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*GetLearningJobResponse, error) {
+	rsp, err := c.GetLearningJob(ctx, job, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetLearningJobResponse(rsp)
+}
+
+// RetryLearningJobWithBodyWithResponse Retry a dead learning job
+//
+// Only dead jobs are retried. Learning programs are not idempotent
+// (a message learned twice counts twice): a job that was already
+// attempted needs `confirm_repeat`. A job whose message was never
+// committed (no receipt) cannot be retried. Requires the role
+// `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+func (c *ClientWithResponses) RetryLearningJobWithBodyWithResponse(ctx context.Context, job JobID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetryLearningJobResponse, error) {
+	rsp, err := c.RetryLearningJobWithBody(ctx, job, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetryLearningJobResponse(rsp)
+}
+
+// RetryLearningJobWithResponse Retry a dead learning job
+//
+// Only dead jobs are retried. Learning programs are not idempotent
+// (a message learned twice counts twice): a job that was already
+// attempted needs `confirm_repeat`. A job whose message was never
+// committed (no receipt) cannot be retried. Requires the role
+// `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
+func (c *ClientWithResponses) RetryLearningJobWithResponse(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*RetryLearningJobResponse, error) {
+	rsp, err := c.RetryLearningJob(ctx, job, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetryLearningJobResponse(rsp)
 }
 
 // GetPlanWithResponse A plan
@@ -7870,6 +11139,164 @@ func ParseSetACLEntryResponse(rsp *http.Response) (*SetACLEntryResponse, error) 
 	return response, nil
 }
 
+// ParseListMessagesResponse parses an HTTP response from a ListMessagesWithResponse call
+func ParseListMessagesResponse(rsp *http.Response) (*ListMessagesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListMessagesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MessagePage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCopyMessagesResponse parses an HTTP response from a CopyMessagesWithResponse call
+func ParseCopyMessagesResponse(rsp *http.Response) (*CopyMessagesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CopyMessagesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CopyResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetMessageFlagsResponse parses an HTTP response from a SetMessageFlagsWithResponse call
+func ParseSetMessageFlagsResponse(rsp *http.Response) (*SetMessageFlagsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetMessageFlagsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FlagResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetMessageResponse parses an HTTP response from a GetMessageWithResponse call
+func ParseGetMessageResponse(rsp *http.Response) (*GetMessageResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetMessageResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MessageDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExportMessageResponse parses an HTTP response from a ExportMessageWithResponse call
+func ParseExportMessageResponse(rsp *http.Response) (*ExportMessageResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExportMessageResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseCreatePlanResponse parses an HTTP response from a CreatePlanWithResponse call
 func ParseCreatePlanResponse(rsp *http.Response) (*CreatePlanResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -7936,6 +11363,39 @@ func ParseGetQuotaResponse(rsp *http.Response) (*GetQuotaResponse, error) {
 	return response, nil
 }
 
+// ParseSearchMessagesResponse parses an HTTP response from a SearchMessagesWithResponse call
+func ParseSearchMessagesResponse(rsp *http.Response) (*SearchMessagesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchMessagesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SearchResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListSharedMailboxesResponse parses an HTTP response from a ListSharedMailboxesWithResponse call
 func ParseListSharedMailboxesResponse(rsp *http.Response) (*ListSharedMailboxesResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -7964,6 +11424,226 @@ func ParseListSharedMailboxesResponse(rsp *http.Response) (*ListSharedMailboxesR
 		}
 		response.JSONDefault = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseListSieveScriptsResponse parses an HTTP response from a ListSieveScriptsWithResponse call
+func ParseListSieveScriptsResponse(rsp *http.Response) (*ListSieveScriptsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSieveScriptsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SieveList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetActiveSieveScriptResponse parses an HTTP response from a SetActiveSieveScriptWithResponse call
+func ParseSetActiveSieveScriptResponse(rsp *http.Response) (*SetActiveSieveScriptResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetActiveSieveScriptResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SieveList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCheckSieveResponse parses an HTTP response from a CheckSieveWithResponse call
+func ParseCheckSieveResponse(rsp *http.Response) (*CheckSieveResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CheckSieveResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SieveCheckResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteSieveScriptResponse parses an HTTP response from a DeleteSieveScriptWithResponse call
+func ParseDeleteSieveScriptResponse(rsp *http.Response) (*DeleteSieveScriptResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteSieveScriptResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetSieveScriptResponse parses an HTTP response from a GetSieveScriptWithResponse call
+func ParseGetSieveScriptResponse(rsp *http.Response) (*GetSieveScriptResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSieveScriptResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SieveScript
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers GetSieveScriptResponse200Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers200 = &headers
+	}
+
+	return response, nil
+}
+
+// ParsePutSieveScriptResponse parses an HTTP response from a PutSieveScriptWithResponse call
+func ParsePutSieveScriptResponse(rsp *http.Response) (*PutSieveScriptResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutSieveScriptResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SieveScript
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers PutSieveScriptResponse200Headers
+		if values := rsp.Header.Values("ETag"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "ETag", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.ETag = &value
+		}
+		response.Headers200 = &headers
 	}
 
 	return response, nil
@@ -8236,6 +11916,105 @@ func ParseCancelJobResponse(rsp *http.Response) (*CancelJobResponse, error) {
 	return response, nil
 }
 
+// ParseListLearningJobsResponse parses an HTTP response from a ListLearningJobsWithResponse call
+func ParseListLearningJobsResponse(rsp *http.Response) (*ListLearningJobsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListLearningJobsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LearningPage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetLearningJobResponse parses an HTTP response from a GetLearningJobWithResponse call
+func ParseGetLearningJobResponse(rsp *http.Response) (*GetLearningJobResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetLearningJobResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LearningJob
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRetryLearningJobResponse parses an HTTP response from a RetryLearningJobWithResponse call
+func ParseRetryLearningJobResponse(rsp *http.Response) (*RetryLearningJobResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetryLearningJobResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LearningJob
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetPlanResponse parses an HTTP response from a GetPlanWithResponse call
 func ParseGetPlanResponse(rsp *http.Response) (*GetPlanResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -8397,15 +12176,51 @@ type ServerInterface interface {
 	// SetACLEntry Change the rights of one identifier
 	// (PUT /admin/v1/accounts/{account}/mailboxes/{id}/acl/{identifier})
 	SetACLEntry(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, identifier Identifier, params SetACLEntryParams)
+	// ListMessages Messages of a mailbox (metadata only), by UID
+	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/messages)
+	ListMessages(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params ListMessagesParams)
+	// CopyMessages Copy or move messages to another mailbox of the account
+	// (POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/copy)
+	CopyMessages(w http.ResponseWriter, r *http.Request, account Account, id MailboxID)
+	// SetMessageFlags Add or remove flags
+	// (POST /admin/v1/accounts/{account}/mailboxes/{id}/messages/flags)
+	SetMessageFlags(w http.ResponseWriter, r *http.Request, account Account, id MailboxID)
+	// GetMessage One message with envelope and header section
+	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid})
+	GetMessage(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, uid UID, params GetMessageParams)
+	// ExportMessage Export one message (RFC 5322)
+	// (GET /admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw)
+	ExportMessage(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, uid UID, params ExportMessageParams)
 	// CreatePlan Plan a maintenance job (dry run)
 	// (POST /admin/v1/accounts/{account}/plans)
 	CreatePlan(w http.ResponseWriter, r *http.Request, account Account)
 	// GetQuota Quota usage and limit
 	// (GET /admin/v1/accounts/{account}/quota)
 	GetQuota(w http.ResponseWriter, r *http.Request, account Account)
+	// SearchMessages Bounded message search
+	// (POST /admin/v1/accounts/{account}/search)
+	SearchMessages(w http.ResponseWriter, r *http.Request, account Account)
 	// ListSharedMailboxes Mailboxes of other accounts shared with this account
 	// (GET /admin/v1/accounts/{account}/shared)
 	ListSharedMailboxes(w http.ResponseWriter, r *http.Request, account Account)
+	// ListSieveScripts Sieve scripts of the account
+	// (GET /admin/v1/accounts/{account}/sieve)
+	ListSieveScripts(w http.ResponseWriter, r *http.Request, account Account)
+	// SetActiveSieveScript Activate a script or deactivate filtering
+	// (PUT /admin/v1/accounts/{account}/sieve-active)
+	SetActiveSieveScript(w http.ResponseWriter, r *http.Request, account Account)
+	// CheckSieve Compile a script and run it without side effects
+	// (POST /admin/v1/accounts/{account}/sieve-check)
+	CheckSieve(w http.ResponseWriter, r *http.Request, account Account)
+	// DeleteSieveScript Delete an inactive Sieve script
+	// (DELETE /admin/v1/accounts/{account}/sieve/{name})
+	DeleteSieveScript(w http.ResponseWriter, r *http.Request, account Account, name ScriptName, params DeleteSieveScriptParams)
+	// GetSieveScript One Sieve script
+	// (GET /admin/v1/accounts/{account}/sieve/{name})
+	GetSieveScript(w http.ResponseWriter, r *http.Request, account Account, name ScriptName)
+	// PutSieveScript Store (and optionally activate) a Sieve script
+	// (PUT /admin/v1/accounts/{account}/sieve/{name})
+	PutSieveScript(w http.ResponseWriter, r *http.Request, account Account, name ScriptName, params PutSieveScriptParams)
 	// ClearTrace Switch the protocol trace off
 	// (DELETE /admin/v1/accounts/{account}/trace)
 	ClearTrace(w http.ResponseWriter, r *http.Request, account Account)
@@ -8430,6 +12245,15 @@ type ServerInterface interface {
 	// CancelJob Ask a job to stop
 	// (POST /admin/v1/jobs/{job}/cancel)
 	CancelJob(w http.ResponseWriter, r *http.Request, job JobID)
+	// ListLearningJobs Learning queue (IMAPSieve learning programs)
+	// (GET /admin/v1/learning)
+	ListLearningJobs(w http.ResponseWriter, r *http.Request, params ListLearningJobsParams)
+	// GetLearningJob One learning job
+	// (GET /admin/v1/learning/{job})
+	GetLearningJob(w http.ResponseWriter, r *http.Request, job JobID)
+	// RetryLearningJob Retry a dead learning job
+	// (POST /admin/v1/learning/{job}/retry)
+	RetryLearningJob(w http.ResponseWriter, r *http.Request, job JobID)
 	// GetPlan A plan
 	// (GET /admin/v1/plans/{plan})
 	GetPlan(w http.ResponseWriter, r *http.Request, plan string)
@@ -9532,6 +13356,260 @@ func (siw *ServerInterfaceWrapper) SetACLEntry(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// ListMessages operation middleware
+func (siw *ServerInterfaceWrapper) ListMessages(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListMessagesParams
+
+	// ------------- Optional query parameter "after_uid" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after_uid", r.URL.Query(), &params.AfterUid, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after_uid"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after_uid", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListMessages(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CopyMessages operation middleware
+func (siw *ServerInterfaceWrapper) CopyMessages(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CopyMessages(w, r, account, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetMessageFlags operation middleware
+func (siw *ServerInterfaceWrapper) SetMessageFlags(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetMessageFlags(w, r, account, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetMessage operation middleware
+func (siw *ServerInterfaceWrapper) GetMessage(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "uid" -------------
+	var uid UID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uid", r.PathValue("uid"), &uid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uid", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetMessageParams
+
+	// ------------- Required query parameter "uidvalidity" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "uidvalidity", r.URL.Query(), &params.Uidvalidity, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "uidvalidity"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uidvalidity", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetMessage(w, r, account, id, uid, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ExportMessage operation middleware
+func (siw *ServerInterfaceWrapper) ExportMessage(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "uid" -------------
+	var uid UID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uid", r.PathValue("uid"), &uid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uid", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ExportMessageParams
+
+	// ------------- Required query parameter "uidvalidity" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "uidvalidity", r.URL.Query(), &params.Uidvalidity, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "uidvalidity"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uidvalidity", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ExportMessage(w, r, account, id, uid, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CreatePlan operation middleware
 func (siw *ServerInterfaceWrapper) CreatePlan(w http.ResponseWriter, r *http.Request) {
 
@@ -9584,6 +13662,32 @@ func (siw *ServerInterfaceWrapper) GetQuota(w http.ResponseWriter, r *http.Reque
 	handler.ServeHTTP(w, r)
 }
 
+// SearchMessages operation middleware
+func (siw *ServerInterfaceWrapper) SearchMessages(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SearchMessages(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListSharedMailboxes operation middleware
 func (siw *ServerInterfaceWrapper) ListSharedMailboxes(w http.ResponseWriter, r *http.Request) {
 
@@ -9601,6 +13705,256 @@ func (siw *ServerInterfaceWrapper) ListSharedMailboxes(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListSharedMailboxes(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListSieveScripts operation middleware
+func (siw *ServerInterfaceWrapper) ListSieveScripts(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListSieveScripts(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetActiveSieveScript operation middleware
+func (siw *ServerInterfaceWrapper) SetActiveSieveScript(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetActiveSieveScript(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CheckSieve operation middleware
+func (siw *ServerInterfaceWrapper) CheckSieve(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CheckSieve(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteSieveScript operation middleware
+func (siw *ServerInterfaceWrapper) DeleteSieveScript(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name ScriptName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteSieveScriptParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-Match")]; found {
+		var IfMatch IfMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-Match", valueList[0], &IfMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-Match", Err: err})
+			return
+		}
+
+		params.IfMatch = &IfMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteSieveScript(w, r, account, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetSieveScript operation middleware
+func (siw *ServerInterfaceWrapper) GetSieveScript(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name ScriptName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSieveScript(w, r, account, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutSieveScript operation middleware
+func (siw *ServerInterfaceWrapper) PutSieveScript(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name ScriptName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutSieveScriptParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-Match")]; found {
+		var IfMatch IfMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-Match", valueList[0], &IfMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-Match", Err: err})
+			return
+		}
+
+		params.IfMatch = &IfMatch
+
+	}
+
+	// ------------- Optional header parameter "If-None-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-None-Match")]; found {
+		var IfNoneMatch PutSieveScriptParamsIfNoneMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-None-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-None-Match", valueList[0], &IfNoneMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-None-Match", Err: err})
+			return
+		}
+
+		params.IfNoneMatch = &IfNoneMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutSieveScript(w, r, account, name, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -9938,6 +14292,130 @@ func (siw *ServerInterfaceWrapper) CancelJob(w http.ResponseWriter, r *http.Requ
 	handler.ServeHTTP(w, r)
 }
 
+// ListLearningJobs operation middleware
+func (siw *ServerInterfaceWrapper) ListLearningJobs(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListLearningJobsParams
+
+	// ------------- Optional query parameter "account" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "account", r.URL.Query(), &params.Account, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "account"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after", r.URL.Query(), &params.After, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListLearningJobs(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetLearningJob operation middleware
+func (siw *ServerInterfaceWrapper) GetLearningJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job" -------------
+	var job JobID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job", r.PathValue("job"), &job, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetLearningJob(w, r, job)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RetryLearningJob operation middleware
+func (siw *ServerInterfaceWrapper) RetryLearningJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "job" -------------
+	var job JobID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job", r.PathValue("job"), &job, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RetryLearningJob(w, r, job)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetPlan operation middleware
 func (siw *ServerInterfaceWrapper) GetPlan(w http.ResponseWriter, r *http.Request) {
 
@@ -10131,6 +14609,21 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/jobs", wrapper.SubmitJob)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/jobs/{job}", wrapper.GetJob)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/jobs/{job}/cancel", wrapper.CancelJob)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages", wrapper.ListMessages)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}", wrapper.GetMessage)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages/{uid}/raw", wrapper.ExportMessage)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages/flags", wrapper.SetMessageFlags)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/messages/copy", wrapper.CopyMessages)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/search", wrapper.SearchMessages)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve", wrapper.ListSieveScripts)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve/{name}", wrapper.DeleteSieveScript)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve/{name}", wrapper.GetSieveScript)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve/{name}", wrapper.PutSieveScript)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve-active", wrapper.SetActiveSieveScript)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/sieve-check", wrapper.CheckSieve)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/learning", wrapper.ListLearningJobs)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/learning/{job}", wrapper.GetLearningJob)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/learning/{job}/retry", wrapper.RetryLearningJob)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/deliveries", wrapper.Deliver)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.CloseImport)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import", wrapper.OpenImport)

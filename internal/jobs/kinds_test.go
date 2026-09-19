@@ -283,3 +283,54 @@ func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+// TestExpunge: the plan names messages by UID and GUID; only those are
+// removed, and with deleted only those still flagged \Deleted.
+func TestExpunge(t *testing.T) {
+	m, store := kindsSetup(t)
+	alice, _ := store.User("alice")
+	_ = alice.EnsureMailbox("Trash", nil)
+
+	var uids []uint32
+
+	for _, flags := range [][]string{{`\deleted`}, {`\deleted`}, nil} {
+		meta, err := alice.Deliver("Trash", []byte(testMessage), flags, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		uids = append(uids, meta.UID)
+	}
+
+	trash, _ := alice.Lookup("Trash")
+	k, _ := m.Kind(KindExpunge)
+
+	p, err := m.CreatePlan(context.Background(), k, "alice", mustJSON(expungeParams{MailboxID: trash.ID, Deleted: true}), "tester", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var s expungeSummary
+
+	_ = json.Unmarshal(p.Summary, &s)
+	if s.Messages != 2 {
+		t.Fatalf("plan: %s", p.Summary)
+	}
+
+	// Between plan and apply the second message is undeleted.
+	if _, err := alice.SetFlags("Trash", []uint32{uids[1]}, 0, func([]string) []string { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	j, _, _ := m.Submit(k, "alice", nil, p.ID, "tester", "")
+	done := waitState(t, m, j.ID, StateSucceeded)
+
+	left, _ := alice.ListMessages(trash.ID)
+	if len(left) != 2 || !strings.Contains(string(done.Result), `"expunged":1`) {
+		t.Fatalf("left %d, result %s", len(left), done.Result)
+	}
+
+	if _, err := m.CreatePlan(context.Background(), k, "alice", mustJSON(expungeParams{MailboxID: trash.ID}), "tester", nil); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("neither uids nor deleted: %v", err)
+	}
+}
