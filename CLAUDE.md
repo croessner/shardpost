@@ -18,6 +18,17 @@ English as well.
 
 Dates in documentation use ISO form (`2026-09-20`).
 
+## Licence
+
+The repository is under GPL-3.0-or-later; `COPYRIGHT.md` states that
+this holds for every file, so a new file needs no licence header. What
+does need care: code copied in from elsewhere keeps its own licence and
+belongs under `vendor/`, `third_party/` or — if it has to live among our
+own packages, as `internal/inflate` does — with its licence file and its
+original header intact, listed in `COPYRIGHT.md`. A new dependency with
+a copyleft licence is a decision for the owner, not a detail of the
+change that needs it.
+
 ## Manual pages
 
 `docs/man/man1/` holds one manual page per command group of

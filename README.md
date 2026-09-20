@@ -93,3 +93,12 @@ previously [0.12.0](docs/reports/2026-09-16-shardpost.md).
 The [quality overview](docs/development/quality.md) distinguishes current tests
 from older conformance results and from explicitly excluded cases. The
 historical [expansion plan](ROADMAP.md) does not replace this overview.
+
+## Licence
+
+ShardPost is free software under the **GNU General Public License,
+version 3 or later**. Every file of this repository falls under it,
+whether or not it carries a header of its own; the third-party code in
+`vendor/`, `third_party/go-sieve/` and `internal/inflate/` keeps the
+licence it came with. See [COPYRIGHT.md](COPYRIGHT.md) for the scope and
+[LICENSE](LICENSE) for the text.
