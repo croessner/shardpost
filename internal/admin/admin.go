@@ -21,10 +21,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
+	"shardpost/internal/telemetry"
 )
 
 // Roles of the admin API.
@@ -256,7 +259,15 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			writeError(rec, http.StatusUnauthorized, adminapi.Unauthenticated, "unknown caller")
 		} else {
 			ctx := context.WithValue(withPrincipal(r.Context(), p), auditKey{}, a)
+
+			// One trace per request; the store hangs its operations below
+			// it. The operation label carries no account name.
+			ctx, span := telemetry.Span(ctx, "admin."+operation(r.URL.Path),
+				attribute.String("admin.principal", p.name), attribute.String("http.method", r.Method))
+
 			next.ServeHTTP(rec, r.WithContext(ctx))
+			span.SetAttributes(attribute.Int("http.status_code", rec.status))
+			span.End()
 		}
 
 		name, transport := "", ""

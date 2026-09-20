@@ -332,6 +332,9 @@ type conn struct {
 	cmdName string
 	// other users' namespaces opened for shared folders (RFC 4314)
 	others map[string]model.User
+	// cmdCtx is the context of the command being handled; the store views
+	// use it for their spans.
+	cmdCtx context.Context
 	// cmdMu serialises the command loop and the NOTIFY pusher on the
 	// session state and the writer; released while waiting for input.
 	cmdMu  sync.Mutex
@@ -473,6 +476,27 @@ func (c *conn) serve() {
 	}
 }
 
+// useRequest hands ctx to every store view of this session, including
+// the views of other users' shared mailboxes.
+func (c *conn) useRequest(ctx context.Context) {
+	c.cmdCtx = ctx
+
+	model.UseRequest(ctx, c.user)
+
+	for _, u := range c.others {
+		model.UseRequest(ctx, u)
+	}
+}
+
+// requestContext is the context of the command being handled.
+func (c *conn) requestContext() context.Context {
+	if c.cmdCtx == nil {
+		return context.Background()
+	}
+
+	return c.cmdCtx
+}
+
 // handleLine parses tag and command and dispatches.
 func (c *conn) handleLine() error {
 	if c.r.eol() {
@@ -518,8 +542,8 @@ func (c *conn) handleLine() error {
 	}
 
 	// The store records its operations below this command's span.
-	model.UseRequest(ctx, c.user)
-	defer model.UseRequest(context.Background(), c.user)
+	c.useRequest(ctx)
+	defer c.useRequest(context.Background())
 
 	err = c.dispatch(tag, cmdName, uid)
 	if err != nil {

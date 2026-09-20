@@ -47,9 +47,9 @@ func TestStoreSpansJoinTheCommand(t *testing.T) {
 	u.trace(spanFTSIndex)(errors.New("index unavailable"))
 	command.End()
 
-	// Back to no command: the store still works, its span is a root.
+	// Outside a command the store stays silent (see the test below).
 	u.UseContext(context.Background())
-	u.trace(spanEntries)(nil)
+	u.trace(spanListEntry)(nil)
 
 	byName := map[string]sdktrace.ReadOnlySpan{}
 	for _, s := range rec.Ended() {
@@ -73,7 +73,22 @@ func TestStoreSpansJoinTheCommand(t *testing.T) {
 		t.Errorf("failed operation not recorded: %+v", s.Status())
 	}
 
-	if byName[spanEntries].Parent().IsValid() {
-		t.Error("span outside a command should be a root span")
+	if _, ok := byName[spanListEntry]; ok {
+		t.Error("store work outside a command must not produce a span")
+	}
+}
+
+// TestNoSpansWithoutACommand: a job walking millions of objects must not
+// turn every store operation into its own trace.
+func TestNoSpansWithoutACommand(t *testing.T) {
+	rec := recordSpans(t)
+	u := &User{}
+
+	u.trace(spanOmapCAS, attrOID("mbox/1"))(nil)
+	u.UseContext(context.Background())
+	u.trace(spanBlobRead, attrGUID("abc"))(errors.New("gone"))
+
+	if n := len(rec.Ended()); n != 0 {
+		t.Fatalf("%d spans without a command", n)
 	}
 }

@@ -82,6 +82,7 @@ func (c *conn) other(owner string) (model.User, error) {
 	}
 
 	c.others[owner] = u
+	model.UseRequest(c.requestContext(), u)
 
 	return u, nil
 }

@@ -10,7 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"shardpost/internal/model"
+	"shardpost/internal/telemetry"
 )
 
 // Run is the execution context of one claimed job.
@@ -208,8 +211,14 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 
 	kind := m.kinds[j.Kind]
 
-	// The store records its operations below the job's span.
+	// One trace per job run: the store records its operations below it,
+	// instead of producing a root span per object it touches.
+	ctx, span := telemetry.Span(ctx, "job."+j.Kind,
+		attribute.String("job.id", j.ID), attribute.String("job.account", j.Account))
+	defer span.End()
+
 	model.UseRequest(ctx, run.User)
+	defer model.UseRequest(context.Background(), run.User)
 
 	if kind.Exclusive() && !m.lock(run, j, gen, log) {
 		return

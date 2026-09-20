@@ -1050,8 +1050,11 @@ func (u *User) quotaChanged(before, after, limit Quota) {
 
 // readHeader reads the header keys of shard 0 and returns the object
 // version they were read at, for compare-and-swap writes.
-func (u *User) readHeader(mb *Mailbox) (*MailboxInfo, uint64, error) {
+func (u *User) readHeader(mb *Mailbox) (hdr *MailboxInfo, version uint64, err error) {
 	defer mh.timer("header_read")()
+
+	end := u.trace(spanHeaderRead, attrOID(mboxOID(mb.ID)))
+	defer func() { end(err) }()
 
 	vals, ver, err := u.getKeysVer(u.idx, mboxOID(mb.ID), []string{keyUIDNext, keyUIDValid, keyModSeq, keyKeywords, keyLogStart, keyShardSize, keyRecent})
 	if err != nil {
@@ -1199,7 +1202,10 @@ func (u *User) writeHeader(mb *Mailbox, ver uint64, set map[string][]byte, rm []
 	}
 
 	done := mh.timer("header_cas")
+	endSpan := u.trace(spanHeaderCAS, attrOID(mboxOID(mb.ID)))
 	err := op.Operate(u.idx, mboxOID(mb.ID), rados.OperationNoFlag)
+
+	endSpan(err)
 	op.Release()
 	done()
 
@@ -1454,8 +1460,11 @@ func (u *User) Vanished(id string, since uint64) ([]uint32, error) {
 
 // ListMessages returns the index records of a mailbox (by id) in UID
 // order, reading all shards in parallel.
-func (u *User) ListMessages(id string) ([]Meta, error) {
+func (u *User) ListMessages(id string) (list []Meta, err error) {
 	defer mh.timer("list_entries")()
+
+	end := u.trace(spanListEntry, attrOID(mboxOID(id)))
+	defer func() { end(err) }()
 
 	n, ss, err := u.listRange(id)
 	if err != nil {
@@ -1546,8 +1555,11 @@ func (u *User) ListMessagesByName(name string) ([]Meta, error) {
 
 // GetMessages returns the records of the given UIDs (missing ones are
 // skipped), grouped by shard and read in parallel.
-func (u *User) GetMessages(id string, uids []uint32) ([]Meta, error) {
+func (u *User) GetMessages(id string, uids []uint32) (found []Meta, err error) {
 	defer mh.timer("get_entries")()
+
+	end := u.trace(spanGetEntry, attrOID(mboxOID(id)), attrCount(len(uids)))
+	defer func() { end(err) }()
 
 	if len(uids) == 0 {
 		return nil, nil
@@ -1695,7 +1707,7 @@ func (u *User) Deliver(name string, raw []byte, flags []string, when time.Time) 
 
 // DeliverGUID is Deliver with a caller-chosen GUID (delivery intents).
 func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when time.Time) (stored *Meta, err error) {
-	end := u.trace(spanDeliver, attrMailbox(name), attrBytes(len(raw)))
+	end := u.trace(spanDeliver, attrBytes(len(raw)))
 	defer func() { end(err) }()
 
 	if g, err := hex.DecodeString(guid); err != nil || len(g) != guidBytes {
@@ -1957,7 +1969,7 @@ func (u *User) Read(m *Meta) ([]byte, error) {
 // STOREs on the same message serialise and an expunged message is never
 // recreated. The commit then records what actually changed.
 func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply func(old []string) []string) (res *model.FlagsResult, err error) {
-	end := u.trace(spanFlags, attrMailbox(name), attrCount(len(uids)))
+	end := u.trace(spanFlags, attrCount(len(uids)))
 	defer func() { end(err) }()
 
 	return u.setFlags(name, uids, unchangedSince, apply, false, 0)
@@ -2289,7 +2301,7 @@ func equalFlags(a, b []string) bool {
 // were actually removed (a stale snapshot may name UIDs another session
 // already expunged; their references are not released twice).
 func (u *User) Expunge(name string, metas []Meta) (err error) {
-	end := u.trace(spanExpunge, attrMailbox(name), attrCount(len(metas)))
+	end := u.trace(spanExpunge, attrCount(len(metas)))
 	defer func() { end(err) }()
 
 	mb, err := u.Lookup(name)
@@ -2472,7 +2484,7 @@ func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[strin
 // for the whole batch is reserved up front (atomically against other
 // writers); what a failed batch did not use is given back.
 func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
-	end := u.trace(spanCopy, attrMailbox(dest), attrCount(len(metas)))
+	end := u.trace(spanCopy, attrCount(len(metas)))
 	defer func() { end(err) }()
 
 	mb, err := u.Lookup(dest)
@@ -2549,7 +2561,7 @@ type moveIntent struct {
 // GUIDs and finishes either way. A crash between 2's reference and its
 // link is a refcount too high, which the scrubber's refcount check fixes.
 func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err error) {
-	end := u.trace(spanMove, attrMailbox(dest), attrCount(len(metas)))
+	end := u.trace(spanMove, attrCount(len(metas)))
 	defer func() { end(err) }()
 
 	smb, err := u.Lookup(src)

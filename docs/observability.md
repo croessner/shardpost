@@ -46,30 +46,40 @@ quantiles are not meaningful.
 
 ## Traces and access
 
-IMAP/POP3 commands, `lmtp.deliver`, `delivery.deliver`, admin requests
-and maintenance jobs are instrumented, and the store reports its own work
-below them. A trace therefore shows where the time of a command actually
-goes:
+One trace is started per unit of work: an IMAP or POP3 command
+(`imap.FETCH`, `pop3.RETR`), a delivery (`lmtp.deliver`,
+`delivery.deliver`), an admin request (`admin.<operation>`, the operation
+label carries no account name) and a maintenance job (`job.<kind>` with
+`job.id`). The store reports its own work below them, so a trace shows
+where the time of a command actually goes:
 
 ```
 imap.FETCH
-├─ store.entries        mailbox, number of entries
+├─ store.get_entries    rados.oid, number of UIDs
 └─ store.blob_read      guid, bytes
 ```
 
-Store spans: `store.deliver`, `store.read`, `store.blob_read`,
-`store.blob_write`, `store.fts_index`, `store.fts_search`,
-`store.entries`, `store.flags`, `store.copy`, `store.move`,
-`store.expunge`, plus `rados.omap_cas` for the central compare-and-swap
-loop. A failed operation carries the error and an error status on its
+Store spans: `store.deliver`, `store.blob_read`, `store.blob_write`,
+`store.fts_index`, `store.fts_search`, `store.header_read`,
+`store.header_cas`, `store.list_entries`, `store.get_entries`,
+`store.flags`, `store.copy`, `store.move`, `store.expunge`, and
+`rados.omap_cas` for the central compare-and-swap loop (the one behind
+most omap writes; `store.header_cas` is the mailbox header in
+particular). The names match the labels of the RADOS metrics where both
+exist. A failed operation carries the error and an error status on its
 span.
 
-The protocol layer hands the context of the running command to the store
-(`model.RequestScoped`); a store that does not implement that interface
-simply produces no store spans. Work that runs outside a command, such as
-a background notifier, produces root spans instead.
+The protocol layers hand the context of the running command to the store
+view (`model.RequestScoped`), including the views of other users' shared
+mailboxes. The store only ever creates **child** spans: work with no
+command above it — a background notifier, a scrub walking a whole
+namespace — produces no spans at all, so a single job cannot turn into
+millions of traces. A store that does not implement the interface
+produces no store spans either.
 
-The traces currently also contain user attributes (`imap.user`, `pop3.user`,
+Store spans deliberately carry no mailbox names, only object ids, counts
+and sizes; mailbox names are user content. The traces currently also
+contain user attributes (`imap.user`, `pop3.user`,
 `lmtp.user`), and for IMAP possibly the mailbox and the peer
 (`imap.mailbox`, `net.peer`). The collector configuration and the access
 rights have to implement the applicable rules for this data. Credentials

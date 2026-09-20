@@ -20,7 +20,7 @@ type RequestScoped interface {
 // store supports it. A nil user or a store without tracing support is
 // ignored, so callers do not have to check.
 func UseRequest(ctx context.Context, u User) {
-	if rs, ok := u.(RequestScoped); ok && u != nil {
+	if rs, ok := u.(RequestScoped); ok {
 		rs.UseContext(ctx)
 	}
 }

@@ -131,6 +131,7 @@ func (s *Service) Deliver(ctx context.Context, req Request) (*Result, error) {
 
 	// The store records its operations below this delivery's span.
 	model.UseRequest(ctx, u)
+	defer model.UseRequest(context.Background(), u)
 
 	r := &run{svc: s, req: req, log: req.Log, u: u}
 	if r.log == nil {

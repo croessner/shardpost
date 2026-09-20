@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"shardpost/internal/model"
 	"shardpost/internal/telemetry"
@@ -37,10 +38,21 @@ func (u *User) reqContext() context.Context {
 	return context.Background()
 }
 
-// trace starts a span for one store operation. The returned function
-// ends it and records a failure; pass nil for success.
+// noSpan is the result of trace without a running command.
+func noSpan(error) {}
+
+// trace starts a span for one store operation, but only below the span
+// of a running command: store work has no trace of its own. A job that
+// walks millions of objects would otherwise produce millions of root
+// traces, each sampled on its own. The returned function ends the span
+// and records a failure; pass nil for success.
 func (u *User) trace(name string, attrs ...attribute.KeyValue) func(error) {
-	_, span := telemetry.Span(u.reqContext(), name, attrs...)
+	ctx := u.reqContext()
+	if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
+		return noSpan
+	}
+
+	_, span := telemetry.Span(ctx, name, attrs...)
 
 	return func(err error) {
 		if err != nil {
@@ -54,23 +66,27 @@ func (u *User) trace(name string, attrs ...attribute.KeyValue) func(error) {
 
 // Span names of the store.
 const (
-	spanDeliver   = "store.deliver"
-	spanRead      = "store.read"
-	spanBlobWrite = "store.blob_write"
-	spanBlobRead  = "store.blob_read"
-	spanFTSIndex  = "store.fts_index"
-	spanFTSSearch = "store.fts_search"
-	spanEntries   = "store.entries"
-	spanFlags     = "store.flags"
-	spanCopy      = "store.copy"
-	spanMove      = "store.move"
-	spanExpunge   = "store.expunge"
-	spanOmapCAS   = "rados.omap_cas"
+	spanDeliver    = "store.deliver"
+	spanBlobWrite  = "store.blob_write"
+	spanBlobRead   = "store.blob_read"
+	spanFTSIndex   = "store.fts_index"
+	spanFTSSearch  = "store.fts_search"
+	spanFlags      = "store.flags"
+	spanCopy       = "store.copy"
+	spanMove       = "store.move"
+	spanExpunge    = "store.expunge"
+	spanHeaderRead = "store.header_read"
+	spanHeaderCAS  = "store.header_cas"
+	spanListEntry  = "store.list_entries"
+	spanGetEntry   = "store.get_entries"
+	spanOmapCAS    = "rados.omap_cas"
 )
 
-// attrMailbox and friends keep the attribute keys in one place.
-func attrMailbox(name string) attribute.KeyValue { return attribute.String("store.mailbox", name) }
-func attrGUID(guid string) attribute.KeyValue    { return attribute.String("store.guid", guid) }
-func attrCount(n int) attribute.KeyValue         { return attribute.Int("store.count", n) }
-func attrBytes(n int) attribute.KeyValue         { return attribute.Int("store.bytes", n) }
-func attrOID(oid string) attribute.KeyValue      { return attribute.String("rados.oid", oid) }
+// Attribute keys, in one place. Mailbox names stay out of traces: they
+// are user content, and the collector filter of the operating profile
+// only knows the protocol attributes. Object ids identify a mailbox
+// where it matters.
+func attrGUID(guid string) attribute.KeyValue { return attribute.String("store.guid", guid) }
+func attrCount(n int) attribute.KeyValue      { return attribute.Int("store.count", n) }
+func attrBytes(n int) attribute.KeyValue      { return attribute.Int("store.bytes", n) }
+func attrOID(oid string) attribute.KeyValue   { return attribute.String("rados.oid", oid) }
