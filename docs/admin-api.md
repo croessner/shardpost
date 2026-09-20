@@ -459,12 +459,15 @@ folder, a team inbox that outlives whoever created it. Clients see them
 under the prefix `Public/` (`server.public_prefix`), the store keeps them
 in the reserved namespace `~public`.
 
+Quote the namespace name: a shell expands `~public` as a home directory
+(zsh errors out, bash leaves it alone).
+
 ```sh
-shardpostctl mailbox create ~public "Announcements"
-shardpostctl acl set ~public "Announcements" anyone lr
-shardpostctl acl set -mode add ~public "Announcements" team@example.org lrswipkxte
-shardpostctl acl explain ~public "Announcements" user@example.org
-shardpostctl mailbox list -all ~public
+shardpostctl mailbox create '~public' "Announcements"
+shardpostctl acl set '~public' "Announcements" anyone lr
+shardpostctl acl set -mode add '~public' "Announcements" team@example.org lrswipkxte
+shardpostctl acl explain '~public' "Announcements" user@example.org
+shardpostctl mailbox list -all '~public'
 ```
 
 - **Administration** uses the same operations as an account: the API
@@ -483,7 +486,7 @@ shardpostctl mailbox list -all ~public
   `server.public_quota_bytes` and `server.public_quota_msgs` (0 =
   unlimited). A message in a public folder does not count against any
   account, which is what Dovecot does as well.
-- **Backup:** `shardpostctl export -o public.tar ~public` and `restore`
+- **Backup:** `shardpostctl export -o public.tar '~public'` and `restore`
   work like they do for an account. `acl_reconcile` is refused for
   `~public`: there are no pointers to reconcile.
 - **Switching them off:** an empty `server.public_prefix` disables the

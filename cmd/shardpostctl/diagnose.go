@@ -369,7 +369,13 @@ func printACL(stdout io.Writer, a diagArgs, acl *adminapi.MailboxACL, etag strin
 		return printJSON(stdout, acl)
 	}
 
-	rows := [][2]string{{acl.Owner, model.AllRights + " (owner)"}}
+	var rows [][2]string
+
+	// A public folder has no owner: only the entries grant rights.
+	if !model.IsPublic(acl.Owner) {
+		rows = append(rows, [2]string{acl.Owner, model.AllRights + " (owner)"})
+	}
+
 	for _, e := range acl.Entries {
 		rows = append(rows, [2]string{e.Identifier, e.Rights})
 	}
