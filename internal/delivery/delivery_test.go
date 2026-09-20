@@ -534,4 +534,10 @@ func checkExplicitResult(t *testing.T, res *Result, err error, want error, mailb
 	if len(res.Stored) != 1 {
 		t.Fatalf("stored %+v, want one message in %s", res.Stored, mailbox)
 	}
+
+	// The result names the mailbox as the store knows it, not as the
+	// caller happened to spell it.
+	if want := canonicalMailbox(mailbox); res.Stored[0].Mailbox != want {
+		t.Errorf("stored in %q, want %q", res.Stored[0].Mailbox, want)
+	}
 }
