@@ -484,7 +484,15 @@ shardpostctl mailbox list -all ~public
   unlimited). A message in a public folder does not count against any
   account, which is what Dovecot does as well.
 - **Backup:** `shardpostctl export -o public.tar ~public` and `restore`
-  work like they do for an account.
+  work like they do for an account. `acl_reconcile` is refused for
+  `~public`: there are no pointers to reconcile.
+- **Switching them off:** an empty `server.public_prefix` disables the
+  namespace for clients (no entry in `NAMESPACE`, no extra reads per
+  `LIST`); the folders stay in the store and remain administrable. While
+  it is off, an account can create a mailbox of its own called
+  `Public/...`; once the prefix is in use again, such a mailbox is
+  shadowed by the public namespace. The same applies to an account that
+  already had a mailbox named `Public` before the feature existed.
 
 ## Protocol trace for an account
 

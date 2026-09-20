@@ -261,7 +261,14 @@ func (s aclSummary) Touched() []string { return s.Accounts }
 type aclReconcile struct{ kindBase }
 
 func (k *aclReconcile) Plan(_ context.Context, env *Env, u model.User, account string, _ json.RawMessage) (any, string, error) {
+	// Public folders have no pointers to reconcile; planning "missing"
+	// ones would report repairs that are never written.
+	if model.IsPublic(account) {
+		return nil, "", fmt.Errorf("%w: public folders have no share pointers", ErrInvalidParams)
+	}
+
 	s, err := reconcileFixes(env, u, account)
+
 	return s, "", err
 }
 
@@ -1010,13 +1017,35 @@ func revokeGrantsOut(run *Run, plan purgeSummary, _ *purgeCheckpoint) error {
 
 // revokeGrantsIn removes the ACL entries others gave the account.
 func revokeGrantsIn(run *Run, plan purgeSummary, _ *purgeCheckpoint) error {
-	for _, g := range plan.GrantsIn {
+	grants := plan.GrantsIn
+
+	// Public grants carry no pointer, so one added between plan and
+	// apply would otherwise survive the purge. Reading them again is one
+	// listing.
+	if fresh, err := publicGrants(run.Env, run.Job.Account); err == nil {
+		grants = mergeGrants(grants, fresh)
+	} else {
+		run.Partial("read public grants: %v", err)
+	}
+
+	for _, g := range grants {
 		if err := revokeAt(run.Env, g, run.Job.Account); err != nil {
 			run.Partial("revoke at %s/%s: %v", g.Owner, g.Mailbox, err)
 		}
 	}
 
 	return nil
+}
+
+// mergeGrants appends the grants of b that a does not have.
+func mergeGrants(a, b []grantIn) []grantIn {
+	for _, g := range b {
+		if !slices.Contains(a, g) {
+			a = append(a, g)
+		}
+	}
+
+	return a
 }
 
 func revokeAt(env *Env, g grantIn, account string) error {

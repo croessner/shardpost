@@ -593,6 +593,7 @@ func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
 
 	nodes := map[string]bool{}
 	prefix := c.publicPrefix()
+	c.dropStalePublicSubs(boxes, subs)
 
 	for i := range boxes {
 		// The rights come with the registry entry; a second read per
@@ -618,6 +619,25 @@ func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
 	}
 
 	return entries, nodes, nil
+}
+
+// dropStalePublicSubs removes subscriptions to public folders that no
+// longer exist, one CAS per leftover and only once.
+func (c *conn) dropStalePublicSubs(boxes []model.Mailbox, subs map[string]bool) {
+	if len(subs) == 0 {
+		return
+	}
+
+	live := make(map[string]bool, len(boxes))
+	for i := range boxes {
+		live[boxes[i].ID] = true
+	}
+
+	for id := range subs {
+		if !live[id] {
+			_ = c.user.SetPublicSubscribed(id, false)
+		}
+	}
 }
 
 // collectShared resolves the account's shared-mailbox pointers to the
