@@ -136,9 +136,10 @@ YAML only. It is switched on through the Admin API (role `trace`), see
 | --- | --- | --- |
 | `server.shared_prefix` | `Shared/` | client-visible prefix of the mailboxes other accounts share, addressed as `<prefix><account>/<mailbox>` (must end with the separator); empty takes the namespace away from clients |
 
-A server whose users come from another one keeps their names by setting
-what they are used to, for example `Other Users/` (Exchange, older
-Dovecot setups) or `shared/` (Dovecot's own default). Changing the
+A prefix is one level and ends with the separator, for example
+`Other Users/` (Exchange, older Dovecot setups) or `shared/` (Dovecot's
+own default) — a server whose users come from another one keeps their
+names by setting what they are used to. Changing the
 prefix renames what clients see: the mailboxes and their permissions
 stay as they are, but every client re-discovers the folders under the
 new name and treats them as new ones locally — local caches, folder

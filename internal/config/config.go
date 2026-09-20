@@ -473,6 +473,12 @@ func checkPrefixChars(p string) error {
 		return fmt.Errorf("a namespace prefix must name a level: %q", p)
 	}
 
+	// One level, so that LIST can show the namespace where a client
+	// walking the hierarchy with "%" finds it.
+	if strings.Count(p, "/") != 1 {
+		return fmt.Errorf("a namespace prefix must be a single level: %q", p)
+	}
+
 	for _, r := range p {
 		switch {
 		case r == '"' || r == '\\' || r == '*' || r == '%':

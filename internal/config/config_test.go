@@ -193,6 +193,7 @@ func TestNamespacePrefixes(t *testing.T) {
 		{"the delimiter alone", "/", "Public/", true},
 		{"an empty level", "Shared//", "Public/", true},
 		{"a space is fine", "Other Users/", "Public/", false},
+		{"more than one level", "Shared/Other/", "Public/", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Config{}

@@ -28,7 +28,7 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 		return nil, err
 	}
 
-	intents, err := r.beginIntents(targets, len(d.FileInto) > 1)
+	intents, err := r.beginIntents(targets, len(targets) > 1)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +99,21 @@ func (r *run) resolve(files []sieve.FileInto) ([]target, []sieve.FileInto, error
 	}
 
 	return targets, kept, nil
+}
+
+// canonicalMailbox folds the name the way the store does, so that two
+// spellings of the same mailbox are one target: INBOX is
+// case-insensitive, and so is the INBOX part of a name below it.
+func canonicalMailbox(name string) string {
+	if strings.EqualFold(name, inboxName) {
+		return inboxName
+	}
+
+	if i := strings.Index(name, "/"); i == len(inboxName) && strings.EqualFold(name[:i], inboxName) {
+		return inboxName + name[i:]
+	}
+
+	return name
 }
 
 // intent is a delivery intent in one namespace.
@@ -232,6 +247,10 @@ func (r *run) ownTarget(name string) target {
 
 		return target{u: r.u, mailbox: inboxName, where: inboxName}
 	}
+
+	// Fold the name as the store does, so that two spellings of the
+	// same mailbox are one target and the result reports one name.
+	name = canonicalMailbox(name)
 
 	return target{u: r.u, mailbox: name, where: name}
 }

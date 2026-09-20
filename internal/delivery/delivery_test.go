@@ -425,6 +425,7 @@ func TestRefusedFileIntoDoesNotDuplicate(t *testing.T) {
 		{"a keep beside it", `require ["fileinto", "copy"]; fileinto :copy "Shared/a@example.org/X";`},
 		{"two refused targets", `require "fileinto"; fileinto "Shared/a@example.org/X"; fileinto "Shared/b@example.org/Y";`},
 		{"INBOX named as well", `require "fileinto"; fileinto "INBOX"; fileinto "Shared/a@example.org/X";`},
+		{"INBOX in another spelling", `require "fileinto"; fileinto "inbox"; fileinto "Shared/a@example.org/X";`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, store := testService(t, tc.script)
