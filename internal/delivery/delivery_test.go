@@ -281,3 +281,57 @@ func messagesIn(u model.User, name string) ([]model.Meta, error) {
 
 	return u.ListMessages(mb.ID)
 }
+
+// TestFileIntoPublicFolderAndKeep: a script that files a copy into a
+// public folder and keeps the message delivers into two namespaces. The
+// delivery intent that a multi-target delivery opens must exist in both,
+// because an intent — like the rollback it exists for — only finds a
+// message in the namespace that holds it.
+func TestFileIntoPublicFolderAndKeep(t *testing.T) {
+	script := `require ["fileinto", "copy"]; fileinto :copy "Public/Support";`
+
+	svc, store := testService(t, script)
+	svc.PublicPrefix = "Public/"
+
+	pub, err := store.User(model.PublicNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.EnsureMailbox("Support", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.SetACL("Support", account, "lrp"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Deliver(context.Background(), request(message))
+	if err != nil {
+		t.Fatalf("delivery into two namespaces: %v", err)
+	}
+
+	if len(res.Stored) != 2 {
+		t.Fatalf("stored %+v, want the public copy and the kept message", res.Stored)
+	}
+
+	msgs, err := messagesIn(pub, "Support")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(msgs) != 1 {
+		t.Errorf("%d messages in the public folder, want 1", len(msgs))
+	}
+
+	u, _ := store.User(account)
+
+	own, err := messagesIn(u, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(own) != 1 {
+		t.Errorf("%d messages in INBOX, want 1", len(own))
+	}
+}

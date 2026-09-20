@@ -54,6 +54,12 @@ func (c *conn) poll(allowExpunge bool) error {
 	if err != nil {
 		return c.pollReload(allowExpunge)
 	}
+	// In a public folder a change may be a mark of this account set by
+	// another of its sessions: that is not in the shared record, so the
+	// marks are re-read before the fresh records are overlaid.
+	if err := c.loadPrivateSeen(); err != nil {
+		return c.pollReload(allowExpunge)
+	}
 	// A UID announced by a committed change but not readable was either
 	// expunged by a change beyond "reached" (announced there) or lost by
 	// a crashed writer (pending expired): skip it, never stall on it.
@@ -528,23 +534,48 @@ func (c *conn) cmdStore(tag string, uid bool) error {
 		uids[i] = m.UID
 	}
 
-	apply, err = c.splitPrivateSeen(op, flags, uids, apply)
+	ps, apply, err := c.splitPrivateSeen(args, metas, apply)
 	if err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
 
-	res, err := c.mu.SetFlags(c.mbox.Name, uids, unchangedSince, apply)
+	// A message whose private mark failed UNCHANGEDSINCE fails as a
+	// whole: RFC 7162 conditions the message, not one of its flags.
+	res, err := c.mu.SetFlags(c.mbox.Name, without(uids, ps.modified), unchangedSince, apply)
 	if err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
 
+	c.mergePrivate(res, ps, metas)
 	c.privateOverlay(res.Updated)
 
 	c.storeResult(tag, res, seqs, metas, silent, unchangedSince != 0, uid)
 
 	return nil
+}
+
+// without returns the UIDs of a without those in b, keeping the order.
+func without(a, b []uint32) []uint32 {
+	if len(b) == 0 {
+		return a
+	}
+
+	drop := make(map[uint32]bool, len(b))
+	for _, uid := range b {
+		drop[uid] = true
+	}
+
+	out := make([]uint32, 0, len(a))
+
+	for _, uid := range a {
+		if !drop[uid] {
+			out = append(out, uid)
+		}
+	}
+
+	return out
 }
 
 // storeResult reports the outcome of a STORE: the FETCH responses, the

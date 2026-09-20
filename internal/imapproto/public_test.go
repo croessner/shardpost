@@ -1,6 +1,7 @@
 package imapproto
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -221,5 +222,225 @@ func TestPublicPrivateSeen(t *testing.T) {
 
 	if lines := strings.Join(bob.cmd(`STATUS Public/Team (UNSEEN)`), "\n"); !strings.Contains(lines, "UNSEEN 0") {
 		t.Errorf("bob's state changed with alice's: %s", lines)
+	}
+}
+
+// highestModSeq reads HIGHESTMODSEQ of a mailbox through STATUS.
+func highestModSeq(t *testing.T, c *client, mailbox string) uint64 {
+	t.Helper()
+
+	lines := strings.Join(c.cmd("STATUS %s (HIGHESTMODSEQ)", mailbox), "\n")
+
+	i := strings.Index(lines, "HIGHESTMODSEQ ")
+	if i < 0 {
+		t.Fatalf("no HIGHESTMODSEQ: %s", lines)
+	}
+
+	var n uint64
+	if _, err := fmt.Sscan(strings.TrimLeft(lines[i+len("HIGHESTMODSEQ "):], " "), &n); err != nil {
+		t.Fatalf("HIGHESTMODSEQ: %s", lines)
+	}
+
+	return n
+}
+
+// TestPublicPrivateSeenModSeq: a private \Seen is a change of the public
+// mailbox like any other. Its MODSEQ comes from the mailbox's own
+// counter, so it neither collides with the next shared change nor
+// stalls a session: the STORE reports the new state, CHANGEDSINCE finds
+// it, and a shared change made afterwards by somebody else still
+// reaches the account that read first.
+func TestPublicPrivateSeenModSeq(t *testing.T) {
+	alice, store := newTestServer(t, func(o *Options, _ *memstore.Store) {
+		o.Auth = auth.Static{"alice": "pw", "bob": "pw"}
+	})
+	defer func() { _ = alice.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	bob, _ := newTestServerClient(t, alice)
+	defer func() { _ = bob.conn.Close() }()
+
+	alice.ok("LOGIN alice pw")
+	bob.ok("LOGIN bob pw")
+
+	for _, c := range []*client{alice, bob} {
+		c.ok("ENABLE CONDSTORE")
+		c.ok("SELECT Public/Team")
+	}
+
+	before := highestModSeq(t, alice, "Public/Team")
+
+	// The STORE must report the message although nothing shared changed.
+	lines := strings.Join(alice.cmd(`STORE 1 +FLAGS (\Seen)`), "\n")
+	if !strings.Contains(lines, "FETCH") || !strings.Contains(lines, `\Seen`) {
+		t.Fatalf("private store without a FETCH response: %s", lines)
+	}
+
+	after := highestModSeq(t, alice, "Public/Team")
+	if after <= before {
+		t.Fatalf("HIGHESTMODSEQ %d did not move past %d", after, before)
+	}
+
+	if lines := strings.Join(alice.cmd("FETCH 1 (FLAGS) (CHANGEDSINCE %d)", before), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("CHANGEDSINCE %d does not report the private change: %s", before, lines)
+	}
+
+	// The number the private change took must not be handed out again:
+	// bob's shared change has to reach alice.
+	bob.ok(`STORE 1 +FLAGS (\Flagged)`)
+
+	if lines := strings.Join(alice.cmd("NOOP"), "\n"); !strings.Contains(lines, `\Flagged`) {
+		t.Errorf("shared change after a private one did not reach the other session: %s", lines)
+	}
+}
+
+// TestPublicPrivateSeenOtherSession: a second session of the same
+// account learns of a mark set by the first one, although the mark is
+// in no shared record.
+func TestPublicPrivateSeenOtherSession(t *testing.T) {
+	first, store := newTestServer(t)
+	defer func() { _ = first.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	second, _ := newTestServerClient(t, first)
+	defer func() { _ = second.conn.Close() }()
+
+	for _, c := range []*client{first, second} {
+		c.ok("LOGIN test test")
+		c.ok("SELECT Public/Team")
+	}
+
+	first.ok(`STORE 1 +FLAGS (\Seen)`)
+
+	if lines := strings.Join(second.cmd("NOOP"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("the account's other session did not learn of its own mark: %s", lines)
+	}
+
+	if lines := strings.Join(second.cmd("FETCH 1 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("snapshot of the other session: %s", lines)
+	}
+}
+
+// TestPublicPrivateSeenUnchangedSince: a conditional STORE fails for a
+// message whose private mark is newer than the client's MODSEQ, and
+// leaves the mark as it is.
+func TestPublicPrivateSeenUnchangedSince(t *testing.T) {
+	c, store := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	c.ok("LOGIN test test")
+	c.ok("ENABLE CONDSTORE")
+	c.ok("SELECT Public/Team")
+
+	before := highestModSeq(t, c, "Public/Team")
+	c.ok(`STORE 1 +FLAGS (\Seen)`)
+
+	lines := strings.Join(c.cmd(`STORE 1 (UNCHANGEDSINCE %d) -FLAGS (\Seen)`, before), "\n")
+	if !strings.Contains(lines, "MODIFIED 1") {
+		t.Errorf("conditional store against an older MODSEQ: %s", lines)
+	}
+
+	if lines := strings.Join(c.cmd("FETCH 1 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("the refused store changed the mark anyway: %s", lines)
+	}
+}
+
+// TestPublicPrivateSeenPruned: marks of messages that are gone do not
+// pile up. Nobody can clean up another account's namespace, so each
+// account does it when it opens the folder.
+func TestPublicPrivateSeenPruned(t *testing.T) {
+	c, store := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	pub := publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	c.ok("LOGIN test test")
+	c.ok("SELECT Public/Team")
+	c.ok(`STORE 1 +FLAGS (\Seen)`)
+	c.ok("CLOSE")
+
+	mb, err := pub.Lookup("Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := pub.ListMessages(mb.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.Expunge("Team", msgs); err != nil {
+		t.Fatal(err)
+	}
+
+	c.ok("SELECT Public/Team")
+
+	u, err := store.User("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marks, err := u.PrivateSeen(mb.ID, mb.UIDValidity)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(marks) != 0 {
+		t.Errorf("marks of expunged messages kept: %+v", marks)
+	}
+}
+
+// TestPublicSharedSeenIsTheDefault: a message that arrives read — from
+// a delivery, an APPEND or a migration — is read for everyone who has
+// no mark of their own yet, and a shared flag set by somebody else does
+// not change that. Only the account's own mark overrides it, and only
+// for that account.
+func TestPublicSharedSeenIsTheDefault(t *testing.T) {
+	alice, store := newTestServer(t, func(o *Options, _ *memstore.Store) {
+		o.Auth = auth.Static{"alice": "pw", "bob": "pw"}
+	})
+	defer func() { _ = alice.conn.Close() }()
+
+	pub := publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	if _, err := pub.Deliver("Team", []byte("Subject: read\r\n\r\nalready read\r\n"), []string{flagSeenLower}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	bob, _ := newTestServerClient(t, alice)
+	defer func() { _ = bob.conn.Close() }()
+
+	alice.ok("LOGIN alice pw")
+	bob.ok("LOGIN bob pw")
+
+	for _, c := range []*client{alice, bob} {
+		c.ok("SELECT Public/Team")
+	}
+
+	if lines := strings.Join(alice.cmd("FETCH 2 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Fatalf("a message delivered as read is unread without a mark: %s", lines)
+	}
+
+	// A shared flag from somebody else must not touch it.
+	bob.ok(`STORE 2 +FLAGS (\Flagged)`)
+	alice.ok("NOOP")
+
+	if lines := strings.Join(alice.cmd("FETCH 2 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("another account's flag cleared the default: %s", lines)
+	}
+
+	// Alice's own mark decides for her, and only for her.
+	alice.ok(`STORE 2 -FLAGS (\Seen)`)
+
+	if lines := strings.Join(alice.cmd("FETCH 2 (FLAGS)"), "\n"); strings.Contains(lines, `\Seen`) {
+		t.Errorf("alice's own mark was not applied: %s", lines)
+	}
+
+	if lines := strings.Join(bob.cmd(`STATUS Public/Team (UNSEEN)`), "\n"); !strings.Contains(lines, "UNSEEN 1") {
+		t.Errorf("alice's mark changed bob's unread count: %s", lines)
 	}
 }

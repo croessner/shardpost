@@ -86,20 +86,21 @@ func (u *User) trace(name string, attrs ...attribute.KeyValue) func(error) {
 
 // Span names of the store.
 const (
-	spanDeliver    = "store.deliver"
-	spanBlobWrite  = "store.blob_write"
-	spanBlobRead   = "store.blob_read"
-	spanFTSIndex   = "store.fts_index"
-	spanFTSSearch  = "store.fts_search"
-	spanFlags      = "store.flags"
-	spanCopy       = "store.copy"
-	spanMove       = "store.move"
-	spanExpunge    = "store.expunge"
-	spanHeaderRead = "store.header_read"
-	spanHeaderCAS  = "store.header_cas"
-	spanListEntry  = "store.list_entries"
-	spanGetEntry   = "store.get_entries"
-	spanOmapCAS    = "rados.omap_cas"
+	spanDeliver     = "store.deliver"
+	spanBlobWrite   = "store.blob_write"
+	spanBlobRead    = "store.blob_read"
+	spanFTSIndex    = "store.fts_index"
+	spanFTSSearch   = "store.fts_search"
+	spanFlags       = "store.flags"
+	spanTouchModSeq = "store.touch_modseq"
+	spanCopy        = "store.copy"
+	spanMove        = "store.move"
+	spanExpunge     = "store.expunge"
+	spanHeaderRead  = "store.header_read"
+	spanHeaderCAS   = "store.header_cas"
+	spanListEntry   = "store.list_entries"
+	spanGetEntry    = "store.get_entries"
+	spanOmapCAS     = "rados.omap_cas"
 )
 
 // Attribute keys, in one place. Mailbox names stay out of traces: they

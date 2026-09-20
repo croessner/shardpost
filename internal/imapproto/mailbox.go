@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1037,16 +1038,16 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 		d.size += m.Size
 	}
 
-	if t.public {
-		// "Unread" is per account here, and so is the modseq of the
-		// account's own marks.
-		unseen, pmodseq, err := c.publicUnseen(info.ID, info.UIDValidity, msgs)
+	if t.public && slices.Contains(items, "UNSEEN") {
+		// "Unread" is per account here: the shared record says nothing
+		// about this account, so its own marks decide. The marks are
+		// read only when the client asks for the count.
+		unseen, err := c.publicUnseen(info.ID, info.UIDValidity, msgs)
 		if err != nil {
 			return "", err
 		}
 
 		d.unseen = unseen
-		d.info.HighestModSeq = max(d.info.HighestModSeq, pmodseq)
 	}
 
 	var out []string
@@ -1493,6 +1494,8 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
 		return "", false
 	}
 
+	c.prunePrivateSeen()
+
 	return rights, true
 }
 
@@ -1722,7 +1725,6 @@ func (c *conn) reload() error {
 	}
 
 	c.privateOverlay(c.msgs)
-	c.info.HighestModSeq = c.effectiveModSeq(c.info.HighestModSeq)
 
 	return nil
 }

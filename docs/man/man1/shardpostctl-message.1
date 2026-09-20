@@ -143,6 +143,14 @@ skips every message whose MODSEQ is higher, which is the CONDSTORE rule:
 those UIDs come back as
 .I modified
 and keep their flags.
+.PP
+In a public folder
+.RB ( ~public )
+.I \eSeen
+is the shared default: it is what everyone sees who has not read the
+message yet, and setting it here does not mark the message read for one
+particular person — each account keeps its own mark, in its own
+namespace, and that mark wins from the moment it exists.
 Role:
 .BR support .
 .SS copy, move

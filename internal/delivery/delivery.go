@@ -79,7 +79,7 @@ func (r *run) closeOpened() {
 		u.Close()
 	}
 
-	r.opened = nil
+	r.opened, r.pub = nil, nil
 }
 
 // Request is one message for one recipient.
@@ -129,8 +129,10 @@ type run struct {
 	log *slog.Logger
 	u   model.User
 	// opened are further namespaces this delivery filed into (public
-	// folders); they are closed with the delivery.
+	// folders); they are closed with the delivery. pub is the public
+	// namespace among them, opened at most once.
 	opened []model.User
+	pub    model.User
 }
 
 // Deliver runs the recipient's Sieve script (unless disabled) and stores

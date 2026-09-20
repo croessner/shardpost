@@ -364,9 +364,8 @@ type conn struct {
 	mpublic bool // the selected mailbox is a public folder
 	mprefix string
 	// pseen are the account's private \Seen marks of the selected public
-	// folder, pmodseq their counter (see private.go).
+	// folder (see private.go).
 	pseen      map[uint32]model.PrivateMark
-	pmodseq    uint64
 	mrights    string
 	mbox       *model.Mailbox
 	info       *model.MailboxInfo

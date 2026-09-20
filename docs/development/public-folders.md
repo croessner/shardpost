@@ -50,19 +50,32 @@ the new state.
    Every other flag and every keyword is shared, which is what makes a
    team folder useful: "answered" and "flagged" are statements about the
    folder, "read" is a statement about a person. This follows Dovecot,
-   where the private index holds `\Seen` and nothing else.
-7. **MODSEQ.** In package A every flag is shared, so the mailbox MODSEQ
-   stays correct and nothing changes. Package B keeps it correct rather
-   than giving up: the private object carries its own counter per
-   account, and a session reports the higher of the two. `NOMODSEQ`
-   (RFC 7162 3.1.2.2) would be the honest fallback for a wrong MODSEQ,
-   but it forces a full flag synchronization on every SELECT, which for
-   a large public archive is exactly the cost we avoid elsewhere. The
-   format of the private object is therefore fixed in B from the start:
-   key `(mailbox id, UIDVALIDITY, UID)`, value the private flags and the
-   counter. Entries whose message is gone are ignored and cleaned up
-   lazily, because an EXPUNGE by one account cannot touch another
-   account's namespace.
+   where the private index holds `\Seen` and nothing else. The shared
+   `\Seen` of the message stays what a delivery, an APPEND or a
+   migration put there and is the state for everyone who has no mark of
+   their own yet; a STORE never changes it, it writes the account's own
+   mark. So a message that arrives read is read for everybody until
+   somebody says otherwise for themselves.
+7. **MODSEQ.** A private mark is a change of the public mailbox like
+   any other, and it takes its MODSEQ from that mailbox's counter: the
+   session allocates the next number there, announces the UIDs in the
+   change log and writes the mark under that number. So there is one
+   number space per mailbox, `HIGHESTMODSEQ` advances when somebody
+   marks a message read, and CONDSTORE and QRESYNC work for private and
+   shared changes alike. A private counter of its own would collide
+   with the next shared change — a client filtering on `> value` would
+   then miss it — and `NOMODSEQ` (RFC 7162 3.1.2.2) would force a full
+   flag synchronization on every SELECT, which for a large public
+   archive is exactly the cost we avoid elsewhere. Other accounts see
+   the change as a FETCH whose flags did not change for them, which
+   costs one record read and is allowed; the other sessions of the same
+   account re-read their marks and report the new state. The mark is
+   written while the change is still pending, so no session learns of
+   the number before the mark is in place. Key of a mark:
+   `(mailbox id, UIDVALIDITY, UID)`. An EXPUNGE by one account cannot
+   reach into another account's namespace, so every account drops the
+   marks of messages that are gone when it opens the folder, at most
+   1000 per SELECT.
 8. **Quota.** The namespace counts its own usage, like every namespace
    here. The limit comes from the configuration
    (`server.public_quota_bytes`, `server.public_quota_msgs`, default 0 =
@@ -111,11 +124,19 @@ the public namespace with the `p` right.
 
 Copying out of a public folder into a private mailbox takes the copying
 account's `\Seen` with it; a copy inside the public namespace cannot
-carry everyone else's private marks and loses them, as it does in
-Dovecot. The shared `\Seen` flags from package A become the starting
-point "seen by everyone".
+carry everyone else's private marks, so the copying account's state
+becomes the new shared default, and everyone else starts from there.
+
+A delivery that files into a public folder and keeps the message writes
+into two namespaces. Its delivery intent — what lets the scrubber roll
+back a half-finished delivery after a crash — therefore exists in both:
+an intent, like the rollback it exists for, only finds a message in the
+namespace that holds it.
 
 Acceptance: two accounts read the same folder and see their own
 `\Seen`; `STATUS UNSEEN` differs between them; a flag other than `\Seen`
 set by one is visible to the other; a Sieve script files into a public
-folder when it has `p` and is refused without it.
+folder when it has `p` and is refused without it. For CONDSTORE
+clients: a private mark moves `HIGHESTMODSEQ`, is reported by the STORE
+itself, is found by `CHANGEDSINCE`, reaches the account's other
+sessions, and a shared change made after it still reaches everyone.

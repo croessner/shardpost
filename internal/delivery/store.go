@@ -16,76 +16,132 @@ import (
 // stored, so the scrubber can roll back after a crash at any point; the
 // intent must be gone before the caller hears of success, otherwise a
 // later rollback would delete confirmed mail.
+//
+// A message filed into a public folder lies in the public namespace, so
+// its intent is kept there as well: an intent, like a rollback, only
+// finds a message in the namespace that holds it.
 func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
-	u, user := r.u, r.req.Account
+	user := r.req.Account
 
-	var done []delivered
+	targets := make([]target, 0, len(d.FileInto))
 
-	intent := ""
-
-	if len(d.FileInto) > 1 {
-		id, err := u.BeginDelivery()
+	for _, f := range d.FileInto {
+		t, err := r.target(f.Mailbox)
 		if err != nil {
 			return nil, err
 		}
 
-		intent = id
+		targets = append(targets, t)
 	}
+
+	intents, err := r.beginIntents(targets, len(d.FileInto) > 1)
+	if err != nil {
+		return nil, err
+	}
+
+	var done []delivered
 
 	fail := func(err error) ([]Stored, error) {
 		if r.rollback(done) {
-			_ = u.EndDelivery(intent) // nothing left to roll back
+			_ = r.endIntents(intents) // nothing left to roll back
 		}
 
 		return nil, err
 	}
-	for _, f := range d.FileInto {
-		meta, where, err := r.storeOne(intent, raw, f)
+
+	for i, f := range d.FileInto {
+		meta, err := r.storeOne(intents, targets[i], raw, f)
 		if err != nil {
 			return fail(err)
 		}
 
-		done = append(done, delivered{where, *meta})
-		r.log.Info("delivered", "user", user, "from", r.req.From, "mailbox", where, "uid", meta.UID, "guid", meta.GUID, "size", meta.Size)
+		done = append(done, delivered{targets[i], *meta})
+		r.log.Info("delivered", "user", user, "from", r.req.From, "mailbox", targets[i].where, "uid", meta.UID, "guid", meta.GUID, "size", meta.Size)
 	}
 
-	if err := u.EndDelivery(intent); err != nil {
+	if err := r.endIntents(intents); err != nil {
 		r.log.Error("delivery intent removal failed, rolling back", "user", user, "err", err)
 		return fail(fmt.Errorf("delivery intent removal: %w", err))
 	}
 
 	stored := make([]Stored, 0, len(done))
 	for _, d := range done {
-		stored = append(stored, Stored{Mailbox: d.mailbox, UID: d.meta.UID, GUID: d.meta.GUID, Size: d.meta.Size})
+		stored = append(stored, Stored{Mailbox: d.target.where, UID: d.meta.UID, GUID: d.meta.GUID, Size: d.meta.Size})
 	}
 
 	return stored, nil
 }
 
-// storeOne records the target in the intent and stores the message (or
-// the target's own edited copy) there. It returns where the message
-// actually landed, which differs from the requested mailbox when a
-// public folder was refused.
-func (r *run) storeOne(intent string, raw []byte, f sieve.FileInto) (*model.Meta, string, error) {
-	u, name, pub, err := r.target(f.Mailbox)
-	if err != nil {
-		return nil, "", err
+// intent is a delivery intent in one namespace.
+type intent struct {
+	u  model.User
+	id string
+}
+
+// beginIntents opens one intent per namespace the delivery files into.
+// A single target needs none: it either lands or it does not.
+func (r *run) beginIntents(targets []target, multi bool) ([]intent, error) {
+	if !multi {
+		return nil, nil
 	}
 
-	where := f.Mailbox
-	f.Mailbox = name
+	var intents []intent
 
-	if !pub {
-		where = name
+	for _, t := range targets {
+		if intentOf(intents, t.u) != "" {
+			continue
+		}
 
-		if err := u.EnsureMailbox(f.Mailbox, nil); err != nil {
-			return nil, "", err
+		id, err := t.u.BeginDelivery()
+		if err != nil {
+			_ = r.endIntents(intents)
+
+			return nil, err
+		}
+
+		intents = append(intents, intent{u: t.u, id: id})
+	}
+
+	return intents, nil
+}
+
+// intentOf returns the intent of a namespace, empty when there is none.
+func intentOf(intents []intent, u model.User) string {
+	for _, in := range intents {
+		if in.u == u {
+			return in.id
+		}
+	}
+
+	return ""
+}
+
+// endIntents removes the intents; the first failure is returned, the
+// others are still attempted.
+func (r *run) endIntents(intents []intent) error {
+	var first error
+
+	for _, in := range intents {
+		if err := in.u.EndDelivery(in.id); err != nil && first == nil {
+			first = err
+		}
+	}
+
+	return first
+}
+
+// storeOne records the target in the intent of its namespace and stores
+// the message (or the target's own edited copy) there.
+func (r *run) storeOne(intents []intent, t target, raw []byte, f sieve.FileInto) (*model.Meta, error) {
+	if !t.public {
+		if err := t.u.EnsureMailbox(t.mailbox, nil); err != nil {
+			return nil, err
 		}
 	}
 
 	guid := model.NewGUID()
-	if err := r.u.RecordDelivery(intent, f.Mailbox, guid); err != nil {
-		return nil, "", err
+	if err := t.u.RecordDelivery(intentOf(intents, t.u), t.mailbox, guid); err != nil {
+		return nil, err
 	}
 
 	body := f.Raw
@@ -93,9 +149,18 @@ func (r *run) storeOne(intent string, raw []byte, f sieve.FileInto) (*model.Meta
 		body = raw
 	}
 
-	meta, err := u.DeliverGUID(f.Mailbox, guid, body, f.Flags, r.now())
+	return t.u.DeliverGUID(t.mailbox, guid, body, f.Flags, r.now())
+}
 
-	return meta, where, err
+// target is a resolved fileinto destination: the namespace that stores
+// the message, the mailbox name inside it and the name everyone else
+// uses for it (a public folder keeps its client-facing name in reports
+// and in the Sieve result).
+type target struct {
+	u       model.User
+	mailbox string
+	where   string
+	public  bool
 }
 
 // target resolves a fileinto destination. A name under the public
@@ -103,30 +168,45 @@ func (r *run) storeOne(intent string, raw []byte, f sieve.FileInto) (*model.Meta
 // on that folder and an existing folder: a delivery does not create
 // public folders. Without the right the message falls back to INBOX,
 // the way a failed fileinto does.
-func (r *run) target(name string) (u model.User, mailbox string, public bool, err error) {
+func (r *run) target(name string) (target, error) {
 	prefix := r.svc.PublicPrefix
 	if prefix == "" || !strings.HasPrefix(name, prefix) {
-		return r.u, name, false, nil
+		return target{u: r.u, mailbox: name, where: name}, nil
 	}
 
 	folder := strings.TrimPrefix(name, prefix)
 
-	pub, err := r.svc.Store.User(model.PublicNamespace)
+	pub, err := r.publicUser()
 	if err != nil {
-		return nil, "", false, err
+		return target{}, err
 	}
 
 	acl, err := pub.GetACL(folder)
 	if err != nil || !model.HasRight(model.EffectiveRights(acl, r.req.Account), 'p') {
-		pub.Close()
 		r.log.Warn("sieve fileinto into a public folder refused", "mailbox", name, "reason", reasonOf(err))
 
-		return r.u, inboxName, false, nil
+		return target{u: r.u, mailbox: inboxName, where: inboxName}, nil
 	}
 
+	return target{u: pub, mailbox: folder, where: name, public: true}, nil
+}
+
+// publicUser opens the public namespace once per delivery; it is closed
+// with the delivery.
+func (r *run) publicUser() (model.User, error) {
+	if r.pub != nil {
+		return r.pub, nil
+	}
+
+	pub, err := r.svc.Store.User(model.PublicNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	r.pub = pub
 	r.opened = append(r.opened, pub)
 
-	return pub, folder, true, nil
+	return pub, nil
 }
 
 // reasonOf names why a public fileinto was refused.
@@ -140,19 +220,20 @@ func reasonOf(err error) string {
 
 // delivered is one completed fileinto of a multi-target delivery.
 type delivered struct {
-	mailbox string
-	meta    model.Meta
+	target target
+	meta   model.Meta
 }
 
 // rollback removes what a failed multi-target delivery stored; ok is
 // false when something could not be removed (the intent then stays for
-// the scrubber).
+// the scrubber). Every message is removed where it lies, which for a
+// public folder is not the recipient's namespace.
 func (r *run) rollback(done []delivered) bool {
 	ok := true
 
 	for _, d := range done {
-		if err := r.u.Expunge(d.mailbox, []model.Meta{d.meta}); err != nil {
-			r.log.Error("delivery rollback failed", "mailbox", d.mailbox, "uid", d.meta.UID, "err", err)
+		if err := d.target.u.Expunge(d.target.mailbox, []model.Meta{d.meta}); err != nil {
+			r.log.Error("delivery rollback failed", "mailbox", d.target.where, "uid", d.meta.UID, "err", err)
 
 			ok = false
 		}

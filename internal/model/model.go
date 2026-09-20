@@ -287,16 +287,26 @@ type User interface {
 	// nobody, so "read" is a statement about a person, not about the
 	// folder: every account keeps its own marks, while every other flag
 	// stays shared. The marks are keyed by mailbox id and UIDVALIDITY,
-	// so a folder that is recreated does not inherit them, and they
-	// carry their own modseq, which a session combines with the
-	// mailbox's own.
-	// PrivateSeen returns the marks by UID and the highest modseq among
-	// them; SetPrivateSeen records a change and returns the new highest.
-	// base is the mailbox's current HIGHESTMODSEQ: private marks live in
-	// the same number space as the shared ones, so a session can report
-	// one combined MODSEQ and CONDSTORE stays meaningful.
-	PrivateSeen(mailboxID string, uidValidity uint32) (marks map[uint32]PrivateMark, modseq uint64, err error)
-	SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, base uint64) (modseq uint64, err error)
+	// so a folder that is recreated does not inherit them.
+	// PrivateSeen returns the marks by UID. SetPrivateSeen records a change under a modseq that the
+	// caller allocated from the mailbox's own counter with TouchModSeq:
+	// private marks and shared flags share one number space, so
+	// CONDSTORE and QRESYNC see a single, monotonic MODSEQ per mailbox.
+	// PrunePrivateSeen drops marks of messages that are gone (keep holds
+	// the UIDs that exist) and every mark of another UIDVALIDITY, at most
+	// limit of them per call, because an EXPUNGE by one account cannot
+	// reach into another account's namespace.
+	PrivateSeen(mailboxID string, uidValidity uint32) (marks map[uint32]PrivateMark, err error)
+	SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, modseq uint64) error
+	PrunePrivateSeen(mailboxID string, uidValidity uint32, keep map[uint32]bool, limit int) error
+
+	// TouchModSeq allocates the next MODSEQ of a mailbox and announces
+	// the UIDs as changed without changing a message. write runs with
+	// that number while the change is still pending, so what it writes
+	// elsewhere — the private \Seen marks of one account — is in place
+	// before any session learns of the modseq. The change is published
+	// when write returns without an error.
+	TouchModSeq(mailbox string, uids []uint32, write func(modseq uint64) error) (modseq uint64, err error)
 
 	// Public folder subscriptions. Public folders belong to no account
 	// (see PublicNamespace), so every account keeps its own set of

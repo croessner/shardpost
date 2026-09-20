@@ -102,6 +102,7 @@ type User struct {
 	usage   model.Quota
 	limit   model.Quota
 	guidN   int
+	intents int
 	scripts map[string]string
 	active  string
 	imp     *importLock
@@ -420,14 +421,19 @@ func (u *User) Vanished(id string, since uint64) ([]uint32, error) {
 	return out, nil
 }
 
-func (b *box) bump() uint64 {
-	b.modseq++
+// wake tells the watchers of the mailbox that something changed.
+func (b *box) wake() {
 	for _, w := range b.watchers {
 		select {
 		case w <- struct{}{}:
 		default:
 		}
 	}
+}
+
+func (b *box) bump() uint64 {
+	b.modseq++
+	b.wake()
 
 	return b.modseq
 }
@@ -534,7 +540,14 @@ func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply
 			continue
 		}
 
-		m.Flags = apply(m.Flags)
+		nf := apply(m.Flags)
+		// Like the real store: a flag set that does not change is not a
+		// change, carries no modseq and is not reported.
+		if equalFlags(nf, m.Flags) {
+			continue
+		}
+
+		m.Flags = nf
 		m.ModSeq = ms
 		changed = true
 
@@ -792,14 +805,37 @@ func (u *User) QuotaUsage() (model.Quota, error) { return u.usage, nil }
 // QuotaLimit returns the user's limit.
 func (u *User) QuotaLimit() (model.Quota, error) { return u.limit, nil }
 
-// BeginDelivery returns no intent: delivery intents are not needed in
-// memory (nothing survives a crash).
-func (u *User) BeginDelivery() (string, error) { return "", nil }
+// BeginDelivery opens a delivery intent. Nothing survives a crash of a
+// store that lives in memory, so the intent is only a handle — but it is
+// one per namespace, and what is recorded in it is resolved there, so a
+// delivery across namespaces behaves as it does in the real store.
+func (u *User) BeginDelivery() (string, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
 
-// RecordDelivery is a no-op (see BeginDelivery).
-func (u *User) RecordDelivery(string, string, string) error { return nil }
+	u.intents++
 
-// EndDelivery is a no-op (see BeginDelivery).
+	return strconv.FormatInt(int64(u.intents), 10), nil
+}
+
+// RecordDelivery names a message of an open intent. Like the real
+// store it resolves the mailbox in this namespace, so filing into a
+// folder of another one fails here as it does there.
+func (u *User) RecordDelivery(id, mailbox, _ string) error {
+	if id == "" {
+		return nil
+	}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	_, _, err := u.lookup(mailbox)
+
+	return err
+}
+
+// EndDelivery drops the intent (id "" is a no-op); nothing is kept, so
+// there is nothing for a scrubber to find.
 func (u *User) EndDelivery(string) error { return nil }
 
 // SetQuotaLimit stores the user's limit.
@@ -1095,6 +1131,22 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 	return out, nil
 }
 
+// equalFlags reports whether two flag sets are the same, ignoring order
+// and case, as the real store compares them.
+func equalFlags(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for _, f := range a {
+		if !model.HasFlag(b, f) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // pseenKey identifies the private marks of one incarnation of a public
 // mailbox.
 func pseenKey(mailboxID string, uidValidity uint32) string {
@@ -1102,24 +1154,22 @@ func pseenKey(mailboxID string, uidValidity uint32) string {
 }
 
 // PrivateSeen implements model.User.
-func (u *User) PrivateSeen(mailboxID string, uidValidity uint32) (map[uint32]model.PrivateMark, uint64, error) {
+func (u *User) PrivateSeen(mailboxID string, uidValidity uint32) (map[uint32]model.PrivateMark, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
 	key := pseenKey(mailboxID, uidValidity)
 	out := map[uint32]model.PrivateMark{}
-	high := uint64(0)
 
 	for uid, m := range u.pubSeen[key] {
 		out[uid] = m
-		high = max(high, m.ModSeq)
 	}
 
-	return out, high, nil
+	return out, nil
 }
 
 // SetPrivateSeen implements model.User.
-func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, base uint64) (uint64, error) {
+func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, modseq uint64) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -1133,31 +1183,86 @@ func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint3
 		u.pubSeen[key] = map[uint32]model.PrivateMark{}
 	}
 
-	high := base
+	for _, uid := range uids {
+		if have, ok := u.pubSeen[key][uid]; ok && have.ModSeq > modseq {
+			continue
+		}
 
-	for _, m := range u.pubSeen[key] {
-		high = max(high, m.ModSeq)
+		u.pubSeen[key][uid] = model.PrivateMark{Seen: seen, ModSeq: modseq}
 	}
 
-	var changed []uint32
+	return nil
+}
 
-	for _, uid := range uids {
-		if have, ok := u.pubSeen[key][uid]; !ok || have.Seen != seen {
-			changed = append(changed, uid)
+// PrunePrivateSeen implements model.User.
+func (u *User) PrunePrivateSeen(mailboxID string, uidValidity uint32, keep map[uint32]bool, limit int) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if limit <= 0 {
+		return nil
+	}
+
+	live := pseenKey(mailboxID, uidValidity)
+
+	for key, marks := range u.pubSeen {
+		if !strings.HasPrefix(key, mailboxID+":") {
+			continue
+		}
+
+		for uid := range marks {
+			if key == live && keep[uid] {
+				continue
+			}
+
+			delete(marks, uid)
+
+			if limit--; limit == 0 {
+				return nil
+			}
 		}
 	}
 
-	if len(changed) == 0 {
-		return high, nil
+	return nil
+}
+
+// TouchModSeq implements model.User.
+func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64) error) (uint64, error) {
+	u.mu.Lock()
+
+	b, _, err := u.lookup(name)
+	if err != nil {
+		u.mu.Unlock()
+		return 0, err
 	}
 
-	high++
+	b.modseq++
+	modseq := b.modseq
+	u.mu.Unlock()
 
-	for _, uid := range changed {
-		u.pubSeen[key][uid] = model.PrivateMark{Seen: seen, ModSeq: high}
+	// write touches another namespace (the reading account's marks), so
+	// it runs without this user's lock. The change is published only
+	// afterwards: no session learns of the modseq before the marks are
+	// in place.
+	if write != nil {
+		if err := write(modseq); err != nil {
+			u.mu.Lock()
+
+			b.changes = append(b.changes, model.Change{ModSeq: modseq})
+			b.wake()
+			u.mu.Unlock()
+
+			return 0, err
+		}
 	}
 
-	return high, nil
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	b.changes = append(b.changes, model.Change{ModSeq: modseq, UIDs: uids})
+	b.wake()
+
+	return modseq, nil
 }
 
 // PublicSubscriptions implements model.User.
