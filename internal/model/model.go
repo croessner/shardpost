@@ -288,7 +288,10 @@ type User interface {
 	// folder: every account keeps its own marks, while every other flag
 	// stays shared. The marks are keyed by mailbox id and UIDVALIDITY,
 	// so a folder that is recreated does not inherit them.
-	// PrivateSeen returns the marks by UID. SetPrivateSeen records a change under a modseq that the
+	// PrivateSeen returns every mark of the folder, PrivateSeenOf only
+	// those of the given UIDs — a folder somebody has read for years
+	// has many, and a session that learns of one change should not read
+	// them all. SetPrivateSeen records a change under a modseq that the
 	// caller allocated from the mailbox's own counter with TouchModSeq:
 	// private marks and shared flags share one number space, so
 	// CONDSTORE and QRESYNC see a single, monotonic MODSEQ per mailbox.
@@ -297,6 +300,7 @@ type User interface {
 	// limit of them per call, because an EXPUNGE by one account cannot
 	// reach into another account's namespace.
 	PrivateSeen(mailboxID string, uidValidity uint32) (marks map[uint32]PrivateMark, err error)
+	PrivateSeenOf(mailboxID string, uidValidity uint32, uids []uint32) (marks map[uint32]PrivateMark, err error)
 	SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, modseq uint64) error
 	PrunePrivateSeen(mailboxID string, uidValidity uint32, keep map[uint32]bool, limit int) error
 

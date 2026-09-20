@@ -55,6 +55,7 @@ type ScrubReport struct {
 	ImportSkipped    bool // an import holds the account: nothing was checked
 	RetiredRepaired  int  // mailboxes left retired by an interrupted import replacement
 	UncoveredEntries int  // entries at or above UIDNEXT (interrupted import) removed
+	StaleMarkObjects int  // private \Seen marks of public folders that are gone
 	Errors           []string
 }
 
@@ -886,18 +887,83 @@ func (sr *scrubRun) collectUnknownIndex(known map[string]bool) ([]string, error)
 		return nil, err
 	}
 
-	var unknown []string
+	var unknown, marks []string
 
 	for iter.Next() {
 		oid := iter.Value()
-		if strings.HasPrefix(oid, mboxPrefix) && !known[oid] {
+
+		switch {
+		case strings.HasPrefix(oid, mboxPrefix) && !known[oid]:
 			unknown = append(unknown, oid)
+		case strings.HasPrefix(oid, oidPrivateSeen):
+			marks = append(marks, oid)
 		}
 	}
 
 	iter.Close()
 
+	sr.removeStaleMarks(marks)
+
 	return unknown, nil
+}
+
+// removeStaleMarks deletes the private \Seen marks of public folders
+// that no longer exist. The marks live in this account's namespace, so
+// nobody else can reach them: deleting the folder cannot, and neither
+// can the account that deleted it.
+func (sr *scrubRun) removeStaleMarks(oids []string) {
+	if len(oids) == 0 || sr.u.name == model.PublicNamespace {
+		return
+	}
+
+	live, err := sr.publicMailboxIDs()
+	if err != nil {
+		sr.log.Warn("scrub: public folders not readable, marks kept", "err", err)
+		sr.rep.Errors = append(sr.rep.Errors, "public folders: "+err.Error())
+
+		return
+	}
+
+	for _, oid := range oids {
+		if live[strings.TrimPrefix(oid, oidPrivateSeen)] {
+			continue
+		}
+
+		scrubFinding("stale_marks")
+
+		sr.rep.StaleMarkObjects++
+
+		sr.log.Warn("private seen marks of a public folder that is gone", "oid", oid)
+
+		if !sr.o.Allowed(RepairUnknown) {
+			continue
+		}
+
+		if err := sr.u.idx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
+			sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("remove %s: %v", oid, err))
+		}
+	}
+}
+
+// publicMailboxIDs returns the ids of the public folders that exist.
+func (sr *scrubRun) publicMailboxIDs() (map[string]bool, error) {
+	pub, err := sr.u.store.User(model.PublicNamespace)
+	if err != nil {
+		return nil, err
+	}
+	defer pub.Close()
+
+	boxes, err := pub.ListMailboxes()
+	if err != nil {
+		return nil, err
+	}
+
+	live := make(map[string]bool, len(boxes))
+	for _, mb := range boxes {
+		live[mb.ID] = true
+	}
+
+	return live, nil
 }
 
 // removeUnknownIndex removes unknown index objects older than the grace

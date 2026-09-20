@@ -1168,6 +1168,23 @@ func (u *User) PrivateSeen(mailboxID string, uidValidity uint32) (map[uint32]mod
 	return out, nil
 }
 
+// PrivateSeenOf implements model.User.
+func (u *User) PrivateSeenOf(mailboxID string, uidValidity uint32, uids []uint32) (map[uint32]model.PrivateMark, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	marks := u.pubSeen[pseenKey(mailboxID, uidValidity)]
+	out := make(map[uint32]model.PrivateMark, len(uids))
+
+	for _, uid := range uids {
+		if m, ok := marks[uid]; ok {
+			out[uid] = m
+		}
+	}
+
+	return out, nil
+}
+
 // SetPrivateSeen implements model.User.
 func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, modseq uint64) error {
 	u.mu.Lock()
@@ -1226,43 +1243,53 @@ func (u *User) PrunePrivateSeen(mailboxID string, uidValidity uint32, keep map[u
 	return nil
 }
 
-// TouchModSeq implements model.User.
+// TouchModSeq implements model.User. The change is announced as
+// pending before write runs and committed afterwards, the way the real
+// store does it: a session that polls in between stops at the pending
+// change instead of walking past a mark that is not written yet.
 func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64) error) (uint64, error) {
 	u.mu.Lock()
 
 	b, _, err := u.lookup(name)
 	if err != nil {
 		u.mu.Unlock()
+
 		return 0, err
 	}
 
 	b.modseq++
 	modseq := b.modseq
+
+	b.changes = append(b.changes, model.Change{ModSeq: modseq, UIDs: uids, Pending: write != nil})
+	at := len(b.changes) - 1
 	u.mu.Unlock()
 
-	// write touches another namespace (the reading account's marks), so
-	// it runs without this user's lock. The change is published only
-	// afterwards: no session learns of the modseq before the marks are
-	// in place.
-	if write != nil {
-		if err := write(modseq); err != nil {
-			u.mu.Lock()
-
-			b.changes = append(b.changes, model.Change{ModSeq: modseq})
-			b.wake()
-			u.mu.Unlock()
-
-			return 0, err
-		}
+	if write == nil {
+		return modseq, nil
 	}
 
+	// write touches another namespace (the reading account's marks), so
+	// it runs without this user's lock.
+	if err := write(modseq); err != nil {
+		// Nothing was written, so there is nothing to pick up.
+		u.commitChange(b, at, model.Change{ModSeq: modseq})
+
+		return 0, err
+	}
+
+	u.commitChange(b, at, model.Change{ModSeq: modseq, UIDs: uids})
+
+	return modseq, nil
+}
+
+// commitChange replaces an announced change by what actually happened
+// and wakes the watchers.
+func (u *User) commitChange(b *box, at int, chg model.Change) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	b.changes = append(b.changes, model.Change{ModSeq: modseq, UIDs: uids})
+	b.changes[at] = chg
 	b.wake()
-
-	return modseq, nil
 }
 
 // PublicSubscriptions implements model.User.

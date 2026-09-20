@@ -22,20 +22,41 @@ import (
 // with a long history does not turn a SELECT into a mass deletion.
 const maxPrune = 1000
 
-// loadPrivateSeen reads the account's marks for the selected public
-// folder. It is a no-op for every other mailbox.
-func (c *conn) loadPrivateSeen() error {
+// privateSeenOf reads the account's marks for the selected public
+// folder. It returns nothing for every other mailbox.
+func (c *conn) privateSeen() (map[uint32]model.PrivateMark, error) {
 	if !c.mpublic || c.mbox == nil {
-		c.pseen = nil
+		return nil, nil
+	}
+
+	return c.user.PrivateSeen(c.mbox.ID, c.mbox.UIDValidity)
+}
+
+// mergePrivateSeen re-reads the marks of the given UIDs only. A poll
+// learns which UIDs changed from the change log, and a folder that an
+// account has read for years holds far more marks than one poll is
+// about.
+func (c *conn) mergePrivateSeen(uids []uint32) error {
+	if !c.mpublic || c.mbox == nil || len(uids) == 0 {
 		return nil
 	}
 
-	marks, err := c.user.PrivateSeen(c.mbox.ID, c.mbox.UIDValidity)
+	marks, err := c.user.PrivateSeenOf(c.mbox.ID, c.mbox.UIDValidity, uids)
 	if err != nil {
 		return err
 	}
 
-	c.pseen = marks
+	if c.pseen == nil {
+		c.pseen = make(map[uint32]model.PrivateMark, len(marks))
+	}
+
+	for _, uid := range uids {
+		if mark, ok := marks[uid]; ok {
+			c.pseen[uid] = mark
+		} else {
+			delete(c.pseen, uid) // pruned meanwhile
+		}
+	}
 
 	return nil
 }
@@ -157,25 +178,120 @@ type privateStore struct {
 	modified []uint32 // untouched: the message changed after UNCHANGEDSINCE
 }
 
-// splitPrivateSeen sends the \Seen part of a STORE in a public folder to
-// the account's own marks and returns the operation for the shared
-// flags; for every other mailbox it changes nothing.
-func (c *conn) splitPrivateSeen(a storeArgs, metas []model.Meta, apply func([]string) []string) (privateStore, func([]string) []string, error) {
+// privatePlan is what a STORE would do to the account's own marks. It
+// is decided before the shared flags are written and carried out after,
+// so a message is either changed on both sides or on neither: RFC 7162
+// conditions the message, not one of its flags.
+type privatePlan struct {
+	seen     bool
+	wanted   bool
+	changed  []uint32
+	modified []uint32
+}
+
+// planPrivateSeen reads the current marks of the addressed messages and
+// decides which of them a STORE changes and which it must refuse. The
+// marks come from the store rather than from the session, so a mark set
+// by another session of the same account is not overwritten by a stale
+// view.
+func (c *conn) planPrivateSeen(a storeArgs, metas []model.Meta) (privatePlan, error) {
+	var p privatePlan
+
 	if !c.mpublic {
-		return privateStore{}, apply, nil
+		return p, nil
 	}
 
-	seen, wanted := seenOperation(a.op, a.flags)
-	if !wanted {
-		return privateStore{}, keepSeen(apply), nil
+	p.seen, p.wanted = seenOperation(a.op, a.flags)
+	if !p.wanted {
+		return p, nil
 	}
 
-	ps, err := c.storePrivateSeen(seen, metas, a.unchangedSince)
+	uids := make([]uint32, 0, len(metas))
+	for _, m := range metas {
+		uids = append(uids, m.UID)
+	}
+
+	cur, err := c.user.PrivateSeenOf(c.mbox.ID, c.mbox.UIDValidity, uids)
 	if err != nil {
-		return privateStore{}, nil, err
+		return privatePlan{}, err
 	}
 
-	return ps, keepSeen(apply), nil
+	c.rememberMarks(cur)
+
+	for _, m := range metas {
+		// The message must not have changed since, and for this account
+		// that includes its own mark.
+		if a.unchangedSince != 0 && max(m.ModSeq, cur[m.UID].ModSeq) > a.unchangedSince {
+			p.modified = append(p.modified, m.UID)
+			continue
+		}
+
+		if seenBy(cur, m) != p.seen {
+			p.changed = append(p.changed, m.UID)
+		}
+	}
+
+	return p, nil
+}
+
+// writePrivateSeen carries out the plan for the given UIDs. The MODSEQ
+// comes from the public mailbox itself, so every session learns of the
+// change through its change log.
+func (c *conn) writePrivateSeen(p privatePlan, uids []uint32) (privateStore, error) {
+	ps := privateStore{modified: p.modified}
+	if !p.wanted || len(uids) == 0 {
+		return ps, nil
+	}
+
+	modseq, err := c.mu.TouchModSeq(c.mbox.Name, uids, func(modseq uint64) error {
+		return c.user.SetPrivateSeen(c.mbox.ID, c.mbox.UIDValidity, uids, p.seen, modseq)
+	})
+	if err != nil {
+		return privateStore{}, err
+	}
+
+	for _, uid := range uids {
+		c.pseen[uid] = model.PrivateMark{Seen: p.seen, ModSeq: modseq}
+	}
+
+	ps.changed = uids
+
+	return ps, nil
+}
+
+// rememberMarks takes freshly read marks into the session view.
+func (c *conn) rememberMarks(marks map[uint32]model.PrivateMark) {
+	if c.pseen == nil {
+		c.pseen = make(map[uint32]model.PrivateMark, len(marks))
+	}
+
+	for uid, mark := range marks {
+		c.pseen[uid] = mark
+	}
+}
+
+// markSeenPrivately sets the account's own mark on one message, for the
+// implicit \Seen of a FETCH.
+func (c *conn) markSeenPrivately(m model.Meta) error {
+	p, err := c.planPrivateSeen(storeArgs{op: kwAddFlags, flags: []string{flagSeenLower}}, []model.Meta{m})
+	if err != nil {
+		return err
+	}
+
+	_, err = c.writePrivateSeen(p, p.changed)
+
+	return err
+}
+
+// sharedApply is the flag operation for the shared record. In a public
+// folder it leaves \Seen exactly as it is: that flag belongs to the
+// account, not to the folder.
+func (c *conn) sharedApply(apply func([]string) []string) func([]string) []string {
+	if !c.mpublic {
+		return apply
+	}
+
+	return keepSeen(apply)
 }
 
 // seenOperation reads the \Seen part out of a STORE: whether the mark is
@@ -196,52 +312,6 @@ func seenOperation(op string, flags []string) (seen, wanted bool) {
 	}
 
 	return false, false
-}
-
-// storePrivateSeen writes the account's own marks for the addressed
-// messages. The current marks are read from the store rather than taken
-// from the session, so a mark set by another session of the same account
-// is not overwritten by a stale view; the MODSEQ comes from the public
-// mailbox, so every session learns of the change through the change log.
-func (c *conn) storePrivateSeen(seen bool, metas []model.Meta, unchangedSince uint64) (privateStore, error) {
-	cur, err := c.user.PrivateSeen(c.mbox.ID, c.mbox.UIDValidity)
-	if err != nil {
-		return privateStore{}, err
-	}
-
-	var ps privateStore
-
-	for _, m := range metas {
-		// RFC 7162: the message must not have changed since, and for
-		// this account that includes its own mark.
-		if unchangedSince != 0 && max(m.ModSeq, cur[m.UID].ModSeq) > unchangedSince {
-			ps.modified = append(ps.modified, m.UID)
-			continue
-		}
-
-		if seenBy(cur, m) != seen {
-			ps.changed = append(ps.changed, m.UID)
-		}
-	}
-
-	c.pseen = cur
-
-	if len(ps.changed) == 0 {
-		return ps, nil
-	}
-
-	modseq, err := c.mu.TouchModSeq(c.mbox.Name, ps.changed, func(modseq uint64) error {
-		return c.user.SetPrivateSeen(c.mbox.ID, c.mbox.UIDValidity, ps.changed, seen, modseq)
-	})
-	if err != nil {
-		return privateStore{}, err
-	}
-
-	for _, uid := range ps.changed {
-		c.pseen[uid] = model.PrivateMark{Seen: seen, ModSeq: modseq}
-	}
-
-	return ps, nil
 }
 
 // mergePrivate adds what only changed privately to the result of the

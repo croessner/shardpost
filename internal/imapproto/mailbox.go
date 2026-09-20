@@ -1716,13 +1716,17 @@ func (c *conn) reload() error {
 		info.HighestModSeq = floor
 	}
 
-	c.info, c.msgs = info, msgs
-
 	// A public folder keeps \Seen per account; the shared record says
-	// nothing about this session's account.
-	if err := c.loadPrivateSeen(); err != nil {
+	// nothing about this session's account. The marks are read before
+	// the session state is replaced: a failure here must leave the
+	// session on its old snapshot, or its sequence numbers would no
+	// longer be what the client was told.
+	marks, err := c.privateSeen()
+	if err != nil {
 		return err
 	}
+
+	c.info, c.msgs, c.pseen = info, msgs, marks
 
 	c.privateOverlay(c.msgs)
 

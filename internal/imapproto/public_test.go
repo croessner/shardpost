@@ -444,3 +444,113 @@ func TestPublicSharedSeenIsTheDefault(t *testing.T) {
 		t.Errorf("alice's mark changed bob's unread count: %s", lines)
 	}
 }
+
+// TestPublicFetchBodyIsPrivate: the implicit \Seen of a FETCH belongs to
+// the account like an explicit STORE does. Most clients fetch BODY[]
+// rather than BODY.PEEK[], so writing the shared flag here would mark
+// the message read for everyone who has no mark of their own.
+func TestPublicFetchBodyIsPrivate(t *testing.T) {
+	alice, store := newTestServer(t, func(o *Options, _ *memstore.Store) {
+		o.Auth = auth.Static{"alice": "pw", "bob": "pw"}
+	})
+	defer func() { _ = alice.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	bob, _ := newTestServerClient(t, alice)
+	defer func() { _ = bob.conn.Close() }()
+
+	alice.ok("LOGIN alice pw")
+	bob.ok("LOGIN bob pw")
+
+	for _, c := range []*client{alice, bob} {
+		c.ok("SELECT Public/Team")
+	}
+
+	if lines := strings.Join(alice.cmd("FETCH 1 (BODY[])"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Fatalf("the reader's own mark was not set: %s", lines)
+	}
+
+	bob.ok("NOOP")
+
+	if lines := strings.Join(bob.cmd("FETCH 1 (FLAGS)"), "\n"); strings.Contains(lines, `\Seen`) {
+		t.Errorf("another account's BODY[] marked the message read: %s", lines)
+	}
+
+	if lines := strings.Join(bob.cmd("STATUS Public/Team (UNSEEN)"), "\n"); !strings.Contains(lines, "UNSEEN 1") {
+		t.Errorf("unread count after another account's BODY[]: %s", lines)
+	}
+}
+
+// TestPublicReplacingStoreKeepsSharedSeen: a replacing STORE by one
+// account removes flags it does not name — but not the shared \Seen,
+// which is the default of everyone who has no mark.
+func TestPublicReplacingStoreKeepsSharedSeen(t *testing.T) {
+	alice, store := newTestServer(t, func(o *Options, _ *memstore.Store) {
+		o.Auth = auth.Static{"alice": "pw", "bob": "pw"}
+	})
+	defer func() { _ = alice.conn.Close() }()
+
+	pub := publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	if _, err := pub.Deliver("Team", []byte("Subject: read\r\n\r\nalready read\r\n"), []string{flagSeenLower}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	bob, _ := newTestServerClient(t, alice)
+	defer func() { _ = bob.conn.Close() }()
+
+	alice.ok("LOGIN alice pw")
+	bob.ok("LOGIN bob pw")
+
+	for _, c := range []*client{alice, bob} {
+		c.ok("SELECT Public/Team")
+	}
+
+	alice.ok(`STORE 2 FLAGS (\Flagged)`)
+	bob.ok("NOOP")
+
+	if lines := strings.Join(bob.cmd("FETCH 2 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("a replacing STORE cleared the shared default for everyone: %s", lines)
+	}
+}
+
+// TestPublicQresyncReportsOwnMark: a client that reconnects with
+// QRESYNC and its last MODSEQ is told about its own mark, which is in
+// no shared record.
+func TestPublicQresyncReportsOwnMark(t *testing.T) {
+	c, store := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	c.ok("LOGIN test test")
+	c.ok("ENABLE QRESYNC")
+	c.ok("SELECT Public/Team")
+
+	before := highestModSeq(t, c, "Public/Team")
+	c.ok(`STORE 1 +FLAGS (\Seen)`)
+	c.ok("CLOSE")
+
+	pub, err := store.User(model.PublicNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mb, err := pub.Lookup("Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+
+	for _, line := range c.cmd("SELECT Public/Team (QRESYNC (%d %d))", mb.UIDValidity, before) {
+		if strings.Contains(line, "FETCH") && strings.Contains(line, "UID 1") && strings.Contains(line, `\Seen`) {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Errorf("QRESYNC since %d does not report the account's own mark", before)
+	}
+}

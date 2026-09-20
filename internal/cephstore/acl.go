@@ -582,6 +582,37 @@ func (u *User) PrivateSeen(mailboxID string, uidValidity uint32) (map[uint32]mod
 	return marks, nil
 }
 
+// PrivateSeenOf implements model.User.
+func (u *User) PrivateSeenOf(mailboxID string, uidValidity uint32, uids []uint32) (map[uint32]model.PrivateMark, error) {
+	marks := make(map[uint32]model.PrivateMark, len(uids))
+
+	if len(uids) == 0 {
+		return marks, nil
+	}
+
+	keys := make([]string, 0, len(uids))
+	for _, uid := range uids {
+		keys = append(keys, pseenKey(uidValidity, uid))
+	}
+
+	vals, _, err := u.getKeysVer(u.idx, oidPrivateSeen+mailboxID, keys)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return marks, nil
+		}
+
+		return nil, err
+	}
+
+	for i, key := range keys {
+		if v, ok := vals[key]; ok {
+			marks[uids[i]] = decodeMark(v)
+		}
+	}
+
+	return marks, nil
+}
+
 // encodeMark and decodeMark store a mark as "<modseq>:<0|1>".
 func encodeMark(m model.PrivateMark) []byte {
 	seen := "0"

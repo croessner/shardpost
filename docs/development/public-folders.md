@@ -55,7 +55,10 @@ the new state.
    migration put there and is the state for everyone who has no mark of
    their own yet; a STORE never changes it, it writes the account's own
    mark. So a message that arrives read is read for everybody until
-   somebody says otherwise for themselves.
+   somebody says otherwise for themselves. This holds for the implicit
+   `\Seen` of a `FETCH BODY[]` as well — most clients use it instead of
+   `BODY.PEEK[]`, and it is the most common way a message is marked
+   read at all.
 7. **MODSEQ.** A private mark is a change of the public mailbox like
    any other, and it takes its MODSEQ from that mailbox's counter: the
    session allocates the next number there, announces the UIDs in the
@@ -66,10 +69,10 @@ the new state.
    with the next shared change — a client filtering on `> value` would
    then miss it — and `NOMODSEQ` (RFC 7162 3.1.2.2) would force a full
    flag synchronization on every SELECT, which for a large public
-   archive is exactly the cost we avoid elsewhere. Other accounts see
-   the change as a FETCH whose flags did not change for them, which
-   costs one record read and is allowed; the other sessions of the same
-   account re-read their marks and report the new state. The mark is
+   archive is exactly the cost we avoid elsewhere. Other accounts read
+   the record of the message once and then send nothing, because
+   nothing changed for them; the other sessions of the same account
+   re-read the marks of exactly those UIDs and report the new state. The mark is
    written while the change is still pending, so no session learns of
    the number before the mark is in place. Key of a mark:
    `(mailbox id, UIDVALIDITY, UID)`. An EXPUNGE by one account cannot
@@ -136,7 +139,8 @@ namespace that holds it.
 Acceptance: two accounts read the same folder and see their own
 `\Seen`; `STATUS UNSEEN` differs between them; a flag other than `\Seen`
 set by one is visible to the other; a Sieve script files into a public
-folder when it has `p` and is refused without it. For CONDSTORE
+folder when it has `p` and is refused without it; a `FETCH BODY[]` by
+one account leaves the folder unread for everyone else. For CONDSTORE
 clients: a private mark moves `HIGHESTMODSEQ`, is reported by the STORE
 itself, is found by `CHANGEDSINCE`, reaches the account's other
 sessions, and a shared change made after it still reaches everyone.

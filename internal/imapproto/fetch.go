@@ -189,6 +189,15 @@ func (c *conn) fetchSetSeen(seq int, m model.Meta) (model.Meta, bool) {
 		return m, false
 	}
 
+	// In a public folder "read" belongs to the account, so the implicit
+	// \Seen of a FETCH writes the account's own mark, exactly like an
+	// explicit STORE. Writing the shared flag here would mark the
+	// message read for everyone who has no mark of their own — and most
+	// clients fetch BODY[] rather than BODY.PEEK[].
+	if c.mpublic {
+		return c.fetchSetPrivateSeen(seq, m)
+	}
+
 	res, err := c.mu.SetFlags(c.mbox.Name, []uint32{m.UID}, 0, addFlags([]string{flagSeenLower}))
 	if err != nil || len(res.Updated) != 1 {
 		return m, false
@@ -198,6 +207,22 @@ func (c *conn) fetchSetSeen(seq int, m model.Meta) (model.Meta, bool) {
 	c.msgs[seq-1] = m
 
 	return m, true
+}
+
+// fetchSetPrivateSeen is the implicit \Seen of a FETCH in a public
+// folder.
+func (c *conn) fetchSetPrivateSeen(seq int, m model.Meta) (model.Meta, bool) {
+	if err := c.markSeenPrivately(m); err != nil {
+		c.log.Warn("private seen mark of a fetch failed", "uid", m.UID, "err", err)
+
+		return m, false
+	}
+
+	msgs := []model.Meta{m}
+	c.privateOverlay(msgs)
+	c.msgs[seq-1] = msgs[0]
+
+	return msgs[0], model.HasFlag(msgs[0].Flags, flagSeen)
 }
 
 var errReadFailed = errors.New("message read failed")

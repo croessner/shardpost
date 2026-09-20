@@ -335,3 +335,47 @@ func TestFileIntoPublicFolderAndKeep(t *testing.T) {
 		t.Errorf("%d messages in INBOX, want 1", len(own))
 	}
 }
+
+// TestFileIntoPublicFolderRollback: when a later target of the same
+// delivery fails, the copy already lying in the public folder has to go
+// again — a retry must not leave two messages behind. The rollback
+// therefore has to remove it where it lies, in the public namespace.
+func TestFileIntoPublicFolderRollback(t *testing.T) {
+	script := `require ["fileinto", "copy"]; fileinto :copy "Public/Support";`
+
+	svc, store := testService(t, script)
+	svc.PublicPrefix = "Public/"
+
+	pub, err := store.User(model.PublicNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.EnsureMailbox("Support", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.SetACL("Support", account, "lrp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The account is full, so the kept message after the public copy
+	// fails.
+	u, _ := store.User(account)
+	if err := u.SetQuotaLimit(model.Quota{Bytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Deliver(context.Background(), request(message)); err == nil {
+		t.Fatal("delivery into a full account succeeded")
+	}
+
+	msgs, err := messagesIn(pub, "Support")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(msgs) != 0 {
+		t.Errorf("%d messages left in the public folder after a failed delivery, want 0", len(msgs))
+	}
+}

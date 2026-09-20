@@ -56,8 +56,9 @@ func (c *conn) poll(allowExpunge bool) error {
 	}
 	// In a public folder a change may be a mark of this account set by
 	// another of its sessions: that is not in the shared record, so the
-	// marks are re-read before the fresh records are overlaid.
-	if err := c.loadPrivateSeen(); err != nil {
+	// marks of the changed messages are re-read before the fresh
+	// records are overlaid.
+	if err := c.mergePrivateSeen(uids); err != nil {
 		return c.pollReload(allowExpunge)
 	}
 	// A UID announced by a committed change but not readable was either
@@ -534,15 +535,23 @@ func (c *conn) cmdStore(tag string, uid bool) error {
 		uids[i] = m.UID
 	}
 
-	ps, apply, err := c.splitPrivateSeen(args, metas, apply)
+	// The private \Seen of a public folder is decided first and written
+	// last: a message the shared store refuses under UNCHANGEDSINCE
+	// keeps its mark, and a message whose mark is too new is not
+	// changed shared either.
+	plan, err := c.planPrivateSeen(args, metas)
 	if err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
 
-	// A message whose private mark failed UNCHANGEDSINCE fails as a
-	// whole: RFC 7162 conditions the message, not one of its flags.
-	res, err := c.mu.SetFlags(c.mbox.Name, without(uids, ps.modified), unchangedSince, apply)
+	res, err := c.mu.SetFlags(c.mbox.Name, without(uids, plan.modified), unchangedSince, c.sharedApply(apply))
+	if err != nil {
+		c.storeErr(tag, err)
+		return nil
+	}
+
+	ps, err := c.writePrivateSeen(plan, without(plan.changed, res.Modified))
 	if err != nil {
 		c.storeErr(tag, err)
 		return nil
