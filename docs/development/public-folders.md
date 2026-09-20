@@ -1,6 +1,7 @@
 # Public folders
 
-Status: package A live with 0.25.0, package B implemented (2026-09-20).
+Status: package A live with 0.25.0, package B live with 0.26.0
+(2026-09-20).
 Decided with the owner; a review and a rollout for each package.
 
 Shared folders exist: a mailbox of an account, opened by someone else
@@ -90,7 +91,10 @@ the new state.
    (`fileinto "Public/Support/Inbox"`). This requires the `p` right for
    that account on that folder, and the message is stored in `~public`.
    No mail is delivered to a public folder directly, because a public
-   folder has no address of its own.
+   folder has no address of its own. A delivery that names its mailbox
+   explicitly (`deliver -m`, LMTP with a target mailbox) does not know
+   the public prefix yet and answers "no such mailbox"; that is a gap,
+   not a decision.
 10. **Account deletion.** When an account is purged, its ACL entries in
     public folders go with it, and so do its private `\Seen` records
     (they live in its own namespace and are removed anyway).
