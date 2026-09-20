@@ -945,13 +945,20 @@ func (sr *scrubRun) removeStaleMarks(oids []string) {
 	}
 }
 
-// publicMailboxIDs returns the ids of the public folders that exist.
+// publicMailboxIDs returns the ids of the public folders that exist. A
+// registry that does not read cleanly is no answer: a single damaged
+// entry would make the marks of that folder look stale in every
+// account at once, and deleting them cannot be undone.
 func (sr *scrubRun) publicMailboxIDs() (map[string]bool, error) {
 	pub, err := sr.u.store.User(model.PublicNamespace)
 	if err != nil {
 		return nil, err
 	}
 	defer pub.Close()
+
+	if !pub.scrubRegistryOK(sr.log) {
+		return nil, errors.New("registry of the public namespace is damaged")
+	}
 
 	boxes, err := pub.ListMailboxes()
 	if err != nil {

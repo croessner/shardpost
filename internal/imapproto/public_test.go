@@ -554,3 +554,36 @@ func TestPublicQresyncReportsOwnMark(t *testing.T) {
 		t.Errorf("QRESYNC since %d does not report the account's own mark", before)
 	}
 }
+
+// TestPublicUnchangedSinceWithoutSeen: a conditional STORE that does
+// not mention \Seen is still about the message, and the MODSEQ it is
+// compared against is the account's own — a mark set meanwhile has to
+// make it fail.
+func TestPublicUnchangedSinceWithoutSeen(t *testing.T) {
+	first, store := newTestServer(t)
+	defer func() { _ = first.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	second, _ := newTestServerClient(t, first)
+	defer func() { _ = second.conn.Close() }()
+
+	for _, c := range []*client{first, second} {
+		c.ok("LOGIN test test")
+		c.ok("ENABLE CONDSTORE")
+		c.ok("SELECT Public/Team")
+	}
+
+	before := highestModSeq(t, second, "Public/Team")
+
+	first.ok(`STORE 1 +FLAGS (\Seen)`)
+
+	lines := strings.Join(second.cmd(`STORE 1 (UNCHANGEDSINCE %d) +FLAGS (\Flagged)`, before), "\n")
+	if !strings.Contains(lines, "MODIFIED 1") {
+		t.Errorf("a mark set meanwhile did not make the conditional store fail: %s", lines)
+	}
+
+	if lines := strings.Join(first.cmd("FETCH 1 (FLAGS)"), "\n"); strings.Contains(lines, `\Flagged`) {
+		t.Errorf("the refused store set the shared flag anyway: %s", lines)
+	}
+}

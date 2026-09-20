@@ -46,17 +46,7 @@ func (c *conn) mergePrivateSeen(uids []uint32) error {
 		return err
 	}
 
-	if c.pseen == nil {
-		c.pseen = make(map[uint32]model.PrivateMark, len(marks))
-	}
-
-	for _, uid := range uids {
-		if mark, ok := marks[uid]; ok {
-			c.pseen[uid] = mark
-		} else {
-			delete(c.pseen, uid) // pruned meanwhile
-		}
-	}
+	c.rememberMarks(uids, marks)
 
 	return nil
 }
@@ -202,7 +192,12 @@ func (c *conn) planPrivateSeen(a storeArgs, metas []model.Meta) (privatePlan, er
 	}
 
 	p.seen, p.wanted = seenOperation(a.op, a.flags)
-	if !p.wanted {
+
+	// A conditional STORE is about the message, not about one of its
+	// flags: the MODSEQ it is compared against is the account's own,
+	// which includes its mark. So the marks are read whenever there is
+	// a condition, even for a STORE that never touches \Seen.
+	if !p.wanted && a.unchangedSince == 0 {
 		return p, nil
 	}
 
@@ -216,7 +211,7 @@ func (c *conn) planPrivateSeen(a storeArgs, metas []model.Meta) (privatePlan, er
 		return privatePlan{}, err
 	}
 
-	c.rememberMarks(cur)
+	c.rememberMarks(uids, cur)
 
 	for _, m := range metas {
 		// The message must not have changed since, and for this account
@@ -226,7 +221,7 @@ func (c *conn) planPrivateSeen(a storeArgs, metas []model.Meta) (privatePlan, er
 			continue
 		}
 
-		if seenBy(cur, m) != p.seen {
+		if p.wanted && seenBy(cur, m) != p.seen {
 			p.changed = append(p.changed, m.UID)
 		}
 	}
@@ -259,28 +254,34 @@ func (c *conn) writePrivateSeen(p privatePlan, uids []uint32) (privateStore, err
 	return ps, nil
 }
 
-// rememberMarks takes freshly read marks into the session view.
-func (c *conn) rememberMarks(marks map[uint32]model.PrivateMark) {
+// rememberMarks takes freshly read marks of the given UIDs into the
+// session view. A UID without a mark loses the one the session held:
+// somebody cleaned it up because the message is gone.
+func (c *conn) rememberMarks(uids []uint32, marks map[uint32]model.PrivateMark) {
 	if c.pseen == nil {
 		c.pseen = make(map[uint32]model.PrivateMark, len(marks))
 	}
 
-	for uid, mark := range marks {
-		c.pseen[uid] = mark
+	for _, uid := range uids {
+		if mark, ok := marks[uid]; ok {
+			c.pseen[uid] = mark
+		} else {
+			delete(c.pseen, uid)
+		}
 	}
 }
 
 // markSeenPrivately sets the account's own mark on one message, for the
 // implicit \Seen of a FETCH.
-func (c *conn) markSeenPrivately(m model.Meta) error {
+func (c *conn) markSeenPrivately(m model.Meta) (bool, error) {
 	p, err := c.planPrivateSeen(storeArgs{op: kwAddFlags, flags: []string{flagSeenLower}}, []model.Meta{m})
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	_, err = c.writePrivateSeen(p, p.changed)
+	ps, err := c.writePrivateSeen(p, p.changed)
 
-	return err
+	return len(ps.changed) > 0, err
 }
 
 // sharedApply is the flag operation for the shared record. In a public

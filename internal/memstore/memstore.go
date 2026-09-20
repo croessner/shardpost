@@ -731,8 +731,27 @@ func (u *User) Lock(id string, _ time.Duration) (model.Lease, error) {
 	return &lease{release: func() { u.mu.Lock(); b.locked = false; u.mu.Unlock() }}, nil
 }
 
-// PendingFloor reports no pending changes (memstore writes are atomic).
-func (u *User) PendingFloor(string, uint64) (uint64, bool, error) { return 0, false, nil }
+// PendingFloor reports the modseq below the oldest announced but
+// unfinished change, so a session does not take a snapshot that claims
+// to include one. Only TouchModSeq announces changes here; every other
+// write of this store is atomic.
+func (u *User) PendingFloor(id string, _ uint64) (uint64, bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	b := u.byID(id)
+	if b == nil {
+		return 0, false, nil
+	}
+
+	for _, ch := range b.changes {
+		if ch.Pending {
+			return ch.ModSeq - 1, true, nil
+		}
+	}
+
+	return 0, false, nil
+}
 
 // Move copies the messages to dest and removes them from src.
 func (u *User) Move(src string, metas []model.Meta, dest string) ([]model.Meta, error) {

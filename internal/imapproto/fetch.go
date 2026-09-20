@@ -212,7 +212,8 @@ func (c *conn) fetchSetSeen(seq int, m model.Meta) (model.Meta, bool) {
 // fetchSetPrivateSeen is the implicit \Seen of a FETCH in a public
 // folder.
 func (c *conn) fetchSetPrivateSeen(seq int, m model.Meta) (model.Meta, bool) {
-	if err := c.markSeenPrivately(m); err != nil {
+	set, err := c.markSeenPrivately(m)
+	if err != nil {
 		c.log.Warn("private seen mark of a fetch failed", "uid", m.UID, "err", err)
 
 		return m, false
@@ -222,7 +223,10 @@ func (c *conn) fetchSetPrivateSeen(seq int, m model.Meta) (model.Meta, bool) {
 	c.privateOverlay(msgs)
 	c.msgs[seq-1] = msgs[0]
 
-	return msgs[0], model.HasFlag(msgs[0].Flags, flagSeen)
+	// set is false when another session of this account got there
+	// first: the message reads as seen, but this one changed nothing
+	// and has no flag event to report.
+	return msgs[0], set
 }
 
 var errReadFailed = errors.New("message read failed")

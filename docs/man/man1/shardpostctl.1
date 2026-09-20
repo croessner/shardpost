@@ -45,11 +45,14 @@ In a public folder every flag is shared except
 in its own namespace. A command of this tool therefore reads and writes
 the shared state, which is what a message arrives with and what counts
 for everyone who has not read it yet; it cannot mark a message read for
-one person. Mail reaches a public folder only through a Sieve
+one person. Public folders have no address of their own: mail reaches
+them through a Sieve
 .B fileinto
 of an account that has the post right
-.RB ( p );
-public folders have no address of their own.
+.RB ( p ),
+or because somebody with the insert right
+.RB ( i )
+puts a message there with APPEND, COPY or MOVE.
 .PP
 Commands are grouped by subject. Each group has its own manual page:
 .TP
