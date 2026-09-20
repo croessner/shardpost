@@ -28,7 +28,7 @@ func newTestServer(t *testing.T, customize ...func(*Options, *memstore.Store)) (
 	store := memstore.New()
 
 	opts := Options{Store: store, Auth: auth.Static{"test": "test"}, InsecureAuth: true, Autocreate: DefaultSpecialFolders,
-		QuotaSelfService: true, PublicPrefix: DefaultPublicPrefix}
+		QuotaSelfService: true, PublicPrefix: DefaultPublicPrefix, SharedPrefix: DefaultSharedPrefix}
 	for _, fn := range customize {
 		fn(&opts, store)
 	}
@@ -195,7 +195,7 @@ func TestLoginAndList(t *testing.T) {
 	c.ok(`STATUS INBOX (MESSAGES UIDNEXT HIGHESTMODSEQ MAILBOXID)`)
 
 	lines = c.ok(`NAMESPACE`)
-	mustHave(t, lines, `NAMESPACE (("" "/")) (("Other Users/" "/")) (("Public/" "/"))`)
+	mustHave(t, lines, `NAMESPACE (("" "/")) (("Shared/" "/")) (("Public/" "/"))`)
 
 	lines = c.ok(`ID ("name" "test")`)
 	mustHave(t, lines, `* ID (`)

@@ -27,7 +27,10 @@ names are compared in lower case.
 .PP
 Three namespaces exist. An account's own mailboxes have no prefix.
 Mailboxes shared by another account appear under
-.IR "Other Users/<account>/" .
+.IR "Shared/<account>/" ,
+where the prefix is what
+.I server.shared_prefix
+says (empty: clients see no shared mailboxes at all).
 Public folders, which belong to no account, live in the reserved
 namespace
 .B ~public

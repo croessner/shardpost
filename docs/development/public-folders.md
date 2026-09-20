@@ -5,7 +5,7 @@ Status: package A live with 0.25.0, package B live with 0.26.0
 Decided with the owner; a review and a rollout for each package.
 
 Shared folders exist: a mailbox of an account, opened by someone else
-under `Other Users/<owner>/<name>` with RFC 4314 rights. What is missing
+under `Shared/<owner>/<name>` with RFC 4314 rights. What is missing
 are folders that belong to no one — an archive, an announcement folder, a
 team inbox that outlives the person who created it.
 

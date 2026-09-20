@@ -86,12 +86,30 @@ func (s *Server) provisionError(w http.ResponseWriter, r *http.Request, err erro
 
 // checkNewName validates a mailbox name to create or rename to; it
 // returns the problem or "".
-func checkNewName(name string) string {
-	if strings.HasPrefix(strings.ToLower(name), "other users/") || strings.HasSuffix(name, "/") {
+//
+// A name below one of the client-visible namespace prefixes is refused:
+// the mailbox would exist in the store but no client could address it,
+// because that name resolves to another namespace.
+func (s *Server) checkNewName(name string) string {
+	if strings.HasSuffix(name, "/") || shadowsNamespace(name, s.o.SharedPrefix, s.o.PublicPrefix) {
 		return msgInvalidMailbox
 	}
 
 	return checkMailboxSpec(name, 1, nil)
+}
+
+// shadowsNamespace reports whether name lies below one of the given
+// namespace prefixes (empty prefixes are switched off).
+func shadowsNamespace(name string, prefixes ...string) bool {
+	lower := strings.ToLower(name)
+
+	for _, p := range prefixes {
+		if p != "" && strings.HasPrefix(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // CreateMailbox creates a mailbox or confirms an identical one.
@@ -117,7 +135,7 @@ func (s *Server) CreateMailbox(w http.ResponseWriter, r *http.Request, account a
 
 	auditf(r, "mailbox", req.Name)
 
-	if msg := checkNewName(req.Name); msg != "" {
+	if msg := s.checkNewName(req.Name); msg != "" {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, msg)
 		return
 	}
@@ -212,7 +230,7 @@ func (s *Server) checkMailboxVersion(w http.ResponseWriter, r *http.Request, ifM
 func (s *Server) renameMailbox(w http.ResponseWriter, r *http.Request, u model.User, old, name string) bool {
 	auditf(r, "mailbox", old, "new_name", name)
 
-	switch msg := checkNewName(name); {
+	switch msg := s.checkNewName(name); {
 	case strings.EqualFold(old, inboxName):
 		writeError(w, http.StatusConflict, adminapi.Conflict, "INBOX cannot be renamed")
 	case msg != "":

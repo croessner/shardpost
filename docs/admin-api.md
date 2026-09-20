@@ -159,7 +159,7 @@ role or scope.
 | `GET …/mailboxes/{id}/acl` | explicit entries and ACL generation (the owner implicitly has all rights) | registry |
 | `GET …/mailboxes/{id}/acl/explain?principal=` | the principal's rights (the same function IMAP uses), the pointer in their registry and findings in plain text | two registries |
 | `GET …/quota` | usage and limit (0 = unlimited) | quota counter |
-| `GET …/shared` | the account's share pointers (`Other Users/…`) | registry |
+| `GET …/shared` | the account's share pointers (the shared namespace) | registry |
 
 `account show` also accepts aliases and then names the canonical account;
 the store fields describe the (usually empty) namespace under the name

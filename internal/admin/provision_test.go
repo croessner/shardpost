@@ -55,7 +55,7 @@ func TestCreateMailbox(t *testing.T) {
 		t.Errorf("unknown special-use: %d", resp.StatusCode())
 	}
 
-	for _, name := range []string{"", "Other Users/bob/X", "a//b", "trailing/", "bad\x01name"} {
+	for _, name := range []string{"", "Shared/bob/X", "Public/Team", "a//b", "trailing/", "bad\x01name"} {
 		if resp, _ := c.CreateMailboxWithResponse(ctx, "alice", adminapi.MailboxCreate{Name: name}); resp.StatusCode() != http.StatusBadRequest {
 			t.Errorf("%q: %d", name, resp.StatusCode())
 		}
@@ -109,11 +109,11 @@ func TestRenameAndSubscribe(t *testing.T) {
 
 	bad := "garbage"
 	if resp, _ := c.UpdateMailboxWithResponse(ctx, "alice", id, &adminapi.UpdateMailboxParams{IfMatch: &bad},
-		adminapi.MailboxUpdate{Name: ptr("Other Users/x")}); resp.StatusCode() != http.StatusBadRequest {
+		adminapi.MailboxUpdate{Name: ptr("Shared/x")}); resp.StatusCode() != http.StatusBadRequest {
 		t.Errorf("malformed If-Match: %d", resp.StatusCode())
 	}
 
-	if resp, _ := c.UpdateMailboxWithResponse(ctx, "alice", id, nil, adminapi.MailboxUpdate{Name: ptr("Other Users/x")}); resp.StatusCode() != http.StatusBadRequest {
+	if resp, _ := c.UpdateMailboxWithResponse(ctx, "alice", id, nil, adminapi.MailboxUpdate{Name: ptr("Shared/x")}); resp.StatusCode() != http.StatusBadRequest {
 		t.Errorf("invalid target name: %d", resp.StatusCode())
 	}
 }

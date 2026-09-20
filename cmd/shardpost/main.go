@@ -243,6 +243,7 @@ func newIMAPSieve(ctx context.Context, log *slog.Logger, settings *config.Config
 
 	imapSieve.Sender = &outbound.Relay{Addr: settings.SMTP.Addr, HELO: settings.SMTP.Helo, StartTLS: settings.SMTP.Starttls, Implicit: settings.SMTP.TLS, User: settings.SMTP.User, Password: settings.SMTP.Password, ServerName: settings.SMTP.ServerName, Timeout: time.Duration(settings.IMAPSieve.TimeoutMS) * time.Millisecond}
 	imapSieve.GlobalScripts = settings.Sieve.GlobalDir
+	imapSieve.SharedPrefix = settings.Server.SharedPrefix
 	imapSieve.SieveConfig = sieveCfg
 
 	return imapSieve, stopWorker
@@ -385,6 +386,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 		InsecureAuth:     insecure,
 		Autocreate:       imapproto.DefaultSpecialFolders,
 		PublicPrefix:     settings.Server.PublicPrefix,
+		SharedPrefix:     settings.Server.SharedPrefix,
 		MaxLiteral:       cephstore.MaxMessageLen,
 		MaxConnsPerIP:    int(settings.Server.MaxConnsPerIP),
 		MaxConnsPerUser:  int(settings.Server.MaxConnsPerUser),

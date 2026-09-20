@@ -52,8 +52,12 @@ type Engine struct {
 	SieveConfig   map[string]string
 	Log           *slog.Logger
 	Learner       Learner
-	Programs      *extprograms.Runner
-	slots         chan struct{}
+	// SharedPrefix is the client-visible prefix of other accounts'
+	// mailboxes; a fileinto below it addresses somebody else's mailbox
+	// and is refused. "" means clients have no shared namespace.
+	SharedPrefix string
+	Programs     *extprograms.Runner
+	slots        chan struct{}
 }
 
 const (
@@ -300,7 +304,7 @@ func (e *Engine) apply(ctx context.Context, u model.User, ev Event, d *sieve.Del
 		return nil, fmt.Errorf("insufficient flag rights")
 	}
 
-	targets, err := fileIntoTargets(u, ev, d)
+	targets, err := e.fileIntoTargets(u, ev, d)
 	if err != nil {
 		return nil, err
 	}
@@ -385,10 +389,10 @@ func hasFlagRights(r string, flags []string) bool {
 }
 
 // fileIntoTargets resolves and authorizes the fileinto destinations.
-func fileIntoTargets(u model.User, ev Event, d *sieve.Delivery) ([]string, error) {
+func (e *Engine) fileIntoTargets(u model.User, ev Event, d *sieve.Delivery) ([]string, error) {
 	targets := make([]string, len(d.FileInto))
 	for i, f := range d.FileInto {
-		name, err := fileIntoTarget(u, ev, f)
+		name, err := e.fileIntoTarget(u, ev, f)
 		if err != nil {
 			return nil, err
 		}
@@ -401,13 +405,13 @@ func fileIntoTargets(u model.User, ev Event, d *sieve.Delivery) ([]string, error
 
 // fileIntoTarget resolves one fileinto (special-use lookup included) to
 // an existing mailbox of the owner the actor may insert into.
-func fileIntoTarget(u model.User, ev Event, f sieve.FileInto) (string, error) {
+func (e *Engine) fileIntoTarget(u model.User, ev Event, f sieve.FileInto) (string, error) {
 	name, err := specialUseTarget(u, f)
 	if err != nil {
 		return "", err
 	}
 
-	if strings.HasPrefix(name, "Other Users/") {
+	if e.SharedPrefix != "" && strings.HasPrefix(name, e.SharedPrefix) {
 		return "", fmt.Errorf("cross-owner fileinto unavailable")
 	}
 

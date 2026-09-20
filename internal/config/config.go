@@ -75,6 +75,9 @@ type Server struct {
 	MboxShardSize int64  `mapstructure:"mbox_shard_size" env:"MBOX_SHARD_SIZE" validate:"gte=0"`
 	// PublicPrefix is the client-visible prefix of the public folders.
 	PublicPrefix string `mapstructure:"public_prefix" env:"PUBLIC_PREFIX" validate:"omitempty,endswith=/"`
+	// SharedPrefix is the client-visible prefix of the mailboxes other
+	// accounts share; "" switches that namespace off.
+	SharedPrefix string `mapstructure:"shared_prefix" env:"SHARED_PREFIX" validate:"omitempty,endswith=/"`
 	// PublicQuotaBytes and PublicQuotaMsgs bound the public namespace as
 	// a whole (0 = unlimited). Public folders do not count against the
 	// quota of the account that files into them.
@@ -243,6 +246,7 @@ var defaults = []struct {
 	{"server.quota_msgs", 0},
 	{"server.mbox_shard_size", 100000},
 	{"server.public_prefix", "Public/"},
+	{"server.shared_prefix", "Shared/"},
 	{"server.public_quota_bytes", 0},
 	{"server.public_quota_msgs", 0},
 	{"rook.namespace", "rook-ceph"},

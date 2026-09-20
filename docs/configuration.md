@@ -130,6 +130,22 @@ reconstructed after the fact. Changing the level requires a restart.
 YAML only. It is switched on through the Admin API (role `trace`), see
 [Admin API](admin-api.md#protocol-trace-for-an-account).
 
+### Namespaces
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `server.shared_prefix` | `Shared/` | client-visible prefix of the mailboxes other accounts share, addressed as `<prefix><account>/<mailbox>` (must end with the separator); empty takes the namespace away from clients |
+
+A server whose users come from another one keeps their names by setting
+what they are used to, for example `Other Users/` (Exchange, older
+Dovecot setups) or `shared/` (Dovecot's own default). Changing the
+prefix renames what clients see: the mailboxes and their permissions
+stay as they are, but every client re-discovers the folders under the
+new name and treats them as new ones locally.
+
+With an empty prefix no client can reach a shared mailbox, although the
+permissions remain in the store and the admin API still shows them.
+
 ### Public folders
 
 | Key | Default | Meaning |

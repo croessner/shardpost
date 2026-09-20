@@ -55,6 +55,10 @@ type Options struct {
 	// "" switches public folders off entirely (no namespace in the
 	// NAMESPACE reply, no extra reads per LIST).
 	PublicPrefix string
+	// SharedPrefix is the client-visible prefix of the mailboxes other
+	// accounts share ("<prefix><account>/<mailbox>"); "" switches the
+	// namespace off, and no client can then reach a shared mailbox.
+	SharedPrefix string
 	Auth         Auth
 	Log          *slog.Logger
 	TLS          *tls.Config // nil: no STARTTLS
@@ -726,12 +730,7 @@ var uidCommands = map[string]bool{
 var authCommands = map[string]cmdHandler{
 	kwEnable: func(c *conn, tag, _ string, _ bool) error { return c.cmdEnable(tag) },
 	"NAMESPACE": func(c *conn, tag, _ string, _ bool) error {
-		public := `NIL`
-		if p := c.publicPrefix(); p != "" {
-			public = fmt.Sprintf(`(("%s" "/"))`, p)
-		}
-
-		c.w.untagged(`NAMESPACE (("" "/")) (("%s" "/")) %s`, otherUsersPrefix, public)
+		c.w.untagged(`NAMESPACE (("" "/")) %s %s`, namespaceField(c.sharedPrefix()), namespaceField(c.publicPrefix()))
 		c.ok(tag, "", "NAMESPACE completed")
 
 		return nil

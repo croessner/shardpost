@@ -11,8 +11,8 @@ import (
 
 // ExplainMailboxACL explains the access of a principal to a mailbox: its
 // canonical account, the effective rights (model.EffectiveRights, as in
-// IMAP) and the pointer in its registry that lists the mailbox under
-// "Other Users/".
+// IMAP) and the pointer in its registry that lists the mailbox in the
+// shared namespace.
 func (s *Server) ExplainMailboxACL(w http.ResponseWriter, r *http.Request, account adminapi.Account, id adminapi.MailboxID, p adminapi.ExplainMailboxACLParams) {
 	if !validAccount(p.Principal) {
 		auditf(r, "account", account)
@@ -63,7 +63,7 @@ func (s *Server) ExplainMailboxACL(w http.ResponseWriter, r *http.Request, accou
 		}
 	}
 
-	out.Findings = findings(&out, info)
+	out.Findings = s.findings(&out, info)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -93,7 +93,7 @@ func (s *Server) pointer(out *adminapi.ACLExplanation, subject string, info *mod
 }
 
 // findings states every reason for the outcome in plain text.
-func findings(out *adminapi.ACLExplanation, info *model.MailboxInfo) []string {
+func (s *Server) findings(out *adminapi.ACLExplanation, info *model.MailboxInfo) []string {
 	var f []string
 
 	add := func(format string, a ...any) { f = append(f, fmt.Sprintf(format, a...)) }
@@ -127,12 +127,17 @@ func findings(out *adminapi.ACLExplanation, info *model.MailboxInfo) []string {
 		return f
 	}
 
-	return append(f, pointerFindings(out, info)...)
+	return append(f, s.pointerFindings(out, info)...)
 }
 
 // pointerFindings explains the shared-mailbox pointer.
-func pointerFindings(out *adminapi.ACLExplanation, info *model.MailboxInfo) []string {
-	shown := "Other Users/" + out.Owner + "/" + info.Name
+func (s *Server) pointerFindings(out *adminapi.ACLExplanation, info *model.MailboxInfo) []string {
+	shown := s.o.SharedPrefix + out.Owner + "/" + info.Name
+	if s.o.SharedPrefix == "" {
+		// No shared namespace: clients cannot address the mailbox at
+		// all, so name it the way this tool does.
+		shown = out.Owner + "/" + info.Name
+	}
 
 	switch ptr := out.Pointer; {
 	case out.Visible && !ptr.Present && out.OwnEntry == "":

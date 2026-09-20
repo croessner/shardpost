@@ -1567,7 +1567,7 @@ type ClientInterface interface {
 	// Resolves the principal to its canonical account, computes its
 	// effective rights with the same function IMAP uses (own entry plus
 	// "anyone") and checks the pointer in the principal's registry that
-	// makes the mailbox appear under "Other Users/". `findings` names
+	// makes the mailbox appear in the shared namespace. `findings` names
 	// every reason in plain text. Requires the role `diagnose`.
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
@@ -1751,7 +1751,8 @@ type ClientInterface interface {
 
 	// ListSharedMailboxes Mailboxes of other accounts shared with this account
 	//
-	// The pointers in the account's registry ("Other Users/<owner>/...").
+	// The pointers in the account's registry (the mailboxes of other
+	// accounts it sees, as "<owner>/<mailbox>").
 	// Requires the role `diagnose`.
 	//
 	// Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
@@ -2608,7 +2609,7 @@ func (c *Client) GetMailboxACL(ctx context.Context, account Account, id MailboxI
 // Resolves the principal to its canonical account, computes its
 // effective rights with the same function IMAP uses (own entry plus
 // "anyone") and checks the pointer in the principal's registry that
-// makes the mailbox appear under "Other Users/". `findings` names
+// makes the mailbox appear in the shared namespace. `findings` names
 // every reason in plain text. Requires the role `diagnose`.
 //
 // Corresponds with GET /admin/v1/accounts/{account}/mailboxes/{id}/acl/explain (the `ExplainMailboxACL` operationId).
@@ -2952,7 +2953,8 @@ func (c *Client) SearchMessages(ctx context.Context, account Account, body Searc
 
 // ListSharedMailboxes Mailboxes of other accounts shared with this account
 //
-// The pointers in the account's registry ("Other Users/<owner>/...").
+// The pointers in the account's registry (the mailboxes of other
+// accounts it sees, as "<owner>/<mailbox>").
 // Requires the role `diagnose`.
 //
 // Corresponds with GET /admin/v1/accounts/{account}/shared (the `ListSharedMailboxes` operationId).
@@ -6630,7 +6632,7 @@ type ClientWithResponsesInterface interface {
 	// Resolves the principal to its canonical account, computes its
 	// effective rights with the same function IMAP uses (own entry plus
 	// "anyone") and checks the pointer in the principal's registry that
-	// makes the mailbox appear under "Other Users/". `findings` names
+	// makes the mailbox appear in the shared namespace. `findings` names
 	// every reason in plain text. Requires the role `diagnose`.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -6826,7 +6828,8 @@ type ClientWithResponsesInterface interface {
 
 	// ListSharedMailboxesWithResponse Mailboxes of other accounts shared with this account
 	//
-	// The pointers in the account's registry ("Other Users/<owner>/...").
+	// The pointers in the account's registry (the mailboxes of other
+	// accounts it sees, as "<owner>/<mailbox>").
 	// Requires the role `diagnose`.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -10065,7 +10068,7 @@ func (c *ClientWithResponses) GetMailboxACLWithResponse(ctx context.Context, acc
 // Resolves the principal to its canonical account, computes its
 // effective rights with the same function IMAP uses (own entry plus
 // "anyone") and checks the pointer in the principal's registry that
-// makes the mailbox appear under "Other Users/". `findings` names
+// makes the mailbox appear in the shared namespace. `findings` names
 // every reason in plain text. Requires the role `diagnose`.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -10357,7 +10360,8 @@ func (c *ClientWithResponses) SearchMessagesWithResponse(ctx context.Context, ac
 
 // ListSharedMailboxesWithResponse Mailboxes of other accounts shared with this account
 //
-// The pointers in the account's registry ("Other Users/<owner>/...").
+// The pointers in the account's registry (the mailboxes of other
+// accounts it sees, as "<owner>/<mailbox>").
 // Requires the role `diagnose`.
 //
 // Returns a wrapper object for the known response body format(s).

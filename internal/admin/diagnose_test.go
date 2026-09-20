@@ -70,7 +70,8 @@ func serveDiag(t *testing.T, wrap func(*memstore.Store) delivery.Store, roles ..
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: diagUsers, Log: log, Version: "test",
 		MaxMessageBytes: 4096, SocketRoles: roles, Accounts: accounts, Instance: "pod-1", StartedAt: time.Unix(1000, 0),
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Learning: testLearning})
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Learning: testLearning,
+		SharedPrefix: "Shared/", PublicPrefix: "Public/"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -270,7 +271,7 @@ func TestExplainACL(t *testing.T) {
 		principal, rights, finding string
 		visible                    bool
 	}{
-		{"bob", "lr", "visible as Other Users/alice/Shared", true},
+		{"bob", "lr", "visible as Shared/alice/Shared", true},
 		{"BOB@example.org", "lr", "is an alias of bob", true},
 		{"carol", "r", "lack l", false},
 		{"alice", model.AllRights, "owns the mailbox", true},

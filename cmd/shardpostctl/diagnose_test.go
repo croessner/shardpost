@@ -50,7 +50,8 @@ func serveFilled(t *testing.T, roles ...string) string {
 	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw", "carol": "pw"},
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
 		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr,
-		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000})
+		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000,
+		SharedPrefix: "Shared/", PublicPrefix: "Public/"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ended := make(chan struct{})
@@ -88,7 +89,7 @@ func TestDiagnoseCommands(t *testing.T) {
 		{[]string{"mailbox", "list", "-limit", "2", "alice"}, []string{"more: -after \"B\""}},
 		{[]string{"mailbox", "show", "alice", "INBOX"}, []string{"2 (2 unseen, 0 deleted)"}},
 		{[]string{"acl", "list", "alice", "Shared"}, []string{"bob", "lr", "(owner)"}},
-		{[]string{"acl", "explain", "alice", "Shared", "bob"}, []string{"visible as Other Users/alice/Shared"}},
+		{[]string{"acl", "explain", "alice", "Shared", "bob"}, []string{"visible as Shared/alice/Shared"}},
 		{[]string{"quota", "show", "alice"}, []string{"2 / unlimited messages"}},
 		{[]string{"shared", "list", "bob"}, []string{"alice", "Shared"}},
 	} {

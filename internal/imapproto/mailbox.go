@@ -433,7 +433,8 @@ func (c *conn) listOwnExtras(mb *model.Mailbox, name string, opts listOptions) {
 	}
 }
 
-// sharedEntry is one mailbox of another user listed in "Other Users".
+// sharedEntry is one mailbox of another user listed in the shared
+// namespace.
 type sharedEntry struct {
 	full   string
 	sub    bool
@@ -441,7 +442,7 @@ type sharedEntry struct {
 	rights string
 }
 
-// sharedTree is the "Other Users" hierarchy as LIST sees it.
+// sharedTree is the hierarchy of shared mailboxes as LIST sees it.
 type sharedTree struct {
 	entries  []sharedEntry
 	full     map[string]sharedEntry
@@ -487,7 +488,7 @@ func (st *sharedTree) subChildUnmatched(n string) bool {
 	return false
 }
 
-// listShared lists the "Other Users" namespace: the mailboxes of other
+// listShared lists the shared namespace: the mailboxes of other
 // users this account holds a pointer for, verified against the owner's
 // ACL (right l). Pointers without rights are pruned.
 func (c *conn) listShared(lsub bool, opts listOptions, ref string, patterns []string) error {
@@ -649,6 +650,11 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 
 	nodes := map[string]bool{} // implicit parents (\Noselect)
 
+	shared := c.sharedPrefix()
+	if shared == "" {
+		return nil, nil // sharing is switched off for clients
+	}
+
 	for _, r := range refs {
 		if model.IsPublic(r.Owner) {
 			// Public folders are listed from their namespace; a pointer
@@ -658,7 +664,7 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 			continue
 		}
 
-		t, err := c.target(otherUsersPrefix + r.Owner + "/" + r.Mailbox)
+		t, err := c.target(shared + r.Owner + "/" + r.Mailbox)
 		if err != nil {
 			continue
 		}
@@ -676,13 +682,13 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 		}
 
 		entries = append(entries, sharedEntry{full: t.full, sub: r.Subscribed, leaf: true, rights: rights})
-		nodes[strings.TrimSuffix(otherUsersPrefix, "/")] = true
-		nodes[otherUsersPrefix+r.Owner] = true
+		nodes[strings.TrimSuffix(shared, "/")] = true
+		nodes[shared+r.Owner] = true
 
 		n := t.full
 		for {
 			j := strings.LastIndex(n, "/")
-			if j < 0 || n[:j] == otherUsersPrefix+r.Owner {
+			if j < 0 || n[:j] == shared+r.Owner {
 				break
 			}
 
@@ -695,7 +701,7 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 }
 
 // listSharedEntry writes the LIST/LSUB response for one matching name of
-// the "Other Users" namespace, if the selection options admit it.
+// the shared namespace, if the selection options admit it.
 func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts listOptions) {
 	e, isBox := st.full[name]
 

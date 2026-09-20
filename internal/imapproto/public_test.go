@@ -150,7 +150,7 @@ func TestPublicGrantWritesNoPointer(t *testing.T) {
 		t.Fatalf("public folder not listed exactly once:\n%s", lines)
 	}
 
-	if strings.Contains(lines, "Other Users/~public") {
+	if strings.Contains(lines, "Shared/~public") {
 		t.Errorf("public folder listed as a shared one:\n%s", lines)
 	}
 }

@@ -60,6 +60,13 @@ type Options struct {
 	Hostname string
 	// MaxMessageBytes bounds a delivered message; required (> 0).
 	MaxMessageBytes int64
+	// SharedPrefix and PublicPrefix are the client-visible prefixes of
+	// the shared and the public namespace. The ACL explanation names a
+	// mailbox the way a client sees it, and a new mailbox must not be
+	// created below either prefix, where no client could address it.
+	// "" means that namespace is switched off.
+	SharedPrefix string
+	PublicPrefix string
 	// SocketRoles are the roles of local callers on the Unix socket.
 	SocketRoles []string
 	// Clients map client certificate identities to roles (TCP listener);

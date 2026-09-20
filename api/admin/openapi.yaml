@@ -272,7 +272,7 @@ paths:
         Resolves the principal to its canonical account, computes its
         effective rights with the same function IMAP uses (own entry plus
         "anyone") and checks the pointer in the principal's registry that
-        makes the mailbox appear under "Other Users/". `findings` names
+        makes the mailbox appear in the shared namespace. `findings` names
         every reason in plain text. Requires the role `diagnose`.
       parameters:
         - name: principal
@@ -317,7 +317,8 @@ paths:
       operationId: listSharedMailboxes
       summary: Mailboxes of other accounts shared with this account
       description: |
-        The pointers in the account's registry ("Other Users/<owner>/...").
+        The pointers in the account's registry (the mailboxes of other
+        accounts it sees, as "<owner>/<mailbox>").
         Requires the role `diagnose`.
       responses:
         "200":

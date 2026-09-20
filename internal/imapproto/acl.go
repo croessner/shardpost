@@ -8,9 +8,9 @@ import (
 	"shardpost/internal/model"
 )
 
-// Access control (RFC 4314) and the "Other Users" namespace.
+// Access control (RFC 4314) and the namespace of shared mailboxes.
 //
-// A mailbox name of the form "Other Users/<owner>/<name>" addresses a
+// A mailbox name of the form "<shared prefix><owner>/<name>" addresses a
 // mailbox in another user's namespace. Every command resolves its
 // mailbox argument to a target (the owning user object, the name inside
 // that namespace) and checks the rights the session's account holds on
@@ -18,7 +18,12 @@ import (
 // entries for the account and for "anyone". A mailbox the account has no
 // rights on does not exist for it (NONEXISTENT rather than NOPERM).
 
-const otherUsersPrefix = "Other Users/"
+// DefaultSharedPrefix is the client-visible prefix of the mailboxes
+// other accounts share (see Options.SharedPrefix); below it a mailbox
+// is addressed as "<prefix><account>/<mailbox>". Dovecot calls its own
+// "shared/"; servers migrated from Exchange or from an older Dovecot
+// often use "Other Users/", which is why it is a setting.
+const DefaultSharedPrefix = "Shared/"
 
 // DefaultPublicPrefix is the client-visible prefix of the public
 // namespace (see Options.PublicPrefix).
@@ -29,7 +34,7 @@ type target struct {
 	u      model.User
 	owner  string // "" for the session's own namespace and for public folders
 	public bool   // a folder of the public namespace
-	prefix string // the public prefix it was addressed with
+	prefix string // the namespace prefix it was addressed with
 	name   string // name inside the namespace
 	full   string // name as the client sees it
 }
@@ -47,7 +52,7 @@ func (t *target) display(name string) string {
 	case t.owner == "":
 		return name
 	default:
-		return otherUsersPrefix + t.owner + "/" + name
+		return t.prefix + t.owner + "/" + name
 	}
 }
 
@@ -67,11 +72,12 @@ func (c *conn) target(full string) (*target, error) {
 		return &target{u: u, public: true, prefix: prefix, name: name, full: full}, nil
 	}
 
-	if !strings.HasPrefix(full, otherUsersPrefix) {
+	shared := c.sharedPrefix()
+	if shared == "" || !strings.HasPrefix(full, shared) {
 		return &target{u: c.user, name: full, full: full}, nil
 	}
 
-	rest := strings.TrimPrefix(full, otherUsersPrefix)
+	rest := strings.TrimPrefix(full, shared)
 	owner, name, ok := strings.Cut(rest, "/")
 
 	owner = strings.ToLower(owner)
@@ -88,12 +94,28 @@ func (c *conn) target(full string) (*target, error) {
 		return nil, err
 	}
 
-	return &target{u: u, owner: owner, name: name, full: full}, nil
+	return &target{u: u, owner: owner, prefix: shared, name: name, full: full}, nil
 }
 
 // publicPrefix is the client-visible prefix of the public namespace,
 // "" when public folders are switched off (server.public_prefix: "").
 func (c *conn) publicPrefix() string { return c.s.o.PublicPrefix }
+
+// sharedPrefix is the client-visible prefix of the mailboxes other
+// accounts share, "" when sharing is switched off
+// (server.shared_prefix: ""). The mailboxes stay shared in the store;
+// no client can reach them while the namespace is off.
+func (c *conn) sharedPrefix() string { return c.s.o.SharedPrefix }
+
+// namespaceField renders one NAMESPACE field: the prefix and the
+// hierarchy delimiter, or NIL when that namespace is switched off.
+func namespaceField(prefix string) string {
+	if prefix == "" {
+		return "NIL"
+	}
+
+	return fmt.Sprintf(`(("%s" "/"))`, prefix)
+}
 
 // publicUser opens the public namespace, once per session. Its view is
 // kept with the other namespaces and closed at logout.

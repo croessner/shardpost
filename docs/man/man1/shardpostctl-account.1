@@ -56,9 +56,11 @@ If the two look implausible, recount them with the
 job; see
 .BR shardpostctl-job (1).
 .SS shared list
-Lists the mailboxes of other accounts this account was granted rights on,
-as the client sees them under
-.IR "Other Users/" .
+Lists the mailboxes of other accounts this account was granted rights
+on, as the client sees them under the shared prefix
+.RI ( server.shared_prefix ,
+by default
+.IR Shared/ ).
 For the other direction (who may see this account's mailboxes) use
 .BR shardpostctl-acl (1).
 .PP
