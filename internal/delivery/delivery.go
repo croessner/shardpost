@@ -9,9 +9,7 @@ package delivery
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -36,6 +34,9 @@ var (
 	ErrRedirectFailed = errors.New("redirect failed")
 	// ErrNoMailbox means the explicitly requested mailbox does not exist.
 	ErrNoMailbox = errors.New("no such mailbox")
+	// ErrNoPostRight means the account may not put mail into the
+	// mailbox the caller named (a public folder needs the right p).
+	ErrNoPostRight = errors.New("not allowed to deliver into this mailbox")
 	// ErrQuotaExemptUnsupported means the store cannot skip quota
 	// enforcement.
 	ErrQuotaExemptUnsupported = errors.New("quota exemption not supported by the store")
@@ -140,6 +141,9 @@ type run struct {
 	// namespace among them, opened at most once.
 	opened []model.User
 	pub    model.User
+	// explicit is set when the caller named the mailbox: then a target
+	// that cannot be used is an error, not a detour into INBOX.
+	explicit bool
 }
 
 // Deliver runs the recipient's Sieve script (unless disabled) and stores
@@ -239,19 +243,11 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 // detour. A public folder needs the post right, as it does for Sieve;
 // the mailboxes of other accounts are no delivery target at all.
 func (r *run) checkExplicit(name string) error {
-	if p := r.svc.SharedPrefix; p != "" && strings.HasPrefix(name, p) {
-		return fmt.Errorf("%w: a mailbox of another account is no delivery target", ErrNoMailbox)
-	}
+	r.explicit = true
 
 	t, err := r.target(name)
 	if err != nil {
 		return err
-	}
-
-	if t.where != name {
-		// The public folder was refused; r.target says so by pointing
-		// at INBOX instead.
-		return fmt.Errorf("%w: no post right on %s", ErrNoMailbox, name)
 	}
 
 	if _, err := t.u.Lookup(t.mailbox); err != nil {

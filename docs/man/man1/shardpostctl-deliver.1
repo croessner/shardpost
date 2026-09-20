@@ -40,7 +40,15 @@ Envelope sender. Empty means the null sender, as for bounces.
 .BI \-m " mailbox"
 Store directly into this existing mailbox and do not run Sieve. Use it
 when a message must land in a specific mailbox, for example while
-re-injecting mail.
+re-injecting mail. A public folder is named the way a client sees it
+.RI ( Public/Support ,
+see
+.IR server.public_prefix )
+and needs the post right
+.RB ( p )
+for the recipient. There is no fallback: if the mailbox is missing the
+command fails with 67, if the right is missing with 77. A mailbox of
+another account is not a delivery target.
 .TP
 .B \-\-no-sieve
 Do not run the user's Sieve script; the message goes to INBOX.
@@ -115,8 +123,11 @@ Over quota.
 Temporary failure. The MTA should try again.
 .TP
 .B 77
-The caller lacks the role.
+The caller lacks the role, or the recipient may not post into the
+mailbox named with
+.BR \-m .
 .SH SEE ALSO
 .BR shardpostctl (1),
+.BR shardpostctl-acl (1),
 .BR shardpostctl-message (1),
 .BR shardpostctl-sieve (1)

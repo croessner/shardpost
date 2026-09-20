@@ -136,6 +136,8 @@ func (s *Server) deliveryError(w http.ResponseWriter, r *http.Request, err error
 		writeError(w, http.StatusNotFound, adminapi.NoSuchUser, "no such user")
 	case errors.Is(err, delivery.ErrNoMailbox):
 		writeError(w, http.StatusNotFound, adminapi.NoSuchMailbox, "no such mailbox")
+	case errors.Is(err, delivery.ErrNoPostRight):
+		writeError(w, http.StatusForbidden, adminapi.Forbidden, err.Error())
 	case errors.Is(err, model.ErrTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, adminapi.TooLarge, "message too large")
 	case errors.As(err, &rej):

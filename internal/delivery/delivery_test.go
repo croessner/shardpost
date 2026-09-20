@@ -455,21 +455,25 @@ func TestRefusedFileIntoDoesNotDuplicate(t *testing.T) {
 }
 
 // TestExplicitMailboxAcrossNamespaces: a delivery that names its
-// mailbox (LMTP with a target, "deliver -m") reaches a public folder
-// like a Sieve script does, and never falls back: whoever names a
-// mailbox wants that one.
+// mailbox (the admin API, "deliver -m") reaches a public folder like a
+// Sieve script does, and never falls back: whoever names a mailbox
+// wants that one, and says so with the right error.
 func TestExplicitMailboxAcrossNamespaces(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		mailbox string
 		rights  string
-		wantErr bool
+		wantErr error
 		inPub   int
+		inInbox int
 	}{
-		{"a public folder with the post right", "Public/Support", "lrp", false, 1},
-		{"without the post right", "Public/Support", "lr", true, 0},
-		{"a folder that does not exist", "Public/Nothing", "lrp", true, 0},
-		{"a mailbox of another account", "Shared/other@example.org/Box", "lrp", true, 0},
+		{"a public folder with the post right", "Public/Support", "lrp", nil, 1, 0},
+		{"without the post right", "Public/Support", "lr", ErrNoPostRight, 0, 0},
+		{"a folder that does not exist", "Public/Nothing", "lrp", ErrNoMailbox, 0, 0},
+		{"a mailbox of another account", "Shared/other@example.org/Box", "lrp", ErrNoMailbox, 0, 0},
+		{"the INBOX", "INBOX", "lrp", nil, 0, 1},
+		{"the INBOX in another spelling", "inbox", "lrp", nil, 0, 1},
+		{"a mailbox that is not there", "Projekte", "lrp", ErrNoMailbox, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, store := testService(t, "")
@@ -488,24 +492,23 @@ func TestExplicitMailboxAcrossNamespaces(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			u, _ := store.User(account)
+			if err := u.EnsureMailbox("INBOX", nil); err != nil {
+				t.Fatal(err)
+			}
+
 			req := request(message)
 			req.Mailbox = tc.mailbox
 
 			res, err := svc.Deliver(context.Background(), req)
 			checkExplicitResult(t, res, err, tc.wantErr, tc.mailbox)
 
-			msgs, err := messagesIn(pub, "Support")
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if len(msgs) != tc.inPub {
+			if msgs, _ := messagesIn(pub, "Support"); len(msgs) != tc.inPub {
 				t.Errorf("%d messages in the public folder, want %d", len(msgs), tc.inPub)
 			}
 
-			u, _ := store.User(account)
-			if own, _ := messagesIn(u, "INBOX"); len(own) != 0 {
-				t.Errorf("%d messages in INBOX, want none: a named mailbox has no fallback", len(own))
+			if own, _ := messagesIn(u, "INBOX"); len(own) != tc.inInbox {
+				t.Errorf("%d messages in INBOX, want %d", len(own), tc.inInbox)
 			}
 		})
 	}
@@ -513,12 +516,12 @@ func TestExplicitMailboxAcrossNamespaces(t *testing.T) {
 
 // checkExplicitResult verifies the outcome of a delivery into a mailbox
 // the caller named.
-func checkExplicitResult(t *testing.T, res *Result, err error, wantErr bool, mailbox string) {
+func checkExplicitResult(t *testing.T, res *Result, err error, want error, mailbox string) {
 	t.Helper()
 
-	if wantErr {
-		if !errors.Is(err, ErrNoMailbox) {
-			t.Fatalf("want ErrNoMailbox, got %v", err)
+	if want != nil {
+		if !errors.Is(err, want) {
+			t.Fatalf("want %v, got %v", want, err)
 		}
 
 		return
@@ -528,7 +531,7 @@ func checkExplicitResult(t *testing.T, res *Result, err error, wantErr bool, mai
 		t.Fatalf("delivery: %v", err)
 	}
 
-	if len(res.Stored) != 1 || res.Stored[0].Mailbox != mailbox {
-		t.Fatalf("stored %+v, want %s", res.Stored, mailbox)
+	if len(res.Stored) != 1 {
+		t.Fatalf("stored %+v, want one message in %s", res.Stored, mailbox)
 	}
 }

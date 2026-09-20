@@ -1264,18 +1264,51 @@ func (c *conn) cmdEnable(tag string) error {
 	return nil
 }
 
-// cmdIdle pushes changes until the client sends DONE. Changes are
-// detected through the RADOS watch on the mailbox object; a slow ticker
-// covers lost notifies.
-func (c *conn) cmdIdle(tag string) error {
+// idleStart arms the watch, tells the client that the session idles and
+// reports what happened while the watch was being armed.
+func (c *conn) idleStart() (model.Watch, error) {
+	watch := c.idleWatch()
+
+	err := c.idleAnnounce()
+	if err != nil && watch != nil {
+		watch.Close()
+
+		return nil, err
+	}
+
+	return watch, err
+}
+
+// idleAnnounce tells the client that the session idles and reports what
+// happened since the command loop last looked.
+func (c *conn) idleAnnounce() error {
 	c.w.line("+ idling")
 
 	if err := c.w.flush(); err != nil {
 		return err
 	}
 
+	if err := c.poll(true); err != nil {
+		return err
+	}
+
+	return c.w.flush()
+}
+
+// cmdIdle pushes changes until the client sends DONE. Changes are
+// detected through the RADOS watch on the mailbox object; a slow ticker
+// covers lost notifies.
+func (c *conn) cmdIdle(tag string) error {
+	// The watch is armed before the client is told to idle, and the
+	// mailbox is polled once afterwards: a change between the poll of
+	// the command loop and the watch would otherwise wake nobody, and
+	// the session would sit on it until the ticker.
+	watch, err := c.idleStart()
+	if err != nil {
+		return err
+	}
+
 	done := c.idleRead()
-	watch := c.idleWatch()
 
 	defer func() {
 		if watch != nil {

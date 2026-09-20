@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -213,43 +214,68 @@ type target struct {
 // public folders. Without the right the message falls back to INBOX,
 // the way a failed fileinto does.
 func (r *run) target(name string) (target, error) {
+	t, refused, err := r.resolveTarget(name)
+	if err != nil {
+		return target{}, err
+	}
+
+	if refused == nil {
+		return t, nil
+	}
+
+	// A caller that named the mailbox itself gets the refusal; a Sieve
+	// script gets INBOX, the way a failed fileinto does.
+	if r.explicit {
+		return target{}, refused
+	}
+
+	r.log.Warn("fileinto refused", "mailbox", name, "reason", refused.Error())
+
+	return target{u: r.u, mailbox: inboxName, where: inboxName}, nil
+}
+
+// resolveTarget resolves a name without any fallback. refused says why
+// the target cannot be used, nil when it can: a mailbox that is not
+// there (ErrNoMailbox) or one this account may not post into
+// (ErrNoPostRight).
+func (r *run) resolveTarget(name string) (t target, refused, err error) {
+	if p := r.svc.SharedPrefix; p != "" && strings.HasPrefix(name, p) {
+		// A delivery is for one account, and this name belongs to
+		// another one. Storing it here would create a mailbox of the
+		// recipient that no client can open.
+		return target{}, fmt.Errorf("%w: a mailbox of another account is no delivery target", ErrNoMailbox), nil
+	}
+
 	prefix := r.svc.PublicPrefix
 	if prefix == "" || !strings.HasPrefix(name, prefix) {
-		return r.ownTarget(name), nil
+		return r.ownTarget(name), nil, nil
 	}
 
 	folder := strings.TrimPrefix(name, prefix)
 
 	pub, err := r.publicUser()
 	if err != nil {
-		return target{}, err
+		return target{}, nil, err
 	}
 
 	acl, err := pub.GetACL(folder)
-	if err != nil || !model.HasRight(model.EffectiveRights(acl, r.req.Account), 'p') {
-		r.log.Warn("sieve fileinto into a public folder refused", "mailbox", name, "reason", reasonOf(err))
 
-		return target{u: r.u, mailbox: inboxName, where: inboxName}, nil
+	switch {
+	case errors.Is(err, model.ErrNoMailbox):
+		return target{}, fmt.Errorf("%w: %s", ErrNoMailbox, name), nil
+	case err != nil:
+		return target{}, nil, err
+	case !model.HasRight(model.EffectiveRights(acl, r.req.Account), 'p'):
+		return target{}, fmt.Errorf("%w: no post right on %s", ErrNoPostRight, name), nil
 	}
 
-	return target{u: pub, mailbox: folder, where: name, public: true}, nil
+	return target{u: pub, mailbox: folder, where: name, public: true}, nil, nil
 }
 
-// ownTarget resolves a name in the recipient's own namespace. A name
-// below the shared prefix is not one: it is what a client calls
-// somebody else's mailbox, and a delivery cannot write there. Storing
-// it would create a mailbox of the recipient that no client can open,
-// because that name resolves to the other account. The message goes to
-// INBOX instead, the way a failed fileinto does.
+// ownTarget resolves a name in the recipient's own namespace, folded as
+// the store folds it, so that two spellings of the same mailbox are one
+// target and the result reports one name.
 func (r *run) ownTarget(name string) target {
-	if p := r.svc.SharedPrefix; p != "" && strings.HasPrefix(name, p) {
-		r.log.Warn("sieve fileinto into another account's mailbox refused", "mailbox", name)
-
-		return target{u: r.u, mailbox: inboxName, where: inboxName}
-	}
-
-	// Fold the name as the store does, so that two spellings of the
-	// same mailbox are one target and the result reports one name.
 	name = canonicalMailbox(name)
 
 	return target{u: r.u, mailbox: name, where: name}
@@ -271,15 +297,6 @@ func (r *run) publicUser() (model.User, error) {
 	r.opened = append(r.opened, pub)
 
 	return pub, nil
-}
-
-// reasonOf names why a public fileinto was refused.
-func reasonOf(err error) string {
-	if err != nil {
-		return err.Error()
-	}
-
-	return "no post right"
 }
 
 // delivered is one completed fileinto of a multi-target delivery.
