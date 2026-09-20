@@ -171,7 +171,7 @@ type target struct {
 func (r *run) target(name string) (target, error) {
 	prefix := r.svc.PublicPrefix
 	if prefix == "" || !strings.HasPrefix(name, prefix) {
-		return target{u: r.u, mailbox: name, where: name}, nil
+		return r.ownTarget(name), nil
 	}
 
 	folder := strings.TrimPrefix(name, prefix)
@@ -189,6 +189,22 @@ func (r *run) target(name string) (target, error) {
 	}
 
 	return target{u: pub, mailbox: folder, where: name, public: true}, nil
+}
+
+// ownTarget resolves a name in the recipient's own namespace. A name
+// below the shared prefix is not one: it is what a client calls
+// somebody else's mailbox, and a delivery cannot write there. Storing
+// it would create a mailbox of the recipient that no client can open,
+// because that name resolves to the other account. The message goes to
+// INBOX instead, the way a failed fileinto does.
+func (r *run) ownTarget(name string) target {
+	if p := r.svc.SharedPrefix; p != "" && strings.HasPrefix(name, p) {
+		r.log.Warn("sieve fileinto into another account's mailbox refused", "mailbox", name)
+
+		return target{u: r.u, mailbox: inboxName, where: inboxName}
+	}
+
+	return target{u: r.u, mailbox: name, where: name}
 }
 
 // publicUser opens the public namespace once per delivery; it is closed

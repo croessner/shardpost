@@ -266,6 +266,44 @@ func (lt *listTree) unmatchedChild(n string) bool {
 	return false
 }
 
+// warnShadowed logs the account's own mailboxes that lie below a
+// namespace prefix. They are listed, but a client cannot open them:
+// their name resolves to the other namespace. This happens when a
+// prefix is introduced or changed while such a mailbox exists; the
+// admin API can rename it out of the way.
+func (c *conn) warnShadowed(boxes []model.Mailbox) {
+	if c.shadowWarned {
+		return
+	}
+
+	for i := range boxes {
+		if !shadowed(boxes[i].Name, c.sharedPrefix(), c.publicPrefix()) {
+			continue
+		}
+
+		c.shadowWarned = true
+
+		c.log.Warn("own mailbox lies below a namespace prefix and cannot be opened by a client",
+			"mailbox_id", boxes[i].ID, "shared_prefix", c.sharedPrefix(), "public_prefix", c.publicPrefix())
+
+		return
+	}
+
+	c.shadowWarned = true
+}
+
+// shadowed reports whether a name lies below one of the namespace
+// prefixes (empty prefixes are switched off).
+func shadowed(name string, prefixes ...string) bool {
+	for _, p := range prefixes {
+		if p != "" && strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // newListTree loads the account's mailboxes, subscriptions without a
 // mailbox (when subscriptions matter) and their implicit parents.
 func (c *conn) newListTree(opts listOptions, ref string, patterns []string) (*listTree, error) {
@@ -284,6 +322,8 @@ func (c *conn) newListTree(opts listOptions, ref string, patterns []string) (*li
 			}
 		}
 	}
+
+	c.warnShadowed(boxes)
 
 	lt := &listTree{boxes: boxes, byName: map[string]*model.Mailbox{}, names: map[string]bool{}, missing: missing, ref: ref, patterns: patterns}
 
@@ -492,6 +532,10 @@ func (st *sharedTree) subChildUnmatched(n string) bool {
 // users this account holds a pointer for, verified against the owner's
 // ACL (right l). Pointers without rights are pruned.
 func (c *conn) listShared(lsub bool, opts listOptions, ref string, patterns []string) error {
+	if c.sharedPrefix() == "" {
+		return nil // no shared namespace: nothing to list, nothing to read
+	}
+
 	refs, err := c.user.ListShared()
 	if err != nil {
 		return err
@@ -642,6 +686,14 @@ func (c *conn) dropStalePublicSubs(boxes []model.Mailbox, subs map[string]bool) 
 	}
 }
 
+// ownMailbox reports whether the account has a mailbox of that exact
+// name.
+func (c *conn) ownMailbox(name string) bool {
+	_, err := c.user.Lookup(name)
+
+	return err == nil
+}
+
 // collectShared resolves the account's shared-mailbox pointers to the
 // entries it may list (right l) and their implicit parents (\Noselect),
 // pruning stale pointers.
@@ -649,11 +701,7 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 	var entries []sharedEntry
 
 	nodes := map[string]bool{} // implicit parents (\Noselect)
-
 	shared := c.sharedPrefix()
-	if shared == "" {
-		return nil, nil // sharing is switched off for clients
-	}
 
 	for _, r := range refs {
 		if model.IsPublic(r.Owner) {
@@ -682,7 +730,14 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 		}
 
 		entries = append(entries, sharedEntry{full: t.full, sub: r.Subscribed, leaf: true, rights: rights})
-		nodes[strings.TrimSuffix(shared, "/")] = true
+
+		// The root of the namespace is a node of its own — unless the
+		// account has a mailbox of that name, which LIST already shows
+		// with its own attributes.
+		if root := strings.TrimSuffix(shared, "/"); !c.ownMailbox(root) {
+			nodes[root] = true
+		}
+
 		nodes[shared+r.Owner] = true
 
 		n := t.full

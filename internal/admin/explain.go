@@ -134,9 +134,11 @@ func (s *Server) findings(out *adminapi.ACLExplanation, info *model.MailboxInfo)
 func (s *Server) pointerFindings(out *adminapi.ACLExplanation, info *model.MailboxInfo) []string {
 	shown := s.o.SharedPrefix + out.Owner + "/" + info.Name
 	if s.o.SharedPrefix == "" {
-		// No shared namespace: clients cannot address the mailbox at
-		// all, so name it the way this tool does.
-		shown = out.Owner + "/" + info.Name
+		// No shared namespace: whatever the rights say, no client can
+		// reach the mailbox, so say that first and name it the way this
+		// tool does.
+		return []string{"the shared namespace is switched off (server.shared_prefix is empty): no client can open " +
+			out.Owner + "/" + info.Name + ", whatever the rights say"}
 	}
 
 	switch ptr := out.Pointer; {

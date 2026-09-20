@@ -417,6 +417,7 @@ func newDeliveryService(log *slog.Logger, settings *config.Config, store *cephst
 	return &delivery.Service{Store: storeAdapter{store}, Log: log.With("component", "delivery"),
 		GlobalScripts: settings.Sieve.GlobalDir, SieveConfig: sieveCfg, Programs: programs,
 		PublicPrefix: settings.Server.PublicPrefix,
+		SharedPrefix: settings.Server.SharedPrefix,
 		Relay: &outbound.Relay{Addr: settings.SMTP.Addr, HELO: settings.SMTP.Helo,
 			StartTLS: settings.SMTP.Starttls, Implicit: settings.SMTP.TLS,
 			User: settings.SMTP.User, Password: settings.SMTP.Password, ServerName: settings.SMTP.ServerName}}

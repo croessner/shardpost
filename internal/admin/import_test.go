@@ -26,7 +26,8 @@ func serveImport(t *testing.T, roles ...string) (*memstore.Store, *adminapi.Clie
 	store := memstore.New()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"user": "pw"}, Log: log, Version: "test",
-		MaxMessageBytes: 4096, SocketRoles: roles, Import: store, ImportMaxBatchMessages: 2, ImportMaxBatchBytes: 1 << 20})
+		MaxMessageBytes: 4096, SocketRoles: roles, Import: store, ImportMaxBatchMessages: 2, ImportMaxBatchBytes: 1 << 20,
+		SharedPrefix: "Shared/", PublicPrefix: "Public/"})
 
 	path := filepath.Join(socketDir(t), "admin.sock")
 
@@ -322,5 +323,27 @@ func TestImportChangesBounded(t *testing.T) {
 	resp, err := f.c.ImportChangesWithResponse(context.Background(), "user", f.id, &adminapi.ImportChangesParams{XImportSession: f.session}, adminapi.ImportChanges{Expunge: &uids})
 	if err != nil || resp.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("%v %d", err, resp.StatusCode())
+	}
+}
+
+// TestImportRefusesShadowedMailbox: a mailbox imported below a
+// namespace prefix would lie in the account and belong to nobody a
+// client can address — the name resolves to the other namespace. A
+// migration reports it per mailbox and carries on with the rest.
+func TestImportRefusesShadowedMailbox(t *testing.T) {
+	f := newImportFixture(t)
+
+	for _, name := range []string{"Shared/alice/Team", "Public/Announce"} {
+		mb, _ := f.c.PutImportMailboxWithResponse(context.Background(), "user", f.mailboxParams(),
+			adminapi.ImportMailboxSpec{Name: name, Uidvalidity: 7})
+		if mb.StatusCode() != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", name, mb.StatusCode())
+		}
+	}
+
+	mb, _ := f.c.PutImportMailboxWithResponse(context.Background(), "user", f.mailboxParams(),
+		adminapi.ImportMailboxSpec{Name: "shared/alice/Team", Uidvalidity: 7})
+	if mb.StatusCode() != http.StatusOK {
+		t.Errorf("a name that only looks like the prefix: %d, want 200", mb.StatusCode())
 	}
 }

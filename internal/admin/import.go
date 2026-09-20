@@ -246,6 +246,16 @@ func (s *Server) PutImportMailbox(w http.ResponseWriter, r *http.Request, accoun
 		return
 	}
 
+	// An imported mailbox below a namespace prefix would be as
+	// unreachable as a newly created one: the name belongs to another
+	// namespace. Rename it at the source (see checkNewName).
+	if shadowsNamespace(spec.Name, s.o.SharedPrefix, s.o.PublicPrefix) {
+		writeError(w, http.StatusBadRequest, adminapi.BadRequest,
+			"the name lies below a namespace prefix, where no client could open it: "+spec.Name)
+
+		return
+	}
+
 	auditf(r, "mailbox", spec.Name, "uidvalidity", spec.Uidvalidity)
 
 	mb, err := c.imp.ImportMailbox(model.ImportMailbox{Name: spec.Name, UIDValidity: uint32(spec.Uidvalidity), ID: strings.ToLower(deref(spec.Id)),

@@ -367,6 +367,9 @@ type conn struct {
 	mowner  string
 	mpublic bool // the selected mailbox is a public folder
 	mprefix string
+	// shadowWarned keeps the warning about a mailbox below a namespace
+	// prefix to one per session.
+	shadowWarned bool
 	// pseen are the account's private \Seen marks of the selected public
 	// folder (see private.go).
 	pseen      map[uint32]model.PrivateMark

@@ -99,12 +99,12 @@ func (s *Server) checkNewName(name string) string {
 }
 
 // shadowsNamespace reports whether name lies below one of the given
-// namespace prefixes (empty prefixes are switched off).
+// namespace prefixes (empty prefixes are switched off). The comparison
+// is case-sensitive, as it is in IMAP: "shared/x" is an ordinary
+// mailbox of the account when the prefix is "Shared/".
 func shadowsNamespace(name string, prefixes ...string) bool {
-	lower := strings.ToLower(name)
-
 	for _, p := range prefixes {
-		if p != "" && strings.HasPrefix(lower, strings.ToLower(p)) {
+		if p != "" && strings.HasPrefix(name, p) {
 			return true
 		}
 	}

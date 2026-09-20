@@ -141,10 +141,34 @@ what they are used to, for example `Other Users/` (Exchange, older
 Dovecot setups) or `shared/` (Dovecot's own default). Changing the
 prefix renames what clients see: the mailboxes and their permissions
 stay as they are, but every client re-discovers the folders under the
-new name and treats them as new ones locally.
+new name and treats them as new ones locally — local caches, folder
+settings and client-side filter rules that name a folder path have to
+be redone. Subscriptions survive: they are kept per account and per
+mailbox, not by name.
 
 With an empty prefix no client can reach a shared mailbox, although the
 permissions remain in the store and the admin API still shows them.
+
+**Before changing a prefix on a running server**, check that no account
+owns a mailbox below the new one:
+
+```sh
+shardpostctl mailbox list <account> | grep -E '^(Shared|Public)/'
+```
+
+Such a mailbox would still be listed but could no longer be opened: its
+name resolves to the other namespace. Rename it first
+(`shardpostctl mailbox rename <account> <old> <new>`); the server also
+logs a warning when it lists one. Creating, renaming or importing a
+mailbox below a prefix is refused for the same reason.
+
+While a namespace is switched off its prefix is not reserved, so an
+account can create a mailbox there in the meantime. Switching it back on
+is therefore the same migration step as changing it: check first.
+
+Version 0.26.1 changed the default from `Other Users/` to `Shared/`. A
+server that was running before it keeps the old name by setting
+`server.shared_prefix: "Other Users/"` explicitly.
 
 ### Public folders
 

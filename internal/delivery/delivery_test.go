@@ -379,3 +379,37 @@ func TestFileIntoPublicFolderRollback(t *testing.T) {
 		t.Errorf("%d messages left in the public folder after a failed delivery, want 0", len(msgs))
 	}
 }
+
+// TestFileIntoSharedFolderRefused: a script that files into what a
+// client calls somebody else's mailbox must not create a mailbox of the
+// recipient under that name. Nobody could open it — the name resolves
+// to the other account — so the message goes to INBOX, as a failed
+// fileinto does.
+func TestFileIntoSharedFolderRefused(t *testing.T) {
+	script := `require "fileinto"; fileinto "Shared/other@example.org/Team";`
+
+	svc, store := testService(t, script)
+	svc.SharedPrefix = "Shared/"
+
+	res, err := svc.Deliver(context.Background(), request(message))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(res.Stored) != 1 || res.Stored[0].Mailbox != "INBOX" {
+		t.Fatalf("stored %+v, want INBOX", res.Stored)
+	}
+
+	u, _ := store.User(account)
+
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, b := range boxes {
+		if strings.HasPrefix(b.Name, "Shared/") {
+			t.Errorf("a mailbox below the shared prefix was created: %s", b.Name)
+		}
+	}
+}

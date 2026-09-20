@@ -347,3 +347,38 @@ func TestSharedPrefixConfigurable(t *testing.T) {
 		})
 	}
 }
+
+// TestSharedPrefixCollision: an account whose own mailbox is named like
+// the root of the shared namespace keeps its own listing — the implicit
+// node of the namespace must not double the line. The own mailbox stays
+// reachable; a name below the prefix does not, which is why the server
+// warns and refuses to create one.
+func TestSharedPrefixCollision(t *testing.T) {
+	alice, bob := twoUsers(t)
+
+	bob.ok("CREATE Shared")
+	bob.append("Shared", "x@example.org", "own mail", "body")
+
+	alice.ok("CREATE Box")
+	alice.ok("SETACL Box bob lrs")
+
+	lines := bob.ok(`LIST "" "*"`)
+
+	own := 0
+
+	for _, l := range lines {
+		if strings.HasSuffix(l, `"/" Shared`) {
+			own++
+		}
+	}
+
+	if own != 1 {
+		t.Errorf("the mailbox named like the namespace is listed %d times:\n%s", own, strings.Join(lines, "\n"))
+	}
+
+	mustHave(t, lines, `"/" Shared/alice/Box`)
+
+	if l := strings.Join(bob.cmd("SELECT Shared"), "\n"); !strings.Contains(l, "1 EXISTS") {
+		t.Errorf("the account's own mailbox is not reachable: %s", l)
+	}
+}

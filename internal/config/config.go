@@ -415,12 +415,41 @@ func (c *Config) checkServer() error {
 		return err
 	}
 
+	if err := c.checkNamespaces(); err != nil {
+		return err
+	}
+
 	cidrs, err := normalizeTrustedCIDRs(c.Server.ProxyProtocolTrustedCidrs)
 	if err != nil {
 		return err
 	}
 
 	c.Server.ProxyProtocolTrustedCidrs = cidrs
+
+	return nil
+}
+
+// checkNamespaces validates the client-visible namespace prefixes. Two
+// namespaces that share a name, or one that lies inside the other,
+// would leave the second unreachable: a name is resolved by its prefix,
+// and the first match wins. A prefix below INBOX would capture the
+// account's own mailboxes.
+func (c *Config) checkNamespaces() error {
+	shared, public := c.Server.SharedPrefix, c.Server.PublicPrefix
+
+	for _, p := range []string{shared, public} {
+		if p != "" && strings.HasPrefix(strings.ToUpper(p), "INBOX/") {
+			return fmt.Errorf("a namespace prefix must not lie below INBOX: %q", p)
+		}
+	}
+
+	if shared == "" || public == "" {
+		return nil
+	}
+
+	if shared == public || strings.HasPrefix(shared, public) || strings.HasPrefix(public, shared) {
+		return fmt.Errorf("server.shared_prefix %q and server.public_prefix %q must not name the same namespace", shared, public)
+	}
 
 	return nil
 }

@@ -171,3 +171,30 @@ func TestTelemetryServiceIdentity(t *testing.T) {
 		t.Fatalf("override: %v", err)
 	}
 }
+
+// TestNamespacePrefixes: two namespaces must not name the same place,
+// and neither may lie below INBOX, or one of them would be unreachable.
+func TestNamespacePrefixes(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		shared, pub   string
+		wantRejection bool
+	}{
+		{"the defaults", "Shared/", "Public/", false},
+		{"sharing off", "", "Public/", false},
+		{"both off", "", "", false},
+		{"the same name", "Shared/", "Shared/", true},
+		{"one inside the other", "Shared/", "Shared/Public/", true},
+		{"below INBOX", "INBOX/Shared/", "Public/", true},
+		{"below inbox, lower case", "inbox/shared/", "Public/", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{}
+			c.Server.SharedPrefix, c.Server.PublicPrefix = tc.shared, tc.pub
+
+			if err := c.checkNamespaces(); (err != nil) != tc.wantRejection {
+				t.Errorf("shared %q public %q: %v", tc.shared, tc.pub, err)
+			}
+		})
+	}
+}

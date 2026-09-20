@@ -71,6 +71,11 @@ type Service struct {
 	// right on the folder; the message is stored in the public
 	// namespace, not in the account.
 	PublicPrefix string
+	// SharedPrefix is the prefix under which clients see the mailboxes
+	// of other accounts. A delivery cannot write there — the recipient
+	// is one account — so a fileinto below it goes to INBOX instead of
+	// creating a mailbox nobody can open.
+	SharedPrefix string
 }
 
 // closeOpened releases the extra namespaces a delivery filed into.
