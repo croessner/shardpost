@@ -858,7 +858,32 @@ func (s purgeSummary) Touched() []string { return s.Accounts }
 // stay with their owner (LDAP).
 type purge struct{ kindBase }
 
-func purgeInventory(u model.User) (purgeSummary, string, error) {
+// publicGrants lists the public folders that hold an ACL entry for the
+// account.
+func publicGrants(env *Env, account string) ([]grantIn, error) {
+	pub, err := env.Accounts.User(model.PublicNamespace)
+	if err != nil {
+		return nil, err
+	}
+	defer pub.Close()
+
+	boxes, err := pub.ListMailboxes()
+	if err != nil {
+		return nil, err
+	}
+
+	out := []grantIn{}
+
+	for i := range boxes {
+		if boxes[i].ACL[account] != "" {
+			out = append(out, grantIn{model.PublicNamespace, boxes[i].Name})
+		}
+	}
+
+	return out, nil
+}
+
+func purgeInventory(env *Env, u model.User, account string) (purgeSummary, string, error) {
 	s := purgeSummary{Scripts: []string{}, GrantsOut: []grantOut{}, GrantsIn: []grantIn{}, Accounts: []string{}}
 
 	boxes, err := u.ListMailboxes()
@@ -897,6 +922,16 @@ func purgeInventory(u model.User) (purgeSummary, string, error) {
 		s.Accounts = appendUnique(s.Accounts, ref.Owner)
 	}
 
+	// Public folders carry no pointers, so their grants have to be found
+	// in the namespace itself; otherwise the rights of a deleted account
+	// would wait there for whoever gets the name next.
+	pub, err := publicGrants(env, account)
+	if err != nil {
+		return s, "", err
+	}
+
+	s.GrantsIn = append(s.GrantsIn, pub...)
+
 	names, active, err := u.ListScripts()
 	if err != nil {
 		return s, "", err
@@ -909,8 +944,8 @@ func purgeInventory(u model.User) (purgeSummary, string, error) {
 	return s, fp + " " + strings.Join(names, ",") + " " + active, err
 }
 
-func (k *purge) Plan(_ context.Context, _ *Env, u model.User, _ string, _ json.RawMessage) (any, string, error) {
-	return purgeInventory(u)
+func (k *purge) Plan(_ context.Context, env *Env, u model.User, account string, _ json.RawMessage) (any, string, error) {
+	return purgeInventory(env, u, account)
 }
 
 // purgeCheckpoint records the finished phases.
@@ -923,7 +958,7 @@ func (k *purge) Run(_ context.Context, run *Run) (any, error) {
 	var cp purgeCheckpoint
 
 	if !run.LoadCheckpoint(&cp) {
-		if _, fp, err := purgeInventory(run.User); err != nil {
+		if _, fp, err := purgeInventory(run.Env, run.User, run.Job.Account); err != nil {
 			return nil, err
 		} else if fp != run.Plan.Fingerprint {
 			return nil, ErrDrift

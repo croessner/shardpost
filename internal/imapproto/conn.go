@@ -51,8 +51,9 @@ var DefaultSpecialFolders = []SpecialFolder{
 type Options struct {
 	IMAPSieve *imapsieve.Engine
 	Store     Store
-	// PublicPrefix is the client-visible prefix of the public namespace
-	// ("" uses DefaultPublicPrefix).
+	// PublicPrefix is the client-visible prefix of the public namespace;
+	// "" switches public folders off entirely (no namespace in the
+	// NAMESPACE reply, no extra reads per LIST).
 	PublicPrefix string
 	Auth         Auth
 	Log          *slog.Logger
@@ -360,6 +361,8 @@ type conn struct {
 	// account's own mailboxes), mrights the account's rights on it
 	mu         model.User
 	mowner     string
+	mpublic    bool // the selected mailbox is a public folder
+	mprefix    string
 	mrights    string
 	mbox       *model.Mailbox
 	info       *model.MailboxInfo
@@ -720,7 +723,12 @@ var uidCommands = map[string]bool{
 var authCommands = map[string]cmdHandler{
 	kwEnable: func(c *conn, tag, _ string, _ bool) error { return c.cmdEnable(tag) },
 	"NAMESPACE": func(c *conn, tag, _ string, _ bool) error {
-		c.w.untagged(`NAMESPACE (("" "/")) (("%s" "/")) (("%s" "/"))`, otherUsersPrefix, c.publicPrefix())
+		public := `NIL`
+		if p := c.publicPrefix(); p != "" {
+			public = fmt.Sprintf(`(("%s" "/"))`, p)
+		}
+
+		c.w.untagged(`NAMESPACE (("" "/")) (("%s" "/")) %s`, otherUsersPrefix, public)
 		c.ok(tag, "", "NAMESPACE completed")
 
 		return nil

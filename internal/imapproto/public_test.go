@@ -116,3 +116,39 @@ func TestPublicSubscription(t *testing.T) {
 		t.Errorf("still subscribed: %s", lines)
 	}
 }
+
+// TestPublicGrantWritesNoPointer: a right granted to an account must not
+// write a share pointer into that account's registry, or the folder
+// would be listed twice and a folder open to many accounts would cost a
+// write per account.
+func TestPublicGrantWritesNoPointer(t *testing.T) {
+	c, store := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"test": "lrswipkxte"})
+
+	u, err := store.User("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := u.ListShared()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(refs) != 0 {
+		t.Fatalf("share pointers written for a public folder: %+v", refs)
+	}
+
+	c.ok("LOGIN test test")
+
+	lines := strings.Join(c.cmd(`LIST "" "*"`), "\n")
+	if strings.Count(lines, "Team") != 1 || !strings.Contains(lines, `"/" Public/Team`) {
+		t.Fatalf("public folder not listed exactly once:\n%s", lines)
+	}
+
+	if strings.Contains(lines, "Other Users/~public") {
+		t.Errorf("public folder listed as a shared one:\n%s", lines)
+	}
+}

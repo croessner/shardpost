@@ -127,7 +127,10 @@ func (s *Store) ListUsers() ([]string, error) {
 
 	users := make([]string, 0, len(seen))
 	for u := range seen {
-		if u != "" && !model.ReservedNamespace(u) {
+		// The public namespace holds ordinary mailboxes, blobs and
+		// counters, so the scrub covers it like an account; the store's
+		// own namespaces (~admin, ~learning) it does not.
+		if u != "" && (!model.ReservedNamespace(u) || model.IsPublic(u)) {
 			users = append(users, u)
 		}
 	}

@@ -570,6 +570,10 @@ func (c *conn) listPublic(lsub bool, opts listOptions, ref string, patterns []st
 // collectPublic reads the public namespace and returns the folders the
 // account may see, plus their implicit parents (\Noselect).
 func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
+	if c.publicPrefix() == "" {
+		return nil, nil, nil // public folders are switched off
+	}
+
 	u, err := c.publicUser()
 	if err != nil {
 		return nil, nil, err
@@ -591,12 +595,9 @@ func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
 	prefix := c.publicPrefix()
 
 	for i := range boxes {
-		acl, err := u.GetACL(boxes[i].Name)
-		if err != nil {
-			continue // a folder that cannot be read this time stays hidden
-		}
-
-		rights := model.EffectiveRights(acl, c.name)
+		// The rights come with the registry entry; a second read per
+		// folder would cost one round trip per folder and LIST.
+		rights := model.EffectiveRights(boxes[i].ACL, c.name)
 		if !model.HasRight(rights, 'l') {
 			continue
 		}
@@ -628,6 +629,14 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 	nodes := map[string]bool{} // implicit parents (\Noselect)
 
 	for _, r := range refs {
+		if model.IsPublic(r.Owner) {
+			// Public folders are listed from their namespace; a pointer
+			// to them is a leftover and would list the folder twice.
+			_ = c.user.RemoveSharedRef(r)
+
+			continue
+		}
+
 		t, err := c.target(otherUsersPrefix + r.Owner + "/" + r.Mailbox)
 		if err != nil {
 			continue
@@ -1440,6 +1449,7 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
 	}
 
 	c.mu, c.mowner, c.mrights = st.u, st.owner, rights
+	c.mpublic, c.mprefix = st.public, st.prefix
 	// Without any modifying right the mailbox is read-only for this account.
 	c.mbox, c.readOnly = mb, examine || (!model.HasRight(rights, 'w') && !model.HasRight(rights, 's') && !model.HasRight(rights, 't') && !model.HasRight(rights, 'e'))
 
@@ -1679,6 +1689,7 @@ func (c *conn) reload() error {
 func (c *conn) unselect() {
 	c.mbox, c.info, c.msgs, c.searchRes = nil, nil, nil, nil
 	c.mu, c.mowner, c.mrights = nil, "", ""
+	c.mpublic, c.mprefix = false, ""
 	c.notifyReselect()
 
 	if c.state == stateSelected {

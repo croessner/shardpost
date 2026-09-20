@@ -982,9 +982,10 @@ func (u *User) SetACL(name, identifier, rights string) error {
 }
 
 // syncPointer writes or removes the grantee's shared pointer ("anyone"
-// has none).
+// has none, and public folders have none at all: they are found through
+// their namespace).
 func (u *User) syncPointer(canon, identifier, rights string) {
-	if identifier == identAnyone {
+	if identifier == identAnyone || model.IsPublic(u.name) {
 		return
 	}
 

@@ -53,7 +53,7 @@ func (t *target) display(name string) string {
 
 // target resolves a client-visible mailbox name.
 func (c *conn) target(full string) (*target, error) {
-	if prefix := c.publicPrefix(); strings.HasPrefix(full, prefix) {
+	if prefix := c.publicPrefix(); prefix != "" && strings.HasPrefix(full, prefix) {
 		name := strings.TrimPrefix(full, prefix)
 		if name == "" {
 			return nil, model.ErrNoMailbox
@@ -91,14 +91,9 @@ func (c *conn) target(full string) (*target, error) {
 	return &target{u: u, owner: owner, name: name, full: full}, nil
 }
 
-// publicPrefix is the client-visible prefix of the public namespace.
-func (c *conn) publicPrefix() string {
-	if c.s.o.PublicPrefix != "" {
-		return c.s.o.PublicPrefix
-	}
-
-	return DefaultPublicPrefix
-}
+// publicPrefix is the client-visible prefix of the public namespace,
+// "" when public folders are switched off (server.public_prefix: "").
+func (c *conn) publicPrefix() string { return c.s.o.PublicPrefix }
 
 // publicUser opens the public namespace, once per session. Its view is
 // kept with the other namespaces and closed at logout.

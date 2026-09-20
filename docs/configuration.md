@@ -134,7 +134,7 @@ YAML only. It is switched on through the Admin API (role `trace`), see
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `server.public_prefix` | `Public/` | client-visible prefix of the public namespace (must end with the separator) |
+| `server.public_prefix` | `Public/` | client-visible prefix of the public namespace (must end with the separator); empty switches public folders off entirely |
 | `server.public_quota_bytes` | 0 | limit of the public namespace as a whole, 0 = unlimited |
 | `server.public_quota_msgs` | 0 | the same as a message count |
 

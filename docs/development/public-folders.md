@@ -51,11 +51,18 @@ the new state.
    team folder useful: "answered" and "flagged" are statements about the
    folder, "read" is a statement about a person. This follows Dovecot,
    where the private index holds `\Seen` and nothing else.
-7. **MODSEQ.** A public mailbox reports `NOMODSEQ` (RFC 7162 3.1.2.2):
-   the shared MODSEQ cannot express a private flag change, and a wrong
-   MODSEQ is worse than none. Clients fall back to a full flag
-   synchronization for these folders. A per-account MODSEQ for the
-   private part is a later improvement, not part of A or B.
+7. **MODSEQ.** In package A every flag is shared, so the mailbox MODSEQ
+   stays correct and nothing changes. Package B keeps it correct rather
+   than giving up: the private object carries its own counter per
+   account, and a session reports the higher of the two. `NOMODSEQ`
+   (RFC 7162 3.1.2.2) would be the honest fallback for a wrong MODSEQ,
+   but it forces a full flag synchronization on every SELECT, which for
+   a large public archive is exactly the cost we avoid elsewhere. The
+   format of the private object is therefore fixed in B from the start:
+   key `(mailbox id, UIDVALIDITY, UID)`, value the private flags and the
+   counter. Entries whose message is gone are ignored and cleaned up
+   lazily, because an EXPUNGE by one account cannot touch another
+   account's namespace.
 8. **Quota.** The namespace counts its own usage, like every namespace
    here. The limit comes from the configuration
    (`server.public_quota_bytes`, `server.public_quota_msgs`, default 0 =
@@ -83,8 +90,8 @@ Store: open `~public`, keep the scrubber, `ListUsers` and account purge
 aware of it. IMAP: prefix handling, `NAMESPACE`, `LIST`/`LSUB` including
 per-account subscriptions, `SELECT`/`EXAMINE`/`STATUS`, `FETCH`,
 `SEARCH`, `STORE`, `APPEND`, `COPY`, `MOVE`, `EXPUNGE`, all with rights
-enforcement and `NOMODSEQ`. Admin: accept `~public`, configured quota
-limit. CLI and manual pages.
+enforcement. Admin: accept `~public`, configured quota limit. CLI and
+manual pages.
 
 In package A, `\Seen` is still shared. That is documented, and it is
 acceptable for an archive; it is not acceptable for a team inbox, which
@@ -101,6 +108,12 @@ The private flag object per account, `\Seen` handling in `FETCH`,
 `STORE`, `SEARCH` (`SEEN`, `UNSEEN`, `NEW`), `STATUS` (`UNSEEN`,
 `RECENT`) and the `\Seen` part of `COPY`/`MOVE`; Sieve `fileinto` into
 the public namespace with the `p` right.
+
+Copying out of a public folder into a private mailbox takes the copying
+account's `\Seen` with it; a copy inside the public namespace cannot
+carry everyone else's private marks and loses them, as it does in
+Dovecot. The shared `\Seen` flags from package A become the starting
+point "seen by everyone".
 
 Acceptance: two accounts read the same folder and see their own
 `\Seen`; `STATUS UNSEEN` differs between them; a flag other than `\Seen`

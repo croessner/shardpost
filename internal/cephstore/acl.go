@@ -197,6 +197,15 @@ func (o *aclOutcome) apply(cur map[string][]byte, key, identifier string, expect
 // the order they land in (an older revoke leaves a tombstone that an
 // older grant cannot override, and vice versa).
 func (u *User) syncSharedRef(name, identifier string) error {
+	// Public folders carry no pointers: they are found through the
+	// public namespace itself, so a grant must not write into the
+	// grantee's registry (a folder open to a thousand accounts would
+	// otherwise cost a thousand writes, and the folder would show up
+	// twice in LIST).
+	if model.IsPublic(u.name) {
+		return nil
+	}
+
 	mb, err := u.Lookup(name)
 	if err != nil {
 		return nil // mailbox gone meanwhile: DELETE removed the pointers
@@ -428,6 +437,10 @@ func (u *User) SetSharedSubscribed(owner, mailbox string, subscribed bool) error
 // dropSharedRefs removes the grantees' pointers after a mailbox was
 // deleted (best effort; a leftover pointer is pruned by LIST).
 func (u *User) dropSharedRefs(acl map[string]string, mailbox string) {
+	if model.IsPublic(u.name) {
+		return // no pointers for public folders, see syncSharedRef
+	}
+
 	for id := range acl {
 		if id == identAnyone {
 			continue
@@ -441,6 +454,10 @@ func (u *User) dropSharedRefs(acl map[string]string, mailbox string) {
 
 // moveSharedRefs re-points grantees after a RENAME.
 func (u *User) moveSharedRefs(rec model.MailboxRec, oldName, newName string) {
+	if model.IsPublic(u.name) {
+		return // no pointers for public folders, see syncSharedRef
+	}
+
 	for id := range rec.ACL {
 		if id == identAnyone {
 			continue

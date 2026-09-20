@@ -65,7 +65,9 @@ func (c *conn) sieveEvent(operation string, t *target, owner string, info *model
 	return e
 }
 
-func (c *conn) selectedTarget() *target { return &target{u: c.mu, owner: c.mowner, name: c.mbox.Name} }
+func (c *conn) selectedTarget() *target {
+	return &target{u: c.mu, owner: c.mowner, public: c.mpublic, prefix: c.mprefix, name: c.mbox.Name}
+}
 
 // prepareLearning installs a transaction hook only for owner-local COPY/MOVE.
 func (c *conn) prepareLearning(operation string, t *target) func() {
@@ -79,7 +81,9 @@ func (c *conn) prepareLearning(operation string, t *target) func() {
 	engine := c.s.o.IMAPSieve
 
 	worker, ok := engine.Learner.(*imapsieve.LearningWorker)
-	if !ok || !engine.Config.Enabled || !engine.Config.Learning.Enabled || t.shared() || c.mowner != "" {
+	// Learning is about the account's own mail: not for another
+	// account's mailbox, and not for a public folder either.
+	if !ok || !engine.Config.Enabled || !engine.Config.Learning.Enabled || t.shared() {
 		return func() {}
 	}
 

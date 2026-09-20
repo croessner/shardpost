@@ -27,7 +27,8 @@ func newTestServer(t *testing.T, customize ...func(*Options, *memstore.Store)) (
 
 	store := memstore.New()
 
-	opts := Options{Store: store, Auth: auth.Static{"test": "test"}, InsecureAuth: true, Autocreate: DefaultSpecialFolders, QuotaSelfService: true}
+	opts := Options{Store: store, Auth: auth.Static{"test": "test"}, InsecureAuth: true, Autocreate: DefaultSpecialFolders,
+		QuotaSelfService: true, PublicPrefix: DefaultPublicPrefix}
 	for _, fn := range customize {
 		fn(&opts, store)
 	}

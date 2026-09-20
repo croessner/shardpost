@@ -334,3 +334,54 @@ func TestExpunge(t *testing.T) {
 		t.Fatalf("neither uids nor deleted: %v", err)
 	}
 }
+
+// TestPurgeRevokesPublicGrants: a public folder holds no pointers, so
+// the rights of a purged account have to be found in the namespace
+// itself. Otherwise whoever gets the name next inherits them.
+func TestPurgeRevokesPublicGrants(t *testing.T) {
+	m, store := kindsSetup(t)
+
+	pub, err := store.User(model.PublicNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.EnsureMailbox("Team", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for id, rights := range map[string]string{"alice": "lrswipkxte", "carol": "lr"} {
+		if err := pub.SetACL("Team", id, rights); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plan, done := planAndApply(t, m, KindPurge, "alice", nil)
+
+	var s purgeSummary
+
+	_ = json.Unmarshal(plan.Summary, &s)
+
+	planned := false
+
+	for _, g := range s.GrantsIn {
+		planned = planned || (g.Owner == model.PublicNamespace && g.Mailbox == "Team")
+	}
+
+	if !planned {
+		t.Fatalf("public grant not planned: %s (%+v)", plan.Summary, done)
+	}
+
+	acl, err := pub.GetACL("Team")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if acl["alice"] != "" {
+		t.Errorf("the purged account keeps its rights: %v", acl)
+	}
+
+	if acl["carol"] != "lr" {
+		t.Errorf("another account lost its rights: %v", acl)
+	}
+}
