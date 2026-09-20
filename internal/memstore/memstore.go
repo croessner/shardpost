@@ -148,10 +148,23 @@ func (u *User) ListMailboxesAfter(after string, limit int) ([]model.Mailbox, []s
 	return all, scanned, nil
 }
 
-func (u *User) lookup(name string) (*box, string, error) {
+// canonicalName normalizes a mailbox name the way the real store does:
+// INBOX is case-insensitive, and so is the INBOX part of a name below
+// it, because "inbox/archive" names the same mailbox as "INBOX/Archive".
+func canonicalName(name string) string {
 	if strings.EqualFold(name, inboxName) {
-		name = inboxName
+		return inboxName
 	}
+
+	if i := strings.Index(name, "/"); i == len(inboxName) && strings.EqualFold(name[:i], inboxName) {
+		return inboxName + name[i:]
+	}
+
+	return name
+}
+
+func (u *User) lookup(name string) (*box, string, error) {
+	name = canonicalName(name)
 
 	b, ok := u.boxes[name]
 	if !ok {
@@ -180,9 +193,7 @@ func (u *User) CreateMailbox(name string, use []string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	if strings.EqualFold(name, inboxName) {
-		name = inboxName
-	}
+	name = canonicalName(name)
 
 	if _, ok := u.boxes[name]; ok {
 		return model.ErrMailboxExists
@@ -272,6 +283,8 @@ func (u *User) repoint(acl map[string]string, oldName, newName string) {
 func (u *User) RenameMailbox(oldName, newName string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+
+	oldName, newName = canonicalName(oldName), canonicalName(newName)
 
 	if _, ok := u.boxes[newName]; ok {
 		return model.ErrMailboxExists
