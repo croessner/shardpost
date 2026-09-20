@@ -1,75 +1,75 @@
-# Konformitätsläufe
+# Conformance runs
 
 ## IMAP: Dovecot imaptest
 
-Image `docker.io/chrroessner/shardpost-imaptest` (bis 0.12.x `imaptest-poc`) = `dovecot/imaptest` plus die
-Test-Skripte aus `github.com/dovecot/imaptest` (`src/tests`, 112 Dateien)
-und die Beispiel-Mailbox `dovecot-crlf`. Läuft als Job im Namespace `shardpost`
-gegen `shardpost:993` (TLS, eigene CA) mit einem Testkonto aus dem Secret
-`imaptest-creds` (Keys `user`, `pass`):
+Image `docker.io/chrroessner/shardpost-imaptest` (`imaptest-poc` up to 0.12.x) = `dovecot/imaptest` plus the
+test scripts from `github.com/dovecot/imaptest` (`src/tests`, 112 files)
+and the example mailbox `dovecot-crlf`. Runs as a job in the namespace `shardpost`
+against `shardpost:993` (TLS, own CA) with a test account from the secret
+`imaptest-creds` (keys `user`, `pass`):
 
 ```bash
 imaptest host=shardpost port=993 ssl=any-cert user=... pass=... mbox=/mbox test=/tests
 ```
 
-Die Job-Vorlage liegt in `hack/imaptest-job.yaml` (restricted
-PodSecurity, Secret `imaptest-creds`); Ergebnis und Bewertung stehen unten.
+The job template is in `hack/imaptest-job.yaml` (restricted
+PodSecurity, secret `imaptest-creds`); results and assessment are below.
 
-## Sieve: Pigeonhole-Testsuite
+## Sieve: Pigeonhole test suite
 
-Der go-sieve-Fork bringt den Dovecot-Testsuite-Dialekt (`vnd.dovecot.testsuite`)
-mit. Mit einem Checkout der Pigeonhole-Tests unter
-`third_party/go-sieve/pigeonhole/tests` (Symlink `tests/pigeonhole`):
+The go-sieve fork ships the Dovecot test suite dialect (`vnd.dovecot.testsuite`).
+With a checkout of the Pigeonhole tests under
+`third_party/go-sieve/pigeonhole/tests` (symlink `tests/pigeonhole`):
 
 ```bash
 cd third_party/go-sieve
 SIEVE_CONFORMANCE=1 GOFLAGS=-mod=mod go test ./tests -run TestPigeonholeConformance -v | grep "SIEVE CONFORMANCE\|  FAIL"
 ```
 
-## Ergebnisse 0.11.2 (16.09.2026)
+## Results 0.11.2 (2026-09-16)
 
-Das Serverbinary in 0.11.2 ist identisch zum vollständig geprüften 0.11.1.
-Der zusätzliche Helperfix für HTTP 204 besteht eigene HTTP-/spamc-Vertragstests
-auch gegen den installierten Helper im finalen Image.
-Die sequenzielle Linux-Abnahme aus einer festen Quellkopie besteht:
-`go test -p 1 -race ./...` im Sieve-Fork und
-`go test -p 1 -race -tags tentacle ./...` im Serverprojekt.
+The server binary in 0.11.2 is identical to the fully verified 0.11.1.
+The additional helper fix for HTTP 204 passes dedicated HTTP and spamc contract
+tests, including against the installed helper in the final image.
+The sequential Linux acceptance from a fixed source copy passes:
+`go test -p 1 -race ./...` in the Sieve fork and
+`go test -p 1 -race -tags tentacle ./...` in the server project.
 
-Pigeonhole: **139 bestanden, 0 fehlgeschlagen, 9 ausdrücklich ausgenommen,
-0 ungeprüft von 148 Dateien**. Alle zehn extprograms-Dateien und der bisher
-hängende CPU-Limit-Test bestehen. Die neun Ausnahmen umfassen sechs Dateien
-für nicht angebotene Erweiterungen, die Dovecot-spezifische Diagnoseprüfung
-und zwei ungültige historische Crash-Szenarien. Compiler-Ablehnung,
-Fehlerpfade und Flags-Isolation werden zusätzlich separat geprüft.
+Pigeonhole: **139 passed, 0 failed, 9 explicitly excluded,
+0 unchecked out of 148 files**. All ten extprograms files and the CPU limit
+test that used to hang now pass. The nine exclusions cover six files
+for extensions that are not offered, the Dovecot-specific diagnostics check
+and two invalid historical crash scenarios. Compiler rejection,
+error paths and flag isolation are additionally checked separately.
 
-Der Adapter vergleicht bei Fehleranzahlen weiterhin Fehlerfreiheit gegen
-Fehlerzustand, nicht die exakte Anzahl der Dovecot-Diagnosen. Details und
-Evidenz stehen im [Korrekturbericht](../docs/reports/2026-09-16-sieve-conformance-fixes.md).
-Ausnahmen zählen nie als bestanden. Der vollständige Sieve-Lauf benötigt
-keinen Ausschluss des CPU-Tests mehr. Plattformreferenz: Linux mit `TZ=UTC`;
-die unveränderten extprograms-Testprogramme erwarten Linux-Shellverhalten.
+For error counts, the adapter still compares error-free against
+error state, not the exact number of Dovecot diagnostics. Details and
+evidence are in the [fix report](../docs/reports/2026-09-16-sieve-conformance-fixes.md).
+Exclusions never count as passed. The full Sieve run no longer needs
+the CPU test to be excluded. Platform reference: Linux with `TZ=UTC`;
+the unmodified extprograms test programs expect Linux shell behavior.
 
-Öffentliche Abnahme 0.11.2: beide Konten bestanden einschließlich
-CPU-/MIME-Abbruch mit bytegleichem Original und erfolgreichem Folgeskript.
-Vier neue Lernaufträge bestätigt (2 Spam, 2 Ham), keine neuen Retries/Dead-Jobs,
-Lernqueue leer. Beide Produktionspods bereit, keine Neustarts.
+Public acceptance 0.11.2: both accounts passed, including the
+CPU/MIME abort with a byte-identical original and a successful follow-up script.
+Four new learn jobs confirmed (2 spam, 2 ham), no new retries or dead jobs,
+learn queue empty. Both production pods ready, no restarts.
 
-## Ergebnisse 0.11.0 (16.09.2026)
+## Results 0.11.0 (2026-09-16)
 
-Linux-Fork-Build und reguläre Fork-Tests bestehen. Die bisher fehlende
-Adress-Fixture wird direkt aus der vorhandenen `.svtest.in`-Quelldatei gelesen;
-die unveränderten, dokumentierten Ausnahmen im Adresstest bleiben bestehen.
+The Linux fork build and the regular fork tests pass. The address fixture
+that was missing until now is read directly from the existing `.svtest.in` source file;
+the unchanged, documented exclusions in the address test remain.
 
-Pigeonhole: **127 bestanden, 20 fehlgeschlagen, 1 separat geprüfte
-CPU-Limit-Datei von 148**. Alle zehn extprograms-Dateien bestehen.
-Die 20 übrigen Fehler betreffen weiterhin nicht implementierte Erweiterungen
-und vorhandene allgemeine Abweichungen; es ist keine vollständige
-Sieve-Konformitätsfreigabe. Die Rohprotokolle und die genaue Bewertung stehen
-im [Abnahmebericht](../docs/reports/2026-09-16-extprograms.md).
+Pigeonhole: **127 passed, 20 failed, 1 separately checked
+CPU limit file out of 148**. All ten extprograms files pass.
+The 20 remaining failures still concern extensions that are not implemented
+and existing general deviations; this is not a full
+Sieve conformance sign-off. The raw logs and the detailed assessment are
+in the [acceptance report](../docs/reports/2026-09-16-extprograms.md).
 
-Der CPU-Limit-Test wurde separat nach 20 Sekunden äußerer Zeitgrenze
-abgebrochen und ist nicht bestanden.
-Für den übrigen Lauf:
+The CPU limit test was run separately, aborted after a 20 second outer time limit,
+and did not pass.
+For the remaining run:
 
 ```bash
 SIEVE_CONFORMANCE=1 GOFLAGS=-mod=mod go test ./tests \
@@ -77,62 +77,62 @@ SIEVE_CONFORMANCE=1 GOFLAGS=-mod=mod go test ./tests \
   -skip 'TestPigeonholeConformance/execute/errors-cpu-limit.svtest' -v
 ```
 
-Die Zusammenfassung zählt herausgefilterte Dateien ausdrücklich als nicht
-ausgeführt. Sie werden nicht als bestanden gezählt.
+The summary explicitly counts filtered-out files as not
+run. They do not count as passed.
 
-## Ergebnisse (15.09.2026, Image 0.8.3)
+## Results (2026-09-15, image 0.8.3)
 
-Sieve (Image 0.9.0, Fork-Stand 15.09.2026): **117 von 148 Dateien** bestehen
-(0.8.3: 50). Umgesetzt wurden dafür ihave, include (mit global/return,
-:once/:optional, Zyklus- und Tiefenlimits), index, regex, spamtest/
-spamtestplus/virustest (Header und Schwellen konfigurierbar), mboxmetadata/
-servermetadata, special-use, enotify mit mailto, foreverypart/break, mime
-(:type/:subtype/:contenttype/:param, :anychild) und extracttext; außerdem
-Testsuite-Umgebung (Mailstore, SMTP-Ausgang, Mailbox-Anlage, Metadaten,
-Konfigurationsschalter, Dateien der Pigeonhole-Beispiele). Die 31 offenen
-Dateien: extprograms/vnd.dovecot.* (Dovecot-eigene Plugins: execute,
-filter, pipe, report, environment, 12 Dateien), extlists (kein
-Listen-Backend, 3), multiscript/test_multiscript (4), Fuzz-Fixtures mit
-absichtlich kaputten Headern (2), Parser-Recovery und Fehlerzählung
-(compile/errors, recover, mime/errors, editheader/errors: unser Loader
-meldet den ersten Fehler, Pigeonhole zählt alle), CPU-Limit, lokale
-Zeitzone (date/zones), zwei Vacation-Details (Subject-Kürzung mit
-Auslassungszeichen, Reply-Regeln in Sonderfällen) und ein
-Redirect-Loop-Fall im SMTP-Test.
+Sieve (image 0.9.0, fork state 2026-09-15): **117 of 148 files** pass
+(0.8.3: 50). To get there, the following were implemented: ihave, include (with global/return,
+:once/:optional, cycle and depth limits), index, regex, spamtest/
+spamtestplus/virustest (header and thresholds configurable), mboxmetadata/
+servermetadata, special-use, enotify with mailto, foreverypart/break, mime
+(:type/:subtype/:contenttype/:param, :anychild) and extracttext; plus the
+test suite environment (mail store, outbound SMTP, mailbox creation, metadata,
+configuration switches, files from the Pigeonhole examples). The 31 open
+files: extprograms/vnd.dovecot.* (Dovecot's own plugins: execute,
+filter, pipe, report, environment, 12 files), extlists (no
+list backend, 3), multiscript/test_multiscript (4), fuzz fixtures with
+deliberately broken headers (2), parser recovery and error counting
+(compile/errors, recover, mime/errors, editheader/errors: our loader
+reports the first error, Pigeonhole counts all of them), CPU limit, local
+time zone (date/zones), two vacation details (subject truncation with an
+ellipsis, reply rules in special cases) and one
+redirect loop case in the SMTP test.
 
-## IMAP-Ergebnis 0.11.0 (16.09.2026)
+## IMAP result 0.11.0 (2026-09-16)
 
-Die vollständige Suite am Release-Kandidaten ergab 72 Gruppen: **1 fehlgeschlagen,
-11 wegen fehlender Capabilities übersprungen**. Basisprotokoll: 1/460
-Kommandos fehlgeschlagen; Erweiterungen: 0/261. Einziger Fehler bleibt
-`fetch-envelope` bei veralteten Source-Routes. Keine Nauthilus-UNAVAILABLE-
-oder Initialisierungsfehler in diesem Lauf. Die öffentliche native Abnahme
-mit beiden Konten sowie vier Rspamd-Lernbestätigungen bestand nach dem Rollout.
+The full suite against the release candidate produced 72 groups: **1 failed,
+11 skipped because of missing capabilities**. Base protocol: 1/460
+commands failed; extensions: 0/261. The only failure remains
+`fetch-envelope` with obsolete source routes. No Nauthilus UNAVAILABLE
+or initialization errors in this run. The public native acceptance
+with both accounts, along with four Rspamd learn confirmations, passed after the rollout.
 
-## IMAP-Ergebnis (15.09.2026, Image 0.8.7; 0.8.8 nur Bugfix, siehe docs/review-round6.md)
+## IMAP result (2026-09-15, image 0.8.7; 0.8.8 bugfix only, see docs/review-round6.md)
 
-Verlauf: 0.8.3 26 von 72 Gruppen rot, 0.8.4 9 rot, 0.8.6/0.8.7 **1 rot**
-(72 Gruppen, 11 wegen fehlender Capabilities übersprungen; Basisprotokoll
-1 von 441 Kommandos, Erweiterungen 0 von 261; dazu je Lauf 0 bis 2
-Gruppen, deren LOGIN an einem Nauthilus-Tempfail scheiterte, siehe Hinweis).
+History: 0.8.3 26 of 72 groups red, 0.8.4 9 red, 0.8.6/0.8.7 **1 red**
+(72 groups, 11 skipped because of missing capabilities; base protocol
+1 of 441 commands, extensions 0 of 261; plus 0 to 2 groups
+per run whose LOGIN failed on a Nauthilus tempfail, see the note).
 
-Behoben zwischen 0.8.4 und 0.8.6: STATUS RECENT (die erste Sitzung, die
-eine Nachricht sieht, nimmt ihr \Recent), ESEARCH MIN/MAX mit MODSEQ der
-gelieferten Teilmenge, RFC-5322-Adressparser für ENVELOPE (Gruppen,
-Kommentare, Sender/Reply-To-Default auf From), SEARCH FROM/TO/CC/BCC und
-HEADER <adresse> auch gegen die geparsten Adressen, SORT nach Gruppen-
-namen, THREAD=ORDEREDSUBJECT mit der ältesten Nachricht als Wurzel,
-MOVE in die selektierte Mailbox (EXPUNGE vor EXISTS), LIST CHILDINFO nur
-für Kinder, die kein Pattern selbst listet, Abo überlebt DELETE
-(\NonExistent), FLAGS/PERMANENTFLAGS vor jedem FETCH mit neuem Keyword,
-APPEND mit Content-Transfer-Encoding: binary wird nach base64 umkodiert.
+Fixed between 0.8.4 and 0.8.6: STATUS RECENT (the first session that
+sees a message takes its \Recent), ESEARCH MIN/MAX with the MODSEQ of the
+returned subset, RFC 5322 address parser for ENVELOPE (groups,
+comments, Sender/Reply-To defaulting to From), SEARCH FROM/TO/CC/BCC and
+HEADER <address> also against the parsed addresses, SORT by group
+names, THREAD=ORDEREDSUBJECT with the oldest message as the root,
+MOVE into the selected mailbox (EXPUNGE before EXISTS), LIST CHILDINFO only
+for children that no pattern lists itself, subscription survives DELETE
+(\NonExistent), FLAGS/PERMANENTFLAGS before every FETCH with a new keyword,
+APPEND with Content-Transfer-Encoding: binary is re-encoded to base64.
 
-Offen: `fetch-envelope` erwartet für `<@route:user@domain>` die
-Source-Route im ENVELOPE (`(NIL "@route" "user" "domain")`); der Parser
-verwirft die veraltete Route. Bewusst nicht umgesetzt (go-imap kennt das
-Feld nicht, kein Client braucht es).
+Open: for `<@route:user@domain>`, `fetch-envelope` expects the
+source route in the ENVELOPE (`(NIL "@route" "user" "domain")`); the parser
+discards the obsolete route. Deliberately not implemented (go-imap does not know
+the field, no client needs it).
 
-Hinweis: Ein Lauf kann zusätzlich an einer `NO [UNAVAILABLE]`-Antwort
-scheitern (imaptest meldet dann "initialization failed"); das ist kein
-Serverfehler, sondern ein sporadischer Tempfail von Nauthilus nach
-erfolgreicher Authentifizierung (siehe Abschlussbericht vom 15.09.2026).
+Note: a run can additionally fail on a `NO [UNAVAILABLE]` response
+(imaptest then reports "initialization failed"); this is not a
+server error but a sporadic tempfail from Nauthilus after
+successful authentication (see the final report of 2026-09-15).

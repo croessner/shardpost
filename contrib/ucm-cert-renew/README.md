@@ -1,60 +1,60 @@
 # ucm-cert-renew (contrib)
 
-Hält ein LDAP-Clientzertifikat der UCM-PKI (RNS Internal Root CA 2026 →
-RNS Client Authentication Issuing CA 01) in einem Kubernetes-Secret aktuell.
-Eigenes Go-Modul und eigenes Image, **kein Bestandteil von ShardPost**; es
-liegt hier, weil es mit der ShardPost-Quota-Anbindung entstanden ist, und
-wird ebenso für Nauthilus genutzt.
+Keeps an LDAP client certificate of the UCM PKI (RNS Internal Root CA 2026 →
+RNS Client Authentication Issuing CA 01) up to date in a Kubernetes secret.
+Its own Go module and its own image, **not part of ShardPost**; it
+lives here because it came about together with the ShardPost quota integration, and
+is used for Nauthilus as well.
 
-## Ablauf
+## Procedure
 
-1. Secret lesen (`tls.crt` Leaf + Issuer, `tls.key`, optional CA-Schlüssel).
-2. Erneuern, wenn Zertifikat oder Schlüssel fehlen, Subject oder Schlüssel
-   nicht passen, die Kette gegen die gepinnten Anker oder `clientAuth`
-   nicht stimmt, weniger als `UCM_RENEW_BEFORE` bleibt oder sich der
-   CA-Anker geändert hat.
-3. Neuer RSA-3072-Schlüssel und CSR ohne Extensions, Subject exakt in der
-   Reihenfolge und mit den String-Typen des Signers.
-4. CSR per SSH an den eingeschränkten UCM-Signer (ForceCommand des
-   Aufruferkontos, gepinnter Host-Key); Antwort höchstens 64 KiB.
-5. Ergebnis prüfen (Subject, Schlüssel, Kette, exakt `clientAuth`) und das
-   Secret per `PUT` mit `resourceVersion` ersetzen; andere Schlüssel bleiben.
+1. Read the secret (`tls.crt` leaf + issuer, `tls.key`, optional CA key).
+2. Renew when the certificate or the key is missing, the subject or the key
+   does not match, the chain against the pinned anchors or `clientAuth`
+   is wrong, less than `UCM_RENEW_BEFORE` remains, or the
+   CA anchor has changed.
+3. New RSA 3072 key and CSR without extensions, subject exactly in the
+   order and with the string types of the signer.
+4. CSR over SSH to the restricted UCM signer (ForceCommand of the
+   caller account, pinned host key); response at most 64 KiB.
+5. Check the result (subject, key, chain, exactly `clientAuth`) and replace the
+   secret with a `PUT` carrying `resourceVersion`; other keys are kept.
 
-Der private Schlüssel verlässt den Job nie, der Signer sieht nur den CSR.
+The private key never leaves the job, the signer only sees the CSR.
 
-## Konfiguration
+## Configuration
 
-| Variable | Bedeutung |
+| Variable | Meaning |
 | --- | --- |
-| `UCM_RENEW_SUBJECT` | Subject in Signer-Reihenfolge, z. B. `C=DE,DC=de,DC=roessner-net,ST=Hessen,L=Alsfeld,O=R.N.S.,OU=Mail,CN=…,emailAddress=…` |
-| `UCM_RENEW_SECRET`, `UCM_RENEW_NAMESPACE` | Ziel-Secret (muss existieren) und Namespace (Standard: der eigene) |
-| `UCM_RENEW_BEFORE` | Erneuerungsvorlauf (Standard `1080h` = 45 Tage: bei 90 Tagen Laufzeit darf der Signer bis zu 45 Tage ausfallen) |
-| `UCM_RENEW_ROOT_FILE`, `UCM_RENEW_ISSUER_FILE` | gepinnte Root- und Issuing-CA (PEM) |
-| `UCM_RENEW_CA_KEY` | Root zusätzlich unter diesem Secret-Schlüssel ablegen (optional) |
-| `UCM_RENEW_SSH_ADDR`, `UCM_RENEW_SSH_USER` | Signer `host:port` und Aufruferkonto |
-| `UCM_RENEW_SSH_KEY_FILE`, `UCM_RENEW_SSH_HOST_KEY_FILE` | SSH-Schlüssel des Kontos, gepinnter Host-Key (authorized_keys-Format) |
-| `UCM_RENEW_TIMEOUT` | Gesamtzeit (Standard `2m`) |
+| `UCM_RENEW_SUBJECT` | Subject in signer order, e.g. `C=DE,DC=de,DC=roessner-net,ST=Hessen,L=Alsfeld,O=R.N.S.,OU=Mail,CN=…,emailAddress=…` |
+| `UCM_RENEW_SECRET`, `UCM_RENEW_NAMESPACE` | Target secret (must exist) and namespace (default: its own) |
+| `UCM_RENEW_BEFORE` | Renewal lead time (default `1080h` = 45 days: with a 90 day lifetime the signer may be down for up to 45 days) |
+| `UCM_RENEW_ROOT_FILE`, `UCM_RENEW_ISSUER_FILE` | Pinned root and issuing CA (PEM) |
+| `UCM_RENEW_CA_KEY` | Also store the root under this secret key (optional) |
+| `UCM_RENEW_SSH_ADDR`, `UCM_RENEW_SSH_USER` | Signer `host:port` and caller account |
+| `UCM_RENEW_SSH_KEY_FILE`, `UCM_RENEW_SSH_HOST_KEY_FILE` | SSH key of the account, pinned host key (authorized_keys format) |
+| `UCM_RENEW_TIMEOUT` | Total time (default `2m`) |
 
-Exit 0: frisch oder erneuert, 1: Fehler (der CronJob läuft erneut). Stellt
-der Signer kürzer aus als der Vorlauf (etwa weil die Issuing-CA bald
-abläuft), wird gespeichert, aber mit Fehler beendet, damit nicht jeder Lauf
-neu ausstellt.
+Exit 0: fresh or renewed, 1: error (the CronJob runs again). If the
+signer issues for a shorter period than the lead time (for example because the issuing CA
+expires soon), the result is stored but the run ends with an error, so that not every run
+issues anew.
 
-RBAC: `get` und `update` auf genau dieses Secret (`resourceNames` wirkt für
-`get`/`update`, nicht für `list`/`watch`). Das Secret muss existieren. Eine
-Annotation `kubectl.kubernetes.io/last-applied-configuration` (enthält nach
-einem früheren `kubectl apply` das alte Schlüsselmaterial) entfernt das
-Werkzeug beim Schreiben; das Secret darf danach nicht mehr per
-`kubectl apply` gepflegt werden.
+RBAC: `get` and `update` on exactly this secret (`resourceNames` applies to
+`get`/`update`, not to `list`/`watch`). The secret must exist. An
+annotation `kubectl.kubernetes.io/last-applied-configuration` (after an
+earlier `kubectl apply` it contains the old key material) is removed by the
+tool when writing; after that the secret must no longer be maintained with
+`kubectl apply`.
 
-SSH: Das Werkzeug sendet einen `shell`-Request ohne Befehl; der Server führt
-das `ForceCommand` des Kontos aus. Angeboten wird nur der Typ des gepinnten
-Host-Keys (ed25519 empfohlen). Pro Namespace ein eigener SSH-Schlüssel.
+SSH: the tool sends a `shell` request without a command; the server runs
+the `ForceCommand` of the account. Only the type of the pinned
+host key is offered (ed25519 recommended). One SSH key per namespace.
 
-## Entwicklung
+## Development
 
 ```sh
 make contrib-ucm-renew-test   # go test -race
-make contrib-ucm-renew-lint   # golangci-lint im Lint-Image
-make contrib-ucm-renew-build  # Image
+make contrib-ucm-renew-lint   # golangci-lint in the lint image
+make contrib-ucm-renew-build  # image
 ```
