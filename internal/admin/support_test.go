@@ -11,6 +11,7 @@ import (
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/imapsieve"
+	"shardpost/internal/model"
 )
 
 // testLearning is the learning queue of serveDiag (nil: none).
@@ -322,5 +323,39 @@ func TestLearningRetry(t *testing.T) {
 
 	if j, _ := c.GetLearningJobWithResponse(ctx, "a1"); j.JSON200 == nil || j.JSON200.State != learningPending || j.JSON200.Retries != 1 {
 		t.Fatalf("after retry: %+v", j.JSON200)
+	}
+}
+
+// TestPublicNamespaceAdministration: public folders are provisioned and
+// granted like any account, without a user database entry, and they are
+// not a delivery target.
+func TestPublicNamespaceAdministration(t *testing.T) {
+	_, c := serveDiag(t, nil, RoleDiagnose, RoleProvision, RoleDeliver)
+	ctx := context.Background()
+	pub := model.PublicNamespace
+
+	created, _ := c.CreateMailboxWithResponse(ctx, pub, adminapi.MailboxCreate{Name: "Announcements"})
+	if created.StatusCode() != http.StatusCreated {
+		t.Fatalf("create: %d %v", created.StatusCode(), created.JSONDefault)
+	}
+
+	id := created.JSON201.Id
+
+	acl, _ := c.SetACLEntryWithResponse(ctx, pub, id, "anyone", nil, adminapi.ACLChange{Rights: "lr"})
+	if acl.JSON200 == nil || acl.JSON200.Entries[0].Rights != "lr" {
+		t.Fatalf("acl: %d %+v", acl.StatusCode(), acl.JSON200)
+	}
+
+	if list, _ := c.ListMailboxesWithResponse(ctx, pub, nil); list.JSON200 == nil || len(list.JSON200.Items) != 1 {
+		t.Fatalf("list: %d", list.StatusCode())
+	}
+
+	if acct, _ := c.GetAccountWithResponse(ctx, pub); acct.JSON200 == nil || !acct.JSON200.StoreExists {
+		t.Fatalf("account show: %d %+v", acct.StatusCode(), acct.JSON200)
+	}
+
+	body := strings.NewReader(message)
+	if resp, _ := c.DeliverWithBodyWithResponse(ctx, &adminapi.DeliverParams{Recipient: pub}, "message/rfc822", body); resp.StatusCode() != http.StatusBadRequest {
+		t.Errorf("delivery to the public namespace: %d", resp.StatusCode())
 	}
 }

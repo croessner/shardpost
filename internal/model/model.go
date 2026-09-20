@@ -283,6 +283,13 @@ type User interface {
 	// reservation whose send failed).
 	VacationSeen(key string, ttl time.Duration) (already bool, err error)
 
+	// Public folder subscriptions. Public folders belong to no account
+	// (see PublicNamespace), so every account keeps its own set of
+	// subscriptions to them, by mailbox id: a folder that is renamed
+	// stays subscribed.
+	PublicSubscriptions() (map[string]bool, error)
+	SetPublicSubscribed(mailboxID string, subscribed bool) error
+
 	// Sieve scripts (ManageSieve, LMTP filtering).
 	ListScripts() (names []string, active string, err error)
 	GetScript(name string) (string, error)

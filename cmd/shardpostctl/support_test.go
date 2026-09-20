@@ -52,3 +52,27 @@ func TestSupportCommands(t *testing.T) {
 		t.Errorf("broken script check: exit %d %s", code, out)
 	}
 }
+
+// TestPublicFolderCommands: public folders are created and granted with
+// the ordinary commands, using ~public as the account.
+func TestPublicFolderCommands(t *testing.T) {
+	socket := serveFilled(t, admin.RoleDiagnose, admin.RoleProvision)
+
+	steps := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"mailbox", "create", "~public", "Announcements"}, "Announcements"},
+		{[]string{"acl", "set", "~public", "Announcements", "anyone", "lr"}, "anyone"},
+		{[]string{"acl", "list", "~public", "Announcements"}, "lr"},
+		{[]string{"mailbox", "list", "-all", "~public"}, "Announcements"},
+		{[]string{"account", "show", "~public"}, "public"},
+	}
+
+	for _, s := range steps {
+		code, out, errOut := call(socket, "", s.args...)
+		if code != exOK || !strings.Contains(out, s.want) {
+			t.Errorf("%v: exit %d, out %q, err %q", s.args, code, out, errOut)
+		}
+	}
+}

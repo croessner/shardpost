@@ -901,7 +901,8 @@ func checkFlags(flags []string) string {
 // validAccount accepts a bounded account name without control
 // characters, spaces or path separators.
 func validAccount(a string) bool {
-	return a != "" && len(a) <= maxAddress && !hasControl(a) && !strings.ContainsAny(a, " /\\") && !model.ReservedNamespace(a)
+	return a != "" && len(a) <= maxAddress && !hasControl(a) && !strings.ContainsAny(a, " /\\") &&
+		(!model.ReservedNamespace(a) || model.IsPublic(a))
 }
 
 // validIdentifier accepts an ACL identifier that can be an account or

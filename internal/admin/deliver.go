@@ -110,6 +110,10 @@ func checkDeliverParams(recipient, from, mailbox, contentType string) string {
 	switch {
 	case recipient == "" || !validPath(recipient):
 		return "invalid recipient"
+	case model.IsPublic(recipient):
+		// A public folder has no address; mail reaches it through a
+		// Sieve script of an account that may post into it.
+		return "the public namespace is not a delivery target"
 	case !validPath(from):
 		return "invalid sender"
 	case len(mailbox) > maxMailbox || hasControl(mailbox):

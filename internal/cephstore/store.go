@@ -25,6 +25,7 @@ import (
 
 	"github.com/ceph/go-ceph/rados"
 
+	"shardpost/internal/model"
 	"shardpost/internal/quota"
 )
 
@@ -46,6 +47,11 @@ type Config struct {
 	FTSShards int
 	// Quota is the per-user limit enforced on delivery (0 = unlimited).
 	Quota QuotaLimit
+	// PublicQuota is the limit of the public namespace, which belongs to
+	// no account and therefore has no user database entry
+	// (0 = unlimited). Mail filed into a public folder counts here, not
+	// against the account that filed it.
+	PublicQuota QuotaLimit
 	// QuotaRules are the mailbox rules and the grace (nil: none).
 	QuotaRules *quota.Policy
 	// OnQuotaChange, if set, is called after a delivery, copy, move,
@@ -228,8 +234,13 @@ func (s *Store) User(name string) (*User, error) {
 		}
 	}
 
+	limit := cfg.Quota
+	if model.IsPublic(name) {
+		limit = cfg.PublicQuota
+	}
+
 	return &User{name: name, store: s, idx: idx, data: data, log: s.log.With("user", name), release: r.refs.Done,
 		idxPool: newVerPool(open(cfg.IndexPool)), dataPool: newVerPool(open(cfg.DataPool)),
-		chunkSize: cfg.ChunkSize, ftsShards: cfg.FTSShards, shardSize: cfg.ShardSize, limit: cfg.Quota,
+		chunkSize: cfg.ChunkSize, ftsShards: cfg.FTSShards, shardSize: cfg.ShardSize, limit: limit,
 		rules: cfg.QuotaRules, onQuota: cfg.OnQuotaChange}, nil
 }

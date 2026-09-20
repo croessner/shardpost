@@ -452,6 +452,40 @@ The full-text index is not included; it is rebuilt from the messages.
   archive damaged or incomplete, 64 usage, 69 export failed, 73 target
   file exists.
 
+## Public folders
+
+A public folder belongs to no account: an archive, an announcement
+folder, a team inbox that outlives whoever created it. Clients see them
+under the prefix `Public/` (`server.public_prefix`), the store keeps them
+in the reserved namespace `~public`.
+
+```sh
+shardpostctl mailbox create ~public "Announcements"
+shardpostctl acl set ~public "Announcements" anyone lr
+shardpostctl acl set -mode add ~public "Announcements" team@example.org lrswipkxte
+shardpostctl acl explain ~public "Announcements" user@example.org
+shardpostctl mailbox list -all ~public
+```
+
+- **Administration** uses the same operations as an account: the API
+  accepts `~public` wherever an account is expected, without a user
+  database lookup. `account show ~public` reports the lookup as `public`.
+  Delivery is refused: a public folder has no address of its own.
+- **Rights:** there is no owner and therefore no implicit right. Only ACL
+  entries grant access; `anyone` covers every authenticated account, an
+  entry for one account wins over it. Without the `l` right a folder does
+  not exist for that account (`NONEXISTENT`, not `NOPERM`), exactly as
+  for shared folders. Unlike Dovecot, the rights are data in the store:
+  `acl set` takes effect with the next command, without a reload.
+- **Subscriptions** belong to the account, not to the folder, and are
+  kept by mailbox id: a folder that is renamed stays subscribed.
+- **Quota:** the namespace counts its own usage and is bounded by
+  `server.public_quota_bytes` and `server.public_quota_msgs` (0 =
+  unlimited). A message in a public folder does not count against any
+  account, which is what Dovecot does as well.
+- **Backup:** `shardpostctl export -o public.tar ~public` and `restore`
+  work like they do for an account.
+
 ## Protocol trace for an account
 
 To debug a problem with a particular client, a recording of the IMAP

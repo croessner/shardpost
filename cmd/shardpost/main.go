@@ -152,16 +152,17 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 // cephConfig maps the configuration onto the RADOS store settings.
 func cephConfig(settings *config.Config) cephstore.Config {
 	return cephstore.Config{
-		User:       settings.Ceph.User,
-		Key:        settings.Ceph.Key,
-		MonHost:    settings.Ceph.MonHost,
-		IndexPool:  settings.Ceph.IndexPool,
-		DataPool:   settings.Ceph.DataPool,
-		ChunkSize:  settings.Ceph.ChunkSize,
-		FTSShards:  int(settings.Server.FtsShards),
-		Quota:      cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
-		QuotaRules: quota.NewPolicy(settings.Quota),
-		ShardSize:  uint32(settings.Server.MboxShardSize),
+		User:        settings.Ceph.User,
+		Key:         settings.Ceph.Key,
+		MonHost:     settings.Ceph.MonHost,
+		IndexPool:   settings.Ceph.IndexPool,
+		DataPool:    settings.Ceph.DataPool,
+		ChunkSize:   settings.Ceph.ChunkSize,
+		FTSShards:   int(settings.Server.FtsShards),
+		Quota:       cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
+		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},
+		QuotaRules:  quota.NewPolicy(settings.Quota),
+		ShardSize:   uint32(settings.Server.MboxShardSize),
 	}
 }
 
@@ -383,6 +384,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 		Store:     storeAdapter{store}, Auth: authn, Log: log.With("proto", "imap"), TLS: tlsCfg,
 		InsecureAuth:     insecure,
 		Autocreate:       imapproto.DefaultSpecialFolders,
+		PublicPrefix:     settings.Server.PublicPrefix,
 		MaxLiteral:       cephstore.MaxMessageLen,
 		MaxConnsPerIP:    int(settings.Server.MaxConnsPerIP),
 		MaxConnsPerUser:  int(settings.Server.MaxConnsPerUser),

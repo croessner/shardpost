@@ -130,6 +130,19 @@ reconstructed after the fact. Changing the level requires a restart.
 YAML only. It is switched on through the Admin API (role `trace`), see
 [Admin API](admin-api.md#protocol-trace-for-an-account).
 
+### Public folders
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `server.public_prefix` | `Public/` | client-visible prefix of the public namespace (must end with the separator) |
+| `server.public_quota_bytes` | 0 | limit of the public namespace as a whole, 0 = unlimited |
+| `server.public_quota_msgs` | 0 | the same as a message count |
+
+Public folders live in the store namespace `~public` and belong to no
+account, so they do not count against a user's quota. They are created
+and granted through the admin API, see
+[Admin API: public folders](admin-api.md#public-folders).
+
 ### Maintenance jobs (`jobs`)
 
 | Key | Default | Meaning |

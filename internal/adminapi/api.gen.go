@@ -70,6 +70,7 @@ func (e ACLExplanationLookup) Valid() bool {
 const (
 	AccountStatusLookupAlias       AccountStatusLookup = "alias"
 	AccountStatusLookupCanonical   AccountStatusLookup = "canonical"
+	AccountStatusLookupPublic      AccountStatusLookup = "public"
 	AccountStatusLookupUnavailable AccountStatusLookup = "unavailable"
 	AccountStatusLookupUnknown     AccountStatusLookup = "unknown"
 )
@@ -80,6 +81,8 @@ func (e AccountStatusLookup) Valid() bool {
 	case AccountStatusLookupAlias:
 		return true
 	case AccountStatusLookupCanonical:
+		return true
+	case AccountStatusLookupPublic:
 		return true
 	case AccountStatusLookupUnavailable:
 		return true
@@ -318,7 +321,8 @@ type AccountStatus struct {
 	CanonicalAccount *string `json:"canonical_account,omitempty"`
 	ImportLocked     bool    `json:"import_locked"`
 
-	// Lookup Outcome of the Nauthilus lookup of `account`.
+	// Lookup Outcome of the Nauthilus lookup of `account`; `public` is the
+	// public namespace, which has no user database entry.
 	Lookup    AccountStatusLookup `json:"lookup"`
 	Mailboxes int                 `json:"mailboxes"`
 	Quota     QuotaStatus         `json:"quota"`
@@ -329,7 +333,8 @@ type AccountStatus struct {
 	TraceUntil  *time.Time `json:"trace_until,omitempty"`
 }
 
-// AccountStatusLookup Outcome of the Nauthilus lookup of `account`.
+// AccountStatusLookup Outcome of the Nauthilus lookup of `account`; `public` is the
+// public namespace, which has no user database entry.
 type AccountStatusLookup string
 
 // CopiedMessage defines model for CopiedMessage.

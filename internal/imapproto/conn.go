@@ -49,8 +49,11 @@ var DefaultSpecialFolders = []SpecialFolder{
 
 // Options configures the server.
 type Options struct {
-	IMAPSieve    *imapsieve.Engine
-	Store        Store
+	IMAPSieve *imapsieve.Engine
+	Store     Store
+	// PublicPrefix is the client-visible prefix of the public namespace
+	// ("" uses DefaultPublicPrefix).
+	PublicPrefix string
 	Auth         Auth
 	Log          *slog.Logger
 	TLS          *tls.Config // nil: no STARTTLS
@@ -717,7 +720,7 @@ var uidCommands = map[string]bool{
 var authCommands = map[string]cmdHandler{
 	kwEnable: func(c *conn, tag, _ string, _ bool) error { return c.cmdEnable(tag) },
 	"NAMESPACE": func(c *conn, tag, _ string, _ bool) error {
-		c.w.untagged(`NAMESPACE (("" "/")) (("%s" "/")) NIL`, otherUsersPrefix)
+		c.w.untagged(`NAMESPACE (("" "/")) (("%s" "/")) (("%s" "/"))`, otherUsersPrefix, c.publicPrefix())
 		c.ok(tag, "", "NAMESPACE completed")
 
 		return nil

@@ -120,6 +120,20 @@ with exit code 65 instead of overwriting someone else's change.
 .B \-\-json
 Print the answer as JSON.
 .SH EXAMPLES
+Public folders are administered like an account, with
+.B ~public
+as the account. They belong to nobody, so nobody has rights on them
+until an entry grants some; see
+.BR shardpostctl-acl (1).
+.PP
+.nf
+.RS
+shardpostctl mailbox create ~public Announcements
+shardpostctl acl set ~public Announcements anyone lr
+shardpostctl mailbox list -all ~public
+.RE
+.fi
+.PP
 Which mailboxes does the account have, and how big is the INBOX?
 .PP
 .nf

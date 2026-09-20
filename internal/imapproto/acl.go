@@ -20,27 +20,53 @@ import (
 
 const otherUsersPrefix = "Other Users/"
 
+// DefaultPublicPrefix is the client-visible prefix of the public
+// namespace (see Options.PublicPrefix).
+const DefaultPublicPrefix = "Public/"
+
 // target is a resolved mailbox argument.
 type target struct {
-	u     model.User
-	owner string // "" for the session's own namespace
-	name  string // name inside the owner's namespace
-	full  string // name as the client sees it
+	u      model.User
+	owner  string // "" for the session's own namespace and for public folders
+	public bool   // a folder of the public namespace
+	prefix string // the public prefix it was addressed with
+	name   string // name inside the namespace
+	full   string // name as the client sees it
 }
 
-func (t *target) shared() bool { return t.owner != "" }
+// shared is true when rights come from the ACL rather than from
+// ownership: another account's mailbox, or a public folder, which nobody
+// owns.
+func (t *target) shared() bool { return t.owner != "" || t.public }
 
 // display converts a name inside t's namespace back to the client view.
 func (t *target) display(name string) string {
-	if t.owner == "" {
+	switch {
+	case t.public:
+		return t.prefix + name
+	case t.owner == "":
 		return name
+	default:
+		return otherUsersPrefix + t.owner + "/" + name
 	}
-
-	return otherUsersPrefix + t.owner + "/" + name
 }
 
 // target resolves a client-visible mailbox name.
 func (c *conn) target(full string) (*target, error) {
+	if prefix := c.publicPrefix(); strings.HasPrefix(full, prefix) {
+		name := strings.TrimPrefix(full, prefix)
+		if name == "" {
+			return nil, model.ErrNoMailbox
+		}
+
+		u, err := c.publicUser()
+		if err != nil {
+			return nil, err
+		}
+
+		return &target{u: u, public: true, prefix: prefix, name: name, full: full}, nil
+	}
+
 	if !strings.HasPrefix(full, otherUsersPrefix) {
 		return &target{u: c.user, name: full, full: full}, nil
 	}
@@ -64,6 +90,23 @@ func (c *conn) target(full string) (*target, error) {
 
 	return &target{u: u, owner: owner, name: name, full: full}, nil
 }
+
+// publicPrefix is the client-visible prefix of the public namespace.
+func (c *conn) publicPrefix() string {
+	if c.s.o.PublicPrefix != "" {
+		return c.s.o.PublicPrefix
+	}
+
+	return DefaultPublicPrefix
+}
+
+// publicUser opens the public namespace, once per session. Its view is
+// kept with the other namespaces and closed at logout.
+func (c *conn) publicUser() (model.User, error) { return c.other(model.PublicNamespace) }
+
+// publicMailbox looks the target's folder up in the public namespace,
+// for the places that need its stable id (subscriptions).
+func (c *conn) publicMailbox(t *target) (*model.Mailbox, error) { return t.u.Lookup(t.name) }
 
 // other returns the user object of another namespace, opened once per
 // session and closed at logout.

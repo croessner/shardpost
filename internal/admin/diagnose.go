@@ -95,7 +95,9 @@ func (s *Server) openAccount(w http.ResponseWriter, r *http.Request, role, accou
 		return nil, false
 	}
 
-	if canonical && !s.canonical(w, r, account) {
+	// The public namespace has no user database entry; it is addressed
+	// by its reserved name and needs no canonical lookup.
+	if canonical && !model.IsPublic(account) && !s.canonical(w, r, account) {
 		return nil, false
 	}
 
@@ -111,6 +113,16 @@ func (s *Server) openAccount(w http.ResponseWriter, r *http.Request, role, accou
 	return u, true
 }
 
+// accountLookup resolves the account in the user database. The public
+// namespace has no entry there and reports itself.
+func (s *Server) accountLookup(r *http.Request, account string) (state, canonical string) {
+	if model.IsPublic(account) {
+		return "public", ""
+	}
+
+	return s.lookupState(r, account)
+}
+
 // GetAccount shows the lookup result and the store state of an account.
 func (s *Server) GetAccount(w http.ResponseWriter, r *http.Request, account adminapi.Account) {
 	u, ok := s.openAccount(w, r, RoleDiagnose, account, false)
@@ -119,7 +131,8 @@ func (s *Server) GetAccount(w http.ResponseWriter, r *http.Request, account admi
 	}
 	defer u.Close()
 
-	state, canonical := s.lookupState(r, account)
+	state, canonical := s.accountLookup(r, account)
+
 	if canonical != "" && !principalOf(r.Context()).inScope(canonical) {
 		writeError(w, http.StatusForbidden, adminapi.Forbidden, "canonical account outside the client's scope")
 		return

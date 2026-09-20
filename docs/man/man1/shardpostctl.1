@@ -25,6 +25,19 @@ command that accepts one is
 which reports it as an alias and names the canonical account. Account
 names are compared in lower case.
 .PP
+Three namespaces exist. An account's own mailboxes have no prefix.
+Mailboxes shared by another account appear under
+.IR "Other Users/<account>/" .
+Public folders, which belong to no account, live in the reserved
+namespace
+.B ~public
+and appear to clients under
+.I Public/
+.RI ( server.public_prefix ).
+Pass
+.B ~public
+where a command expects an account to administer them.
+.PP
 Commands are grouped by subject. Each group has its own manual page:
 .TP
 .BR shardpostctl-server (1)

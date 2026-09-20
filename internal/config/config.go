@@ -66,13 +66,20 @@ type Ceph struct {
 
 // Server configures listeners, limits, authentication and storage tuning.
 type Server struct {
-	Pop3Addr                  string `mapstructure:"pop3_addr" env:"POP3_ADDR"`
-	Pop3SAddr                 string `mapstructure:"pop3s_addr" env:"POP3S_ADDR"`
-	Pop3MarkSeen              bool   `mapstructure:"pop3_mark_seen" env:"POP3_MARK_SEEN"`
-	FtsShards                 int64  `mapstructure:"fts_shards" env:"FTS_SHARDS" validate:"gte=0"`
-	QuotaBytes                int64  `mapstructure:"quota_bytes" env:"QUOTA_BYTES" validate:"gte=0"`
-	QuotaMsgs                 int64  `mapstructure:"quota_msgs" env:"QUOTA_MSGS" validate:"gte=0"`
-	MboxShardSize             int64  `mapstructure:"mbox_shard_size" env:"MBOX_SHARD_SIZE" validate:"gte=0"`
+	Pop3Addr      string `mapstructure:"pop3_addr" env:"POP3_ADDR"`
+	Pop3SAddr     string `mapstructure:"pop3s_addr" env:"POP3S_ADDR"`
+	Pop3MarkSeen  bool   `mapstructure:"pop3_mark_seen" env:"POP3_MARK_SEEN"`
+	FtsShards     int64  `mapstructure:"fts_shards" env:"FTS_SHARDS" validate:"gte=0"`
+	QuotaBytes    int64  `mapstructure:"quota_bytes" env:"QUOTA_BYTES" validate:"gte=0"`
+	QuotaMsgs     int64  `mapstructure:"quota_msgs" env:"QUOTA_MSGS" validate:"gte=0"`
+	MboxShardSize int64  `mapstructure:"mbox_shard_size" env:"MBOX_SHARD_SIZE" validate:"gte=0"`
+	// PublicPrefix is the client-visible prefix of the public folders.
+	PublicPrefix string `mapstructure:"public_prefix" env:"PUBLIC_PREFIX" validate:"omitempty,endswith=/"`
+	// PublicQuotaBytes and PublicQuotaMsgs bound the public namespace as
+	// a whole (0 = unlimited). Public folders do not count against the
+	// quota of the account that files into them.
+	PublicQuotaBytes          int64  `mapstructure:"public_quota_bytes" env:"PUBLIC_QUOTA_BYTES" validate:"gte=0"`
+	PublicQuotaMsgs           int64  `mapstructure:"public_quota_msgs" env:"PUBLIC_QUOTA_MSGS" validate:"gte=0"`
 	KeyPollSeconds            int64  `mapstructure:"key_poll_seconds" env:"KEY_POLL_SECONDS" validate:"gte=0,lte=86400"`
 	MemoryBudgetBytes         int64  `mapstructure:"memory_budget_bytes" env:"MEMORY_BUDGET_BYTES" validate:"gte=0"`
 	InsecureAuth              bool   `mapstructure:"insecure_auth" env:"INSECURE_AUTH"`
@@ -235,6 +242,9 @@ var defaults = []struct {
 	{"server.quota_bytes", 0},
 	{"server.quota_msgs", 0},
 	{"server.mbox_shard_size", 100000},
+	{"server.public_prefix", "Public/"},
+	{"server.public_quota_bytes", 0},
+	{"server.public_quota_msgs", 0},
 	{"rook.namespace", "rook-ceph"},
 	{"rook.client_secret", ""},
 	{"server.key_poll_seconds", 60},

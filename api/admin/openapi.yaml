@@ -1690,8 +1690,10 @@ components:
           type: string
         lookup:
           type: string
-          enum: [canonical, alias, unknown, unavailable]
-          description: Outcome of the Nauthilus lookup of `account`.
+          enum: [canonical, alias, unknown, unavailable, public]
+          description: |
+            Outcome of the Nauthilus lookup of `account`; `public` is the
+            public namespace, which has no user database entry.
         canonical_account:
           type: string
         store_exists:

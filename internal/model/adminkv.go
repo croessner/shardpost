@@ -27,8 +27,17 @@ type AdminKV interface {
 }
 
 // ReservedNamespace reports whether a name belongs to the store itself
-// ("~admin", "~learning") rather than to an account.
+// ("~admin", "~learning", PublicNamespace) rather than to an account.
 func ReservedNamespace(name string) bool { return len(name) > 0 && name[0] == '~' }
+
+// PublicNamespace holds the public folders: mailboxes that belong to no
+// account. It has no login, no user database entry and no INBOX; access
+// is granted by ACL entries alone, and the store counts its usage
+// separately from any account.
+const PublicNamespace = "~public"
+
+// IsPublic reports whether name addresses the public namespace.
+func IsPublic(name string) bool { return name == PublicNamespace }
 
 // MaxAdminValue bounds one admin record (a job with its report, a plan).
 const MaxAdminValue = 4 << 20

@@ -194,7 +194,7 @@ func TestLoginAndList(t *testing.T) {
 	c.ok(`STATUS INBOX (MESSAGES UIDNEXT HIGHESTMODSEQ MAILBOXID)`)
 
 	lines = c.ok(`NAMESPACE`)
-	mustHave(t, lines, `NAMESPACE (("" "/")) (("Other Users/" "/")) NIL`)
+	mustHave(t, lines, `NAMESPACE (("" "/")) (("Other Users/" "/")) (("Public/" "/"))`)
 
 	lines = c.ok(`ID ("name" "test")`)
 	mustHave(t, lines, `* ID (`)

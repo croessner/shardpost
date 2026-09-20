@@ -90,6 +90,11 @@ func (c *conn) listRun(tag string, lsub bool, opts listOptions, ref string, patt
 		return nil
 	}
 
+	if err := c.listPublic(lsub, opts, ref, patterns); err != nil {
+		c.storeErr(tag, err)
+		return nil
+	}
+
 	if err := c.listShared(lsub, opts, ref, patterns); err != nil {
 		c.storeErr(tag, err)
 		return nil
@@ -525,6 +530,95 @@ func (c *conn) listShared(lsub bool, opts listOptions, ref string, patterns []st
 	return nil
 }
 
+// listPublic lists the public namespace: folders that belong to no
+// account, filtered by the account's rights (l), with the account's own
+// subscriptions.
+func (c *conn) listPublic(lsub bool, opts listOptions, ref string, patterns []string) error {
+	entries, nodes, err := c.collectPublic()
+	if err != nil || len(entries) == 0 {
+		return err
+	}
+
+	st := &sharedTree{entries: entries, full: map[string]sharedEntry{}, ref: ref, patterns: patterns}
+	for _, e := range entries {
+		st.full[e.full] = e
+	}
+
+	names := make([]string, 0, len(nodes)+len(entries))
+
+	for n := range nodes {
+		if _, ok := st.full[n]; !ok {
+			names = append(names, n)
+		}
+	}
+
+	for _, e := range entries {
+		names = append(names, e.full)
+	}
+
+	sort.Strings(names)
+
+	for _, name := range names {
+		if matchAny(name, ref, patterns) {
+			c.listSharedEntry(st, name, lsub, opts)
+		}
+	}
+
+	return nil
+}
+
+// collectPublic reads the public namespace and returns the folders the
+// account may see, plus their implicit parents (\Noselect).
+func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
+	u, err := c.publicUser()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	boxes, err := u.ListMailboxes()
+	if err != nil || len(boxes) == 0 {
+		return nil, nil, err
+	}
+
+	subs, err := c.user.PublicSubscriptions()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var entries []sharedEntry
+
+	nodes := map[string]bool{}
+	prefix := c.publicPrefix()
+
+	for i := range boxes {
+		acl, err := u.GetACL(boxes[i].Name)
+		if err != nil {
+			continue // a folder that cannot be read this time stays hidden
+		}
+
+		rights := model.EffectiveRights(acl, c.name)
+		if !model.HasRight(rights, 'l') {
+			continue
+		}
+
+		full := prefix + boxes[i].Name
+		entries = append(entries, sharedEntry{full: full, sub: subs[boxes[i].ID], leaf: true, rights: rights})
+		nodes[strings.TrimSuffix(prefix, "/")] = true
+
+		for n := full; ; {
+			j := strings.LastIndex(n, "/")
+			if j < 0 || n[:j] == strings.TrimSuffix(prefix, "/") {
+				break
+			}
+
+			n = n[:j]
+			nodes[n] = true
+		}
+	}
+
+	return entries, nodes, nil
+}
+
 // collectShared resolves the account's shared-mailbox pointers to the
 // entries it may list (right l) and their implicit parents (\Noselect),
 // pruning stale pointers.
@@ -814,13 +908,25 @@ func (c *conn) cmdSubscribe(tag string, on bool) error {
 		return nil
 	}
 
-	if t.shared() {
+	switch {
+	case t.public:
+		if !c.needRight(tag, t, 'l') {
+			return nil
+		}
+
+		var mb *model.Mailbox
+
+		if mb, err = c.publicMailbox(t); err == nil {
+			// By id: a folder that is renamed stays subscribed.
+			err = c.user.SetPublicSubscribed(mb.ID, on)
+		}
+	case t.shared():
 		if !c.needRight(tag, t, 'l') {
 			return nil
 		}
 
 		err = c.user.SetSharedSubscribed(t.owner, t.name, on)
-	} else {
+	default:
 		err = c.user.SetSubscribed(t.name, on)
 	}
 

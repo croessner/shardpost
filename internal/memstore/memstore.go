@@ -93,6 +93,7 @@ type User struct {
 	annot   map[string]string           // "<mailboxID|->|<accessor|>|<entry>"
 	vacSeen map[string]time.Time
 	subMiss map[string]bool // subscriptions without a mailbox
+	pubSubs map[string]bool // subscribed public folders, by mailbox id
 	boxes   map[string]*box // by name
 	blobs   map[string][]byte
 	terms   map[string]map[string]bool // term -> guids
@@ -1089,6 +1090,37 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Owner+"/"+out[i].Mailbox < out[j].Owner+"/"+out[j].Mailbox })
 
 	return out, nil
+}
+
+// PublicSubscriptions implements model.User.
+func (u *User) PublicSubscriptions() (map[string]bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	out := make(map[string]bool, len(u.pubSubs))
+	for id := range u.pubSubs {
+		out[id] = true
+	}
+
+	return out, nil
+}
+
+// SetPublicSubscribed implements model.User.
+func (u *User) SetPublicSubscribed(mailboxID string, subscribed bool) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if u.pubSubs == nil {
+		u.pubSubs = map[string]bool{}
+	}
+
+	if subscribed {
+		u.pubSubs[mailboxID] = true
+	} else {
+		delete(u.pubSubs, mailboxID)
+	}
+
+	return nil
 }
 
 // SetSharedSubscribed changes the subscription flag of a shared pointer.

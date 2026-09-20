@@ -467,3 +467,47 @@ func canonicalIdentifier(id string) string {
 
 	return strings.ToLower(id)
 }
+
+// Public folder subscriptions live in the account's own registry, keyed
+// by the mailbox id of the public folder: the folder belongs to no one,
+// but the decision to see it belongs to each account.
+const regPublicPrefix = "pub:"
+
+// PublicSubscriptions implements model.User.
+func (u *User) PublicSubscriptions() (map[string]bool, error) {
+	vals, err := u.idx.GetAllOmapValues(oidRegistry, "", regPublicPrefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return map[string]bool{}, nil
+		}
+
+		return nil, err
+	}
+
+	out := make(map[string]bool, len(vals))
+	for k := range vals {
+		if id, ok := strings.CutPrefix(k, regPublicPrefix); ok && id != "" {
+			out[id] = true
+		}
+	}
+
+	return out, nil
+}
+
+// SetPublicSubscribed implements model.User.
+func (u *User) SetPublicSubscribed(mailboxID string, subscribed bool) error {
+	key := regPublicPrefix + mailboxID
+
+	return casOmap(u, u.idx, oidRegistry, []string{key}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		_, have := cur[key]
+
+		switch {
+		case subscribed && !have:
+			return map[string][]byte{key: []byte("1")}, nil
+		case !subscribed && have:
+			return nil, []string{key}
+		default:
+			return nil, nil
+		}
+	})
+}
