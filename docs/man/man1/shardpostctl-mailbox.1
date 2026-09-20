@@ -110,7 +110,18 @@ Continue the listing after this mailbox name.
 Fetch every page.
 .TP
 .BI \-special-use " list"
-Special-use attributes of a new mailbox, comma-separated.
+Special-use attributes of a new mailbox, comma-separated. A client finds
+such a mailbox by its attribute rather than by its name, which is what
+makes "Drafts" work in a client that calls it something else. The server
+creates
+.IR \eDrafts ", " \eSent ", " \eTrash ", " \eJunk " and " \eArchive
+for every account on its own, so this flag is for the rest: RFC 6154
+also defines
+.IR \eAll " and " \eFlagged ,
+RFC 8457 defines
+.IR \eImportant .
+The value is stored as given; the server does not check that no other
+mailbox of the account carries the same attribute.
 .TP
 .BI \-if-match " etag"
 Make the change conditional. The ETag is printed by every command that

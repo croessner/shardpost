@@ -123,11 +123,63 @@ and refuses a larger batch.
 .TP
 .B \-\-json
 Print the report as JSON.
+.SH ENVIRONMENT
+Every flag of the source and of ManageSieve reads its default from the
+environment, which is how the import sidecar is configured: the
+deployment sets the variables once and the command is called without
+flags. A flag on the command line wins.
+.TP
+.B SHARDPOST_MIGRATE_SOURCE_ADDR
+Default of
+.BR \-source-addr .
+.TP
+.B SHARDPOST_MIGRATE_SOURCE_TLS
+Default of
+.BR \-source-tls .
+.TP
+.B SHARDPOST_MIGRATE_SOURCE_SERVER_NAME
+Default of
+.BR \-source-server-name .
+.TP
+.B SHARDPOST_MIGRATE_SOURCE_CA
+Default of
+.BR \-source-ca .
+.TP
+.B SHARDPOST_MIGRATE_SOURCE_PROXY
+Default of
+.BR \-source-proxy .
+.TP
+.B SHARDPOST_MIGRATE_MASTER_USER
+Default of
+.BR \-master-user .
+.TP
+.B SHARDPOST_MIGRATE_USER_FORMAT
+Default of
+.BR \-user-format .
+.TP
+.B SHARDPOST_MIGRATE_PASSWORD_FILE
+Default of
+.BR \-password-file .
+.TP
+.B SHARDPOST_MIGRATE_SIEVE_ADDR
+Default of
+.BR \-sieve-addr .
+.TP
+.B SHARDPOST_MIGRATE_SIEVE_TLS
+Default of
+.BR \-sieve-tls .
+.TP
+.B SHARDPOST_MIGRATE_SIEVE_SERVER_NAME
+Default of
+.BR \-sieve-server-name .
+.TP
+.B SHARDPOST_MIGRATE_SIEVE_PROXY
+Default of
+.BR \-sieve-proxy .
 .PP
-Most flags also read a default from the environment
-.RI ( SHARDPOST_MIGRATE_SOURCE_ADDR ", " SHARDPOST_MIGRATE_MASTER_USER ", "
-.IR SHARDPOST_MIGRATE_PASSWORD_FILE ", " SHARDPOST_MIGRATE_SIEVE_ADDR ", "
-and so on), which is how the import sidecar is configured.
+The connection to this server is configured as for every other command,
+see
+.BR shardpostctl (1).
 .SH EXAMPLES
 A first copy while the account still lives on the old server. Repeat it
 until a run reports few changes:
