@@ -438,8 +438,16 @@ func (c *Config) checkNamespaces() error {
 	shared, public := c.Server.SharedPrefix, c.Server.PublicPrefix
 
 	for _, p := range []string{shared, public} {
-		if p != "" && strings.HasPrefix(strings.ToUpper(p), "INBOX/") {
+		if p == "" {
+			continue
+		}
+
+		if strings.HasPrefix(strings.ToUpper(p), "INBOX/") {
 			return fmt.Errorf("a namespace prefix must not lie below INBOX: %q", p)
+		}
+
+		if err := checkPrefixChars(p); err != nil {
+			return err
 		}
 	}
 
@@ -449,6 +457,29 @@ func (c *Config) checkNamespaces() error {
 
 	if shared == public || strings.HasPrefix(shared, public) || strings.HasPrefix(public, shared) {
 		return fmt.Errorf("server.shared_prefix %q and server.public_prefix %q must not name the same namespace", shared, public)
+	}
+
+	return nil
+}
+
+// checkPrefixChars rejects a namespace prefix a client could not read
+// back: the prefix goes into the NAMESPACE reply and into every mailbox
+// name below it. IMAP quotes it, matches it against LIST patterns and
+// (without UTF8=ACCEPT) expects ASCII, so quotes, backslashes, the
+// wildcards, control characters, non-ASCII, an empty level and the
+// delimiter alone are out.
+func checkPrefixChars(p string) error {
+	if p == "/" || strings.Contains(p, "//") {
+		return fmt.Errorf("a namespace prefix must name a level: %q", p)
+	}
+
+	for _, r := range p {
+		switch {
+		case r == '"' || r == '\\' || r == '*' || r == '%':
+			return fmt.Errorf("a namespace prefix must not contain %q: %q", r, p)
+		case r < 0x20 || r > 0x7e:
+			return fmt.Errorf("a namespace prefix must be printable ASCII: %q", p)
+		}
 	}
 
 	return nil

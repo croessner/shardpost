@@ -381,4 +381,13 @@ func TestSharedPrefixCollision(t *testing.T) {
 	if l := strings.Join(bob.cmd("SELECT Shared"), "\n"); !strings.Contains(l, "1 EXISTS") {
 		t.Errorf("the account's own mailbox is not reachable: %s", l)
 	}
+	// A client that walks the hierarchy with % must be told that there
+	// is something below the name, or it never asks for it.
+	for _, cmd := range []string{`LIST "" "%"`, `LIST "" "%" RETURN (CHILDREN)`} {
+		for _, l := range bob.ok("%s", cmd) {
+			if strings.HasSuffix(l, `"/" Shared`) && !strings.Contains(l, `\HasChildren`) {
+				t.Errorf("%s hides the shared namespace: %s", cmd, l)
+			}
+		}
+	}
 }

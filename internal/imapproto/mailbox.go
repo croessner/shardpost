@@ -86,20 +86,28 @@ func (c *conn) listRun(tag string, lsub bool, opts listOptions, ref string, patt
 		return nil
 	}
 
-	if err := c.listOwn(lsub, opts, ref, patterns); err != nil {
+	// The other namespaces are collected first: an account whose own
+	// mailbox is named like the root of one of them gets a single LIST
+	// line, and that line has to say \HasChildren.
+	public, publicNodes, err := c.collectPublic()
+	if err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
 
-	if err := c.listPublic(lsub, opts, ref, patterns); err != nil {
+	shared, sharedNodes, err := c.collectSharedRefs()
+	if err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
 
-	if err := c.listShared(lsub, opts, ref, patterns); err != nil {
+	if err := c.listOwn(lsub, opts, ref, patterns, namespaceRoots(public, shared)); err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
+
+	c.listForeign(public, publicNodes, lsub, opts, ref, patterns)
+	c.listForeign(shared, sharedNodes, lsub, opts, ref, patterns)
 
 	c.ok(tag, "", "LIST completed")
 
@@ -220,16 +228,25 @@ func matchAny(name, ref string, patterns []string) bool {
 
 // listTree is the account's own mailbox hierarchy as LIST sees it.
 type listTree struct {
-	boxes    []model.Mailbox
-	byName   map[string]*model.Mailbox
-	names    map[string]bool // true = real mailbox, false = implicit parent
-	missing  map[string]bool // subscriptions without a mailbox
+	boxes   []model.Mailbox
+	byName  map[string]*model.Mailbox
+	names   map[string]bool // true = real mailbox, false = implicit parent
+	missing map[string]bool // subscriptions without a mailbox
+	// foreign are names whose children live in another namespace: an own
+	// mailbox called like the root of the shared or public namespace is
+	// one LIST line, and that line must say \HasChildren.
+	foreign  map[string]bool
 	ref      string
 	patterns []string
 }
 
-// hasChildren reports whether n has any descendant.
+// hasChildren reports whether n has any descendant, in this namespace
+// or in another one.
 func (lt *listTree) hasChildren(n string) bool {
+	if lt.foreign[n] {
+		return true
+	}
+
 	for cn := range lt.names {
 		if strings.HasPrefix(cn, n+string(delim)) {
 			return true
@@ -284,7 +301,8 @@ func (c *conn) warnShadowed(boxes []model.Mailbox) {
 		c.shadowWarned = true
 
 		c.log.Warn("own mailbox lies below a namespace prefix and cannot be opened by a client",
-			"mailbox_id", boxes[i].ID, "shared_prefix", c.sharedPrefix(), "public_prefix", c.publicPrefix())
+			"mailbox", boxes[i].Name, "mailbox_id", boxes[i].ID,
+			"shared_prefix", c.sharedPrefix(), "public_prefix", c.publicPrefix())
 
 		return
 	}
@@ -306,7 +324,7 @@ func shadowed(name string, prefixes ...string) bool {
 
 // newListTree loads the account's mailboxes, subscriptions without a
 // mailbox (when subscriptions matter) and their implicit parents.
-func (c *conn) newListTree(opts listOptions, ref string, patterns []string) (*listTree, error) {
+func (c *conn) newListTree(opts listOptions, ref string, patterns []string, foreign map[string]bool) (*listTree, error) {
 	boxes, err := c.user.ListMailboxes()
 	if err != nil {
 		return nil, err
@@ -325,7 +343,8 @@ func (c *conn) newListTree(opts listOptions, ref string, patterns []string) (*li
 
 	c.warnShadowed(boxes)
 
-	lt := &listTree{boxes: boxes, byName: map[string]*model.Mailbox{}, names: map[string]bool{}, missing: missing, ref: ref, patterns: patterns}
+	lt := &listTree{boxes: boxes, byName: map[string]*model.Mailbox{}, names: map[string]bool{}, missing: missing,
+		foreign: foreign, ref: ref, patterns: patterns}
 
 	for i := range boxes {
 		lt.byName[boxes[i].Name] = &boxes[i]
@@ -349,8 +368,8 @@ func (c *conn) newListTree(opts listOptions, ref string, patterns []string) (*li
 }
 
 // listOwn lists the matching mailboxes of the account's own namespace.
-func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []string) error {
-	lt, err := c.newListTree(opts, ref, patterns)
+func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []string, foreign map[string]bool) error {
+	lt, err := c.newListTree(opts, ref, patterns, foreign)
 	if err != nil {
 		return err
 	}
@@ -528,61 +547,50 @@ func (st *sharedTree) subChildUnmatched(n string) bool {
 	return false
 }
 
-// listShared lists the shared namespace: the mailboxes of other
+// collectSharedRefs reads the shared namespace: the mailboxes of other
 // users this account holds a pointer for, verified against the owner's
 // ACL (right l). Pointers without rights are pruned.
-func (c *conn) listShared(lsub bool, opts listOptions, ref string, patterns []string) error {
+func (c *conn) collectSharedRefs() ([]sharedEntry, map[string]bool, error) {
 	if c.sharedPrefix() == "" {
-		return nil // no shared namespace: nothing to list, nothing to read
+		return nil, nil, nil // no shared namespace: nothing to list, nothing to read
 	}
 
 	refs, err := c.user.ListShared()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	if len(refs) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 
 	entries, nodes := c.collectShared(refs)
 
-	st := &sharedTree{entries: entries, full: map[string]sharedEntry{}, ref: ref, patterns: patterns}
-	for _, e := range entries {
-		st.full[e.full] = e
-	}
-
-	names := make([]string, 0, len(nodes)+len(entries))
-	for n := range nodes {
-		if _, ok := st.full[n]; !ok {
-			names = append(names, n)
-		}
-	}
-
-	for _, e := range entries {
-		names = append(names, e.full)
-	}
-
-	sort.Strings(names)
-
-	for _, name := range names {
-		if !matchAny(name, ref, patterns) {
-			continue
-		}
-
-		c.listSharedEntry(st, name, lsub, opts)
-	}
-
-	return nil
+	return entries, nodes, nil
 }
 
-// listPublic lists the public namespace: folders that belong to no
-// account, filtered by the account's rights (l), with the account's own
-// subscriptions.
-func (c *conn) listPublic(lsub bool, opts listOptions, ref string, patterns []string) error {
-	entries, nodes, err := c.collectPublic()
-	if err != nil || len(entries) == 0 {
-		return err
+// namespaceRoots returns the first segment of every entry of another
+// namespace: the names under which the account's own listing has
+// children it does not know about.
+func namespaceRoots(sets ...[]sharedEntry) map[string]bool {
+	roots := map[string]bool{}
+
+	for _, set := range sets {
+		for _, e := range set {
+			if i := strings.Index(e.full, string(delim)); i > 0 {
+				roots[e.full[:i]] = true
+			}
+		}
+	}
+
+	return roots
+}
+
+// listForeign writes the LIST lines of another namespace: its entries
+// and the implicit parents that only exist as a path.
+func (c *conn) listForeign(entries []sharedEntry, nodes map[string]bool, lsub bool, opts listOptions, ref string, patterns []string) {
+	if len(entries) == 0 {
+		return
 	}
 
 	st := &sharedTree{entries: entries, full: map[string]sharedEntry{}, ref: ref, patterns: patterns}
@@ -609,8 +617,6 @@ func (c *conn) listPublic(lsub bool, opts listOptions, ref string, patterns []st
 			c.listSharedEntry(st, name, lsub, opts)
 		}
 	}
-
-	return nil
 }
 
 // collectPublic reads the public namespace and returns the folders the
@@ -639,6 +645,11 @@ func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
 
 	nodes := map[string]bool{}
 	prefix := c.publicPrefix()
+	// As in the shared namespace: the root is a node of its own unless
+	// the account has a mailbox of that name (see collectShared).
+	root := strings.TrimSuffix(prefix, "/")
+	ownRoot := c.ownMailbox(root)
+
 	c.dropStalePublicSubs(boxes, subs)
 
 	for i := range boxes {
@@ -651,11 +662,14 @@ func (c *conn) collectPublic() ([]sharedEntry, map[string]bool, error) {
 
 		full := prefix + boxes[i].Name
 		entries = append(entries, sharedEntry{full: full, sub: subs[boxes[i].ID], leaf: true, rights: rights})
-		nodes[strings.TrimSuffix(prefix, "/")] = true
+
+		if !ownRoot {
+			nodes[root] = true
+		}
 
 		for n := full; ; {
 			j := strings.LastIndex(n, "/")
-			if j < 0 || n[:j] == strings.TrimSuffix(prefix, "/") {
+			if j < 0 || n[:j] == root {
 				break
 			}
 
@@ -702,6 +716,11 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 
 	nodes := map[string]bool{} // implicit parents (\Noselect)
 	shared := c.sharedPrefix()
+	// The root of the namespace is a node of its own — unless the
+	// account has a mailbox of that name, which its own listing already
+	// shows, with \HasChildren for what lies below it here.
+	root := strings.TrimSuffix(shared, "/")
+	ownRoot := c.ownMailbox(root)
 
 	for _, r := range refs {
 		if model.IsPublic(r.Owner) {
@@ -731,10 +750,7 @@ func (c *conn) collectShared(refs []model.SharedRef) ([]sharedEntry, map[string]
 
 		entries = append(entries, sharedEntry{full: t.full, sub: r.Subscribed, leaf: true, rights: rights})
 
-		// The root of the namespace is a node of its own — unless the
-		// account has a mailbox of that name, which LIST already shows
-		// with its own attributes.
-		if root := strings.TrimSuffix(shared, "/"); !c.ownMailbox(root) {
+		if !ownRoot {
 			nodes[root] = true
 		}
 

@@ -114,7 +114,8 @@ func namespaceField(prefix string) string {
 		return "NIL"
 	}
 
-	return fmt.Sprintf(`(("%s" "/"))`, prefix)
+	// RFC 3501 wants a string here, never a bare atom.
+	return fmt.Sprintf(`((%s "/"))`, quote(prefix))
 }
 
 // publicUser opens the public namespace, once per session. Its view is

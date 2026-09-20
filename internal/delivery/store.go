@@ -23,15 +23,9 @@ import (
 func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 	user := r.req.Account
 
-	targets := make([]target, 0, len(d.FileInto))
-
-	for _, f := range d.FileInto {
-		t, err := r.target(f.Mailbox)
-		if err != nil {
-			return nil, err
-		}
-
-		targets = append(targets, t)
+	targets, files, err := r.resolve(d.FileInto)
+	if err != nil {
+		return nil, err
 	}
 
 	intents, err := r.beginIntents(targets, len(d.FileInto) > 1)
@@ -49,7 +43,7 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 		return nil, err
 	}
 
-	for i, f := range d.FileInto {
+	for i, f := range files {
 		meta, err := r.storeOne(intents, targets[i], raw, f)
 		if err != nil {
 			return fail(err)
@@ -70,6 +64,41 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 	}
 
 	return stored, nil
+}
+
+// resolve turns the fileinto list into targets, dropping a target that
+// another one already names. Sieve deduplicates by name before the
+// names are resolved (RFC 5232 5.1), so two names that end in the same
+// mailbox — a refused public folder and a keep, for instance — would
+// otherwise store the message twice. The last one wins, as it does
+// there.
+func (r *run) resolve(files []sieve.FileInto) ([]target, []sieve.FileInto, error) {
+	var (
+		targets []target
+		kept    []sieve.FileInto
+	)
+
+	at := map[string]int{} // "<namespace>\x00<mailbox>" -> index
+
+	for _, f := range files {
+		t, err := r.target(f.Mailbox)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		key := t.where + "\x00" + t.mailbox
+		if i, ok := at[key]; ok {
+			targets[i], kept[i] = t, f
+
+			continue
+		}
+
+		at[key] = len(targets)
+		targets = append(targets, t)
+		kept = append(kept, f)
+	}
+
+	return targets, kept, nil
 }
 
 // intent is a delivery intent in one namespace.

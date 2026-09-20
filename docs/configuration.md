@@ -159,8 +159,11 @@ shardpostctl mailbox list <account> | grep -E '^(Shared|Public)/'
 Such a mailbox would still be listed but could no longer be opened: its
 name resolves to the other namespace. Rename it first
 (`shardpostctl mailbox rename <account> <old> <new>`); the server also
-logs a warning when it lists one. Creating, renaming or importing a
-mailbox below a prefix is refused for the same reason.
+logs a warning, with the mailbox name, when it lists one. Creating,
+renaming or importing a mailbox below a prefix is refused by the admin
+API for the same reason; over IMAP such a name never reaches the
+account's own namespace at all, so `CREATE "Shared/Sub"` answers
+`NONEXISTENT` instead.
 
 While a namespace is switched off its prefix is not reserved, so an
 account can create a mailbox there in the meantime. Switching it back on

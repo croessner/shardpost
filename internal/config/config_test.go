@@ -187,6 +187,12 @@ func TestNamespacePrefixes(t *testing.T) {
 		{"one inside the other", "Shared/", "Shared/Public/", true},
 		{"below INBOX", "INBOX/Shared/", "Public/", true},
 		{"below inbox, lower case", "inbox/shared/", "Public/", true},
+		{"a quote in the prefix", `Sh"ared/`, "Public/", true},
+		{"a wildcard in the prefix", "Sh*ared/", "Public/", true},
+		{"not ASCII", "Geteilt ü/", "Public/", true},
+		{"the delimiter alone", "/", "Public/", true},
+		{"an empty level", "Shared//", "Public/", true},
+		{"a space is fine", "Other Users/", "Public/", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Config{}

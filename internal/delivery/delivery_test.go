@@ -413,3 +413,42 @@ func TestFileIntoSharedFolderRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestRefusedFileIntoDoesNotDuplicate: a refused fileinto falls back to
+// INBOX, and a keep (or a second refused target) names the same mailbox
+// — the message must be stored once, not once per name.
+func TestRefusedFileIntoDoesNotDuplicate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{"a keep beside it", `require ["fileinto", "copy"]; fileinto :copy "Shared/a@example.org/X";`},
+		{"two refused targets", `require "fileinto"; fileinto "Shared/a@example.org/X"; fileinto "Shared/b@example.org/Y";`},
+		{"INBOX named as well", `require "fileinto"; fileinto "INBOX"; fileinto "Shared/a@example.org/X";`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store := testService(t, tc.script)
+			svc.SharedPrefix = "Shared/"
+
+			res, err := svc.Deliver(context.Background(), request(message))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(res.Stored) != 1 {
+				t.Errorf("stored %+v, want one message", res.Stored)
+			}
+
+			u, _ := store.User(account)
+
+			msgs, err := messagesIn(u, "INBOX")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(msgs) != 1 {
+				t.Errorf("%d messages in INBOX, want 1", len(msgs))
+			}
+		})
+	}
+}
