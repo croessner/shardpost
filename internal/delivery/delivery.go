@@ -9,7 +9,9 @@ package delivery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -231,15 +233,43 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 	return &Result{Stored: stored}, nil
 }
 
+// checkExplicit verifies a mailbox the caller named itself. Unlike a
+// fileinto it never falls back to INBOX: somebody asked for this
+// mailbox, so a missing one or a missing right is an error, not a
+// detour. A public folder needs the post right, as it does for Sieve;
+// the mailboxes of other accounts are no delivery target at all.
+func (r *run) checkExplicit(name string) error {
+	if p := r.svc.SharedPrefix; p != "" && strings.HasPrefix(name, p) {
+		return fmt.Errorf("%w: a mailbox of another account is no delivery target", ErrNoMailbox)
+	}
+
+	t, err := r.target(name)
+	if err != nil {
+		return err
+	}
+
+	if t.where != name {
+		// The public folder was refused; r.target says so by pointing
+		// at INBOX instead.
+		return fmt.Errorf("%w: no post right on %s", ErrNoMailbox, name)
+	}
+
+	if _, err := t.u.Lookup(t.mailbox); err != nil {
+		if errors.Is(err, model.ErrNoMailbox) {
+			return ErrNoMailbox
+		}
+
+		return err
+	}
+
+	return nil
+}
+
 // targets returns what to do with the message: the direct target
 // mailbox, INBOX without Sieve, or the result of the user's script.
 func (r *run) targets(ctx context.Context) (*sieve.Delivery, error) {
 	if r.req.Mailbox != "" {
-		if _, err := r.u.Lookup(r.req.Mailbox); err != nil {
-			if errors.Is(err, model.ErrNoMailbox) {
-				return nil, ErrNoMailbox
-			}
-
+		if err := r.checkExplicit(r.req.Mailbox); err != nil {
 			return nil, err
 		}
 

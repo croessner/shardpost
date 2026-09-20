@@ -271,19 +271,6 @@ func (c *conn) rememberMarks(uids []uint32, marks map[uint32]model.PrivateMark) 
 	}
 }
 
-// markSeenPrivately sets the account's own mark on one message, for the
-// implicit \Seen of a FETCH.
-func (c *conn) markSeenPrivately(m model.Meta) (bool, error) {
-	p, err := c.planPrivateSeen(storeArgs{op: kwAddFlags, flags: []string{flagSeenLower}}, []model.Meta{m})
-	if err != nil {
-		return false, err
-	}
-
-	ps, err := c.writePrivateSeen(p, p.changed)
-
-	return len(ps.changed) > 0, err
-}
-
 // sharedApply is the flag operation for the shared record. In a public
 // folder it leaves \Seen exactly as it is: that flag belongs to the
 // account, not to the folder.

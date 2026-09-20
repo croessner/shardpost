@@ -155,6 +155,7 @@ func fetchSetsSeen(opts *fetchOptions) bool {
 // message could not be read.
 func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions, uid bool) (flagEvents []model.Meta, failed bool, err error) {
 	markSeen := fetchSetsSeen(opts)
+	marked := c.markSeenBatch(markSeen, metas, opts)
 
 	for i, m := range metas {
 		if opts.changedSince != 0 && m.ModSeq <= opts.changedSince {
@@ -164,7 +165,7 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 		seenSet := false
 
 		if markSeen {
-			if m, seenSet = c.fetchSetSeen(seqs[i], m); seenSet {
+			if m, seenSet = c.fetchSetSeen(seqs[i], m, marked); seenSet {
 				flagEvents = append(flagEvents, m)
 			}
 		}
@@ -184,7 +185,7 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 
 // fetchSetSeen sets \Seen on message seq when the session may; it returns
 // the updated message and true when the flag was set.
-func (c *conn) fetchSetSeen(seq int, m model.Meta) (model.Meta, bool) {
+func (c *conn) fetchSetSeen(seq int, m model.Meta, marked map[uint32]bool) (model.Meta, bool) {
 	if c.readOnly || !model.HasRight(c.mrights, 's') || model.HasFlag(m.Flags, flagSeen) {
 		return m, false
 	}
@@ -193,9 +194,14 @@ func (c *conn) fetchSetSeen(seq int, m model.Meta) (model.Meta, bool) {
 	// \Seen of a FETCH writes the account's own mark, exactly like an
 	// explicit STORE. Writing the shared flag here would mark the
 	// message read for everyone who has no mark of their own — and most
-	// clients fetch BODY[] rather than BODY.PEEK[].
+	// clients fetch BODY[] rather than BODY.PEEK[]. The marks are
+	// already written (markSeenBatch); what is left is the overlay.
 	if c.mpublic {
-		return c.fetchSetPrivateSeen(seq, m)
+		msgs := []model.Meta{m}
+		c.privateOverlay(msgs)
+		c.msgs[seq-1] = msgs[0]
+
+		return msgs[0], marked[m.UID]
 	}
 
 	res, err := c.mu.SetFlags(c.mbox.Name, []uint32{m.UID}, 0, addFlags([]string{flagSeenLower}))
@@ -209,24 +215,61 @@ func (c *conn) fetchSetSeen(seq int, m model.Meta) (model.Meta, bool) {
 	return m, true
 }
 
-// fetchSetPrivateSeen is the implicit \Seen of a FETCH in a public
-// folder.
-func (c *conn) fetchSetPrivateSeen(seq int, m model.Meta) (model.Meta, bool) {
-	set, err := c.markSeenPrivately(m)
-	if err != nil {
-		c.log.Warn("private seen mark of a fetch failed", "uid", m.UID, "err", err)
-
-		return m, false
+// markSeenBatch writes the account's own \Seen marks for every message
+// of a FETCH into a public folder, in one step. A mark takes a MODSEQ of
+// the mailbox and announces a change, so one per message would turn a
+// FETCH over a folder into as many announcements as it has messages. It
+// returns the UIDs whose mark this FETCH changed.
+func (c *conn) markSeenBatch(markSeen bool, metas []model.Meta, opts *fetchOptions) map[uint32]bool {
+	if !markSeen || !c.mpublic || c.readOnly || !model.HasRight(c.mrights, 's') {
+		return nil
 	}
 
-	msgs := []model.Meta{m}
-	c.privateOverlay(msgs)
-	c.msgs[seq-1] = msgs[0]
+	var want []model.Meta
 
-	// set is false when another session of this account got there
-	// first: the message reads as seen, but this one changed nothing
-	// and has no flag event to report.
-	return msgs[0], set
+	for _, m := range metas {
+		if opts.changedSince != 0 && m.ModSeq <= opts.changedSince {
+			continue
+		}
+
+		if !model.HasFlag(m.Flags, flagSeen) {
+			want = append(want, m)
+		}
+	}
+
+	if len(want) == 0 {
+		return nil
+	}
+
+	marked, err := c.markSeenAll(want)
+	if err != nil {
+		c.log.Warn("private seen marks of a fetch failed", "count", len(want), "err", err)
+
+		return nil
+	}
+
+	return marked
+}
+
+// markSeenAll writes the marks of the given messages and returns the
+// UIDs whose mark changed.
+func (c *conn) markSeenAll(want []model.Meta) (map[uint32]bool, error) {
+	plan, err := c.planPrivateSeen(storeArgs{op: kwAddFlags, flags: []string{flagSeenLower}}, want)
+	if err != nil {
+		return nil, err
+	}
+
+	ps, err := c.writePrivateSeen(plan, plan.changed)
+	if err != nil {
+		return nil, err
+	}
+
+	marked := make(map[uint32]bool, len(ps.changed))
+	for _, uid := range ps.changed {
+		marked[uid] = true
+	}
+
+	return marked, nil
 }
 
 var errReadFailed = errors.New("message read failed")

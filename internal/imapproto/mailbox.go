@@ -101,7 +101,7 @@ func (c *conn) listRun(tag string, lsub bool, opts listOptions, ref string, patt
 		return nil
 	}
 
-	if err := c.listOwn(lsub, opts, ref, patterns, namespaceRoots(public, shared)); err != nil {
+	if err := c.listOwn(lsub, opts, ref, patterns, namespaceRoots(ref, patterns, public, shared)); err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
@@ -234,16 +234,24 @@ type listTree struct {
 	missing map[string]bool // subscriptions without a mailbox
 	// foreign are names whose children live in another namespace: an own
 	// mailbox called like the root of the shared or public namespace is
-	// one LIST line, and that line must say \HasChildren.
-	foreign  map[string]bool
+	// one LIST line, and that line must say \HasChildren — and stand in
+	// for the subscriptions below it.
+	foreign  map[string]foreignRoot
 	ref      string
 	patterns []string
+}
+
+// foreignRoot says what another namespace holds below a name of the
+// account's own listing.
+type foreignRoot struct {
+	subscribed bool // a subscribed entry lies below it
+	unmatched  bool // one of those is not listed by the pattern itself
 }
 
 // hasChildren reports whether n has any descendant, in this namespace
 // or in another one.
 func (lt *listTree) hasChildren(n string) bool {
-	if lt.foreign[n] {
+	if _, ok := lt.foreign[n]; ok {
 		return true
 	}
 
@@ -256,8 +264,13 @@ func (lt *listTree) hasChildren(n string) bool {
 	return false
 }
 
-// subscribedChild reports whether n has a subscribed descendant.
+// subscribedChild reports whether n has a subscribed descendant, here
+// or in another namespace.
 func (lt *listTree) subscribedChild(n string) bool {
+	if lt.foreign[n].subscribed {
+		return true
+	}
+
 	for _, b := range lt.boxes {
 		if b.Subscribed && strings.HasPrefix(b.Name, n+string(delim)) {
 			return true
@@ -270,6 +283,10 @@ func (lt *listTree) subscribedChild(n string) bool {
 // unmatchedChild: a subscribed descendant that no pattern lists
 // itself (RFC 5258 3.5: CHILDINFO only stands in for such children)
 func (lt *listTree) unmatchedChild(n string) bool {
+	if lt.foreign[n].unmatched {
+		return true
+	}
+
 	for _, b := range lt.boxes {
 		if !b.Subscribed || !strings.HasPrefix(b.Name, n+string(delim)) {
 			continue
@@ -324,7 +341,7 @@ func shadowed(name string, prefixes ...string) bool {
 
 // newListTree loads the account's mailboxes, subscriptions without a
 // mailbox (when subscriptions matter) and their implicit parents.
-func (c *conn) newListTree(opts listOptions, ref string, patterns []string, foreign map[string]bool) (*listTree, error) {
+func (c *conn) newListTree(opts listOptions, ref string, patterns []string, foreign map[string]foreignRoot) (*listTree, error) {
 	boxes, err := c.user.ListMailboxes()
 	if err != nil {
 		return nil, err
@@ -368,7 +385,7 @@ func (c *conn) newListTree(opts listOptions, ref string, patterns []string, fore
 }
 
 // listOwn lists the matching mailboxes of the account's own namespace.
-func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []string, foreign map[string]bool) error {
+func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []string, foreign map[string]foreignRoot) error {
 	lt, err := c.newListTree(opts, ref, patterns, foreign)
 	if err != nil {
 		return err
@@ -571,15 +588,26 @@ func (c *conn) collectSharedRefs() ([]sharedEntry, map[string]bool, error) {
 
 // namespaceRoots returns the first segment of every entry of another
 // namespace: the names under which the account's own listing has
-// children it does not know about.
-func namespaceRoots(sets ...[]sharedEntry) map[string]bool {
-	roots := map[string]bool{}
+// children it does not know about, with what lies below them.
+func namespaceRoots(ref string, patterns []string, sets ...[]sharedEntry) map[string]foreignRoot {
+	roots := map[string]foreignRoot{}
 
 	for _, set := range sets {
 		for _, e := range set {
-			if i := strings.Index(e.full, string(delim)); i > 0 {
-				roots[e.full[:i]] = true
+			i := strings.Index(e.full, string(delim))
+			if i <= 0 {
+				continue
 			}
+
+			r := roots[e.full[:i]]
+			if e.sub {
+				r.subscribed = true
+				// RFC 5258 3.5: CHILDINFO only stands in for children
+				// the pattern does not list itself.
+				r.unmatched = r.unmatched || !matchAny(e.full, ref, patterns)
+			}
+
+			roots[e.full[:i]] = r
 		}
 	}
 
@@ -779,6 +807,11 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 	childInfo := ""
 
 	if opts.selectSubscribed && (!isBox || !e.sub) {
+		if lsub {
+			c.lsubSharedParent(st, name)
+			return
+		}
+
 		if !opts.selectRecursive || !st.subChild(name) || !st.subChildUnmatched(name) {
 			return
 		}
@@ -793,6 +826,15 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 	attrs := st.attrs(e, isBox, name, lsub, opts)
 	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), astringOut(name), childInfo)
 	c.listSharedExtras(e, isBox, name, opts)
+}
+
+// lsubSharedParent lists a name of another namespace that is not
+// subscribed itself, as lsubParent does for the account's own
+// mailboxes (RFC 3501 6.3.9).
+func (c *conn) lsubSharedParent(st *sharedTree, name string) {
+	if st.subChild(name) && len(st.patterns) > 0 && strings.HasSuffix(st.patterns[0], "%") {
+		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, astringOut(name))
+	}
 }
 
 // attrs returns the name attributes of a listed shared name.

@@ -55,7 +55,11 @@ of an account that has the post right
 .RB ( p ),
 or because somebody with the insert right
 .RB ( i )
-puts a message there with APPEND, COPY or MOVE.
+puts a message there with APPEND, COPY or MOVE. A delivery that names
+the folder itself
+.RB ( "deliver \-m" )
+needs the post right as well and fails if the folder is missing or the
+right is not there \(em it never falls back to the INBOX.
 .PP
 Commands are grouped by subject. Each group has its own manual page:
 .TP

@@ -391,3 +391,39 @@ func TestSharedPrefixCollision(t *testing.T) {
 		}
 	}
 }
+
+// TestSharedNamespaceSubscriptionsInList: a subscribed mailbox of
+// another account has to be findable the way a client looks for it —
+// through CHILDINFO when it asks recursively, and through the
+// \Noselect parent of LSUB — whether or not the account happens to own
+// a mailbox named like the namespace.
+func TestSharedNamespaceSubscriptionsInList(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		name := "without a mailbox of its own"
+		if own {
+			name = "with a mailbox named like the namespace"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			alice, bob := twoUsers(t)
+
+			if own {
+				bob.ok("CREATE Shared")
+			}
+
+			alice.ok("CREATE Box")
+			alice.ok("SETACL Box bob lrs")
+			bob.ok(`SUBSCRIBE "Shared/alice/Box"`)
+
+			rec := strings.Join(bob.cmd(`LIST (SUBSCRIBED RECURSIVEMATCH) "" "%%"`), "\n")
+			if !strings.Contains(rec, `"/" Shared ("CHILDINFO" ("SUBSCRIBED"))`) {
+				t.Errorf("RECURSIVEMATCH does not point at the subscription below Shared:\n%s", rec)
+			}
+
+			lsub := strings.Join(bob.cmd(`LSUB "" "%%"`), "\n")
+			if !strings.Contains(lsub, `"/" Shared`) {
+				t.Errorf("LSUB hides the parent of a subscribed mailbox:\n%s", lsub)
+			}
+		})
+	}
+}

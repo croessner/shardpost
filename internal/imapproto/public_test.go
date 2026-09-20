@@ -587,3 +587,39 @@ func TestPublicUnchangedSinceWithoutSeen(t *testing.T) {
 		t.Errorf("the refused store set the shared flag anyway: %s", lines)
 	}
 }
+
+// TestPublicFetchBatchesMarks: a FETCH over a whole public folder
+// writes the account's marks in one step. A mark takes a MODSEQ of the
+// mailbox and announces a change, so one per message would announce as
+// many changes as the folder has messages.
+func TestPublicFetchBatchesMarks(t *testing.T) {
+	c, store := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	pub := publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	for i := 0; i < 4; i++ {
+		if _, err := pub.Deliver("Team", []byte("Subject: more\r\n\r\ntext\r\n"), nil, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c.ok("LOGIN test test")
+	c.ok("ENABLE CONDSTORE")
+	c.ok("SELECT Public/Team")
+
+	before := highestModSeq(t, c, "Public/Team")
+
+	lines := strings.Join(c.cmd("FETCH 1:* (BODY[])"), "\n")
+	if strings.Count(lines, `\Seen`) != 5 {
+		t.Errorf("not every message was marked read: %s", lines)
+	}
+
+	if after := highestModSeq(t, c, "Public/Team"); after != before+1 {
+		t.Errorf("HIGHESTMODSEQ went from %d to %d, want one step for the whole fetch", before, after)
+	}
+
+	if lines := strings.Join(c.cmd("STATUS Public/Team (UNSEEN)"), "\n"); !strings.Contains(lines, "UNSEEN 0") {
+		t.Errorf("unread after reading everything: %s", lines)
+	}
+}

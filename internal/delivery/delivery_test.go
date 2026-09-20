@@ -453,3 +453,82 @@ func TestRefusedFileIntoDoesNotDuplicate(t *testing.T) {
 		})
 	}
 }
+
+// TestExplicitMailboxAcrossNamespaces: a delivery that names its
+// mailbox (LMTP with a target, "deliver -m") reaches a public folder
+// like a Sieve script does, and never falls back: whoever names a
+// mailbox wants that one.
+func TestExplicitMailboxAcrossNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mailbox string
+		rights  string
+		wantErr bool
+		inPub   int
+	}{
+		{"a public folder with the post right", "Public/Support", "lrp", false, 1},
+		{"without the post right", "Public/Support", "lr", true, 0},
+		{"a folder that does not exist", "Public/Nothing", "lrp", true, 0},
+		{"a mailbox of another account", "Shared/other@example.org/Box", "lrp", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store := testService(t, "")
+			svc.PublicPrefix, svc.SharedPrefix = "Public/", "Shared/"
+
+			pub, err := store.User(model.PublicNamespace)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := pub.EnsureMailbox("Support", nil); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := pub.SetACL("Support", account, tc.rights); err != nil {
+				t.Fatal(err)
+			}
+
+			req := request(message)
+			req.Mailbox = tc.mailbox
+
+			res, err := svc.Deliver(context.Background(), req)
+			checkExplicitResult(t, res, err, tc.wantErr, tc.mailbox)
+
+			msgs, err := messagesIn(pub, "Support")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(msgs) != tc.inPub {
+				t.Errorf("%d messages in the public folder, want %d", len(msgs), tc.inPub)
+			}
+
+			u, _ := store.User(account)
+			if own, _ := messagesIn(u, "INBOX"); len(own) != 0 {
+				t.Errorf("%d messages in INBOX, want none: a named mailbox has no fallback", len(own))
+			}
+		})
+	}
+}
+
+// checkExplicitResult verifies the outcome of a delivery into a mailbox
+// the caller named.
+func checkExplicitResult(t *testing.T, res *Result, err error, wantErr bool, mailbox string) {
+	t.Helper()
+
+	if wantErr {
+		if !errors.Is(err, ErrNoMailbox) {
+			t.Fatalf("want ErrNoMailbox, got %v", err)
+		}
+
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("delivery: %v", err)
+	}
+
+	if len(res.Stored) != 1 || res.Stored[0].Mailbox != mailbox {
+		t.Fatalf("stored %+v, want %s", res.Stored, mailbox)
+	}
+}

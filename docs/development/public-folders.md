@@ -92,9 +92,10 @@ the new state.
    that account on that folder, and the message is stored in `~public`.
    No mail is delivered to a public folder directly, because a public
    folder has no address of its own. A delivery that names its mailbox
-   explicitly (`deliver -m`, LMTP with a target mailbox) does not know
-   the public prefix yet and answers "no such mailbox"; that is a gap,
-   not a decision.
+   explicitly (`deliver -m`, LMTP with a target mailbox) reaches a
+   public folder the same way and under the same right, but never falls
+   back: whoever names a mailbox wants that one, so a missing folder or
+   a missing right is an error.
 10. **Account deletion.** When an account is purged, its ACL entries in
     public folders go with it, and so do its private `\Seen` records
     (they live in its own namespace and are removed anyway).
