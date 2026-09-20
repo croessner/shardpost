@@ -66,6 +66,20 @@ type Service struct {
 	SieveConfig map[string]string
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
+	// PublicPrefix is the prefix a Sieve script uses to file into a
+	// public folder ("" switches that off). Filing there needs the post
+	// right on the folder; the message is stored in the public
+	// namespace, not in the account.
+	PublicPrefix string
+}
+
+// closeOpened releases the extra namespaces a delivery filed into.
+func (r *run) closeOpened() {
+	for _, u := range r.opened {
+		u.Close()
+	}
+
+	r.opened = nil
 }
 
 // Request is one message for one recipient.
@@ -114,6 +128,9 @@ type run struct {
 	req Request
 	log *slog.Logger
 	u   model.User
+	// opened are further namespaces this delivery filed into (public
+	// folders); they are closed with the delivery.
+	opened []model.User
 }
 
 // Deliver runs the recipient's Sieve script (unless disabled) and stores
@@ -134,6 +151,9 @@ func (s *Service) Deliver(ctx context.Context, req Request) (*Result, error) {
 	defer model.UseRequest(context.Background(), u)
 
 	r := &run{svc: s, req: req, log: req.Log, u: u}
+
+	defer r.closeOpened()
+
 	if r.log == nil {
 		r.log = s.Log
 	}

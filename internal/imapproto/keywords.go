@@ -124,6 +124,12 @@ const (
 // metric labels.
 const protoIMAP = "imap"
 
+// STORE operations.
+const (
+	kwAddFlags = "+FLAGS"
+	kwDelFlags = "-FLAGS"
+)
+
 // Lower-cased system flags, for case-insensitive comparisons.
 const (
 	flagSeenLower    = `\seen`

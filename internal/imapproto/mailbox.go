@@ -1037,6 +1037,18 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 		d.size += m.Size
 	}
 
+	if t.public {
+		// "Unread" is per account here, and so is the modseq of the
+		// account's own marks.
+		unseen, pmodseq, err := c.publicUnseen(info.ID, info.UIDValidity, msgs)
+		if err != nil {
+			return "", err
+		}
+
+		d.unseen = unseen
+		d.info.HighestModSeq = max(d.info.HighestModSeq, pmodseq)
+	}
+
 	var out []string
 
 	for _, it := range items {
@@ -1702,6 +1714,15 @@ func (c *conn) reload() error {
 	}
 
 	c.info, c.msgs = info, msgs
+
+	// A public folder keeps \Seen per account; the shared record says
+	// nothing about this session's account.
+	if err := c.loadPrivateSeen(); err != nil {
+		return err
+	}
+
+	c.privateOverlay(c.msgs)
+	c.info.HighestModSeq = c.effectiveModSeq(c.info.HighestModSeq)
 
 	return nil
 }

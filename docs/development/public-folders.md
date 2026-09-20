@@ -1,7 +1,7 @@
 # Public folders
 
-Status: design, 2026-09-20. Decided with the owner; implementation in two
-packages (A, B) with a review and a rollout each.
+Status: package A live with 0.25.0, package B implemented (2026-09-20).
+Decided with the owner; a review and a rollout for each package.
 
 Shared folders exist: a mailbox of an account, opened by someone else
 under `Other Users/<owner>/<name>` with RFC 4314 rights. What is missing

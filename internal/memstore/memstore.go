@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +95,7 @@ type User struct {
 	vacSeen map[string]time.Time
 	subMiss map[string]bool // subscriptions without a mailbox
 	pubSubs map[string]bool // subscribed public folders, by mailbox id
+	pubSeen map[string]map[uint32]model.PrivateMark
 	boxes   map[string]*box // by name
 	blobs   map[string][]byte
 	terms   map[string]map[string]bool // term -> guids
@@ -1091,6 +1093,71 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Owner+"/"+out[i].Mailbox < out[j].Owner+"/"+out[j].Mailbox })
 
 	return out, nil
+}
+
+// pseenKey identifies the private marks of one incarnation of a public
+// mailbox.
+func pseenKey(mailboxID string, uidValidity uint32) string {
+	return mailboxID + ":" + strconv.FormatUint(uint64(uidValidity), 10)
+}
+
+// PrivateSeen implements model.User.
+func (u *User) PrivateSeen(mailboxID string, uidValidity uint32) (map[uint32]model.PrivateMark, uint64, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	key := pseenKey(mailboxID, uidValidity)
+	out := map[uint32]model.PrivateMark{}
+	high := uint64(0)
+
+	for uid, m := range u.pubSeen[key] {
+		out[uid] = m
+		high = max(high, m.ModSeq)
+	}
+
+	return out, high, nil
+}
+
+// SetPrivateSeen implements model.User.
+func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, base uint64) (uint64, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	key := pseenKey(mailboxID, uidValidity)
+
+	if u.pubSeen == nil {
+		u.pubSeen = map[string]map[uint32]model.PrivateMark{}
+	}
+
+	if u.pubSeen[key] == nil {
+		u.pubSeen[key] = map[uint32]model.PrivateMark{}
+	}
+
+	high := base
+
+	for _, m := range u.pubSeen[key] {
+		high = max(high, m.ModSeq)
+	}
+
+	var changed []uint32
+
+	for _, uid := range uids {
+		if have, ok := u.pubSeen[key][uid]; !ok || have.Seen != seen {
+			changed = append(changed, uid)
+		}
+	}
+
+	if len(changed) == 0 {
+		return high, nil
+	}
+
+	high++
+
+	for _, uid := range changed {
+		u.pubSeen[key][uid] = model.PrivateMark{Seen: seen, ModSeq: high}
+	}
+
+	return high, nil
 }
 
 // PublicSubscriptions implements model.User.

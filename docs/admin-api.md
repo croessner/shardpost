@@ -486,6 +486,19 @@ shardpostctl mailbox list -all '~public'
   `server.public_quota_bytes` and `server.public_quota_msgs` (0 =
   unlimited). A message in a public folder does not count against any
   account, which is what Dovecot does as well.
+- **Reading state:** `\Seen` is private per account and kept in that
+  account's own namespace; every other flag and every keyword is shared.
+  "Answered" and "flagged" are statements about the folder, "read" is a
+  statement about a person. `STATUS ... (UNSEEN)` therefore differs
+  between accounts. This matches Dovecot, whose private index also holds
+  `\Seen` alone.
+- **Delivery** goes through Sieve: a normal account receives the message
+  and its script files it into the folder
+  (`fileinto "Public/Support/Inbox"`). That needs the `p` (post) right on
+  the folder for that account; without it the message stays in INBOX, as
+  a failed `fileinto` does. The message is stored in the public
+  namespace, so it counts against its quota, not the account's. A
+  delivery never creates a public folder.
 - **Backup:** `shardpostctl export -o public.tar '~public'` and `restore`
   work like they do for an account. `acl_reconcile` is refused for
   `~public`: there are no pointers to reconcile.

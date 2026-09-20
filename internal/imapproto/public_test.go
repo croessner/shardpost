@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"shardpost/internal/auth"
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
 )
@@ -150,5 +151,75 @@ func TestPublicGrantWritesNoPointer(t *testing.T) {
 
 	if strings.Contains(lines, "Other Users/~public") {
 		t.Errorf("public folder listed as a shared one:\n%s", lines)
+	}
+}
+
+// TestPublicPrivateSeen: two accounts read the same public folder and
+// each sees its own \Seen, while every other flag is shared. The
+// combined MODSEQ keeps CONDSTORE usable.
+func TestPublicPrivateSeen(t *testing.T) {
+	alice, store := newTestServer(t, func(o *Options, _ *memstore.Store) {
+		o.Auth = auth.Static{"alice": "pw", "bob": "pw"}
+	})
+	defer func() { _ = alice.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	bob, _ := newTestServerClient(t, alice)
+	defer func() { _ = bob.conn.Close() }()
+
+	alice.ok("LOGIN alice pw")
+	bob.ok("LOGIN bob pw")
+
+	for _, c := range []*client{alice, bob} {
+		if lines := strings.Join(c.cmd("SELECT Public/Team"), "\n"); !strings.Contains(lines, "1 EXISTS") {
+			t.Fatalf("select: %s", lines)
+		}
+	}
+
+	// Alice reads the message and flags it for the team.
+	alice.ok(`STORE 1 +FLAGS (\Seen \Flagged)`)
+
+	if lines := strings.Join(alice.cmd("FETCH 1 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) || !strings.Contains(lines, `\Flagged`) {
+		t.Fatalf("alice after store: %s", lines)
+	}
+
+	// Bob sees the shared flag but not Alice's reading state.
+	bob.ok("NOOP")
+
+	lines := strings.Join(bob.cmd("FETCH 1 (FLAGS)"), "\n")
+	if !strings.Contains(lines, `\Flagged`) {
+		t.Errorf("shared flag missing for bob: %s", lines)
+	}
+
+	if strings.Contains(lines, `\Seen`) {
+		t.Errorf("alice's reading state leaked to bob: %s", lines)
+	}
+
+	if lines := strings.Join(bob.cmd(`STATUS Public/Team (UNSEEN)`), "\n"); !strings.Contains(lines, "UNSEEN 1") {
+		t.Errorf("bob's unseen count: %s", lines)
+	}
+
+	if lines := strings.Join(alice.cmd(`STATUS Public/Team (UNSEEN)`), "\n"); !strings.Contains(lines, "UNSEEN 0") {
+		t.Errorf("alice's unseen count: %s", lines)
+	}
+
+	// Bob marks it read for himself; Alice keeps her own state.
+	bob.ok(`STORE 1 +FLAGS (\Seen)`)
+	alice.ok("NOOP")
+
+	if lines := strings.Join(alice.cmd("FETCH 1 (FLAGS)"), "\n"); !strings.Contains(lines, `\Seen`) {
+		t.Errorf("alice lost her reading state: %s", lines)
+	}
+
+	// Unread again for Alice only.
+	alice.ok(`STORE 1 -FLAGS (\Seen)`)
+
+	if lines := strings.Join(alice.cmd("FETCH 1 (FLAGS)"), "\n"); strings.Contains(lines, `\Seen`) {
+		t.Errorf("alice still seen: %s", lines)
+	}
+
+	if lines := strings.Join(bob.cmd(`STATUS Public/Team (UNSEEN)`), "\n"); !strings.Contains(lines, "UNSEEN 0") {
+		t.Errorf("bob's state changed with alice's: %s", lines)
 	}
 }

@@ -149,6 +149,8 @@ func (c *conn) pollExpunges(gone map[uint32]bool) {
 // pollMerge applies the re-read messages to the snapshot: flag changes of
 // known messages are announced, new ones appended in UID order.
 func (c *conn) pollMerge(fresh []model.Meta) {
+	c.privateOverlay(fresh)
+
 	freshByUID := map[uint32]model.Meta{}
 	for _, m := range fresh {
 		freshByUID[m.UID] = m
@@ -459,30 +461,47 @@ func (c *conn) announceExpunge(victims []model.Meta, seqs []int) {
 
 // --- STORE with UNCHANGEDSINCE ----------------------------------------------
 
-func (c *conn) cmdStore(tag string, uid bool) error {
+// storeArgs are the parsed arguments of a STORE command.
+type storeArgs struct {
+	set            *numSet
+	unchangedSince uint64
+	op             string
+	silent         bool
+	flags          []string
+}
+
+// readStoreArgs parses "<set> <operation> <flags>" with its modifier.
+func (c *conn) readStoreArgs() (a storeArgs, err error) {
 	setStr, err := c.r.atom()
 	if err != nil {
-		return err
+		return a, err
 	}
 
-	set, err := parseSet(setStr)
-	if err != nil {
-		return err
+	if a.set, err = parseSet(setStr); err != nil {
+		return a, err
 	}
 
 	unchangedSince, t, err := c.readStoreModifier()
 	if err != nil {
-		return err
+		return a, err
 	}
 
-	op := strings.ToUpper(t.str)
-	silent := strings.HasSuffix(op, ".SILENT")
-	op = strings.TrimSuffix(op, ".SILENT")
+	a.unchangedSince = unchangedSince
+	a.op = strings.ToUpper(t.str)
+	a.silent = strings.HasSuffix(a.op, ".SILENT")
+	a.op = strings.TrimSuffix(a.op, ".SILENT")
+	a.flags, err = c.readStoreFlags()
 
-	flags, err := c.readStoreFlags()
+	return a, err
+}
+
+func (c *conn) cmdStore(tag string, uid bool) error {
+	args, err := c.readStoreArgs()
 	if err != nil {
 		return err
 	}
+
+	set, unchangedSince, op, silent, flags := args.set, args.unchangedSince, args.op, args.silent, args.flags
 
 	if c.readOnly {
 		c.no(tag, "NOPERM", "Mailbox is read-only")
@@ -509,11 +528,19 @@ func (c *conn) cmdStore(tag string, uid bool) error {
 		uids[i] = m.UID
 	}
 
+	apply, err = c.splitPrivateSeen(op, flags, uids, apply)
+	if err != nil {
+		c.storeErr(tag, err)
+		return nil
+	}
+
 	res, err := c.mu.SetFlags(c.mbox.Name, uids, unchangedSince, apply)
 	if err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
+
+	c.privateOverlay(res.Updated)
 
 	c.storeResult(tag, res, seqs, metas, silent, unchangedSince != 0, uid)
 
@@ -659,9 +686,9 @@ func storeOperation(op, rights string, flags []string) func([]string) []string {
 	switch op {
 	case kwFlags:
 		return replaceFlags(rights, flags)
-	case "+FLAGS":
+	case kwAddFlags:
 		return addFlags(flags)
-	case "-FLAGS":
+	case kwDelFlags:
 		return delFlags(flags)
 	}
 

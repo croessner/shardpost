@@ -283,6 +283,21 @@ type User interface {
 	// reservation whose send failed).
 	VacationSeen(key string, ttl time.Duration) (already bool, err error)
 
+	// Private \Seen marks of public folders. A public folder belongs to
+	// nobody, so "read" is a statement about a person, not about the
+	// folder: every account keeps its own marks, while every other flag
+	// stays shared. The marks are keyed by mailbox id and UIDVALIDITY,
+	// so a folder that is recreated does not inherit them, and they
+	// carry their own modseq, which a session combines with the
+	// mailbox's own.
+	// PrivateSeen returns the marks by UID and the highest modseq among
+	// them; SetPrivateSeen records a change and returns the new highest.
+	// base is the mailbox's current HIGHESTMODSEQ: private marks live in
+	// the same number space as the shared ones, so a session can report
+	// one combined MODSEQ and CONDSTORE stays meaningful.
+	PrivateSeen(mailboxID string, uidValidity uint32) (marks map[uint32]PrivateMark, modseq uint64, err error)
+	SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, base uint64) (modseq uint64, err error)
+
 	// Public folder subscriptions. Public folders belong to no account
 	// (see PublicNamespace), so every account keeps its own set of
 	// subscriptions to them, by mailbox id: a folder that is renamed
@@ -298,6 +313,15 @@ type User interface {
 	DeleteScript(name string) error
 	SetActiveScript(name string) error
 	RenameScript(oldName, newName string) error
+}
+
+// PrivateMark is one account's \Seen mark on a message of a public
+// folder, with the modseq at which it last changed. A cleared mark is
+// kept with Seen false, so a client that asks for changes since a modseq
+// learns about it.
+type PrivateMark struct {
+	Seen   bool
+	ModSeq uint64
 }
 
 // HasFlag reports whether flags contains f (case-insensitive).

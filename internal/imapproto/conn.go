@@ -359,10 +359,14 @@ type conn struct {
 
 	// selected mailbox; mu is the user object owning it (c.user for the
 	// account's own mailboxes), mrights the account's rights on it
-	mu         model.User
-	mowner     string
-	mpublic    bool // the selected mailbox is a public folder
-	mprefix    string
+	mu      model.User
+	mowner  string
+	mpublic bool // the selected mailbox is a public folder
+	mprefix string
+	// pseen are the account's private \Seen marks of the selected public
+	// folder, pmodseq their counter (see private.go).
+	pseen      map[uint32]model.PrivateMark
+	pmodseq    uint64
 	mrights    string
 	mbox       *model.Mailbox
 	info       *model.MailboxInfo

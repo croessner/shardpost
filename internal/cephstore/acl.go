@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -527,4 +528,124 @@ func (u *User) SetPublicSubscribed(mailboxID string, subscribed bool) error {
 			return nil, nil
 		}
 	})
+}
+
+// Private \Seen marks of public folders live in the reading account's
+// own namespace, one object per public mailbox:
+//
+//	pubseen/<mailbox id>   omap: "s:<uidvalidity>:<uid>" -> "1"
+//	                             "modseq"                -> counter
+//
+// The UIDVALIDITY is part of the key, so a folder that is deleted and
+// recreated starts without marks. The counter is the modseq of the
+// private state; a session reports the higher of it and the mailbox's
+// own, so CONDSTORE and QRESYNC keep working.
+const (
+	oidPrivateSeen = "pubseen/"
+	pseenPrefix    = "s:"
+	pseenModSeq    = "modseq"
+)
+
+func pseenKey(uidValidity uint32, uid uint32) string {
+	return pseenPrefix + strconv.FormatUint(uint64(uidValidity), 10) + ":" + strconv.FormatUint(uint64(uid), 10)
+}
+
+// PrivateSeen implements model.User.
+func (u *User) PrivateSeen(mailboxID string, uidValidity uint32) (map[uint32]model.PrivateMark, uint64, error) {
+	prefix := pseenPrefix + strconv.FormatUint(uint64(uidValidity), 10) + ":"
+
+	vals, err := u.idx.GetAllOmapValues(oidPrivateSeen+mailboxID, "", prefix, omapPageSize)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return map[uint32]model.PrivateMark{}, 0, nil
+		}
+
+		return nil, 0, err
+	}
+
+	marks := make(map[uint32]model.PrivateMark, len(vals))
+	high := uint64(0)
+
+	for k, v := range vals {
+		rest, ok := strings.CutPrefix(k, prefix)
+		if !ok {
+			continue
+		}
+
+		uid, err := strconv.ParseUint(rest, 10, 32)
+		if err != nil {
+			continue
+		}
+
+		m := decodeMark(v)
+		marks[uint32(uid)] = m
+		high = max(high, m.ModSeq)
+	}
+
+	return marks, high, nil
+}
+
+// encodeMark and decodeMark store a mark as "<modseq>:<0|1>".
+func encodeMark(m model.PrivateMark) []byte {
+	seen := "0"
+	if m.Seen {
+		seen = "1"
+	}
+
+	return []byte(strconv.FormatUint(m.ModSeq, 10) + ":" + seen)
+}
+
+func decodeMark(v []byte) model.PrivateMark {
+	modseq, seen, _ := strings.Cut(string(v), ":")
+	n, _ := strconv.ParseUint(modseq, 10, 64)
+
+	return model.PrivateMark{Seen: seen == "1", ModSeq: n}
+}
+
+// SetPrivateSeen implements model.User.
+func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint32, seen bool, base uint64) (uint64, error) {
+	if len(uids) == 0 {
+		_, modseq, err := u.PrivateSeen(mailboxID, uidValidity)
+		return modseq, err
+	}
+
+	keys := make([]string, 0, len(uids))
+	for _, uid := range uids {
+		keys = append(keys, pseenKey(uidValidity, uid))
+	}
+
+	var high uint64
+
+	err := casOmap(u, u.idx, oidPrivateSeen+mailboxID, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+		high = base
+
+		for _, v := range cur {
+			high = max(high, decodeMark(v).ModSeq)
+		}
+
+		set := map[string][]byte{}
+
+		for _, uid := range uids {
+			key := pseenKey(uidValidity, uid)
+			if have, ok := cur[key]; ok && decodeMark(have).Seen == seen {
+				continue
+			}
+
+			set[key] = nil // filled in below, once the modseq is known
+		}
+
+		if len(set) == 0 {
+			return nil, nil // nothing changed, keep the modseq
+		}
+
+		high++
+
+		for key := range set {
+			set[key] = encodeMark(model.PrivateMark{Seen: seen, ModSeq: high})
+		}
+
+		return set, nil
+	})
+
+	return high, err
 }

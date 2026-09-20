@@ -207,3 +207,77 @@ func TestReadMessage(t *testing.T) {
 
 	release()
 }
+
+// TestFileIntoPublicFolder: a Sieve script files into a public folder
+// when the account may post there; without the right the message lands
+// in INBOX instead, and nothing is created in the public namespace.
+func TestFileIntoPublicFolder(t *testing.T) {
+	script := `require "fileinto"; fileinto "Public/Support";`
+
+	for _, tc := range []struct {
+		name    string
+		rights  string
+		mailbox string
+		inPub   int
+	}{
+		{"with the post right", "lrp", "Public/Support", 1},
+		{"without it", "lr", "INBOX", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store := testService(t, script)
+			svc.PublicPrefix = "Public/"
+
+			pub, err := store.User(model.PublicNamespace)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := pub.EnsureMailbox("Support", nil); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := pub.SetACL("Support", account, tc.rights); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := svc.Deliver(context.Background(), request(message))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(res.Stored) != 1 || res.Stored[0].Mailbox != tc.mailbox {
+				t.Fatalf("stored %+v, want mailbox %s", res.Stored, tc.mailbox)
+			}
+
+			msgs, err := messagesIn(pub, "Support")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(msgs) != tc.inPub {
+				t.Errorf("%d messages in the public folder, want %d", len(msgs), tc.inPub)
+			}
+
+			u, _ := store.User(account)
+
+			own, err := messagesIn(u, "INBOX")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if want := 1 - tc.inPub; len(own) != want {
+				t.Errorf("%d messages in INBOX, want %d", len(own), want)
+			}
+		})
+	}
+}
+
+// messagesIn lists the messages of a mailbox by name.
+func messagesIn(u model.User, name string) ([]model.Meta, error) {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return u.ListMessages(mb.ID)
+}

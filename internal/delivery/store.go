@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"fmt"
+	"strings"
 
 	"shardpost/internal/model"
 	"shardpost/internal/sieve"
@@ -39,13 +40,13 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 		return nil, err
 	}
 	for _, f := range d.FileInto {
-		meta, err := r.storeOne(intent, raw, f)
+		meta, where, err := r.storeOne(intent, raw, f)
 		if err != nil {
 			return fail(err)
 		}
 
-		done = append(done, delivered{f.Mailbox, *meta})
-		r.log.Info("delivered", "user", user, "from", r.req.From, "mailbox", f.Mailbox, "uid", meta.UID, "guid", meta.GUID, "size", meta.Size)
+		done = append(done, delivered{where, *meta})
+		r.log.Info("delivered", "user", user, "from", r.req.From, "mailbox", where, "uid", meta.UID, "guid", meta.GUID, "size", meta.Size)
 	}
 
 	if err := u.EndDelivery(intent); err != nil {
@@ -62,16 +63,29 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 }
 
 // storeOne records the target in the intent and stores the message (or
-// the target's own edited copy) there.
-func (r *run) storeOne(intent string, raw []byte, f sieve.FileInto) (*model.Meta, error) {
-	u := r.u
-	if err := u.EnsureMailbox(f.Mailbox, nil); err != nil {
-		return nil, err
+// the target's own edited copy) there. It returns where the message
+// actually landed, which differs from the requested mailbox when a
+// public folder was refused.
+func (r *run) storeOne(intent string, raw []byte, f sieve.FileInto) (*model.Meta, string, error) {
+	u, name, pub, err := r.target(f.Mailbox)
+	if err != nil {
+		return nil, "", err
+	}
+
+	where := f.Mailbox
+	f.Mailbox = name
+
+	if !pub {
+		where = name
+
+		if err := u.EnsureMailbox(f.Mailbox, nil); err != nil {
+			return nil, "", err
+		}
 	}
 
 	guid := model.NewGUID()
-	if err := u.RecordDelivery(intent, f.Mailbox, guid); err != nil {
-		return nil, err
+	if err := r.u.RecordDelivery(intent, f.Mailbox, guid); err != nil {
+		return nil, "", err
 	}
 
 	body := f.Raw
@@ -79,7 +93,49 @@ func (r *run) storeOne(intent string, raw []byte, f sieve.FileInto) (*model.Meta
 		body = raw
 	}
 
-	return u.DeliverGUID(f.Mailbox, guid, body, f.Flags, r.now())
+	meta, err := u.DeliverGUID(f.Mailbox, guid, body, f.Flags, r.now())
+
+	return meta, where, err
+}
+
+// target resolves a fileinto destination. A name under the public
+// prefix goes to the public namespace, which needs the post right (p)
+// on that folder and an existing folder: a delivery does not create
+// public folders. Without the right the message falls back to INBOX,
+// the way a failed fileinto does.
+func (r *run) target(name string) (u model.User, mailbox string, public bool, err error) {
+	prefix := r.svc.PublicPrefix
+	if prefix == "" || !strings.HasPrefix(name, prefix) {
+		return r.u, name, false, nil
+	}
+
+	folder := strings.TrimPrefix(name, prefix)
+
+	pub, err := r.svc.Store.User(model.PublicNamespace)
+	if err != nil {
+		return nil, "", false, err
+	}
+
+	acl, err := pub.GetACL(folder)
+	if err != nil || !model.HasRight(model.EffectiveRights(acl, r.req.Account), 'p') {
+		pub.Close()
+		r.log.Warn("sieve fileinto into a public folder refused", "mailbox", name, "reason", reasonOf(err))
+
+		return r.u, inboxName, false, nil
+	}
+
+	r.opened = append(r.opened, pub)
+
+	return pub, folder, true, nil
+}
+
+// reasonOf names why a public fileinto was refused.
+func reasonOf(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+
+	return "no post right"
 }
 
 // delivered is one completed fileinto of a multi-target delivery.
