@@ -1,83 +1,84 @@
-# ShardPost: Namensentscheidung und Migration
+# ShardPost: naming decision and migration
 
-Status: **ShardPost gewählt und Refactoring/Rollout freigegeben**, 16.09.2026.
-Erstes Release unter dem neuen Namen: **0.12.0**. Seit **0.13.0** (18.09.2026)
-tragen auch alle Betriebs- und externen Bezeichner den Namen.
+Status: **ShardPost chosen, refactoring/rollout approved**, 2026-09-16.
+First release under the new name: **0.12.0**. Since **0.13.0** (2026-09-18)
+the operational and external identifiers carry the name as well.
 
-ShardPost bezeichnet die verteilte Mailbox- und Verarbeitungsschicht über
-mehrere Protokolle. Der frühere Name `imapcephpoc` ist nur noch ein historischer
-bzw. ausdrücklich kompatibler Bezeichner. Die Umbenennung ist keine Migration
-der Nachrichten oder ihrer Speicherformate.
+ShardPost denotes the distributed mailbox and processing layer across
+several protocols. The former name `imapcephpoc` is now only a historical
+or explicitly compatible identifier. The rename is not a migration
+of the messages or their storage formats.
 
-## Umgestellte Produktbezeichner
+## Product identifiers that changed
 
-| Bereich | Neuer Name |
+| Area | New name |
 |---|---|
-| Produkt / Protokoll-Identität | ShardPost |
-| Go-Modul und eigene Imports | `shardpost` / `shardpost/internal/...` |
-| Serverquelle / Binary | `cmd/shardpost` / `/usr/local/bin/shardpost` |
-| Lastgenerator | `cmd/shardpost-load` / `/usr/local/bin/shardpost-load` |
-| Serverimage | `docker.io/chrroessner/shardpost:0.12.0` |
-| Toolsimage | `docker.io/chrroessner/shardpost-tools:0.12.0` |
-| Konfigurationsauswahl | `SHARDPOST_CONFIG` oder `--config` |
-| Konfigurationsmount im Betriebsprofil | `/etc/shardpost/server.yaml` |
-| Externe Programme | `/usr/local/lib/shardpost/programs` |
-| OTel-Standard für neue Installationen | `service.name=shardpost`, Instrumentierungsscope `shardpost` |
+| Product / protocol identity | ShardPost |
+| Go module and internal imports | `shardpost` / `shardpost/internal/...` |
+| Server source / binary | `cmd/shardpost` / `/usr/local/bin/shardpost` |
+| Load generator | `cmd/shardpost-load` / `/usr/local/bin/shardpost-load` |
+| Server image | `docker.io/chrroessner/shardpost:0.12.0` |
+| Tools image | `docker.io/chrroessner/shardpost-tools:0.12.0` |
+| Configuration selection | `SHARDPOST_CONFIG` or `--config` |
+| Configuration mount in the operational profile | `/etc/shardpost/server.yaml` |
+| External programs | `/usr/local/lib/shardpost/programs` |
+| OTel default for new installations | `service.name=shardpost`, instrumentation scope `shardpost` |
 
-README, Entwicklerhandbuch, Architekturdiagramme, Buildanweisungen,
-Testskripte und Release-Manifeste verwenden die neuen Namen. Historische
-Nachweise behalten damalige Images, Digests und URLs. Das lokale
-Arbeitsverzeichnis heißt `shardpost`.
+The README, the developer guide, the architecture diagrams, the build
+instructions, the test scripts and the release manifests use the new names.
+Historical evidence keeps the images, digests and URLs of its time. The local
+working directory is named `shardpost`.
 
-## Übergangskompatibilität
+## Transitional compatibility
 
-Die Images 0.12.x enthielten Symlinks `imapcephpoc -> shardpost`,
-`imapload -> shardpost-load` und
-`/usr/local/lib/imapcephpoc -> /usr/local/lib/shardpost`. Sie sind seit dem
-18.09.2026 entfernt: alle Manifeste und die aktive ConfigMap verwenden
-`/usr/local/bin/shardpost` und `/usr/local/lib/shardpost/programs`. Ein
-Rollback auf eine ConfigMap aus der Zeit vor 0.12.0 muss deshalb zusammen mit
-dem damaligen Image erfolgen (wie im Abschnitt „Rollout und Rückweg“ ohnehin
-vorgesehen). Der Arbeitsordner heißt seit demselben Tag ebenfalls
-`shardpost`.
+The 0.12.x images contained the symlinks `imapcephpoc -> shardpost`,
+`imapload -> shardpost-load` and
+`/usr/local/lib/imapcephpoc -> /usr/local/lib/shardpost`. They were removed on
+2026-09-18: all manifests and the active ConfigMap use
+`/usr/local/bin/shardpost` and `/usr/local/lib/shardpost/programs`. A
+rollback to a ConfigMap from before 0.12.0 therefore has to happen together
+with the image of that time (as the section "Rollout and rollback path"
+provides for anyway). Since that same day, the working directory is likewise
+named `shardpost`.
 
-Konfigurationspfad-Priorität: explizites `--config`, danach ein gesetztes
-`SHARDPOST_CONFIG`, sonst `IMAP_CONFIG`. Ein bewusst leer gesetztes
-`SHARDPOST_CONFIG` bedeutet Defaults ohne Dateipfad und verhindert den
-Rückfall auf die alte Variable. Protokollbezogene Einstellungen wie
-`IMAP_ADDR`, `POP3_ADDR` und `LMTP_ADDR` behalten ihre sachlich passenden Namen.
+Configuration path precedence: an explicit `--config`, then a set
+`SHARDPOST_CONFIG`, otherwise `IMAP_CONFIG`. A deliberately empty
+`SHARDPOST_CONFIG` means defaults without a file path and prevents the
+fallback to the old variable. Protocol-specific settings such as
+`IMAP_ADDR`, `POP3_ADDR` and `LMTP_ADDR` keep their factually fitting names.
 
-Bis 0.12.x blieben die Kubernetes-Namen (`imap`, `imap-server`, `imap-scrub`,
-Service `imap`), RADOS-Pools, Secrets, Zertifikate und Director-/Nauthilus-
-Verträge erhalten. Mit 0.13.0 (18.09.2026) wurden sie mitgezogen: Namespace
-`shardpost`, Deployment `shardpost-server`, Service `shardpost`, Pools
-`shardpost-index`/`shardpost-data` (Kopie mit `hack/pool-copy.py`,
-objektweise verifiziert), cephx-Client `shardpost`, Director-Shard
-`shardpost`, OIDC-Client `shardpost-service`, LDAP-Health-Konto
-`mail_health_shardpost` und die SOPS-Datei `shardpost.sops.yaml` der
-Testkonten. Unverändert bleiben nur die Logins der Testkonten und die
-Kontonamespaces in RADOS. Ablauf und Nachweise stehen im Bericht
-[2026-09-18-shardpost-0.13.0](../reports/2026-09-18-shardpost-0.13.0.md).
+Up to 0.12.x the Kubernetes names (`imap`, `imap-server`, `imap-scrub`,
+service `imap`), the RADOS pools, secrets, certificates and the
+director/Nauthilus contracts stayed unchanged. With 0.13.0 (2026-09-18) they
+were carried along: namespace `shardpost`, deployment `shardpost-server`,
+service `shardpost`, pools `shardpost-index`/`shardpost-data` (copied with
+`hack/pool-copy.py`, verified object by object), cephx client `shardpost`,
+director shard `shardpost`, OIDC client `shardpost-service`, LDAP health
+account `mail_health_shardpost` and the SOPS file `shardpost.sops.yaml` of
+the test accounts. Only the logins of the test accounts and the account
+namespaces in RADOS remain unchanged. The procedure and the evidence are in
+report [2026-09-18-shardpost-0.13.0](../reports/2026-09-18-shardpost-0.13.0.md).
 
-Die Metrikfamilien `imapceph_*` und `imap_*` bleiben als bestehende
-Monitoring-API stabil. `telemetry.service_name` ist seit 0.13.0 auch im
-Betriebsprofil `shardpost`; `OTEL_SERVICE_NAME` kann ihn überschreiben. Der Produktname in den Betriebslogs lautet `shardpost`.
+The metric families `imapceph_*` and `imap_*` remain stable as an existing
+monitoring API. Since 0.13.0, `telemetry.service_name` is `shardpost` in the
+operational profile as well; `OTEL_SERVICE_NAME` can override it. The product name in the operational logs is `shardpost`.
 
-## Rollout und Rückweg
+## Rollout and rollback path
 
-Neue Images werden mit Digests gepinnt. Für das Serverdeployment werden
-Image, Konfigurationsmount und Env-Auswahl gemeinsam umgestellt. Die neue
-ConfigMap unterscheidet sich fachlich nur durch Helperpfad und expliziten
-Telemetrie-Kompatibilitätsnamen. Der Scrub-CronJob und das Toolsdeployment
-wechseln auf ihre jeweiligen neuen Images.
+New images are pinned by digest. For the server deployment, the
+image, the configuration mount and the environment selection are switched
+together. In substance, the new ConfigMap differs only in the helper path and
+the explicit telemetry compatibility name. The scrub CronJob and the tools
+deployment switch to their respective new images.
 
-Die bisherige ConfigMap und die vorherigen Manifeste bleiben für den Rollback
-verfügbar. Ein Rückweg stellt gemeinsam altes Image, alten Mount und alte
-Env-Auswahl wieder her; allein das alte Binary vor einer neuen Konfiguration
-reicht wegen des neuen Feldes `telemetry.service_name` nicht aus. Poolnamen,
-Objektformate und Lernjob-Actions wurden nicht verändert.
+The previous ConfigMap and the earlier manifests remain available for a
+rollback. A rollback restores the old image, the old mount and the old
+environment selection together; the old binary alone in front of a new
+configuration is not enough, because of the new field
+`telemetry.service_name`. Pool names, object formats and learning job actions
+were not changed.
 
-Prüfung: vollständiger Linux-Build/Race-Suite, alte/neue CLI-Konfiguration,
-Protokollidentität, unveränderte Monitoring-Verträge und reale Anmeldung
-beider Testkonten über IMAP und ManageSieve. Der konkrete produktive
-Nachweis steht im [Releasebericht](../reports/2026-09-16-shardpost.md).
+Verification: a full Linux build/race suite, old and new CLI configuration,
+protocol identity, unchanged monitoring contracts and a real login of
+both test accounts over IMAP and ManageSieve. The concrete production
+evidence is in the [release report](../reports/2026-09-16-shardpost.md).

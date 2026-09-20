@@ -1,164 +1,164 @@
-> Historischer Stand vor der Dokumentationsüberarbeitung vom 16.09.2026.
-> Keine aktuelle Betriebsanleitung; Aussagen und Messwerte können überholt sein.
-> Einstieg: [aktuelle Dokumentation](../README.md).
+> Historical state before the documentation rework of 2026-09-16.
+> Not a current operations manual; statements and measurements may be outdated.
+> Starting point: [current documentation](../README.md).
 
-# imapcephpoc – IMAP/LMTP direkt auf RADOS
+# imapcephpoc – IMAP/LMTP directly on RADOS
 
-Proof of Concept: ein Mailserver (LMTP-Einlieferung, IMAP4rev1/rev2), der
-Nachrichten **direkt als RADOS-Objekte in Ceph** ablegt. Kein CephFS, kein RGW,
-kein Dateisystem, keine Datenbank. Ziel ist herauszufinden, wie ein eigener
-Server aussehen müsste, der Ceph optimal nutzt und horizontal auf ein
-Millionenpublikum skaliert. Die Architektur ist in [ARCHITECTURE.md](../../ARCHITECTURE.md)
-beschrieben, die Ausbaustufen bis zum Produktivsystem in
+Proof of concept: a mail server (LMTP delivery, IMAP4rev1/rev2) that stores
+messages **directly as RADOS objects in Ceph**. No CephFS, no RGW,
+no file system, no database. The goal is to find out what a dedicated
+server would have to look like that uses Ceph optimally and scales horizontally to
+an audience of millions. The architecture is described in [ARCHITECTURE.md](../../ARCHITECTURE.md),
+the stages up to a production system in
 [ROADMAP.md](../../ROADMAP.md).
 
-Testbenutzer: `test` / `test` (Umgebungsvariable `USERS`, statisches Backend).
-Produktiv: `AUTH_BACKEND=nauthilus` mit `NAUTHILUS_GRPC_ADDR` und den
-Backchannel-Credentials, siehe [cmd/imapcephpoc/auth.go](../../cmd/shardpost/auth.go).
+Test user: `test` / `test` (environment variable `USERS`, static backend).
+In production: `AUTH_BACKEND=nauthilus` with `NAUTHILUS_GRPC_ADDR` and the
+backchannel credentials, see [cmd/imapcephpoc/auth.go](../../cmd/shardpost/auth.go).
 
-## Aufbau
+## Layout
 
 ```
-cmd/imapcephpoc        main: Konfiguration, Listener, Health-Endpoints
-internal/cephstore     RADOS-Store (librados via go-ceph): Index in omap, Blobs in 4-MiB-Chunks
-                       mit Referenzzählung, Volltextindex in omap-Shards
-internal/fts           Tokenizer, Snowball-Stemming, Trigramme (reines Go, kein Ceph)
-internal/imapproto     eigene IMAP-Protokollschicht (Parser, Dispatcher, Encoder) mit
+cmd/imapcephpoc        main: configuration, listeners, health endpoints
+internal/cephstore     RADOS store (librados via go-ceph): index in omap, blobs in 4 MiB chunks
+                       with reference counting, full-text index in omap shards
+internal/fts           tokenizer, Snowball stemming, trigrams (pure Go, no Ceph)
+internal/imapproto     dedicated IMAP protocol layer (parser, dispatcher, encoder) with
                        CONDSTORE, QRESYNC, QUOTA, SORT, THREAD, OBJECTID, PREVIEW;
-                       cgo-frei, lokal gegen In-Memory-Backend getestet
-internal/pop3proto     POP3-Front-End auf derselben Schnittstelle
-internal/sieve         Sieve-Ausführung (go-sieve) und ManageSieve-Server
-internal/auth          Authenticator: statisch, Nauthilus (gRPC/HTTP, OIDC client_credentials), Master-User, SASL-Parser
-internal/postings      Posting-Listen-Kodierung (Delta-Varint, cgo-frei)
-internal/telemetry     OpenTelemetry-Setup (OTLP)
-cmd/imapload           Lastgenerator (LMTP + IMAP-Sessions, Perzentile)
-internal/model         gemeinsame Datentypen und die Backend-Schnittstelle (cgo-frei)
-internal/memstore      In-Memory-Backend für die Protokolltests
-internal/metrics       Prometheus-Metriken
-internal/mailmeta      Envelope/Preview-Extraktion für den Index-Cache
-internal/lmtpd         LMTP auf Basis von go-smtp
-internal/rookcreds     holt cephx-Key + Mon-Adressen aus Rook (Kubernetes-API, RBAC)
-deploy/                Kustomize: Namespace imap, Rook-CRs (Pools, CephClient), Deployment, Test-Pod
-Dockerfile             Build gegen librados 20.2.4 (Tentacle), Runtime CentOS Stream 9 + librados2
-Dockerfile.tools       Debian + swaks + curl für Tests im Cluster
-hack/test.sh           End-to-End-Test (swaks -> LMTP, curl -> IMAP)
-hack/test-extended.sh  Chunking (10 MiB), SEARCH über den Index, COPY/MOVE/EXPUNGE
-hack/test-search.sh    Stemming, Substrings, 40 parallele Zustellungen
-hack/test-full.sh      Hierarchie, RENAME, Subscriptions, EXAMINE, Keywords,
-                       SEARCHRES, ENVELOPE-Cache, IDLE via Watch/Notify, TLS
+                       cgo-free, tested locally against an in-memory backend
+internal/pop3proto     POP3 front end on the same interface
+internal/sieve         Sieve execution (go-sieve) and ManageSieve server
+internal/auth          authenticator: static, Nauthilus (gRPC/HTTP, OIDC client_credentials), master user, SASL parser
+internal/postings      posting list encoding (delta varint, cgo-free)
+internal/telemetry     OpenTelemetry setup (OTLP)
+cmd/imapload           load generator (LMTP + IMAP sessions, percentiles)
+internal/model         shared data types and the backend interface (cgo-free)
+internal/memstore      in-memory backend for the protocol tests
+internal/metrics       Prometheus metrics
+internal/mailmeta      envelope/preview extraction for the index cache
+internal/lmtpd         LMTP based on go-smtp
+internal/rookcreds     fetches the cephx key + mon addresses from Rook (Kubernetes API, RBAC)
+deploy/                Kustomize: namespace imap, Rook CRs (pools, CephClient), deployment, test pod
+Dockerfile             build against librados 20.2.4 (Tentacle), runtime CentOS Stream 9 + librados2
+Dockerfile.tools       Debian + swaks + curl for tests in the cluster
+hack/test.sh           end-to-end test (swaks -> LMTP, curl -> IMAP)
+hack/test-extended.sh  chunking (10 MiB), SEARCH over the index, COPY/MOVE/EXPUNGE
+hack/test-search.sh    stemming, substrings, 40 parallel deliveries
+hack/test-full.sh      hierarchy, RENAME, subscriptions, EXAMINE, keywords,
+                       SEARCHRES, ENVELOPE cache, IDLE via watch/notify, TLS
 hack/test-proto.sh     CONDSTORE, QRESYNC, QUOTA, SORT, THREAD, OBJECTID, MULTIAPPEND
-hack/test-ops.sh       Sharding, inkrementeller Poll, POP3, COMPRESS, Charset, Scrubber, Metriken
-hack/test-stage5.sh    ManageSieve, Sieve-Zustellung, XOAUTH2/OAUTHBEARER, Master-User, Drain, Key-Rotation
-hack/loadtest-job.yaml Lasttest als Job im Cluster
+hack/test-ops.sh       sharding, incremental poll, POP3, COMPRESS, charset, scrubber, metrics
+hack/test-stage5.sh    ManageSieve, Sieve delivery, XOAUTH2/OAUTHBEARER, master user, drain, key rotation
+hack/loadtest-job.yaml load test as a job in the cluster
 ```
 
-## Build und Deploy
+## Build and deploy
 
 ```bash
-make build build-tools   # Images bauen (linux/amd64, cgo gegen librados)
-make push                # nach docker.io/chrroessner/… pushen
+make build build-tools   # build images (linux/amd64, cgo against librados)
+make push                # push to docker.io/chrroessner/…
 make deploy              # kubectl --context croessner apply -k deploy/overlays/croessner
 make status
-make test                # swaks/curl im mailtest-Pod
-go test ./internal/...   # Protokollschicht und Tokenizer lokal, ohne Ceph
+make test                # swaks/curl in the mailtest pod
+go test ./internal/...   # protocol layer and tokenizer locally, without Ceph
 ```
 
-Beim Deploy entstehen in `rook-ceph` zwei Pools (`imap-index` repliziert,
-`imap-data` erasure coded 2+1), ein `CephClient` namens `imap` und eine Role,
-die dem ServiceAccount `imap/imap-server` genau das Secret
-`rook-ceph-client-imap` und die ConfigMap `rook-ceph-mon-endpoints` lesbar
-macht. Der Server holt den Key beim Start selbst; nichts wird manuell kopiert.
+The deploy creates two pools in `rook-ceph` (`imap-index` replicated,
+`imap-data` erasure coded 2+1), a `CephClient` named `imap` and a Role
+that makes exactly the secret `rook-ceph-client-imap` and the ConfigMap
+`rook-ceph-mon-endpoints` readable for the ServiceAccount
+`imap/imap-server`. The server fetches the key itself at startup; nothing is copied manually.
 
-`make undeploy` entfernt alles wieder, inklusive der Pools (Rook löscht die
-Pools, wenn die CRs verschwinden).
+`make undeploy` removes everything again, including the pools (Rook deletes the
+pools when the CRs disappear).
 
-## Nauthilus und nauthilus-director
+## Nauthilus and nauthilus-director
 
-Das Overlay `deploy/overlays/croessner-nauthilus` schaltet die Anmeldung
-auf Nauthilus um (Komponente `deploy/components/nauthilus`): gRPC gegen
-`nauthilus-service.auth.svc.cluster.local:8444` (doppelgaenger-Sidecar,
-TLS-Name `login.authserv.me`, System-CAs), Backchannel-Auth per OIDC
-`client_credentials` (`imappoc-service`, Token-URL
-`https://login.authserv.me/oidc/token`, Scopes `nauthilus:authenticate`
-und `nauthilus:lookup_identity`), Master-User `nauthilus-director` für die
-Backend-Logins des Directors, `INSECURE_AUTH=false`. Die Bearer-Replays des
-Directors (XOAUTH2/OAUTHBEARER) gehen mit dem SASL-Methodennamen im
-Passwortfeld an Nauthilus.
+The overlay `deploy/overlays/croessner-nauthilus` switches the login
+to Nauthilus (component `deploy/components/nauthilus`): gRPC against
+`nauthilus-service.auth.svc.cluster.local:8444` (doppelgaenger sidecar,
+TLS name `login.authserv.me`, system CAs), backchannel auth via OIDC
+`client_credentials` (`imappoc-service`, token URL
+`https://login.authserv.me/oidc/token`, scopes `nauthilus:authenticate`
+and `nauthilus:lookup_identity`), master user `nauthilus-director` for the
+director's backend logins, `INSECURE_AUTH=false`. The director's bearer replays
+(XOAUTH2/OAUTHBEARER) go to Nauthilus with the SASL method name in the
+password field.
 
-Die beiden Secrets, die das Overlay erwartet, entstehen in den anderen
-Repositories und werden nie von Hand angelegt:
+The two secrets that the overlay expects are created in the other
+repositories and are never created by hand:
 
-| Secret (Namespace imap) | Keys | Quelle |
+| Secret (namespace imap) | Keys | Source |
 |---|---|---|
 | `imap-nauthilus-oidc` | client-id, client-secret, token-url | nauthilus-tests/kubernetes: `make handover-imappoc` |
 | `imap-director-backend` | master-password | kubernetes/director: `make sync-imappoc-secrets` |
 
-Der Server-Cert der POC-Listener wird von einer namespace-lokalen CA
-(`imap-poc-ca`, cert-manager) ausgestellt; ihr Zertifikat liegt im
-Director-Repo als `certificates/imap-poc-ca.crt` und wird dort als
-`tls.ca_file` der Backends `imappoc-imap/-lmtp/-sieve` (Shard `imappoc`)
-verwendet. Nauthilus pinnt `rbdpoc1@exampleserver.de` und
-`rbdpoc2@exampleserver.de` per `director.lua` dauerhaft auf diesen Shard.
+The server certificate of the POC listeners is issued by a namespace-local CA
+(`imap-poc-ca`, cert-manager); its certificate lives in the
+director repo as `certificates/imap-poc-ca.crt` and is used there as the
+`tls.ca_file` of the backends `imappoc-imap/-lmtp/-sieve` (shard `imappoc`).
+Nauthilus pins `rbdpoc1@exampleserver.de` and
+`rbdpoc2@exampleserver.de` permanently to this shard via `director.lua`.
 
-Stand 2026-09-15: die Umstellung ist erfolgt, das Overlay
-`croessner-nauthilus` ist der Live-Stand. `hack/acceptance-nauthilus.sh`
-prüft Login, LMTP-Zustellung und die Negativfälle mit den LDAP-Konten
-(Passwörter nur aus der SOPS-Datei des rns-server-Repos, im Speicher).
+As of 2026-09-15: the migration has happened, the overlay
+`croessner-nauthilus` is the live state. `hack/acceptance-nauthilus.sh`
+checks login, LMTP delivery and the negative cases with the LDAP accounts
+(passwords only from the SOPS file of the rns-server repo, in memory).
 
-Reihenfolge der Umstellung (jeder Schritt ein produktiver Rollout, den der
-jeweilige Owner freigibt):
+Order of the migration (each step a production rollout approved by the
+respective owner):
 
-1. nauthilus-tests/kubernetes: `make apply-prod`, dann `make handover-imappoc`
-   (Details: `docs/imappoc-handover.md` dort).
-2. LDAP: die beiden Konten und `mail_health_imappoc` unter `ou=health`.
-3. kubernetes/director: `make -C director sync-imappoc-secrets`, dann
-   `make -C director deploy` (Details: `director/imappoc.md` dort).
-4. Hier: `kubectl --context croessner apply -k deploy/overlays/croessner-nauthilus`.
-   Die Test-Skripte unter `hack/` setzen die statischen Konten voraus und
-   gelten dann nicht mehr; der Abnahmetest läuft über den Director
-   (`mail.roessner-net.de`, Skript in `director/imappoc.md`).
+1. nauthilus-tests/kubernetes: `make apply-prod`, then `make handover-imappoc`
+   (details: `docs/imappoc-handover.md` there).
+2. LDAP: the two accounts and `mail_health_imappoc` under `ou=health`.
+3. kubernetes/director: `make -C director sync-imappoc-secrets`, then
+   `make -C director deploy` (details: `director/imappoc.md` there).
+4. Here: `kubectl --context croessner apply -k deploy/overlays/croessner-nauthilus`.
+   The test scripts under `hack/` assume the static accounts and
+   no longer apply after that; the acceptance test runs through the director
+   (`mail.roessner-net.de`, script in `director/imappoc.md`).
 
-Speicher: librados hält allein rund 150 MiB RSS, dazu kommt das
-Nachrichtenbudget (`MEMORY_BUDGET_BYTES`, 256 MiB). Das Deployment setzt
-deshalb 1 GiB Limit und `GOMEMLIMIT=700MiB`; unter dem Lasttest (20
-Benutzer, 25 Zustellungen/s) liegt der Pod bei etwa 230 MiB.
+Memory: librados alone holds about 150 MiB RSS, plus the
+message budget (`MEMORY_BUDGET_BYTES`, 256 MiB). The deployment therefore sets
+a 1 GiB limit and `GOMEMLIMIT=700MiB`; under the load test (20
+users, 25 deliveries/s) the pod sits at about 230 MiB.
 
-## Manuell testen
+## Testing manually
 
 ```bash
 kubectl --context croessner -n imap exec -it deploy/mailtest -- bash
 swaks --protocol LMTP --server imap:24 --from a@example.org --to test@example.org
 curl --url 'imap://imap/INBOX?ALL' --user test:test          # SEARCH ALL -> UIDs
-curl --url 'imap://imap/INBOX;UID=1' --user test:test        # Nachricht abrufen
+curl --url 'imap://imap/INBOX;UID=1' --user test:test        # fetch the message
 curl --url 'imap://imap/' --user test:test -X 'STATUS INBOX (MESSAGES UNSEEN)'
-curl --url 'imap://imap/INBOX' --user test:test -X 'SEARCH SUBJECT invoice FROM alice'   # aus dem RADOS-Index
+curl --url 'imap://imap/INBOX' --user test:test -X 'SEARCH SUBJECT invoice FROM alice'   # from the RADOS index
 curl --url 'imap://imap/INBOX' --user test:test -X 'UID MOVE 2 Archive'
 curl --url 'imap://imap/INBOX' --user test:test -X 'UID STORE 3 +FLAGS (\Deleted)'
 curl --url 'imap://imap/INBOX' --user test:test -X 'EXPUNGE'
 ```
 
-Umgebungsvariablen: `CEPH_CHUNK_SIZE` (Bytes, Standard 4 MiB), `FTS_SHARDS`
-(Shard-Objekte pro Benutzer, Standard 16), `USERS`, `QUOTA_BYTES`/`QUOTA_MSGS`
-(0 = unbegrenzt), `TLS_CERT`/`TLS_KEY` (aktiviert STARTTLS und IMAPS auf
-`IMAPS_ADDR`), `INSECURE_AUTH` (LOGIN ohne TLS erlauben, POC-Standard true).
+Environment variables: `CEPH_CHUNK_SIZE` (bytes, default 4 MiB), `FTS_SHARDS`
+(shard objects per user, default 16), `USERS`, `QUOTA_BYTES`/`QUOTA_MSGS`
+(0 = unlimited), `TLS_CERT`/`TLS_KEY` (enables STARTTLS and IMAPS on
+`IMAPS_ADDR`), `INSECURE_AUTH` (allow LOGIN without TLS, POC default true).
 
-Weitere: `MBOX_SHARD_SIZE` (UIDs pro Index-Shard, gilt für neue Postfächer,
-Standard 100000; das POC-Overlay setzt 20), `MAX_CONNS_PER_IP`,
+Further ones: `MBOX_SHARD_SIZE` (UIDs per index shard, applies to new mailboxes,
+default 100000; the POC overlay sets 20), `MAX_CONNS_PER_IP`,
 `MAX_CONNS_PER_USER`, `POP3_MARK_SEEN`, `SCRUB_GRACE_SECONDS`,
 `SCRUB_DRY_RUN`, `SCRUB_USERS`.
 
-Im Cluster stellt cert-manager ein selbstsigniertes Zertifikat aus; Service-Ports
-sind 143 (IMAP + STARTTLS), 993 (IMAPS), 110 (POP3 + STLS), 995 (POP3S),
-4190 (ManageSieve + STARTTLS) und 24 (LMTP + STARTTLS). Metriken liegen auf Port 8080 unter `/metrics`.
-Die [Observability-Dokumentation](../../docs/observability.md) beschreibt OTLP-Aktivierung,
-Messwertbedeutung und die Abnahme von Prometheus, Tempo und Operator-Dashboard. Der
-Scrubber läuft nächtlich als CronJob `imap-scrub` und manuell mit
+In the cluster, cert-manager issues a self-signed certificate; the service ports
+are 143 (IMAP + STARTTLS), 993 (IMAPS), 110 (POP3 + STLS), 995 (POP3S),
+4190 (ManageSieve + STARTTLS) and 24 (LMTP + STARTTLS). Metrics are on port 8080 under `/metrics`.
+The [observability documentation](../../docs/observability.md) describes how to enable OTLP,
+what the measurements mean, and the acceptance of Prometheus, Tempo and the operator dashboard. The
+scrubber runs nightly as the CronJob `imap-scrub` and manually with
 
 ```bash
 kubectl --context croessner -n imap create job scrub-now --from=cronjob/imap-scrub
 ```
 
-Direkt in Ceph nachsehen (Namespace = Benutzer):
+Looking directly into Ceph (namespace = user):
 
 ```bash
 kubectl --context croessner -n rook-ceph exec deploy/rook-ceph-tools -- rados -p imap-index -N test ls
@@ -166,99 +166,99 @@ kubectl --context croessner -n rook-ceph exec deploy/rook-ceph-tools -- rados -p
 kubectl --context croessner -n rook-ceph exec deploy/rook-ceph-tools -- rados -p imap-data  -N test ls
 ```
 
-## Quota, Löschen, LMTP-Details
+## Quota, deletion, LMTP details
 
-* **Quota je Konto:** Standard aus `QUOTA_BYTES`/`QUOTA_MSGS`; ein Wert
-  pro Konto kommt aus dem Attribut, das Nauthilus mit dem Login liefert
-  (`QUOTA_ATTRIBUTE`, Standard `rnsMSQuota`, Bytes mit optionalem
-  K/M/G/T-Suffix, 0 = unbegrenzt) und wird bei jedem Login und jeder
-  Zustellung übernommen. `GETQUOTAROOT INBOX` zeigt den wirksamen Wert;
-  SETQUOTA durch Benutzer ist gesperrt (`QUOTA_SELF_SERVICE`).
-* **Löschen:** EXPUNGE entfernt den Index-Eintrag und gibt die
-  Blob-Referenz frei; mit der letzten Referenz werden die Chunks sofort
-  gelöscht (kein Papierkorb im Store, keine Aufbewahrung). Waisen aus
-  Abstürzen räumt der Scrubber nach zwei Läufen weg.
-* **LMTP:** SMTPUTF8 und 8BITMIME werden angekündigt, jede Zustellung
-  bekommt einen eigenen `Received:`-Header (Absender-Adresse, dieser Host
-  aus `LMTP_HOSTNAME`, Empfänger, Zeit).
+* **Quota per account:** the default comes from `QUOTA_BYTES`/`QUOTA_MSGS`; a per-account
+  value comes from the attribute that Nauthilus supplies with the login
+  (`QUOTA_ATTRIBUTE`, default `rnsMSQuota`, bytes with an optional
+  K/M/G/T suffix, 0 = unlimited) and is adopted on every login and every
+  delivery. `GETQUOTAROOT INBOX` shows the effective value;
+  SETQUOTA by users is blocked (`QUOTA_SELF_SERVICE`).
+* **Deletion:** EXPUNGE removes the index entry and releases the
+  blob reference; with the last reference, the chunks are deleted
+  immediately (no trash can in the store, no retention). Orphans from
+  crashes are cleaned up by the scrubber after two runs.
+* **LMTP:** SMTPUTF8 and 8BITMIME are advertised, every delivery
+  gets its own `Received:` header (sender address, this host
+  from `LMTP_HOSTNAME`, recipient, time).
 
-## Zugriffsrechte, Annotationen, NOTIFY, CATENATE, Sieve-Versand
+## Access rights, annotations, NOTIFY, CATENATE, Sieve sending
 
-* **ACL und Shared Folders (RFC 4314):** SETACL/DELETEACL/GETACL/LISTRIGHTS/
-  MYRIGHTS. Ein Postfach eines anderen Benutzers erscheint als
-  `Other Users/<konto>/<postfach>` (NAMESPACE meldet den Präfix). Rechte
-  liegen im Registry-Eintrag des Besitzers, Berechtigte bekommen einen
-  Verweis in ihrem Namensraum; COPY/MOVE zwischen Benutzern kopiert die
-  Daten (Blobs sind namensraumgebunden). Flags sind geteilt, nicht pro
-  Benutzer.
-* **METADATA (RFC 5464):** GETMETADATA/SETMETADATA mit DEPTH und MAXSIZE.
-  Mailbox-Einträge liegen beim Besitzer, `/private/*` je zugreifendem
-  Konto; `/shared/*` auf Serverebene ist global und für Konten nur lesbar.
+* **ACL and shared folders (RFC 4314):** SETACL/DELETEACL/GETACL/LISTRIGHTS/
+  MYRIGHTS. Another user's mailbox appears as
+  `Other Users/<account>/<mailbox>` (NAMESPACE reports the prefix). Rights
+  live in the owner's registry entry, entitled users get a
+  reference in their own namespace; COPY/MOVE between users copies the
+  data (blobs are namespace-bound). Flags are shared, not per
+  user.
+* **METADATA (RFC 5464):** GETMETADATA/SETMETADATA with DEPTH and MAXSIZE.
+  Mailbox entries live at the owner, `/private/*` per accessing
+  account; `/shared/*` at server level is global and read-only for accounts.
 * **NOTIFY (RFC 5465):** SELECTED, SELECTED-DELAYED, INBOXES, PERSONAL,
-  SUBSCRIBED, SUBTREE, MAILBOXES mit MessageNew (inkl. Fetch-Attributen),
-  MessageExpunge, FlagChange; höchstens 64 beobachtete Postfächer,
-  Ereignisse auch während IDLE. MailboxName, SubscriptionChange und
-  AnnotationChange werden mit BADEVENT abgelehnt.
-* **CATENATE (RFC 4469):** APPEND aus TEXT-Teilen und IMAP-URLs
-  (`imap:///Postfach;UIDVALIDITY=n/;UID=n[/;SECTION=x]`), Rechte werden
-  geprüft, Fehler als BADURL.
-* **Sieve redirect und vacation:** brauchen `SMTP_RELAY_ADDR` (optional
+  SUBSCRIBED, SUBTREE, MAILBOXES with MessageNew (including fetch attributes),
+  MessageExpunge, FlagChange; at most 64 watched mailboxes,
+  events also during IDLE. MailboxName, SubscriptionChange and
+  AnnotationChange are rejected with BADEVENT.
+* **CATENATE (RFC 4469):** APPEND from TEXT parts and IMAP URLs
+  (`imap:///Postfach;UIDVALIDITY=n/;UID=n[/;SECTION=x]`), rights are
+  checked, errors as BADURL.
+* **Sieve redirect and vacation:** require `SMTP_RELAY_ADDR` (optionally
   `SMTP_RELAY_USER/PASSWORD`, `SMTP_RELAY_TLS`, `SMTP_RELAY_HELO`). Redirect
-  behält den Envelope-Absender, meidet Schleifen (kein Redirect an sich
-  selbst oder von automatischer Mail, höchstens vier Ziele) und ist bei
-  Relay-Fehler ein temporärer LMTP-Fehler. Vacation folgt RFC 5230 (keine
-  Antwort an Listen, automatische Mail, den Nullabsender oder wenn das
-  Konto nicht adressiert ist), einmal pro Absender und Zeitraum (Merker
-  auf dem Sieve-Objekt), Antwort mit Nullabsender und Auto-Submitted.
-  go-sieve liegt dafür als Fork mit Vacation-Erweiterung unter
-  `third_party/go-sieve` (replace-Direktive).
+  keeps the envelope sender, avoids loops (no redirect to
+  itself or from automatic mail, at most four targets) and is a temporary
+  LMTP error on a relay failure. Vacation follows RFC 5230 (no
+  reply to lists, automatic mail, the null sender, or when the
+  account is not addressed), once per sender and period (marker
+  on the Sieve object), the reply with a null sender and Auto-Submitted.
+  For this, go-sieve is vendored as a fork with a vacation extension under
+  `third_party/go-sieve` (replace directive).
 
-## Weitere Erweiterungen und Konformität
+## Further extensions and conformance
 
-* IMAP: `WITHIN` (SEARCH YOUNGER/OLDER), `REPLACE` (RFC 8508, auch mit
+* IMAP: `WITHIN` (SEARCH YOUNGER/OLDER), `REPLACE` (RFC 8508, also with
   CATENATE), `LIST-MYRIGHTS` (RFC 8440), `UNAUTHENTICATE` (RFC 8437).
-* Sieve (im Fork `third_party/go-sieve`): `date`/`currentdate`
-  (RFC 5260), `duplicate` (RFC 7352, Merker auf dem Sieve-Objekt),
+* Sieve (in the fork `third_party/go-sieve`): `date`/`currentdate`
+  (RFC 5260), `duplicate` (RFC 7352, marker on the Sieve object),
   `editheader` (RFC 5293, Received/Return-Path/Auto-Submitted/Delivered-To
-  geschützt; die gespeicherte Nachricht ist die editierte), `mailbox`
+  protected; the stored message is the edited one), `mailbox`
   (`fileinto :create`, `mailboxexists`), `ihave`, `include` (`:personal`
-  aus dem eigenen Skriptspeicher, `:global` aus `SIEVE_GLOBAL_DIR`,
+  from the user's own script storage, `:global` from `SIEVE_GLOBAL_DIR`,
   `global`/`return`), `index`, `regex`, `spamtest`/`spamtestplus`/
-  `virustest` (Header und Skala über `SIEVE_SETTINGS`, Standard
-  `X-Spam-Score` mit Maximum 15), `mboxmetadata`/`servermetadata` (liest
-  die IMAP-METADATA-Einträge), `special-use` (`fileinto :specialuse`,
-  `specialuse_exists`), `enotify` mit `mailto:` (Versand über den Relay,
-  keine Benachrichtigung über automatische Mails), `foreverypart`/`break`,
-  `mime` (`:type`, `:subtype`, `:contenttype`, `:param`, `:anychild`) und
-  `extracttext`, konfigurierbares `imapsieve` und `vnd.dovecot.execute`/`pipe`/`filter` über eine Programm-Allowlist (siehe unten). Nicht umgesetzt: `extlists`, `replace`/
-  `enclose`, Dovecot-eigene `vnd.dovecot.*`. Einstellungen mit den
-  Pigeonhole-Schlüsseln (`sieve_editheader_header/...`, `sieve_notify_*`,
+  `virustest` (header and scale via `SIEVE_SETTINGS`, default
+  `X-Spam-Score` with a maximum of 15), `mboxmetadata`/`servermetadata` (reads
+  the IMAP METADATA entries), `special-use` (`fileinto :specialuse`,
+  `specialuse_exists`), `enotify` with `mailto:` (sent through the relay,
+  no notification about automatic mail), `foreverypart`/`break`,
+  `mime` (`:type`, `:subtype`, `:contenttype`, `:param`, `:anychild`) and
+  `extracttext`, configurable `imapsieve` and `vnd.dovecot.execute`/`pipe`/`filter` through a program allowlist (see below). Not implemented: `extlists`, `replace`/
+  `enclose`, Dovecot's own `vnd.dovecot.*`. Settings with the
+  Pigeonhole keys (`sieve_editheader_header/...`, `sieve_notify_*`,
   `sieve_redirect_envelope_from`, `sieve_vacation_default_subject*`) in
-  `SIEVE_SETTINGS` als `key=value;key=value`.
-* Konformität: `hack/conformance.md` beschreibt die Läufe mit Dovecots
-  imaptest (Job `hack/imaptest-job.yaml`, Image `chrroessner/imaptest-poc`)
-  und der Pigeonhole-Testsuite (`SIEVE_CONFORMANCE=1 go test ./tests` im
-  Fork, Checkout unter `third_party/go-sieve/pigeonhole`). Stand 0.8.7:
-  imaptest 71 von 72 Gruppen (offen nur die Source-Route im ENVELOPE),
-  Pigeonhole-Stand 0.11.2: 139 Dateien bestanden, 0 fehlgeschlagen,
-  9 begründet ausgenommen. CPU-/MIME-Grenzen sind geprüft; optionale
-  Erweiterungen und Diagnose-/Crash-Fixtures sind in `hack/conformance.md`
-  ausdrücklich abgegrenzt.
-* Header-Adressen (`internal/mailmeta/address.go`): eigener RFC-5322-Parser
-  für ENVELOPE, SORT und SEARCH, mit Gruppen, Kommentaren und der
-  veralteten Syntax; Sender und Reply-To fallen auf From zurück.
-* `\Recent`: die erste Sitzung, die eine Nachricht sieht (SELECT oder
-  NOOP/IDLE), nimmt sie; STATUS RECENT zählt danach 0.
-* APPEND mit `Content-Transfer-Encoding: binary` (literal8) wird beim
-  Speichern nach base64 umkodiert (RFC 3516 erlaubt das), damit auch
-  Clients ohne BINARY die Nachricht lesen können.
+  `SIEVE_SETTINGS` as `key=value;key=value`.
+* Conformance: `hack/conformance.md` describes the runs with Dovecot's
+  imaptest (job `hack/imaptest-job.yaml`, image `chrroessner/imaptest-poc`)
+  and with the Pigeonhole test suite (`SIEVE_CONFORMANCE=1 go test ./tests` in
+  the fork, checkout under `third_party/go-sieve/pigeonhole`). As of 0.8.7:
+  imaptest 71 of 72 groups (only the source route in the ENVELOPE is open),
+  Pigeonhole as of 0.11.2: 139 files passed, 0 failed,
+  9 excluded with a justification. CPU/MIME limits are verified; optional
+  extensions and diagnostic/crash fixtures are explicitly delimited in
+  `hack/conformance.md`.
+* Header addresses (`internal/mailmeta/address.go`): a dedicated RFC 5322 parser
+  for ENVELOPE, SORT and SEARCH, with groups, comments and the
+  obsolete syntax; Sender and Reply-To fall back to From.
+* `\Recent`: the first session that sees a message (SELECT or
+  NOOP/IDLE) takes it; STATUS RECENT counts 0 afterwards.
+* APPEND with `Content-Transfer-Encoding: binary` (literal8) is re-encoded
+  to base64 when stored (RFC 3516 allows that), so that
+  clients without BINARY can read the message as well.
 
-## Was der POC bewusst nicht kann
+## What the POC deliberately cannot do
 
-TLS, SASL-Mechanismen außer LOGIN, RENAME, Quota, Sieve, Phrasensuche und
-Substrings über Tokengrenzen hinweg, Garbage Collector für verwaiste Blobs. Nichts davon ist eine Architekturfrage,
-siehe ARCHITECTURE.md.
+TLS, SASL mechanisms other than LOGIN, RENAME, quota, Sieve, phrase search and
+substrings across token boundaries, a garbage collector for orphaned blobs. None of that is an architectural question,
+see ARCHITECTURE.md.
 
-## Konfigurationsdatei und IMAPSieve
+## Configuration file and IMAPSieve
 
-Der Server unterstützt YAML über `--config` oder `IMAP_CONFIG`, validiert mit Viper/validator. Bisherige Env-Variablen bleiben Overrides. Details: [Serverkonfiguration](../../docs/configuration.md) und [IMAPSieve/Rspamd](../../docs/imapsieve.md).
+The server supports YAML via `--config` or `IMAP_CONFIG`, validated with Viper/validator. Existing env variables remain overrides. Details: [server configuration](../../docs/configuration.md) and [IMAPSieve/Rspamd](../../docs/imapsieve.md).

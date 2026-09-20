@@ -1,0 +1,201 @@
+.TH SHARDPOSTCTL-MIGRATE 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-migrate \- copy an account from another IMAP server, keeping its identities
+.SH SYNOPSIS
+.B shardpostctl migrate
+.BI \-source-addr " host:port"
+.BI \-password-file " file"
+.RB [ \-master-user
+.IR name ]
+.RB [ \-sieve-addr
+.IR host:port ]
+.RI [ options ]
+.I account
+.SH DESCRIPTION
+Reads an account from another IMAP server and writes it into ShardPost
+through the import API, keeping what clients care about: UIDVALIDITY,
+the UIDs with their gaps, UIDNEXT, flags and keywords, INTERNALDATE and
+SAVEDATE, and the MODSEQ of every message. Clients that were synchronized
+before the move therefore only fetch what is new, instead of downloading
+the whole account again. IMAP APPEND cannot do this, which is why
+imapsync and similar tools always produce new UIDs.
+.PP
+Every run is repeatable. The migrator reads the source, compares it with
+the target's inventory and sends only the differences, so you can run it
+during normal operation until the last delta is small. At the end it
+checks each mailbox against the source it read and reports it as
+.IR verified .
+.PP
+Mailboxes that the source no longer has are removed from the target
+.RB ( \-no-prune
+keeps them; INBOX always stays). Sieve scripts are copied when
+.B \-sieve-addr
+is given.
+.PP
+While a run is in progress, the account is locked: IMAP, POP3 and LMTP
+refuse it. Role:
+.BR import .
+.SH OPTIONS
+.SS Source
+.TP
+.BI \-source-addr " host:port"
+Source IMAP server. Required.
+.TP
+.BI \-source-tls " implicit|starttls|none"
+How to secure the connection. Default:
+.IR implicit .
+.TP
+.BI \-source-server-name " name"
+Certificate name to expect. Default: the host of
+.BR \-source-addr .
+.TP
+.BI \-source-ca " file"
+CA for the source and for ManageSieve. Default: the system roots.
+.TP
+.B \-source-proxy
+Send a PROXY v1 header to the source, for load balancers that require it.
+.TP
+.BI \-source-timeout " duration"
+Timeout per source command. Default:
+.IR 2m .
+.SS Login
+.TP
+.BI \-source-user " name"
+Login name at the source. Default: the account.
+.TP
+.BI \-master-user " name"
+Master user of the source. Without it, the migrator logs in as the user.
+.TP
+.BI \-user-format " format"
+How the master login is composed. Default:
+.IR {user}*{master} .
+.TP
+.BI \-password-file " file"
+File holding the password of the (master) user. Required.
+.SS Sieve
+.TP
+.BI \-sieve-addr " host:port"
+ManageSieve of the source. Without it, Sieve is not copied.
+.TP
+.BI \-sieve-tls " implicit|starttls|none"
+Default:
+.IR starttls .
+.TP
+.BI \-sieve-server-name " name"
+Certificate name to expect for ManageSieve.
+.TP
+.B \-sieve-proxy
+Send a PROXY v1 header to ManageSieve.
+.SS Run
+.TP
+.BI \-session " id"
+Resume this import session instead of opening a new one.
+.TP
+.B \-no-prune
+Keep target mailboxes the source no longer has.
+.TP
+.B \-no-acl
+Do not copy mailbox ACLs.
+.TP
+.B \-reimport
+Replace target mailboxes whose UIDVALIDITY no longer matches the source.
+Their messages are imported again.
+.TP
+.BI \-pop3-uidl-format " format"
+The source's
+.I pop3_uidl_format
+(Dovecot syntax), so POP3 clients keep their UIDLs. Without it, POP3
+reports the message GUID.
+.TP
+.BI \-batch-messages " n"
+Messages per import request. Default:
+.IR 200 .
+.TP
+.B \-\-json
+Print the report as JSON.
+.PP
+Most flags also read a default from the environment
+.RI ( SHARDPOST_MIGRATE_SOURCE_ADDR ", " SHARDPOST_MIGRATE_MASTER_USER ", "
+.IR SHARDPOST_MIGRATE_PASSWORD_FILE ", " SHARDPOST_MIGRATE_SIEVE_ADDR ", "
+and so on), which is how the import sidecar is configured.
+.SH EXAMPLES
+A first copy while the account still lives on the old server. Repeat it
+until a run reports few changes:
+.PP
+.nf
+.RS
+shardpostctl -timeout 10m migrate \\
+    -source-addr mail.example.org:993 \\
+    -master-user admin -password-file /run/secrets/master \\
+    -sieve-addr mail.example.org:4190 \\
+    user@example.org
+.RE
+.fi
+.PP
+In the cluster the sidecar already carries the settings:
+.PP
+.nf
+.RS
+kubectl -n shardpost exec deploy/shardpost-server -c import -- \\
+    shardpostctl -timeout 10m migrate user@example.org
+.RE
+.fi
+.PP
+A long run, detached, with its log on the work volume:
+.PP
+.nf
+.RS
+kubectl -n shardpost exec deploy/shardpost-server -c import -- sh -c \\
+    'nohup shardpostctl -timeout 10m migrate --json user@example.org \\
+     >/work/user.json 2>/work/user.log &'
+.RE
+.fi
+.PP
+Keep POP3 UIDLs stable for a Dovecot 2.3 source:
+.PP
+.nf
+.RS
+shardpostctl migrate -pop3-uidl-format '%08Xu%08Xv' \\
+    -source-addr mail.example.org:993 \\
+    -master-user admin -password-file /run/secrets/master \\
+    user@example.org
+.RE
+.fi
+.PP
+The cutover, once the copy is close: hold the account, kick its sessions,
+run the last delta, then move it.
+.PP
+.nf
+.RS
+nauthilus-directorctl users hold set user@example.org --duration 15m \\
+    --reason mailbox-move
+nauthilus-directorctl users kick user@example.org --reason mailbox-move
+shardpostctl migrate user@example.org            # all mailboxes verified
+nauthilus-directorctl users move user@example.org \\
+    --to-shard shardpost --strategy kick_existing
+nauthilus-directorctl users hold clear user@example.org --reason done
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Everything was copied and verified.
+.TP
+.B 1
+Parts failed. Run the command again; it continues where it left off.
+.TP
+.B 64
+Usage error, for example a missing
+.B \-source-addr
+or
+.BR \-password-file .
+.TP
+.B 69
+The run was aborted.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-export (1),
+.BR shardpostctl-account (1)
+.PP
+The import semantics and the migration procedure are described in
+.IR docs/admin-api.md .

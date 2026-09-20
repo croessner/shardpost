@@ -1,57 +1,57 @@
-**Noch keine Freigabe für produktive Mailbestände.** Die Shard-Korrekturen beseitigen wesentliche Rennen, lassen aber Fehler bei ModSeq-Reihenfolge, Snapshot-Abgleich und Budgetreservierung bestehen.
+**Still no release for production mail stores.** The shard fixes eliminate major races, but leave bugs in ModSeq ordering, snapshot reconciliation and budget reservation in place.
 
-„Behoben“ bedeutet statisch geprüft. Tests für IMAP, POP3, Auth, FTS und Sieve bestehen. Der Gesamtlauf scheitert am fehlenden `rados/librados.h`; Ceph-, Crash- und Race-Tests bleiben unbestätigt. `vendor/` wurde nicht reviewed.
+"Fixed" means verified statically. The tests for IMAP, POP3, auth, FTS and Sieve pass. The full run fails on the missing `rados/librados.h`; Ceph, crash and race tests remain unconfirmed. `vendor/` was not reviewed.
 
-| Befund | Status |
+| Finding | Status |
 |---|---|
-| R1 #1 – Fremde IOContext-Version | **Behoben:** exklusiver Versionslesekontext, `internal/cephstore/verpool.go:72`. |
-| R1 #2 – Flags/CONDSTORE außerhalb CAS | **Teilweise:** aktueller Shardzustand wird erneut gelesen; neue ModSeq-/Retry-Fehler unten. `internal/cephstore/user.go:1191`. |
-| R1 #3 – Veröffentlichung vor Shard-Commit | **Offen:** Pending ist weiterhin zeitbegrenzt; PendingFloor schließt das Snapshot-Rennen nicht. `internal/cephstore/user.go:764`, `internal/imapproto/mailbox.go:650`. |
-| R1 #4 – Doppelte EXPUNGE-Referenzfreigabe | **Behoben für konkurrierende EXPUNGEs:** `modifyEntries` setzt die entfernten Schlüssel bei jedem Versuch zurück; nur erfolgreich entfernte Einträge werden freigegeben. `internal/cephstore/user.go:957`, `:1355`. |
-| R1 #5 – COPY belebt gelöschten Blob wieder | **Behoben:** positive Referenzänderung gegen null abgelehnt. `internal/cephstore/blob.go:138`. |
-| R1 #6 – Scrub nach unvollständigem Scan | **Teilweise:** Registry und Zwischenshards geprüft; fehlender **letzter** Shard bleibt ungeschützt. Löschungen erfolgen außerdem vor dem Vollständigkeitsentscheid. `internal/cephstore/scrub.go:212`, `:238`. |
-| R1 #7 – Konkurrierende Scrub-Reparaturen | **Offen:** Scan und Reparatur bleiben inkonsistent; Orphan-Löschung ohne CAS. `internal/cephstore/scrub.go:277`, `:330`. |
-| R1 #8/#9 – MOVE-Recovery/Intent | **Teilweise:** Zielfehler und regulärer Intent-Abschluss verbessert; GUID-Gleichheit ersetzt weiterhin konkrete Zielidentität, Recovery bleibt unzureichend idempotent. `internal/cephstore/scrub.go:172`, `internal/cephstore/user.go:1380`. |
-| R1 #10 – RENAME-Kollisionen | **Behoben:** Live-Auflistung innerhalb des Registry-CAS-Versuchs. `internal/cephstore/user.go:399`. |
-| R1 #11 – Log/QRESYNC-Lücken | **Teilweise:** monotones Trimming; ohne known-UIDs weiterhin nur ALERT. Pending-EXPUNGEs stehen bereits im Vanished-Log. `internal/imapproto/mailbox.go:586`, `internal/cephstore/user.go:638`. |
-| R1 #12 – Eigene Quota abschalten | **Behoben im Standardbetrieb:** explizite Freischaltung und Werteprüfung. `internal/imapproto/mailbox.go:739`. |
-| R1 #13 – COPY-Quota | **Teilweise:** Batchsumme berücksichtigt, aber keine atomare Reservierung zwischen parallelen Zustellungen. `internal/cephstore/user.go:1399`. |
-| R1 #14 – Parser-Ressourcen | **Teilweise:** Literalbytes summiert, Argumentzahl weiterhin unbegrenzt. Beliebig viele `{0+}`-Fortsetzungen verbrauchen Token-/Callback-Speicher bei null Budgetbytes. `internal/imapproto/wire.go:183`, `internal/imapproto/conn.go:294`. |
-| R1 #15/#16 – STORE-Endlosschleife/Metrik-Kardinalität | **Behoben:** `internal/imapproto/selected.go:351`, `internal/imapproto/conn.go:202`, `internal/pop3proto/pop3.go:202`. |
-| R1 #17 – Zurückgestellte EXPUNGEs | **Behoben im beschriebenen Reload-Pfad:** alter Wasserstand bleibt bei zurückgestellten Entfernungen erhalten. `internal/imapproto/selected.go:175`. |
-| R1 #18 – MULTIAPPEND-Atomarität | **Teilweise:** Rollback bleibt bestmöglich, ohne Crash-Recovery. `internal/imapproto/mailbox.go:438`. |
-| R1 #19 – Falscher FETCH-Erfolg | **Behoben:** Makroexpansion und Fehlerweitergabe. `internal/imapproto/fetch.go:144`, `:374`. |
-| R1 #20 – WriteDeadline | **Teilweise:** vor Kommandobearbeitung erneuert; automatische Writer-Ausgaben bleiben ohne eigene Erneuerung. `internal/imapproto/conn.go:367`, `internal/imapproto/wire.go:331`. |
-| R1 #21 – POP3-Leaseverlust | **Teilweise:** erkannter Verlust sperrt Transaktionskommandos; QUIT überspringt dann jedoch Löschungen und antwortet trotzdem positiv. `internal/pop3proto/pop3.go:326`, `:612`. |
-| R1 #22/#24 – Session-Ressourcen/ManageSieve-Escapes | **Behoben:** `internal/imapproto/conn.go:744`, `internal/sieve/managesieve.go:330`, `:237`. |
-| R1 #23 – Sieve-Aktivierung/Rename | **Teilweise:** Rename-Inhalt und Aktivstatus bleiben aus ungeschützten Vorab-Reads; Aktivierung separat. `internal/cephstore/scripts.go:129`, `:153`. |
-| R1 #25/#27 – LMTP-TLS-Vorgabe/HTTP-Authfehler | **Behoben:** `internal/lmtpd/lmtpd.go:46`, `internal/auth/nauthilus.go:269`. |
-| R1 #26 – Sieve-Teilzustellung | **Teilweise:** Rollback ohne dauerhaften Zustellintent. `internal/lmtpd/lmtpd.go:269`. |
-| R1 #28 – Rotation/Config-Race | **Die beschriebenen Pfade behoben:** bestätigter Key und gesperrter ListUsers-Config-Read. `internal/rookcreds/rookcreds.go:147`, `internal/cephstore/scrub.go:61`. |
-| R1 #29 – SEARCH-Korrektheit | **Teilweise:** Textkriterien werden weiterhin entfernt; Kandidatengrenze jetzt 4096 statt 256, weiterhin ohne Vollständigkeitsnachweis. `internal/imapproto/search.go:522`, `internal/cephstore/fts.go:371`. |
-| R1 #30 – Speicherbudget | **Teilweise:** Pufferlebensdauer besser erfasst; Kopien, FETCH-Ausgabepuffer, POP3-Zeilenarrays und Snapshots fehlen weiterhin. `internal/imapproto/fetch.go:415`, `:429`, `internal/pop3proto/pop3.go:573`. |
-| R1 #31 – FTS-/Scrub-Skalierung | **Weiter offen:** vollständige Postinglisten und Namespace-Enumeration. `internal/cephstore/fts.go:467`, `internal/cephstore/scrub.go:75`. |
-| R2 neu #1 – Blob-Löschung nach Commitfehler | **Behoben:** erfolgreicher Shardwrite bleibt trotz Commitfehler erfolgreich. `internal/cephstore/user.go:1074`. |
-| R2 neu #2 – Pending serialisiert keine Shardänderungen | **Teilweise:** Flag-RMW und Löschentscheidung jetzt versionsgebunden; ModSeq-Reihenfolge bleibt falsch, siehe unten. |
-| R2 neu #3 – Poll hängt an fehlender UID | **Teilweise:** konkrete Blockade beseitigt; langsame Writer werden nach 30 Sekunden weiterhin übergangen. `internal/imapproto/selected.go:73`, `internal/cephstore/user.go:764`. |
-| R2 neu #4 – MULTIAPPEND-Speicher-DoS | **Teilweise:** Byte-Summe begrenzt; Null-Literale und Budgetstillstand bleiben. `internal/imapproto/conn.go:285`. |
-| R2 neu #5 – Automatische Buffer-Flushes | **Teilweise**, siehe R1 #20. |
-| R2 neu #6 – Scriptnamenprüfung nach Mutation | **Behoben:** Prüfung vor Reads und Mutation. `internal/cephstore/scripts.go:126`. |
-| R2 neu #7 – Header-Unfolding/verschluckte Lesefehler | **Beschriebene Fälle behoben:** Unfolding und Fehlerweitergabe an SEARCH. `internal/imapproto/search.go:499`, `:674`. |
+| R1 #1 – Foreign IOContext version | **Fixed:** exclusive version read context, `internal/cephstore/verpool.go:72`. |
+| R1 #2 – Flags/CONDSTORE outside CAS | **Partially:** the current shard state is re-read; new ModSeq/retry bugs below. `internal/cephstore/user.go:1191`. |
+| R1 #3 – Publication before shard commit | **Open:** pending is still time-bounded; PendingFloor does not close the snapshot race. `internal/cephstore/user.go:764`, `internal/imapproto/mailbox.go:650`. |
+| R1 #4 – Duplicate EXPUNGE reference release | **Fixed for concurrent EXPUNGEs:** `modifyEntries` resets the removed keys on every attempt; only successfully removed entries are released. `internal/cephstore/user.go:957`, `:1355`. |
+| R1 #5 – COPY revives deleted blob | **Fixed:** a positive reference change against zero is rejected. `internal/cephstore/blob.go:138`. |
+| R1 #6 – Scrub after incomplete scan | **Partially:** registry and intermediate shards are checked; a missing **last** shard remains unprotected. Deletions also happen before the completeness decision. `internal/cephstore/scrub.go:212`, `:238`. |
+| R1 #7 – Concurrent scrub repairs | **Open:** scan and repair remain inconsistent; orphan deletion without CAS. `internal/cephstore/scrub.go:277`, `:330`. |
+| R1 #8/#9 – MOVE recovery/intent | **Partially:** target failures and the regular intent completion improved; GUID equality still substitutes for a concrete target identity, recovery remains insufficiently idempotent. `internal/cephstore/scrub.go:172`, `internal/cephstore/user.go:1380`. |
+| R1 #10 – RENAME collisions | **Fixed:** live listing inside the registry CAS attempt. `internal/cephstore/user.go:399`. |
+| R1 #11 – Log/QRESYNC gaps | **Partially:** monotonic trimming; without known UIDs still only an ALERT. Pending EXPUNGEs already appear in the vanished log. `internal/imapproto/mailbox.go:586`, `internal/cephstore/user.go:638`. |
+| R1 #12 – Switching off one's own quota | **Fixed in the default setup:** explicit opt-in and value validation. `internal/imapproto/mailbox.go:739`. |
+| R1 #13 – COPY quota | **Partially:** the batch total is taken into account, but there is no atomic reservation between parallel deliveries. `internal/cephstore/user.go:1399`. |
+| R1 #14 – Parser resources | **Partially:** literal bytes are summed, the argument count is still unbounded. Arbitrarily many `{0+}` continuations consume token/callback memory at zero budget bytes. `internal/imapproto/wire.go:183`, `internal/imapproto/conn.go:294`. |
+| R1 #15/#16 – STORE infinite loop/metric cardinality | **Fixed:** `internal/imapproto/selected.go:351`, `internal/imapproto/conn.go:202`, `internal/pop3proto/pop3.go:202`. |
+| R1 #17 – Deferred EXPUNGEs | **Fixed in the described reload path:** the old watermark is preserved when removals are deferred. `internal/imapproto/selected.go:175`. |
+| R1 #18 – MULTIAPPEND atomicity | **Partially:** the rollback remains best-effort, without crash recovery. `internal/imapproto/mailbox.go:438`. |
+| R1 #19 – False FETCH success | **Fixed:** macro expansion and error propagation. `internal/imapproto/fetch.go:144`, `:374`. |
+| R1 #20 – WriteDeadline | **Partially:** renewed before command processing; automatic writer output still has no renewal of its own. `internal/imapproto/conn.go:367`, `internal/imapproto/wire.go:331`. |
+| R1 #21 – POP3 lease loss | **Partially:** a detected loss blocks transaction commands; QUIT, however, then skips deletions and still answers positively. `internal/pop3proto/pop3.go:326`, `:612`. |
+| R1 #22/#24 – Session resources/ManageSieve escapes | **Fixed:** `internal/imapproto/conn.go:744`, `internal/sieve/managesieve.go:330`, `:237`. |
+| R1 #23 – Sieve activation/rename | **Partially:** rename content and active status still come from unprotected up-front reads; activation is separate. `internal/cephstore/scripts.go:129`, `:153`. |
+| R1 #25/#27 – LMTP TLS setting/HTTP auth errors | **Fixed:** `internal/lmtpd/lmtpd.go:46`, `internal/auth/nauthilus.go:269`. |
+| R1 #26 – Partial Sieve delivery | **Partially:** rollback without a durable delivery intent. `internal/lmtpd/lmtpd.go:269`. |
+| R1 #28 – Rotation/config race | **The described paths fixed:** confirmed key and a locked ListUsers config read. `internal/rookcreds/rookcreds.go:147`, `internal/cephstore/scrub.go:61`. |
+| R1 #29 – SEARCH correctness | **Partially:** text criteria are still removed; the candidate limit is now 4096 instead of 256, still without a completeness guarantee. `internal/imapproto/search.go:522`, `internal/cephstore/fts.go:371`. |
+| R1 #30 – Memory budget | **Partially:** buffer lifetimes are tracked better; copies, FETCH output buffers, POP3 line arrays and snapshots are still missing. `internal/imapproto/fetch.go:415`, `:429`, `internal/pop3proto/pop3.go:573`. |
+| R1 #31 – FTS/scrub scaling | **Still open:** complete posting lists and namespace enumeration. `internal/cephstore/fts.go:467`, `internal/cephstore/scrub.go:75`. |
+| R2 new #1 – Blob deletion after commit error | **Fixed:** a successful shard write stays successful despite a commit error. `internal/cephstore/user.go:1074`. |
+| R2 new #2 – Pending does not serialize shard changes | **Partially:** the flag RMW and the deletion decision are now bound to a version; ModSeq ordering remains wrong, see below. |
+| R2 new #3 – Poll stuck on a missing UID | **Partially:** the concrete blockage is eliminated; slow writers are still skipped after 30 seconds. `internal/imapproto/selected.go:73`, `internal/cephstore/user.go:764`. |
+| R2 new #4 – MULTIAPPEND memory DoS | **Partially:** the byte total is bounded; zero literals and budget stalls remain. `internal/imapproto/conn.go:285`. |
+| R2 new #5 – Automatic buffer flushes | **Partially**, see R1 #20. |
+| R2 new #6 – Script name check after mutation | **Fixed:** the check happens before reads and mutation. `internal/cephstore/scripts.go:126`. |
+| R2 new #7 – Header unfolding/swallowed read errors | **The described cases fixed:** unfolding and error propagation to SEARCH. `internal/imapproto/search.go:499`, `:674`. |
 
-**Neue Befunde**
+**New findings**
 
-1. **Hoch – Budgetreservierungen können dauerhaft gegenseitig blockieren.**  
-   `internal/membudget/membudget.go:69`, `internal/imapproto/conn.go:289`, `internal/lmtpd/lmtpd.go:148`. Zwei Kommandos halten bereits Teilreservierungen und warten auf weitere Bytes; freigegeben wird erst nach Kommandoende. Selbst eine einzelne LMTP-Nachricht mit exakt 256 MiB blockiert beim zusätzlichen EOF-Leseversuch am standardmäßigen 256-MiB-Budget. Socket-Timeouts unterbrechen `cond.Wait()` nicht. Erweiterungen müssen nichtblockierend scheitern oder vorab vollständig reserviert werden.
+1. **High – Budget reservations can block each other permanently.**  
+   `internal/membudget/membudget.go:69`, `internal/imapproto/conn.go:289`, `internal/lmtpd/lmtpd.go:148`. Two commands already hold partial reservations and wait for further bytes; release only happens at the end of the command. Even a single LMTP message of exactly 256 MiB blocks on the additional EOF read attempt against the default 256 MiB budget. Socket timeouts do not interrupt `cond.Wait()`. Extensions must fail non-blockingly or be reserved completely up front.
 
-2. **Hoch – STORE kann die Nachrichten-ModSeq zurücksetzen.**  
-   `internal/cephstore/user.go:625`, `:1209`. A reserviert ModSeq 10, B reserviert 11 und schreibt zuerst. A liest danach korrekt Bs Flags, schreibt seine Änderung aber mit **10**. Der Shard-CAS schützt den Inhalt, nicht die vorab reservierte Reihenfolge. CONDSTORE und CHANGEDSINCE werden dadurch falsch. ModSeq-Vergabe und tatsächliche Schreibreihenfolge müssen zusammen abgesichert werden.
+2. **High – STORE can reset the message ModSeq.**  
+   `internal/cephstore/user.go:625`, `:1209`. A reserves ModSeq 10, B reserves 11 and writes first. A then correctly reads B's flags, but writes its change with **10**. The shard CAS protects the content, not the order reserved up front. CONDSTORE and CHANGEDSINCE become incorrect as a result. ModSeq assignment and the actual write order must be protected together.
 
-3. **Hoch – PendingFloor übersieht einen Commit zwischen Snapshot und Nachprüfung.**  
-   `internal/imapproto/mailbox.go:642`, `:646`, `:650`; `internal/cephstore/user.go:677`, `:789`. Header enthält Pending-ModSeq 10, Snapshot enthält dessen Nachricht noch nicht; anschließend schreibt und committet der Writer. PendingFloor findet jetzt nichts mehr. Die Session bleibt auf 10 und überspringt die Nachricht dauerhaft. Zusätzlich ignoriert die Suche Pending-Einträge außerhalb der letzten 512 ModSeqs sowie Abfragefehler. Erforderlich ist eine validierte Snapshot-Grenze über alle beteiligten Reads.
+3. **High – PendingFloor misses a commit between snapshot and re-check.**  
+   `internal/imapproto/mailbox.go:642`, `:646`, `:650`; `internal/cephstore/user.go:677`, `:789`. The header contains pending ModSeq 10, the snapshot does not yet contain its message; afterwards the writer writes and commits. PendingFloor now no longer finds anything. The session stays at 10 and skips the message permanently. In addition, the lookup ignores pending entries outside the last 512 ModSeqs as well as query errors. What is needed is a validated snapshot boundary across all reads involved.
 
-4. **Mittel – Fehlgeschlagene CAS-Versuche gelangen ins STORE-Ergebnis.**  
-   `internal/cephstore/user.go:1191`, `:1201`, `:1211`; Wiederholung in `internal/cephstore/fts.go:530`. Der Callback hängt `Updated`, `Modified` und Keywords bei jedem Versuch an. Nach einem Konflikt werden diese Ergebnisse nicht verworfen. Beispielsweise bleibt eine vermeintliche Änderung in `Updated`, obwohl der erfolgreiche Wiederholungsversuch die inzwischen gelöschte UID überspringt. Ergebnisse pro Versuch isolieren und erst nach erfolgreichem CAS übernehmen.
+4. **Medium – Failed CAS attempts make it into the STORE result.**  
+   `internal/cephstore/user.go:1191`, `:1201`, `:1211`; repeated in `internal/cephstore/fts.go:530`. The callback appends `Updated`, `Modified` and keywords on every attempt. After a conflict, these results are not discarded. For example, a supposed change remains in `Updated` even though the successful retry skips the UID that has since been deleted. Results should be isolated per attempt and adopted only after a successful CAS.
 
-5. **Hoch – MOVE konkurriert ungeschützt mit EXPUNGE um die letzte Blob-Referenz.**  
-   `internal/cephstore/user.go:1469`, `:1475`, `:1277`. MOVE legt das Ziel ohne zusätzliche Referenz an. EXPUNGE kann zwischen Ziel-Link und Quell-Unlink die Quelle entfernen und den einzigen Refcount auf null setzen. Der Zielindex bleibt ohne Blob zurück; der Intent verhindert das nicht. Auch zwei parallele MOVEs können mehrere Zielreferenzen bei unverändertem Refcount erzeugen.
+5. **High – MOVE races unprotected with EXPUNGE for the last blob reference.**  
+   `internal/cephstore/user.go:1469`, `:1475`, `:1277`. MOVE creates the target without an additional reference. Between the target link and the source unlink, EXPUNGE can remove the source and drop the only refcount to zero. The target index is left behind without a blob; the intent does not prevent this. Two parallel MOVEs can likewise create multiple target references with an unchanged refcount.

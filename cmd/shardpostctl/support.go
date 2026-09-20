@@ -32,7 +32,7 @@ import (
 // of an earlier listing to make sure the command acts on the same
 // messages. Dates are RFC 3339 or YYYY-MM-DD.
 
-const supportUsage = `usage: shardpostctl messages|search|message|flags|copy|move|sieve|learning ... (see shardpostctl -h and docs/admin-api.md)`
+const supportUsage = `usage: shardpostctl messages|search|message|flags|copy|move|sieve|learning ... (see the manual pages, docs/man)`
 
 // Command nouns of the support tools.
 const (

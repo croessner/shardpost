@@ -1,0 +1,109 @@
+.TH SHARDPOSTCTL-TRACE 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-trace \- record the IMAP protocol of one account for a while
+.SH SYNOPSIS
+.B shardpostctl trace on
+.RB [ \-for
+.IR duration ]
+.I account
+.br
+.B shardpostctl trace status
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl trace off
+.I account
+.SH DESCRIPTION
+Switches on a protocol trace for one account: every IMAP command and
+response of its sessions is written to the server log as
+.IR event=protocol_trace .
+This is the tool for "it works with every client except this one".
+.PP
+The switch is stored with the account, so it applies on every server of
+the cluster, no matter which one the client happens to reach. Sessions
+that are already open pick it up within
+.I trace.recheck_seconds
+(60 by default), so you do not have to ask the user to reconnect.
+.PP
+A trace always expires on its own. Without
+.B \-for
+it runs for
+.IR trace.default_duration_seconds ,
+and no trace can outlast
+.IR trace.max_duration_seconds .
+.PP
+Credentials never reach the log: a LOGIN or AUTHENTICATE command stops
+the trace for that session, unlogged, until the next login, so neither
+the password nor pipelined SASL data can appear. PREVIEW responses, which
+quote message text, are masked.
+.PP
+Role:
+.BR trace .
+.SS trace status
+Reports whether a trace is on and when it expires.
+.SH OPTIONS
+.TP
+.BI \-for " duration"
+How long the trace lasts, for example
+.IR 30m ,
+.IR 2h .
+Only for
+.BR "trace on" .
+The server caps it at its maximum.
+.TP
+.B \-\-json
+Print the status as JSON.
+.SH EXAMPLES
+A user's phone does not show new mail. Trace them for half an hour:
+.PP
+.nf
+.RS
+shardpostctl trace on -for 30m user@example.org
+shardpostctl trace status user@example.org
+.RE
+.fi
+.PP
+Read what the client actually sent, on both servers:
+.PP
+.nf
+.RS
+for p in $(kubectl -n shardpost get pod \\
+        -l app.kubernetes.io/name=shardpost-server -o name); do
+    kubectl -n shardpost logs $p -c server --since=10m \\
+        | grep protocol_trace | grep user@example.org
+done
+.RE
+.fi
+.PP
+Switch it off as soon as you have what you need:
+.PP
+.nf
+.RS
+shardpostctl trace off user@example.org
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 64
+The duration is not valid, or
+.B \-for
+was used with
+.B off
+or
+.BR status .
+.TP
+.B 67
+No such account.
+.TP
+.B 77
+The caller lacks the role
+.BR trace .
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-account (1)
+.PP
+The trace settings are described in
+.IR docs/configuration.md .

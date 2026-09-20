@@ -1,29 +1,29 @@
-# Quota: Grenzen, Regeln, Warnungen und Over-Flag
+# Quota: limits, rules, warnings and the over flag
 
-Die Quota eines Kontos besteht aus zwei Zählern (Bytes und Nachrichten) im
-Registry-Objekt des Kontos und einem Limit. Das Limit kommt in dieser
-Reihenfolge aus `SETQUOTA` bzw. dem Userdb-Attribut
-(`server.quota_attribute`, Standard `rnsMSQuota`, Wert mit optionalem
-K/M/G/T-Suffix) oder aus `server.quota_bytes`/`server.quota_msgs`
-(0 = unbegrenzt). Das Attribut setzt nur das Speicherlimit; das
-Nachrichtenlimit folgt weiter `SETQUOTA` bzw. `server.quota_msgs`.
+The quota of an account consists of two counters (bytes and messages) in
+the account's registry object and of a limit. The limit comes, in this
+order, from `SETQUOTA` or from the userdb attribute
+(`server.quota_attribute`, default `rnsMSQuota`, a value with an optional
+K/M/G/T suffix), or from `server.quota_bytes`/`server.quota_msgs`
+(0 = unlimited). The attribute sets the storage limit only; the message
+limit still follows `SETQUOTA` or `server.quota_msgs`.
 
-Darüber liegt der Abschnitt `quota`, angelehnt an Dovecots
-`quota_grace`, `quota_rule`, `quota_warning` und `quota_over_flag`:
+On top of that sits the `quota` section, modeled on Dovecot's
+`quota_grace`, `quota_rule`, `quota_warning` and `quota_over_flag`:
 
 ```yaml
 quota:
-  grace: 10%                 # oder eine Größe wie 10M; leer = 0
-  rules:                     # erste passende Regel gewinnt
+  grace: 10%                 # or a size such as 10M; empty = 0
+  rules:                     # the first matching rule wins
     - special_use: '\Trash'
-      extra_storage: 100M    # oder 10%; extra_messages: 100 oder 10%
+      extra_storage: 100M    # or 10%; extra_messages: 100 or 10%
     - special_use: '\Junk'
       ignore: true
     - mailbox: 'Archiv/Extern*'
       ignore: true
-  warnings:                  # erste passende Warnung gewinnt: höchste Schwelle zuerst
+  warnings:                  # the first matching warning wins: highest threshold first
     - name: full
-      resource: storage      # oder messages
+      resource: storage      # or messages
       percent: 100
       program: quota-warning
     - name: almost-full
@@ -33,200 +33,196 @@ quota:
     - name: below-again
       resource: storage
       percent: 100
-      direction: under       # Standard: over
+      direction: under       # default: over
       program: quota-warning
   over_flag:
     enabled: true
     attribute: quotaOverFlag
-    over_value: 'TRUE'       # Standard; Vergleich ohne Groß-/Kleinschreibung
+    over_value: 'TRUE'       # default; compared case-insensitively
     program: quota-over-flag
     recheck_seconds: 300
 extprograms:
   bin_dir: /usr/local/lib/shardpost/programs
   programs:
     quota-warning:
-      command: quota_warning.py      # mitgeliefert, siehe unten
+      command: quota_warning.py      # bundled, see below
       kinds: [quota]
       env: {WARN_FROM: postmaster@example.org}
     quota-over-flag:
-      command: quota_flag.py         # mitgeliefert, siehe unten
+      command: quota_flag.py         # bundled, see below
       kinds: [quota]
       timeout_ms: 30000
       env: {FLAG_LDAP_URI: "ldaps://ldap.example.org", ...}
 ```
 
 `quota.grace`, `quota.over_flag.enabled`, `.attribute`, `.over_value`,
-`.program` und `.recheck_seconds` sind auch per Umgebung setzbar
+`.program` and `.recheck_seconds` can also be set from the environment
 (`QUOTA_GRACE`, `QUOTA_OVER_FLAG_ENABLED`, `QUOTA_OVER_FLAG_ATTRIBUTE`,
 `QUOTA_OVER_FLAG_OVER_VALUE`, `QUOTA_OVER_FLAG_PROGRAM`,
-`QUOTA_OVER_FLAG_RECHECK_SECONDS`); Regeln und Warnungen nur per YAML.
+`QUOTA_OVER_FLAG_RECHECK_SECONDS`); rules and warnings are YAML only.
 
 ## Grace
 
-Eine Speicherung, die unter dem Speicherlimit beginnt, darf das Limit um
-die Grace überschreiten; ab dem Limit wird abgelehnt. So scheitert nicht
-die letzte große Mail knapp vor dem Limit. Standard ist 0 (bisheriges
-Verhalten); Dovecot verwendet 10 %.
+A store that starts below the storage limit may exceed the limit by the
+grace; from the limit onwards it is rejected. This keeps the last large
+mail from failing just short of the limit. The default is 0 (the previous
+behavior); Dovecot uses 10%.
 
-## Mailbox-Regeln
+## Mailbox rules
 
-Eine Regel trifft entweder über `mailbox` (Namensmuster: `*` beliebig
-viele Zeichen einschließlich `/`, `?` genau eines; `INBOX` ohne
-Groß-/Kleinschreibung, führende und abschließende `/` werden entfernt)
-oder über `special_use` (RFC 6154, unabhängig von übersetzten
-Ordnernamen).
+A rule matches either by `mailbox` (name pattern: `*` matches any number
+of characters including `/`, `?` exactly one; `INBOX` is matched
+case-insensitively, leading and trailing `/` are stripped) or by
+`special_use` (RFC 6154, independent of translated folder names).
 
-* `ignore: true` nimmt die Mailbox aus der Zählung: Zustellung, APPEND
-  und COPY dorthin reservieren nichts, EXPUNGE und DELETE geben nichts
-  frei. MOVE aus einer ignorierten in eine gezählte Mailbox wird wie ein
-  COPY geprüft und kann mit `OVERQUOTA` scheitern; MOVE in eine ignorierte
-  Mailbox gibt den Platz frei; das gilt auch, wenn der Scrubber einen
-  abgebrochenen MOVE vollendet. Ein RENAME, das eine Mailbox in die
-  Zählung hinein oder aus ihr heraus bewegt (eine Namensregel kann auch
-  eine Special-Use-Regel verdecken), zählt ihre Nachrichten nach, wird
-  aber nicht abgelehnt (wie ein gesenktes Limit).
-* `extra_storage`/`extra_messages` erhöhen das Limit für Speicherungen in
-  diese Mailbox, absolut oder in Prozent des Limits. Typisch ist der
-  Papierkorb: Ein volles Konto kann per COPY dorthin noch Platz schaffen.
-  MOVE zwischen zwei verschiedenen gezählten Mailboxen ändert die Nutzung
-  nicht und wird nie abgelehnt. (MOVE in die gerade selektierte Mailbox
-  selbst läuft als COPY mit EXPUNGE und unterliegt daher dem Limit.) Ein
-  unbegrenztes Limit bleibt unbegrenzt.
+* `ignore: true` takes the mailbox out of the accounting: delivery, APPEND
+  and COPY into it reserve nothing, EXPUNGE and DELETE release nothing. A
+  MOVE from an ignored into a counted mailbox is checked like a COPY and
+  can fail with `OVERQUOTA`; a MOVE into an ignored mailbox releases the
+  space; this also applies when the scrubber completes an interrupted
+  MOVE. A RENAME that moves a mailbox into or out of the accounting (a
+  name rule can also shadow a special-use rule) counts its messages
+  afterwards, but is not rejected (just like a lowered limit).
+* `extra_storage`/`extra_messages` raise the limit for stores into that
+  mailbox, either as an absolute size or as a percentage of the limit. The
+  typical case is the trash folder: a full account can still free up space
+  by copying into it. A MOVE between two different counted mailboxes does
+  not change the usage and is never rejected. (A MOVE into the currently
+  selected mailbox itself runs as a COPY with EXPUNGE and is therefore
+  subject to the limit.) An unlimited limit stays unlimited.
 
-Wer Regeln oder Namensmuster ändert, ändert, was gezählt wird: der
-Scrubber (`shardpost scrub`) zählt nach den aktuellen Regeln und gleicht
-die Zähler nach zwei übereinstimmenden Läufen an.
+Changing rules or name patterns changes what is counted: the scrubber
+(`shardpost scrub`) counts according to the current rules and adjusts the
+counters after two matching runs.
 
-## Warnungen
+## Warnings
 
-Eine Warnung startet ihr Programm, wenn eine Änderung der Nutzung die
-Schwelle (`percent` des Basislimits, ohne Extras) überschreitet:
-`over` beim Anstieg von unter auf mindestens die Schwelle, `under` beim
-Fall von mindestens auf unter die Schwelle. Pro Änderung läuft nur die
-erste passende Warnung in Konfigurationsreihenfolge. Auslöser sind
-Zustellung, APPEND, COPY, MOVE (bei geänderter Zählung), EXPUNGE, DELETE
-und RENAME. Eine Speicherung meldet ihre Änderung erst, wenn sie gelungen
-ist; eine Reservierung, die eine fehlgeschlagene Speicherung zurückgibt,
-meldet nichts. Wird dagegen ein bereits gespeicherter Teil einer
-Zustellung in mehrere Ordner oder eines MULTIAPPEND zurückgerollt, ist das
-ein EXPUNGE und kann eine `under`-Warnung auslösen. Limitänderungen und
-die Scrubber-Korrektur lösen nichts aus.
+A warning starts its program when a change in usage crosses the threshold
+(`percent` of the base limit, without the extras): `over` when usage rises
+from below the threshold to at least the threshold, `under` when it falls
+from at least the threshold to below it. Per change, only the first
+matching warning in configuration order runs. The triggers are delivery,
+APPEND, COPY, MOVE (when the accounting changes), EXPUNGE, DELETE and
+RENAME. A store reports its change only once it has succeeded; a
+reservation that a failed store returns reports nothing. If, on the other
+hand, an already stored part of a delivery into several folders or of a
+MULTIAPPEND is rolled back, that is an EXPUNGE and can trigger an
+`under` warning. Limit changes and the scrubber correction trigger nothing.
 
-Die Zähler ändern sich per Compare-and-swap auf dem Registry-Objekt; nur
-der Pod, dessen Schreibvorgang die Schwelle überschreitet, sieht den
-Übergang. Eine Warnung läuft daher clusterweit genau einmal pro Übergang,
-ohne Koordination zwischen den Pods.
+The counters change by compare-and-swap on the registry object; only the
+pod whose write crosses the threshold sees the transition. A warning
+therefore runs exactly once cluster-wide per transition, without any
+coordination between the pods.
 
-## Over-Flag
+## Over flag
 
-Das Over-Flag ist ein Userdb-Attribut, mit dem ein MTA Mail für volle
-Konten früh ablehnen kann. Der Server vergleicht bei jeder Anmeldung
-(IMAP, POP3, ManageSieve), bei jeder LMTP-Zustellung vor dem Speichern
-(mit den Attributen der Empfängerauflösung) und nach einer gelungenen
-Speicherung (eine wegen OVERQUOTA abgelehnte Zustellung ändert den
-Zustand nicht) den Attributwert mit dem echten Zustand (Nutzung ≥ Limit
-bei Bytes oder Nachrichten). Weichen sie ab, startet das Programm, das das Attribut korrigieren soll
-(z. B. per LDAP). Zusätzlich läuft das Programm, wenn eine Änderung der
-Nutzung das Limit selbst über- oder unterschreitet, etwa weil ein
-IMAP-Client Platz schafft, ohne dass eine Anmeldung oder Zustellung folgt
-(dann ohne bisherigen Attributwert). Ein fehlendes Attribut gilt als
-„nicht voll“.
-Steuerzeichen im Attributwert werden entfernt, er wird auf 256 Bytes
-gekürzt. Weil die Userdb (Nauthilus-Cache) den alten Wert noch eine
-Weile liefern kann, läuft das Programm für dasselbe Konto und
-denselben Zustand höchstens einmal je `recheck_seconds` und Pod; ein
-Zustandswechsel läuft sofort.
+The over flag is a userdb attribute that lets an MTA reject mail for full
+accounts early. The server compares the attribute value with the real
+state (usage ≥ limit in bytes or messages) at every login (IMAP, POP3,
+ManageSieve), at every LMTP delivery before storing (using the attributes
+from recipient resolution) and after a successful store (a delivery
+rejected because of OVERQUOTA does not change the state). If they differ,
+the server starts the program that is meant to correct the attribute
+(for example via LDAP). The program also runs when a change in usage
+crosses the limit itself, upwards or downwards, for example because an
+IMAP client frees up space without a login or a delivery following it
+(in that case without a previous attribute value). A missing attribute
+counts as "not full".
+Control characters are removed from the attribute value, and it is
+truncated to 256 bytes. Because the userdb (the Nauthilus cache) can keep
+returning the old value for a while, the program runs at most once per
+`recheck_seconds` and pod for the same account and the same state; a
+state change runs immediately.
 
-## Programme
+## Programs
 
-Beide Ereignisse starten Einträge aus `extprograms.programs` mit der Art
-`quota` (sudoers-Prinzip wie bei Sieve, siehe
-[IMAPSieve und externe Programme](imapsieve.md)): feste Kommandozeile unter
-`bin_dir`, keine Shell, private Umgebung, Timeout, keine Eingabe auf
-stdin. `kinds: [quota]` verhindert, dass ein Sieve-Skript das Programm
-aufruft.
+Both events start entries from `extprograms.programs` of the kind
+`quota` (the sudoers principle, as with Sieve, see
+[IMAPSieve and external programs](imapsieve.md)): a fixed command line under
+`bin_dir`, no shell, a private environment, a timeout, no input on
+stdin. `kinds: [quota]` prevents a Sieve script from invoking the program.
 
-Platzhalter in `args`:
+Placeholders in `args`:
 
-| Platzhalter | Warnung | Over-Flag |
+| Placeholder | Warning | Over flag |
 | --- | --- | --- |
-| `{account}` | Konto | Konto |
-| `{warning}`, `{resource}`, `{percent}`, `{direction}` | Name, `storage`/`messages`, Schwelle, `over`/`under` | – |
-| `{state}`, `{flag}` | – | `over`/`under`, bisheriger Attributwert |
-| `{storage_usage}`, `{storage_limit}`, `{messages_usage}`, `{messages_limit}` | nach der Änderung | aktueller Stand |
+| `{account}` | account | account |
+| `{warning}`, `{resource}`, `{percent}`, `{direction}` | name, `storage`/`messages`, threshold, `over`/`under` | – |
+| `{state}`, `{flag}` | – | `over`/`under`, previous attribute value |
+| `{storage_usage}`, `{storage_limit}`, `{messages_usage}`, `{messages_limit}` | after the change | current state |
 
-Umgebung: `QUOTA_EVENT` (`warning` oder `over_flag`), `QUOTA_ACCOUNT`,
+Environment: `QUOTA_EVENT` (`warning` or `over_flag`), `QUOTA_ACCOUNT`,
 `QUOTA_STORAGE_USAGE`, `QUOTA_STORAGE_LIMIT`, `QUOTA_MESSAGES_USAGE`,
-`QUOTA_MESSAGES_LIMIT`; bei Warnungen zusätzlich `QUOTA_WARNING`,
-`QUOTA_RESOURCE`, `QUOTA_PERCENT`, `QUOTA_DIRECTION`; beim Over-Flag
-`QUOTA_OVER` (`true`/`false`) und `QUOTA_FLAG`.
+`QUOTA_MESSAGES_LIMIT`; for warnings additionally `QUOTA_WARNING`,
+`QUOTA_RESOURCE`, `QUOTA_PERCENT`, `QUOTA_DIRECTION`; for the over flag
+`QUOTA_OVER` (`true`/`false`) and `QUOTA_FLAG`.
 
-Die Programme laufen asynchron; Zustellung und Anmeldung warten nicht.
-Höchstens 64 Läufe sind gleichzeitig offen, weitere werden verworfen und
-gezählt. Beim Herunterfahren wartet der Server bis zu 10 s auf laufende
-Programme. Metriken: `imap_quota_events_total{event,result}` (`dispatched`,
-`dropped`) und `imap_extprograms_runs_total{program,result}`.
+The programs run asynchronously; delivery and login do not wait. At most
+64 runs are open at the same time, further ones are dropped and
+counted. On shutdown the server waits up to 10 s for running programs.
+Metrics: `imap_quota_events_total{event,result}` (`dispatched`,
+`dropped`) and `imap_extprograms_runs_total{program,result}`.
 
-## Mitgelieferte Programme
+## Bundled programs
 
-Das Image enthält zwei Programme unter
-`/usr/local/lib/shardpost/programs` (Einträge mit `kinds: [quota]`, ohne
-`args`; sie lesen die `QUOTA_*`-Umgebung). Konfiguriert werden sie über
-`env` des `extprograms`-Eintrags, Secrets über Dateipfade.
+The image contains two programs under
+`/usr/local/lib/shardpost/programs` (entries with `kinds: [quota]`, without
+`args`; they read the `QUOTA_*` environment). They are configured through
+the `env` of the `extprograms` entry, and secrets through file paths.
 
-**`quota_warning.py`** stellt eine Warnmail in das Postfach zu, über die
-lokale Zustellung der [Admin-API](admin-api.md) (`shardpostctl deliver`,
-standardmäßig ohne Quota-Durchsetzung wie `dovecot-lda … noenforcing`,
-mit Sieve). Die Mail trägt `Auto-Submitted: auto-generated`, damit
-Vacation und Redirect nicht reagieren.
+**`quota_warning.py`** delivers a warning message into the mailbox, using
+the local delivery of the [Admin API](admin-api.md) (`shardpostctl deliver`,
+by default without quota enforcement, like `dovecot-lda … noenforcing`,
+and with Sieve). The message carries `Auto-Submitted: auto-generated` so
+that vacation and redirect do not react to it.
 
-| Variable | Bedeutung |
+| Variable | Meaning |
 | --- | --- |
-| `WARN_FROM` | Absender (Pflicht) |
-| `WARN_TEMPLATE_OVER`, `WARN_TEMPLATE_UNDER` | Vorlagen; Standard `templates/quota-warning-{over,under}.txt` (DE/EN) |
-| `WARN_MSGID_DOMAIN` | Domain der Message-ID (Standard: die von `WARN_FROM`) |
-| `WARN_ENFORCE_QUOTA` | `true` stellt mit Durchsetzung zu (Standard `false`) |
-| `WARN_SIEVE` | `false` umgeht das Benutzerskript |
-| `WARN_SHARDPOSTCTL`, `WARN_ADMIN_SOCKET` | Pfade, falls abweichend |
-| `WARN_DEADLINE` | Gesamtzeit in Sekunden (Standard 50, unter `timeout_ms` halten) |
+| `WARN_FROM` | sender (required) |
+| `WARN_TEMPLATE_OVER`, `WARN_TEMPLATE_UNDER` | templates; default `templates/quota-warning-{over,under}.txt` (DE/EN) |
+| `WARN_MSGID_DOMAIN` | domain of the Message-ID (default: the one from `WARN_FROM`) |
+| `WARN_ENFORCE_QUOTA` | `true` delivers with enforcement (default `false`) |
+| `WARN_SIEVE` | `false` bypasses the user script |
+| `WARN_SHARDPOSTCTL`, `WARN_ADMIN_SOCKET` | paths, if they differ |
+| `WARN_DEADLINE` | total time in seconds (default 50, keep it below `timeout_ms`) |
 
-Eine Vorlage besteht aus `Subject: …`, einer Leerzeile und dem Text;
-Platzhalter `${account}`, `${percent}`, `${warning}`, `${direction}`,
+A template consists of `Subject: …`, a blank line and the body text;
+placeholders `${account}`, `${percent}`, `${warning}`, `${direction}`,
 `${resource}`, `${storage_usage}`, `${storage_limit}`,
 `${storage_usage_human}`, `${storage_limit_human}`, `${messages_usage}`,
 `${messages_limit}`.
 
-**`quota_flag.py`** setzt das Attribut des Kontos per LDAP auf den
-**Zielwert** (kein Umschalten; schon richtig heißt kein Schreibzugriff)
-und leert danach den Nauthilus-Cache des Kontos
-(`DELETE /api/v1/cache/flush`, Bearer-Token per OIDC
-client_credentials, pro Lauf neu geholt). Es nutzt `ldap3` aus dem venv
-des Images (`/usr/local/lib/shardpost/venv`, `programs/requirements.txt`
-mit festen Hashes) und verweigert unverschlüsseltes LDAP.
+**`quota_flag.py`** sets the account's attribute via LDAP to the
+**target value** (no toggling; if it is already correct, nothing is written)
+and then flushes the account's Nauthilus cache
+(`DELETE /api/v1/cache/flush`, bearer token via OIDC
+client_credentials, fetched anew on every run). It uses `ldap3` from the
+image's venv (`/usr/local/lib/shardpost/venv`, `programs/requirements.txt`
+with pinned hashes) and refuses unencrypted LDAP.
 
-| Variable | Bedeutung |
+| Variable | Meaning |
 | --- | --- |
-| `FLAG_LDAP_URI`, `FLAG_LDAP_BASE`, `FLAG_LDAP_FILTER` | Server, Suchbasis, Filter mit `{account}` (RFC-4515-escaped) |
-| `FLAG_LDAP_ATTRIBUTE`, `FLAG_LDAP_VALUE_OVER`, `FLAG_LDAP_VALUE_UNDER` | Standard `rnsMSOverQuota`, `TRUE`, `FALSE` |
-| `FLAG_LDAP_CA_FILE`, `FLAG_LDAP_STARTTLS` | Server-CA; StartTLS für `ldap://` |
-| `FLAG_LDAP_AUTH` | `external` (SASL EXTERNAL mit `FLAG_LDAP_CERT_FILE`/`FLAG_LDAP_KEY_FILE`) oder `simple` (`FLAG_LDAP_BIND_DN`, `FLAG_LDAP_BIND_PASSWORD_FILE`) |
-| `FLAG_FLUSH_URL` | Flush-Endpunkt; leer schaltet den Flush ab |
+| `FLAG_LDAP_URI`, `FLAG_LDAP_BASE`, `FLAG_LDAP_FILTER` | server, search base, filter with `{account}` (RFC 4515 escaped) |
+| `FLAG_LDAP_ATTRIBUTE`, `FLAG_LDAP_VALUE_OVER`, `FLAG_LDAP_VALUE_UNDER` | default `rnsMSOverQuota`, `TRUE`, `FALSE` |
+| `FLAG_LDAP_CA_FILE`, `FLAG_LDAP_STARTTLS` | server CA; StartTLS for `ldap://` |
+| `FLAG_LDAP_AUTH` | `external` (SASL EXTERNAL with `FLAG_LDAP_CERT_FILE`/`FLAG_LDAP_KEY_FILE`) or `simple` (`FLAG_LDAP_BIND_DN`, `FLAG_LDAP_BIND_PASSWORD_FILE`) |
+| `FLAG_FLUSH_URL` | flush endpoint; empty disables the flush |
 | `FLAG_OIDC_TOKEN_URL`, `FLAG_OIDC_CLIENT_ID`, `FLAG_OIDC_CLIENT_SECRET_FILE` | client_credentials |
-| `FLAG_OIDC_SCOPE`, `FLAG_OIDC_AUTH_METHOD` | Standard `nauthilus:authenticate nauthilus:security` (Basis- und Flush-Scope), `client_secret_basic` |
-| `FLAG_HTTP_CONNECT_TO` | `host:port`, mit dem statt des URL-Hosts verbunden wird (wie `curl --connect-to`); TLS prüft weiter den URL-Host. Nötig, weil die öffentliche Kante `/api/v1/cache` nicht routet |
-| `FLAG_HTTP_CA_FILE` | CA für HTTPS (Standard: System-Trust) |
-| `FLAG_LDAP_TIMEOUT`, `FLAG_HTTP_TIMEOUT` | Sekunden pro Operation (Standard 5) |
-| `FLAG_DEADLINE` | Gesamtzeit in Sekunden (Standard 20, mit Abstand unter `timeout_ms` halten) |
+| `FLAG_OIDC_SCOPE`, `FLAG_OIDC_AUTH_METHOD` | default `nauthilus:authenticate nauthilus:security` (base and flush scope), `client_secret_basic` |
+| `FLAG_HTTP_CONNECT_TO` | `host:port` to connect to instead of the URL host (like `curl --connect-to`); TLS still verifies the URL host. Required because the public edge does not route `/api/v1/cache` |
+| `FLAG_HTTP_CA_FILE` | CA for HTTPS (default: the system trust store) |
+| `FLAG_LDAP_TIMEOUT`, `FLAG_HTTP_TIMEOUT` | seconds per operation (default 5) |
+| `FLAG_DEADLINE` | total time in seconds (default 20, keep it comfortably below `timeout_ms`) |
 
-Nach Ablauf der Gesamtzeit brechen beide Programme selbst mit 75 und
-Statuszeile ab, bevor der Server sie nach `timeout_ms` beendet. Konten mit
-Zeichen außerhalb von `A-Z a-z 0-9 @ . _ % + -` lehnen beide mit 1 ab
-(wie die Skripte des mailstack). Beide Programme schreiben eine
-Statuszeile nach stdout, die der Server mitloggt, und enden mit 0 (erledigt), 75 (vorübergehend, etwa LDAP oder
-Nauthilus nicht erreichbar) oder 1 (Konfiguration, kein oder mehrere
-Einträge). `make test-programs` prüft beide im Laufzeit-Basisimage,
-`make test-programs-ldap` `quota_flag.py` gegen ein Wegwerf-OpenLDAP
-(`chrroessner/openldap`, RNS-Schema, SASL EXTERNAL). Dessen
-`hack/testdata/quota-ldap/slapd.conf` zeigt die vorgeschlagene
-Provider-Regel: `authz-regexp` für die Zertifikatsidentität und eine ACL,
-die ihr nur `rnsMSOverQuota` zum Schreiben gibt.
+Once the total time is up, both programs abort on their own with 75 and a
+status line, before the server terminates them after `timeout_ms`. Accounts
+with characters outside `A-Z a-z 0-9 @ . _ % + -` are rejected by both with
+1 (as in the mailstack scripts). Both programs write a status line
+to stdout that the server logs, and exit with 0 (done), 75 (temporary, for
+example LDAP or Nauthilus unreachable) or 1 (configuration, no entry or
+several entries). `make test-programs` checks both in the runtime base
+image, `make test-programs-ldap` checks `quota_flag.py` against a
+throwaway OpenLDAP (`chrroessner/openldap`, RNS schema, SASL EXTERNAL). Its
+`hack/testdata/quota-ldap/slapd.conf` shows the suggested provider rule:
+`authz-regexp` for the certificate identity and an ACL that grants it
+write access to `rnsMSOverQuota` only.

@@ -1,0 +1,241 @@
+.TH SHARDPOSTCTL-SIEVE 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-sieve \- manage Sieve scripts and test them without side effects
+.SH SYNOPSIS
+.B shardpostctl sieve list
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl sieve show
+.RB [ \-\-json ]
+.I account name
+.br
+.B shardpostctl sieve put
+.RB [ \-activate ]
+.RB [ \-create ]
+.RB [ \-if-match
+.IR etag ]
+.RB [ \-file
+.IR path ]
+.I account name
+.br
+.B shardpostctl sieve delete
+.RB [ \-if-match
+.IR etag ]
+.I account name
+.br
+.B shardpostctl sieve activate
+.I account name
+.br
+.B shardpostctl sieve deactivate
+.I account
+.br
+.B shardpostctl sieve check
+.RB [ \-name
+.IR name ]
+.RB [ \-file
+.IR path ]
+.RB [ \-message
+.IR mailbox:uidvalidity:uid ]
+.RB [ \-from
+.IR address ]
+.RB [ \-to
+.IR address ]
+.RB [ \-\-json ]
+.I account
+.SH DESCRIPTION
+The account's Sieve scripts, the same ones ManageSieve serves. Exactly
+one script can be active; it is the one that runs on delivery.
+.SS sieve list
+Every script with its size, its version (ETag) and a marker on the active
+one. Names and sizes only, no content, so the role
+.B diagnose
+is enough.
+.SS sieve show
+The script text, with its ETag. Reads content, so it needs the role
+.BR content .
+.SS sieve put
+Stores a script from
+.B \-file
+or standard input. The server compiles it first, with the account's own
+includes; a script that does not compile is refused and nothing is
+stored.
+.B \-activate
+makes it the active script in the same step.
+.B \-create
+stores it only if no script of that name exists yet, and
+.B \-if-match
+stores it only if the stored script is still the version you read.
+Role:
+.BR support .
+.SS sieve delete
+Deletes a script. The active script cannot be deleted; deactivate it or
+activate another one first. Role:
+.BR support .
+.SS sieve activate, sieve deactivate
+Selects the active script, or switches filtering off entirely.
+.B deactivate
+takes no script name. Role:
+.BR support .
+.SS sieve check
+Compiles a script and, if you give it a message, runs it and reports what
+it would do.
+.PP
+Nothing is carried out. No mail is redirected, no vacation reply is sent,
+no notification goes out, no external program runs (an
+.I execute
+or
+.I filter
+test is treated as if the program had exited 0), no duplicate or vacation
+record is written, and the message is not filed anywhere. Every
+suppressed side effect is listed under
+.IR suppressed ,
+so you can see exactly what would have happened in production.
+.PP
+Which script is checked:
+.B \-file
+or standard input for a script you are working on,
+.B \-name
+for a stored one, and with neither, the active script.
+.PP
+Which message it runs on:
+.B \-message
+names a stored message as
+.IR mailbox:uidvalidity:uid ,
+or standard input carries a test message when no script is read from
+there.
+.B \-from
+and
+.B \-to
+set the envelope; without
+.BR \-to ,
+the account is the recipient. Without a message the script is only
+compiled.
+.PP
+Role:
+.B content
+when the script or the message comes from the store, otherwise
+.BR diagnose .
+.SH OPTIONS
+.TP
+.BI \-file " path"
+Read the script (or the test message) from this file instead of standard
+input.
+.TP
+.B \-activate
+Activate the script that is being stored.
+.TP
+.B \-create
+Refuse to overwrite an existing script.
+.TP
+.BI \-if-match " etag"
+Store or delete only if the stored script is still this version
+(exit code 65 otherwise).
+.TP
+.BI \-name " name"
+Check this stored script.
+.TP
+.BI \-message " mailbox:uidvalidity:uid"
+Run the check on this stored message.
+.TP
+.BI \-from " address"
+.TQ
+.BI \-to " address"
+Envelope sender and recipient of the check.
+.TP
+.B \-\-json
+Print the answer as JSON.
+.SH EXAMPLES
+What does the account filter with, and how does it look?
+.PP
+.nf
+.RS
+shardpostctl sieve list user@example.org
+shardpostctl sieve show user@example.org main
+.RE
+.fi
+.PP
+Install a script from a file and switch it on:
+.PP
+.nf
+.RS
+shardpostctl sieve put -activate user@example.org main < main.sieve
+.RE
+.fi
+.PP
+Before you change the live script, try the new one against a message the
+user complains about. Nothing is delivered, forwarded or answered:
+.PP
+.nf
+.RS
+shardpostctl sieve check -file new.sieve \\
+    -message INBOX:1789726963:933 user@example.org
+.RE
+.fi
+.PP
+"Why did this mail end up in Junk?" Run the active script over it:
+.PP
+.nf
+.RS
+shardpostctl sieve check -message INBOX:1789726963:933 user@example.org
+.RE
+.fi
+.PP
+Check a script against a message you have as a file, without touching the
+account's data:
+.PP
+.nf
+.RS
+shardpostctl sieve check -file rules.sieve \\
+    -from sender@example.net user@example.org < sample.eml
+.RE
+.fi
+.PP
+Replace a script safely, so a parallel change is not lost:
+.PP
+.nf
+.RS
+shardpostctl sieve show user@example.org main      # prints the etag
+shardpostctl sieve put -if-match '"s-1f0c3a9d2b4e5f60"' \\
+    user@example.org main < main.sieve
+.RE
+.fi
+.PP
+Switch filtering off for a while, then back on:
+.PP
+.nf
+.RS
+shardpostctl sieve deactivate user@example.org
+shardpostctl sieve activate user@example.org main
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done; for
+.B sieve check
+the script compiles.
+.TP
+.B 64
+The script does not compile
+.RB ( "sieve put" );
+nothing was stored, and the message says where the error is.
+.TP
+.B 65
+The checked script does not compile
+.RB ( "sieve check" ),
+the ETag no longer matches, or the script is active and cannot be
+deleted.
+.TP
+.B 67
+No such account, script or message.
+.TP
+.B 77
+The caller lacks the role.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-learning (1),
+.BR shardpostctl-message (1)
+.PP
+IMAPSieve and the learning rules are described in
+.IR docs/imapsieve.md .

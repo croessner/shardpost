@@ -1,123 +1,122 @@
-# Architektur
+# Architecture
 
-Der Server verbindet mehrere Mailprotokolle mit einem gemeinsamen Mailstore.
-Er speichert direkt über librados in RADOS und kapselt dieses Backend hinter
-Go-Interfaces. Dauerhafte Daten sind zwischen Replikas geteilt; aktive
-Verbindungen und deren Zustände gehören jeweils einem Prozess.
+The server connects several mail protocols to a shared mail store. It writes
+directly into RADOS via librados and encapsulates that backend behind Go
+interfaces. Durable data is shared between replicas; active connections and
+their state each belong to one process.
 
-Quellbasis: [main.go](cmd/shardpost/main.go), [model.User](internal/model/model.go),
-[cephstore](internal/cephstore/store.go). Details zu Schreibreihenfolge und
-Reparatur stehen im [Speicherkapitel](docs/architecture/storage.md).
+Source base: [main.go](cmd/shardpost/main.go), [model.User](internal/model/model.go),
+[cephstore](internal/cephstore/store.go). Details on write ordering and
+repair are in the [storage chapter](docs/architecture/storage.md).
 
-## Systemgrenzen
+## System Boundaries
 
-![Systemkontext](docs/diagrams/context.svg)
+![System context](docs/diagrams/context.svg)
 
-| Komponente | Aufgabe | Grenze |
+| Component | Task | Boundary |
 |---|---|---|
-| Mailserver dieses Projekts | IMAP, POP3, LMTP, ManageSieve, Sieve, Mailstore, Lernworker | Kein öffentlicher SMTP-MTA und keine Benutzerverwaltung |
-| nauthilus-director | Öffentliche Protokollzugänge und Backend-Routing; Client-IP per PROXY | Eigene Konfiguration, Zertifikate und Healthchecks |
-| Nauthilus | Anmeldung und Auflösung einer Adresse zum kanonischen Konto | Kein Mailinhalt, kein Postfachindex |
-| Ceph/Rook | RADOS-Persistenz, Replikation/EC; Bereitstellung der Ceph-Zugangsdaten | Keine globale Transaktion zwischen Mailobjekten |
-| SMTP-Relay | Versand von Redirect, Vacation und Notify | Externer Seiteneffekt, nicht gemeinsam mit Ceph atomar |
-| Lernprogramm/Rspamd | Verarbeitung eines bestätigten Lernauftrags | Wiederholungen müssen verträglich sein |
-| Monitoring | Logs, Metriken und Traces | Ersetzt keinen echten Protokolltest |
+| This project's mail server | IMAP, POP3, LMTP, ManageSieve, Sieve, mail store, learning worker | No public SMTP MTA and no user management |
+| nauthilus-director | Public protocol access and backend routing; client IP via PROXY | Its own configuration, certificates and health checks |
+| Nauthilus | Login and resolution of an address to the canonical account | No mail content, no mailbox index |
+| Ceph/Rook | RADOS persistence, replication/EC; provisioning of the Ceph credentials | No global transaction across mail objects |
+| SMTP relay | Sending of redirect, vacation and notify | External side effect, not atomic together with Ceph |
+| Learning program/Rspamd | Processing of a committed learning job | Repeated runs must be harmless |
+| Monitoring | Logs, metrics and traces | Does not replace a real protocol test |
 
-Nauthilus wird im Produktivprofil über gRPC und einen OIDC-authentifizierten
-Backchannel angesprochen. Das generische Auth-Interface erlaubt außerdem
-HTTP und ein statisches Testbackend. Ein Loginname ist nicht automatisch der
-Speichernamespace: Entscheidend ist das kanonische `auth.Result.Account`.
+In the production profile, Nauthilus is addressed over gRPC and an
+OIDC-authenticated backchannel. The generic auth interface additionally allows
+HTTP and a static test backend. A login name is not automatically the storage
+namespace: what counts is the canonical `auth.Result.Account`.
 
-## Komponenten im Prozess
+## Components Within the Process
 
-![Komponenten und Abhängigkeiten](docs/diagrams/components.svg)
+![Components and dependencies](docs/diagrams/components.svg)
 
-`cmd/shardpost` ist die Verdrahtungsstelle. Sie lädt und validiert die
-Konfiguration, initialisiert Logging und Telemetrie, beschafft Ceph-Zugang,
-öffnet den Store und verbindet Protokollserver, Authentifizierung,
-Sieve-Engine, Programmstarter und Lernworker. Sie startet außerdem
-Health-/Readiness-/Metrik-Endpunkte und koordiniert das Herunterfahren.
+`cmd/shardpost` is the wiring point. It loads and validates the configuration,
+initializes logging and telemetry, obtains Ceph access, opens the store and
+connects protocol servers, authentication, the Sieve engine, the program
+launcher and the learning worker. It also starts the health, readiness and
+metrics endpoints and coordinates shutdown.
 
-Die Protokollserver besitzen ihre Verbindungen und übersetzen Befehle in
-Operationen auf `model.User`. `imapproto` implementiert Parser, Dispatcher,
-Sitzungszustände und Ausgabe selbst; go-imap liefert Typen und Hilfsbausteine.
-LMTP verwendet go-smtp und ist derzeit direkt mit dem Ceph-Store gekoppelt.
-Das bedeutet: Nicht sämtliche Protokollpakete sind cgo-frei.
+The protocol servers own their connections and translate commands into
+operations on `model.User`. `imapproto` implements its own parser, dispatcher,
+session states and output; go-imap supplies types and helper building blocks.
+LMTP uses go-smtp and is currently coupled directly to the Ceph store.
+This means that not all protocol packages are cgo-free.
 
-`internal/sieve` wertet Skripte mit dem mitgelieferten go-sieve-Fork aus.
-`internal/imapsieve` ordnet Mailboxereignisse diesen Skripten und Lernregeln
-zu. Der externe Programmstarter akzeptiert ausschließlich konfigurierte
-Programme. Er startet keine Shell und begrenzt Eingabe, Ausgabe, Laufzeit
-und Parallelität. Der Klassifizierer ist ein konfiguriertes Programm, keine
-Rspamd-Sonderbehandlung im Go-Mailstore.
+`internal/sieve` evaluates scripts with the bundled go-sieve fork.
+`internal/imapsieve` maps mailbox events to those scripts and to learning rules.
+The external program launcher accepts configured programs only. It starts no
+shell and limits input, output, runtime and concurrency. The classifier is a
+configured program, not special Rspamd handling inside the Go mail store.
 
-## Deployment und Verbindungen
+## Deployment and Connections
 
 ![Deployment](docs/diagrams/deployment.svg)
 
-Das vorhandene Kubernetes-Profil enthält zwei Replikas, einen Service,
-ein PodDisruptionBudget, Netzregeln und einen Scrub-CronJob. Alle Replikas
-verwenden dieselben Pools. Topologieverteilung verbessert die Platzierung,
-ist aber keine Garantie gegen korrelierte Ausfälle.
+The existing Kubernetes profile contains two replicas, one Service,
+a PodDisruptionBudget, network rules and a scrub CronJob. All replicas
+use the same pools. Topology spreading improves placement, but is no
+guarantee against correlated failures.
 
-| Service-Port | Listener im Container | Verwendung |
+| Service port | Listener in the container | Use |
 |---|---|---|
 | 143 | 1143 | IMAP, optional STARTTLS |
-| 993 | 1993 | IMAP mit implizitem TLS |
+| 993 | 1993 | IMAP with implicit TLS |
 | 110 | 1110 | POP3, optional STLS |
-| 995 | 1995 | POP3 mit implizitem TLS |
+| 995 | 1995 | POP3 with implicit TLS |
 | 4190 | 14190 | ManageSieve, optional STARTTLS |
 | 24 | 2424 | LMTP, optional STARTTLS |
-| kein Mail-Service-Port | 8080 | `/healthz`, `/readyz`, `/metrics` am Pod |
+| no mail service port | 8080 | `/healthz`, `/readyz`, `/metrics` on the pod |
 
-Die tatsächliche Aktivierung hängt von Konfiguration und TLS-Dateien ab.
-Die Existenz eines Service-Ports beweist weder Listenergesundheit noch
-öffentliche Erreichbarkeit. Der aktuelle öffentliche Nachweis umfasst IMAP
-und ManageSieve, nicht jede denkbare POP3-Route.
+Whether a listener is actually enabled depends on the configuration and the TLS
+files. The existence of a service port proves neither listener health nor
+public reachability. The current public evidence covers IMAP and ManageSieve,
+not every conceivable POP3 route.
 
-Die Listener werden zuerst mit dem vertrauensgebundenen PROXY-Parser und
-anschließend gegebenenfalls mit implizitem TLS umhüllt. `RemoteAddr()` liefert
-damit die effektive Client-Adresse. Die Receiver-Vertrauensliste und die
-PROXY-Ausgabe des Directors sind ein gemeinsamer Vertrag; die NetworkPolicy
-begrenzt zusätzlich die erreichbaren Absender.
+The listeners are wrapped first with the trust-bound PROXY parser and then,
+where applicable, with implicit TLS. `RemoteAddr()` therefore returns the
+effective client address. The receiver trust list and the Director's PROXY
+output are a shared contract; the NetworkPolicy additionally restricts which
+senders can be reached.
 
-## Zustand, Parallelität und Skalierung
+## State, Concurrency and Scaling
 
-Verbindung, ausgewählte Mailbox, Parserpuffer, Watch und Antwortschreiber
-leben im Pod. `cmdMu` serialisiert im IMAP-Pfad Befehle und asynchrone
-Benachrichtigungen. Speicherbudgets begrenzen eingelesene Literale und
-Nachrichtenarbeit; `GOMEMLIMIT` ersetzt dieses Anwendungsbudget nicht.
+Connection, selected mailbox, parser buffers, watch and response writer live in
+the pod. In the IMAP path, `cmdMu` serializes commands and asynchronous
+notifications. Memory budgets limit the literals read in and the per-message
+work; `GOMEMLIMIT` does not replace this application-level budget.
 
-Dauerhafte Maildaten, Änderungsjournale, Skripte und Lernjobs liegen in RADOS.
-Einzelne Objektänderungen verwenden Compare-and-Swap; über mehrere Objekte
-arbeiten Intents, Pending-Markierungen und Reparaturpfade. POP3-Maildrop-
-und Lernoperationen verwenden darüber hinaus erneuerbare Leases. Es gibt
-keine allgemeine Zusage einer transaktionalen Datenbank über alle Objekte.
+Durable mail data, change journals, scripts and learning jobs live in RADOS.
+Changes to individual objects use compare-and-swap; across several objects,
+intents, pending markers and repair paths do the work. POP3 maildrop and
+learning operations additionally use renewable leases. There is no general
+promise of a transactional database spanning all objects.
 
-Watch/Notify weckt IMAP-Sitzungen nach Änderungen anderer Pods. Benachrichtigungen
-sind Hinweise; Header, MODSEQ und Änderungsjournal bleiben die Grundlage für
-die Synchronisierung. Verlorene Hinweise dürfen nicht mit verlorenem
-Mailzustand verwechselt werden.
+Watch/notify wakes IMAP sessions after changes made by other pods. Notifications
+are hints; header, MODSEQ and the change journal remain the basis for
+synchronization. Lost hints must not be confused with lost
+mail state.
 
-Mehr Replikas verteilen Verbindungen und Arbeit. Heiße Konten, CAS-Konflikte,
-Ceph-Latenz, Speicherbudgets und nachgelagerte Dienste können weiter begrenzen.
-Eine garantierte Millionenkapazität ist nicht aus den bisherigen Tests ableitbar.
+More replicas spread connections and work. Hot accounts, CAS conflicts,
+Ceph latency, memory budgets and downstream services can still impose limits.
+A guaranteed capacity in the millions cannot be derived from the tests so far.
 
-## Ausfälle und ihre sichtbaren Folgen
+## Failures and Their Visible Consequences
 
-| Ausfall | Wirkung | Reaktion/Nachweis |
+| Failure | Effect | Response/evidence |
 |---|---|---|
-| Nauthilus/Backchannel | Neue Anmeldung oder Empfängerauflösung scheitert temporär | Auth-Fehler getrennt von falschen Zugangsdaten behandeln |
-| Ceph nicht erreichbar | Store-Operationen schlagen fehl; Readiness prüft `Store.Ping` | Ceph und echte Mailoperationen prüfen; Liveness allein reicht nicht |
-| Pod wird beendet | Sitzungen werden beendet; Clients verbinden neu | Readiness wird rot, Drain, begrenztes Shutdown-Fenster |
-| Watch fällt aus | Verzögerte Aktualisierung | Polling/Neuanmeldung am Watch, persistente Änderungsdaten bleiben maßgeblich |
-| Skript schlägt fehl | LMTP nutzt vorgesehenen INBOX-Fallback; IMAP erhält das Original gemäß Aktionspfad | Protokollkontext beachten; kein einheitliches Verhalten für alle Aktionen |
-| Lernziel nicht erreichbar | Persistenter Job wartet bzw. läuft in Retry/Dead | Queue-/Programmmetriken und Jobzustand prüfen |
-| Collector nicht erreichbar | Telemetrie kann ausfallen, Mailbetrieb kann weiterlaufen | Exportfehler und Telemetrie gesondert beurteilen |
+| Nauthilus/backchannel | New logins or recipient resolution fail temporarily | Handle auth errors separately from wrong credentials |
+| Ceph unreachable | Store operations fail; readiness checks `Store.Ping` | Check Ceph and real mail operations; liveness alone is not enough |
+| Pod is terminated | Sessions are ended; clients reconnect | Readiness turns red, drain, limited shutdown window |
+| Watch fails | Delayed updates | Polling/re-registration of the watch; the persistent change data remains authoritative |
+| Script fails | LMTP uses the intended INBOX fallback; IMAP keeps the original according to the action path | Mind the protocol context; there is no uniform behavior for all actions |
+| Learning target unreachable | The persistent job waits or moves into retry/dead | Check queue and program metrics and the job state |
+| Collector unreachable | Telemetry can fail while mail operation continues | Assess export errors and telemetry separately |
 
-## Entwurfsentscheidungen
+## Design Decisions
 
-Die [Entscheidungsübersicht](docs/decisions/architecture.md) erklärt RADOS,
-Pooltrennung, Interfaces, Intents und die Programm-Allowlist samt Konsequenzen.
-[UML und Sequenzdiagramme](docs/architecture/runtime.md) führen von den
-Interfaces zu konkreten Login- und Zustellpfaden.
+The [decision overview](docs/decisions/architecture.md) explains RADOS,
+pool separation, interfaces, intents and the program allowlist together with
+their consequences. [UML and sequence diagrams](docs/architecture/runtime.md)
+lead from the interfaces to concrete login and delivery paths.

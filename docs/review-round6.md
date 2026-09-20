@@ -1,231 +1,231 @@
-# Review-Runde 6 (15.09.2026, Codex gpt-6-astra, Stand 0.8.6 → Fixes in 0.8.7)
+# Review round 6 (2026-09-15, Codex gpt-6-astra, state 0.8.6 → fixes in 0.8.7)
 
-Schwerpunkt: die seit Runde 5 neuen Teile (ACL/METADATA/NOTIFY/CATENATE,
-\Recent-Wasserzeichen, Adressparser, Sieve-Erweiterungen, Redirect/Vacation).
-21 Befunde, alle in 0.8.7 behandelt; die Umsetzung steht jeweils unter
-"Fix". Der Originalbericht folgt unten.
+Focus: the parts that are new since round 5 (ACL/METADATA/NOTIFY/CATENATE,
+\Recent watermark, address parser, Sieve extensions, redirect/vacation).
+21 findings, all addressed in 0.8.7; the implementation is given under
+"Fix" in each case. The original report follows below.
 
-| # | Befund | Fix in 0.8.7 |
+| # | Finding | Fix in 0.8.7 |
 |---|---|---|
-| 1 | Sieve `duplicate` schreibt den Merker während des Laufs | Test ist nur noch eine Abfrage (`Hooks.Duplicate(key)`), Antwort pro Schlüssel im Lauf gecacht; `Delivery.Tracked` wird vom LMTP-Server erst nach dem endgültigen Ergebnis (Speichern oder Discard) geschrieben |
-| 2 | `stop` überspringt den impliziten Keep | Fork: `ErrStop` bricht die Schleife ab, der Abschluss (impliziter Keep) läuft wie am Skriptende; Test `TestStopKeepsImplicitKeep` |
-| 3 | FETCH/CATENATE-Teilbereiche können abstürzen | negative Offsets/Längen sind BAD, `off+size` wird vorab gegen MaxInt64 begrenzt; CATENATE begrenzt per Subtraktion; Test `TestPartialRangesRejectedNotCrashing` |
-| 4 | Paralleles DELETE gibt Blobs doppelt frei | Registry-CAS prüft, dass der Eintrag noch dieselbe Mailbox-ID trägt; nur der Gewinner gibt Referenzen frei, Abo/ACL kommen aus seinem Snapshot, der Verlierer bekommt `ErrNoMailbox` |
-| 5 | COPY/MOVE im fremden Namespace ohne Flag-Rechte | `flagsForTarget` wendet `allowedFlags` auch an, wenn Quelle und Ziel im selben (fremden) Namespace liegen |
-| 6 | Ersetzendes STORE prüft gegen veralteten Snapshot | `replaceFlags(rights, flags)`: die Mutation läuft im Store gegen den aktuellen Flagbestand und erhält Flags ohne Recht; Test `TestReplaceFlagsKeepsProtectedFlags` |
-| 7 | Vacation `:from` Header-Injection | Wert wird als eine Adresse geparst (`net/mail`), CR/LF abgewiesen, sonst Fallback auf den Empfänger; Test `TestVacationFromInjection` |
-| 8 | Redirect vor dem dauerhaften Speichern | Mit lokaler Kopie wird zuerst gespeichert, dann weitergeleitet; ein Relay-Fehler verliert nur die Weiterleitung (geloggt), nie die Mail, und ein LMTP-Retry sendet nicht doppelt. Reiner Redirect ohne Kopie sendet weiterhin sofort (nichts gespeichert). Eine Outbox bleibt offen (siehe unten) |
-| 9 | Redirect-Loops über Konten | Header `X-Sieve-Redirected-From: <konto>` bei jeder Weiterleitung; ist das eigene Konto darin oder gibt es > 25 Received-Header, wird nicht weitergeleitet |
-| 10 | Vacation-Sperrfrist nicht atomar | Reservierung per CAS vor dem Versand (`VacationSeen(key, period)`), Freigabe bei Versandfehler (`ttl == 0` löscht den Eintrag, neue Semantik in `model.User`) |
-| 11 | LMTP-Reset behält `rcptRes` | `Reset` leert auch `rcptRes` |
-| 12 | Shared-Pointer-Race SETACL/DELETEACL | `MailboxRec.ACLGen` zählt ACL-Änderungen; Pointer tragen die Generation, Widerruf hinterlässt einen Tombstone mit Generation; ein späterer Write älterer Generation wird ignoriert; `ListShared` blendet Tombstones aus |
-| 13 | LIST löscht Pointer bei temporären Fehlern | Pointer wird nur entfernt, wenn die Mailbox fehlt (`ErrNoMailbox`), und auch dann nur, wenn seine Generation nicht neuer ist (`RemoveSharedRef(ref)`); sonst nur ausgeblendet |
-| 14 | NOTIFY vs. Writer außerhalb `cmdMu` | die Fehlerpfade (Zeile zu lang, Lesefehler) nehmen `cmdMu` für Antwort und Flush |
-| 15 | REPLACE ohne `drain` bei früher Ablehnung | alle frühen Ablehnungen konsumieren die Zeile samt angekündigtem Literal |
-| 16 | EXAMINE verbraucht \Recent per Poll | `c.examine` verhindert `claimRecent`; Test `TestExamineDoesNotClaimRecent` |
-| 17 | MOVE verliert konkurrierende Änderungen | `announceExpunge` springt nicht mehr im Change-Log vor, sondern ruft `poll(true)`; eigene Expunges sind nicht mehr im Snapshot und drucken nichts, fremde Zustellungen und die Kopien eines MOVE in dieselbe Mailbox werden regulär angekündigt |
-| 18 | TO/CC/BCC nicht unterschieden | die Suchschlüssel behalten den Headernamen (`key`), der FTS-Index dient nur der Kandidatenauswahl, geprüft wird der jeweilige Header bzw. die geparste Adressliste; Test `TestSearchToCcBccDistinct` |
-| 19 | Adressparser entfernt Leerzeichen aus quoted Localparts | Wörter werden für den Localpart ohne Trennzeichen konkateniert (quoted strings behalten ihre Zeichen), für Anzeigenamen mit Leerzeichen |
-| 20 | Verschachteltes MODSEQ ohne Rückgabe | `hasModseq` prüft den Kriterienbaum; Test `TestNestedModseqInSearchResponse` |
-| 21 | memstore RENAME/DELETE geben ACL-Map ungesperrt weiter | `copyACL`-Snapshots unter dem Mutex |
+| 1 | Sieve `duplicate` writes the marker during the run | The test is now only a query (`Hooks.Duplicate(key)`), the answer is cached per key within the run; `Delivery.Tracked` is written by the LMTP server only after the final result (store or discard) |
+| 2 | `stop` skips the implicit keep | Fork: `ErrStop` breaks out of the loop, the finalization (implicit keep) runs as it does at the end of a script; test `TestStopKeepsImplicitKeep` |
+| 3 | FETCH/CATENATE partial ranges can crash | Negative offsets/lengths are BAD, `off+size` is bounded against MaxInt64 up front; CATENATE bounds by subtraction; test `TestPartialRangesRejectedNotCrashing` |
+| 4 | Parallel DELETE releases blobs twice | The registry CAS checks that the entry still carries the same mailbox ID; only the winner releases references, subscription/ACL come from its snapshot, the loser gets `ErrNoMailbox` |
+| 5 | COPY/MOVE in another user's namespace without flag rights | `flagsForTarget` applies `allowedFlags` even when source and target lie in the same (foreign) namespace |
+| 6 | A replacing STORE checks against a stale snapshot | `replaceFlags(rights, flags)`: the mutation runs in the store against the current flag state and preserves flags the user has no right to; test `TestReplaceFlagsKeepsProtectedFlags` |
+| 7 | Vacation `:from` header injection | The value is parsed as a single address (`net/mail`), CR/LF is rejected, otherwise it falls back to the recipient; test `TestVacationFromInjection` |
+| 8 | Redirect before the durable store | With a local copy, the message is stored first and forwarded afterwards; a relay error only loses the forward (logged), never the mail, and an LMTP retry does not send twice. A pure redirect without a copy still sends immediately (nothing was stored). An outbox remains open (see below) |
+| 9 | Redirect loops across accounts | Header `X-Sieve-Redirected-From: <account>` on every forward; if the own account appears in it, or there are > 25 Received headers, nothing is forwarded |
+| 10 | Vacation suppression period not atomic | Reservation via CAS before sending (`VacationSeen(key, period)`), release on a send error (`ttl == 0` deletes the entry, new semantics in `model.User`) |
+| 11 | LMTP reset keeps `rcptRes` | `Reset` clears `rcptRes` as well |
+| 12 | Shared pointer race SETACL/DELETEACL | `MailboxRec.ACLGen` counts ACL changes; pointers carry the generation, a revocation leaves a tombstone with a generation; a later write of an older generation is ignored; `ListShared` hides tombstones |
+| 13 | LIST deletes pointers on temporary errors | A pointer is only removed when the mailbox is missing (`ErrNoMailbox`), and even then only when its generation is not newer (`RemoveSharedRef(ref)`); otherwise it is merely hidden |
+| 14 | NOTIFY vs. writer outside `cmdMu` | The error paths (line too long, read error) take `cmdMu` for the response and the flush |
+| 15 | REPLACE without `drain` on an early rejection | All early rejections consume the line including the announced literal |
+| 16 | EXAMINE consumes \Recent via poll | `c.examine` prevents `claimRecent`; test `TestExamineDoesNotClaimRecent` |
+| 17 | MOVE loses concurrent changes | `announceExpunge` no longer jumps ahead in the change log but calls `poll(true)`; the session's own expunges are no longer in the snapshot and print nothing, foreign deliveries and the copies of a MOVE into the same mailbox are announced regularly |
+| 18 | TO/CC/BCC not distinguished | The search keys keep the header name (`key`), the FTS index only serves candidate selection, what is checked is the respective header or the parsed address list; test `TestSearchToCcBccDistinct` |
+| 19 | Address parser strips spaces from quoted local parts | Words are concatenated without separators for the local part (quoted strings keep their characters), and with spaces for display names |
+| 20 | Nested MODSEQ without a return value | `hasModseq` checks the criteria tree; test `TestNestedModseqInSearchResponse` |
+| 21 | memstore RENAME/DELETE pass on the ACL map unlocked | `copyACL` snapshots under the mutex |
 
-Beim Verifizieren von 0.8.7 zusätzlich gefunden und in 0.8.8 behoben:
-ManageSieve `SETACTIVE ""` (deaktivieren) schrieb ein leeres xattr, worauf
-go-ceph mit einem Index-Panic reagiert und der ganze Prozess starb
-(`SetActiveScript` entfernt das xattr jetzt). Die Verbindungs-Goroutinen
-von IMAP, ManageSieve und LMTP fangen Panics seither ab (Log mit Stack,
-nur die betroffene Verbindung bzw. Transaktion endet; LMTP antwortet 451).
+Additionally found while verifying 0.8.7 and fixed in 0.8.8:
+ManageSieve `SETACTIVE ""` (deactivate) wrote an empty xattr, to which
+go-ceph reacts with an index panic, killing the whole process
+(`SetActiveScript` now removes the xattr). The connection goroutines of
+IMAP, ManageSieve and LMTP have caught panics ever since (log with stack,
+only the affected connection or transaction ends; LMTP answers 451).
 
-Offen geblieben (bewusst): eine persistente Outbox für Redirect/Vacation
-(Befund 8) ist Architekturarbeit für den Regelbetrieb; bis dahin gilt:
-lokale Kopie zuerst, Weiterleitung danach, Fehler geloggt.
+Left open (deliberately): a persistent outbox for redirect/vacation
+(finding 8) is architectural work for regular operation; until then the
+rule is: local copy first, forward afterwards, errors logged.
 
 ---
 
-## Originalbericht
+## Original report
 
-# Review-Runde 6
+# Review round 6
 
-**Der Stand enthält weiterhin Datenverlustrisiken und einen durch IMAP-Eingaben erreichbaren Prozessabsturz.** Mehrere Korrekturen aus Runde 5 greifen nur in Teilpfaden.
+**This state still contains data loss risks and a process crash reachable through IMAP input.** Several fixes from round 5 take effect only in partial paths.
 
-**Prüfgrundlage:** ausschließlich lesende Quellcodeprüfung einschließlich aufgerufener Store-/Interpreterpfade und RFC-Abgleich. Keine Dateien geändert, keine Tests ausgeführt. Mangels Git-Metadaten lässt sich das Einführungsdatum einzelner Fehler nicht sicher bestimmen.
+**Basis of the review:** read-only source code review including the store/interpreter paths being called, plus an RFC comparison. No files changed, no tests run. In the absence of git metadata, the date individual bugs were introduced cannot be determined reliably.
 
-## Hohe Schwere
+## High severity
 
-### 1. Sieve `duplicate` kann die einzige Zustellung verwerfen
+### 1. Sieve `duplicate` can discard the only delivery
 
-**Fundstellen:** `internal/lmtpd/lmtpd.go:277`, `third_party/go-sieve/interp/extensions.go:229`, `internal/cephstore/scripts.go:161`.
+**Locations:** `internal/lmtpd/lmtpd.go:277`, `third_party/go-sieve/interp/extensions.go:229`, `internal/cephstore/scripts.go:161`.
 
-Der Test persistiert den Schlüssel unmittelbar während der Script-Ausführung. Scheitert danach die Speicherung temporär, erkennt der nächste Zustellversuch die Nachricht bereits als Duplikat. Bei `if duplicate { discard; }` folgt LMTP-Erfolg ohne gespeicherte Nachricht. Auch zwei identische Tests innerhalb derselben Ausführung können unterschiedliche Ergebnisse liefern.
+The test persists the key immediately, during script execution. If storing then fails temporarily, the next delivery attempt already recognizes the message as a duplicate. With `if duplicate { discard; }`, LMTP success follows without a stored message. Two identical tests within the same execution can also return different results.
 
-**Fix:** Ergebnisse innerhalb einer Ausführung zwischenspeichern; endgültige Tracking-Einträge erst nach erfolgreichem Zustellabschluss schreiben. Fehlgeschlagene Versuche dürfen keine positiven Duplikattreffer erzeugen. [RFC 7352 §3](https://www.rfc-editor.org/rfc/rfc7352.html#section-3)
+**Fix:** cache results within one execution; write final tracking entries only after a successful delivery completion. Failed attempts must not produce positive duplicate hits. [RFC 7352 §3](https://www.rfc-editor.org/rfc/rfc7352.html#section-3)
 
-### 2. `stop` überspringt den impliziten Keep
+### 2. `stop` skips the implicit keep
 
-**Fundstellen:** `third_party/go-sieve/interp/script.go:87`, `internal/lmtpd/lmtpd.go:310`.
+**Locations:** `third_party/go-sieve/interp/script.go:87`, `internal/lmtpd/lmtpd.go:310`.
 
-`ErrStop` führt sofort zu `return nil`, bevor der implizite Keep erzeugt wird. Schon das gültige Script `stop;` hinterlässt keine Zustellaktion und wird vom LMTP-Pfad als Discard erfolgreich bestätigt. Ebenso betroffen: `vacation "..."; stop;`.
+`ErrStop` leads immediately to `return nil`, before the implicit keep is created. Even the valid script `stop;` leaves no delivery action behind and is confirmed as a successful discard by the LMTP path. Likewise affected: `vacation "..."; stop;`.
 
-**Fix:** Bei `ErrStop` die Ausführungsschleife verlassen und anschließend dieselbe Abschlusslogik wie am normalen Script-Ende ausführen. [RFC 5228 §3.3](https://www.rfc-editor.org/rfc/rfc5228.html#section-3.3)
+**Fix:** on `ErrStop`, leave the execution loop and then run the same finalization logic as at the normal end of a script. [RFC 5228 §3.3](https://www.rfc-editor.org/rfc/rfc5228.html#section-3.3)
 
-### 3. FETCH-/CATENATE-Teilbereiche können den Serverprozess abstürzen lassen
+### 3. FETCH/CATENATE partial ranges can crash the server process
 
-**Fundstellen:** `internal/imapproto/fetch.go:292`, `internal/imapproto/mailbox.go:1392`; weitergereicht an `vendor/github.com/emersion/go-imap/v2/imapserver/message.go:159`.
+**Locations:** `internal/imapproto/fetch.go:292`, `internal/imapproto/mailbox.go:1392`; passed on to `vendor/github.com/emersion/go-imap/v2/imapserver/message.go:159`.
 
-FETCH akzeptiert negative Offsets und Größen; beispielsweise erreicht `BODY[]<-1.1>` einen ungültigen Slice-Zugriff. CATENATE weist negative Werte zurück, prüft aber den Überlauf von `off + ln` nicht: `PARTIAL=1.9223372036854775807` erzeugt einen negativen Endindex. Der IMAP-Goroutine fehlt eine Panic-Abfangstelle; betroffen ist der gesamte Prozess.
+FETCH accepts negative offsets and sizes; `BODY[]<-1.1>`, for example, reaches an invalid slice access. CATENATE rejects negative values but does not check the overflow of `off + ln`: `PARTIAL=1.9223372036854775807` produces a negative end index. The IMAP goroutine has no panic recovery point; the entire process is affected.
 
-**Fix:** Protokollgültige Zahlenbereiche vorab prüfen und Teilbereiche durch Subtraktion begrenzen, bevor addiert oder gesliced wird.
+**Fix:** validate protocol-valid number ranges up front and bound partial ranges by subtraction before adding or slicing.
 
-### 4. Paralleles DELETE kann Blobs einer anderen Mailbox löschen
+### 4. Parallel DELETE can delete blobs of another mailbox
 
-**Fundstellen:** `internal/cephstore/user.go:361`, `internal/cephstore/user.go:373`.
+**Locations:** `internal/cephstore/user.go:361`, `internal/cephstore/user.go:373`.
 
-Der Registry-CAS ignoriert den aktuell gelesenen Eintrag. Zwei DELETE-Aufrufe können dieselben Metadaten vorab lesen und anschließend beide die Blob-Referenzen freigeben. Existiert eine COPY desselben Blobs in einer anderen Mailbox, fällt dessen Refcount dadurch fälschlich auf null.
+The registry CAS ignores the entry that was just read. Two DELETE calls can read the same metadata up front and then both release the blob references. If a COPY of the same blob exists in another mailbox, its refcount incorrectly drops to zero as a result.
 
-Ein verspäteter DELETE kann außerdem einen inzwischen neu angelegten gleichnamigen Registry-Eintrag entfernen. Die neue Abo-Erhaltung verwendet ebenfalls den veralteten Snapshot.
+A late DELETE can additionally remove a registry entry of the same name that has been re-created in the meantime. The new subscription preservation likewise uses the stale snapshot.
 
-**Fix:** Im CAS Mailbox-ID und aktuellen Registry-Zustand prüfen; genau einen Löschgewinner bestimmen. Nur dieser darf Referenzen freigeben. Subscription und ACL aus dessen erfolgreichem CAS-Snapshot übernehmen.
+**Fix:** check the mailbox ID and the current registry state in the CAS; determine exactly one deletion winner. Only that one may release references. Take subscription and ACL from its successful CAS snapshot.
 
-## Mittlere Schwere
+## Medium severity
 
-### 5. COPY innerhalb eines fremden Namespace umgeht weiterhin Flagrechte
+### 5. COPY within a foreign namespace still bypasses flag rights
 
-**Fundstelle:** `internal/imapproto/selected.go:572`.
+**Location:** `internal/imapproto/selected.go:572`.
 
-`allowedFlags` wird nur in `copyAcross` angewendet. Selektiert Bob einen Ordner von Alice und kopiert in einen anderen Alice-Ordner, gilt `dt.u == c.mu`: `\Deleted`, `\Seen` und Keywords werden ungefiltert übernommen, obwohl Bob am Ziel nur `i` besitzt. **Runde 5, Befund 4 bleibt teilweise offen.**
+`allowedFlags` is only applied in `copyAcross`. If Bob selects a folder of Alice's and copies into another of Alice's folders, `dt.u == c.mu` holds: `\Deleted`, `\Seen` and keywords are adopted unfiltered, although Bob only has `i` on the target. **Round 5, finding 4 remains partially open.**
 
-**Fix:** Zielflagrechte unabhängig von der Namespace-Verzweigung anwenden. [RFC 4314 §4](https://www.rfc-editor.org/rfc/rfc4314.html#section-4)
+**Fix:** apply target flag rights independently of the namespace branch. [RFC 4314 §4](https://www.rfc-editor.org/rfc/rfc4314.html#section-4)
 
-### 6. Ersetzendes STORE prüft Flagrechte gegen einen veralteten Snapshot
+### 6. A replacing STORE checks flag rights against a stale snapshot
 
-**Fundstellen:** `internal/imapproto/selected.go:411`, `internal/imapproto/selected.go:440`.
+**Locations:** `internal/imapproto/selected.go:411`, `internal/imapproto/selected.go:440`.
 
-Die neue Rechteprüfung untersucht `c.msgs`; der spätere Store-CAS ersetzt dagegen die dann aktuellen Flags vollständig. Setzt Alice zwischen Prüfung und CAS `\Deleted`, kann Bob mit ausschließlich `rs` dieses Flag durch `STORE ... FLAGS (\Seen)` entfernen.
+The new rights check examines `c.msgs`; the later store CAS, by contrast, completely replaces the flags that are current at that point. If Alice sets `\Deleted` between the check and the CAS, Bob can remove that flag with just `rs` through `STORE ... FLAGS (\Seen)`.
 
-**Fix:** Die erlaubten Änderungen innerhalb der Store-Mutation gegen deren aktuellen Flagbestand prüfen beziehungsweise geschützte Flags erhalten.
+**Fix:** check the permitted changes inside the store mutation against its current flag state, respectively preserve protected flags.
 
-### 7. Vacation erlaubt Header-Injection über `:from`
+### 7. Vacation allows header injection via `:from`
 
-**Fundstellen:** `third_party/go-sieve/interp/vacation.go:104`, `internal/sieve/vacation.go:125`.
+**Locations:** `third_party/go-sieve/interp/vacation.go:104`, `internal/sieve/vacation.go:125`.
 
-Der expandierte `:from`-Wert wird ohne Adress- oder CR/LF-Prüfung direkt hinter `From:` geschrieben. Ein mehrzeiliger Sieve-String kann zusätzliche Header oder einen vorzeitigen Headerabschluss einschleusen. Das erweitert nicht automatisch die SMTP-Empfängerliste, beschädigt aber die erzeugte Nachricht.
+The expanded `:from` value is written directly after `From:` without an address or CR/LF check. A multi-line Sieve string can inject additional headers or an early end of the header section. That does not automatically extend the SMTP recipient list, but it corrupts the generated message.
 
-**Fix:** Nach Variablenexpansion Steuerzeichen zurückweisen, den Wert als gültige Adressliste parsen und sicher serialisieren.
+**Fix:** after variable expansion, reject control characters, parse the value as a valid address list and serialize it safely.
 
-### 8. Redirect erfolgt weiterhin vor dauerhaftem Speichern
+### 8. Redirect still happens before the durable store
 
-**Fundstellen:** `internal/lmtpd/lmtpd.go:295`, `internal/lmtpd/lmtpd.go:350`.
+**Locations:** `internal/lmtpd/lmtpd.go:295`, `internal/lmtpd/lmtpd.go:350`.
 
-Bei `redirect` zusammen mit `keep` oder `fileinto` wird zuerst extern versendet. Scheitert anschließend die lokale Speicherung temporär, liefert LMTP einen Fehler; der Wiederholungsversuch versendet erneut. Die nachgelagerte Vacation-Korrektur löst diesen Redirect-Pfad nicht.
+With `redirect` together with `keep` or `fileinto`, the external send happens first. If the local store then fails temporarily, LMTP returns an error; the retry sends again. The subsequent vacation fix does not resolve this redirect path.
 
-**Fix:** Versandaufträge dauerhaft zusammen mit dem Zustellabschluss protokollieren und anschließend über eine Outbox abarbeiten. Bloßes Vertauschen der beiden Operationen verschiebt das Wiederholungsproblem.
+**Fix:** record send jobs durably together with the delivery completion and then process them through an outbox. Merely swapping the two operations only shifts the retry problem.
 
-### 9. Redirect-Loops über mehrere Konten werden nicht erkannt
+### 9. Redirect loops across multiple accounts are not detected
 
-**Fundstelle:** `internal/lmtpd/lmtpd.go:405`.
+**Location:** `internal/lmtpd/lmtpd.go:405`.
 
-Die Zielmenge kennt nur den aktuellen Empfänger und die Ziele dieser einen Ausführung. Bei A→B→A greift weder der Selbstvergleich noch `Auto-Submitted`, da Redirect dieses Feld nicht setzt. Auch `maxRedirects` begrenzt nur die Verzweigung, nicht die Anzahl der Umläufe. Ein Abbruch hängt vollständig von einem externen Relay-Hoplimit ab.
+The target set only knows the current recipient and the targets of this one execution. With A→B→A, neither the self comparison nor `Auto-Submitted` takes effect, since redirect does not set that field. `maxRedirects` also only bounds the fan-out, not the number of loop iterations. Termination depends entirely on an external relay hop limit.
 
-**Fix:** Einen persistent mitgeführten Loop-Nachweis oder ein geprüftes Received-Hoplimit implementieren und erkannte Schleifen abbrechen. [RFC 5228 §4.2](https://www.rfc-editor.org/rfc/rfc5228.html#section-4.2)
+**Fix:** implement a persistently carried loop marker or a checked Received hop limit and break detected loops. [RFC 5228 §4.2](https://www.rfc-editor.org/rfc/rfc5228.html#section-4.2)
 
-### 10. Vacation-Sperrfrist ist nach der Korrektur nicht mehr atomar
+### 10. The vacation suppression period is no longer atomic after the fix
 
-**Fundstellen:** `internal/lmtpd/lmtpd.go:444`, `internal/lmtpd/lmtpd.go:452`, `internal/lmtpd/lmtpd.go:456`.
+**Locations:** `internal/lmtpd/lmtpd.go:444`, `internal/lmtpd/lmtpd.go:452`, `internal/lmtpd/lmtpd.go:456`.
 
-Zwei parallele Zustellungen lesen beide „noch nicht beantwortet“, senden beide und tragen erst danach die Sperrfrist ein. Der CAS beim abschließenden Eintrag verhindert die bereits versandte zweite Antwort nicht. **Folgefehler der Korrektur zu Runde 5, Befund 14.**
+Two parallel deliveries both read "not yet answered", both send, and only then record the suppression period. The CAS on the final entry does not prevent the second reply that has already been sent. **Follow-up bug of the fix for round 5, finding 14.**
 
-**Fix:** Einen befristeten Versandanspruch atomar reservieren; nach erfolgreichem Versand bestätigen, bei eindeutigem Versandfehler freigeben. [RFC 5230 §8](https://www.rfc-editor.org/rfc/rfc5230.html#section-8)
+**Fix:** reserve a time-limited send claim atomically; confirm it after a successful send, release it on an unambiguous send error. [RFC 5230 §8](https://www.rfc-editor.org/rfc/rfc5230.html#section-8)
 
-### 11. LMTP-Reset behält die Auth-Ergebnisse vorheriger Empfänger
+### 11. LMTP reset keeps the auth results of previous recipients
 
-**Fundstellen:** `internal/lmtpd/lmtpd.go:123`, `internal/lmtpd/lmtpd.go:208`.
+**Locations:** `internal/lmtpd/lmtpd.go:123`, `internal/lmtpd/lmtpd.go:208`.
 
-`Reset` leert `rcpt` und `rcptAddr`, aber nicht `rcptRes`. In der nächsten Transaktion wird deshalb das erste alte Auth-Ergebnis an den neuen Empfänger übergeben. `provision.Apply` kann beispielsweise dessen Quota mit der Quota eines vorherigen Kontos überschreiben. Zusätzlich wächst die Liste über die Verbindungslaufzeit.
+`Reset` clears `rcpt` and `rcptAddr`, but not `rcptRes`. In the next transaction, the first old auth result is therefore handed to the new recipient. `provision.Apply`, for example, can overwrite that recipient's quota with the quota of a previous account. In addition, the list grows over the connection's lifetime.
 
-**Fix:** `rcptRes` bei jedem Transaktionsreset ebenfalls leeren.
+**Fix:** clear `rcptRes` on every transaction reset as well.
 
-### 12. Shared-Pointer-Race bleibt trotz erneutem ACL-Lesen bestehen
+### 12. The shared pointer race persists despite the re-read of the ACL
 
-**Fundstelle:** `internal/cephstore/acl.go:108`.
+**Location:** `internal/cephstore/acl.go:108`.
 
-Möglicher Ablauf: DELETEACL liest „keine Rechte“; SETACL stellt Rechte und Pointer wieder her; der ältere DELETEACL entfernt anschließend den Pointer. Der zusätzliche Read liegt weiterhin außerhalb der Pointer-Mutation. **Runde 5, Befund 7 ist nicht behoben.**
+A possible sequence: DELETEACL reads "no rights"; SETACL restores rights and pointer; the older DELETEACL then removes the pointer. The additional read still lies outside the pointer mutation. **Round 5, finding 7 is not fixed.**
 
-**Fix:** Pointer-Versionierung beziehungsweise eine wiederholbare, generationsgebundene Synchronisierung einführen. Ein einmaliger Kontrollread vor dem zweiten Write reicht nicht.
+**Fix:** introduce pointer versioning, respectively a repeatable, generation-bound synchronization. A single check read before the second write is not enough.
 
-### 13. LIST entfernt Shared-Pointer auch bei vorübergehenden Fehlern
+### 13. LIST removes shared pointers even on temporary errors
 
-**Fundstelle:** `internal/imapproto/mailbox.go:308`.
+**Location:** `internal/imapproto/mailbox.go:308`.
 
-Jeder Fehler aus `rightsOf`, einschließlich eines temporären RADOS-Lesefehlers, führt zur dauerhaften Pointer-Löschung. Damit kann eine einzelne fehlgeschlagene LIST-Abfrage eine weiterhin gültige Freigabe aus späteren Auflistungen entfernen.
+Every error from `rightsOf`, including a temporary RADOS read error, leads to permanent pointer deletion. A single failed LIST query can thereby remove a still valid share from later listings.
 
-**Fix:** Bei temporären Fehlern ausschließlich die aktuelle Ausgabe auslassen. Dauerhaftes Bereinigen nur bei nachgewiesen ungültiger, gegen konkurrierende Änderungen abgesicherter Referenz.
+**Fix:** on temporary errors, omit only the current output. Permanent cleanup only for a reference proven invalid and protected against concurrent changes.
 
-### 14. NOTIFY konkurriert weiterhin mit Writer-Zugriffen außerhalb von `cmdMu`
+### 14. NOTIFY still races with writer access outside of `cmdMu`
 
-**Fundstellen:** `internal/imapproto/conn.go:347`, `internal/imapproto/conn.go:355`.
+**Locations:** `internal/imapproto/conn.go:347`, `internal/imapproto/conn.go:355`.
 
-Die Antworten bei überlangen Kommandozeilen und sonstigen Lesefehlern benutzen Writer und Flush ohne `cmdMu`. Gleichzeitig kann `notifyLoop` unter seiner Sperre auf denselben gepufferten Writer zugreifen. Die IDLE-DONE-Korrektur deckt diese Fehlerpfade nicht ab.
+The responses for overlong command lines and other read errors use the writer and flush without `cmdMu`. At the same time, `notifyLoop` can access the same buffered writer under its own lock. The IDLE DONE fix does not cover these error paths.
 
-**Fix:** Auch diese Antwort- und Flush-Pfade serialisieren; das blockierende Netzwerklesen selbst außerhalb der Sperre lassen.
+**Fix:** serialize these response and flush paths as well; leave the blocking network read itself outside the lock.
 
-### 15. Frühe REPLACE-Ablehnung lässt Literalinhalt als Folgekommandos zurück
+### 15. An early REPLACE rejection leaves literal content behind as follow-up commands
 
-**Fundstelle:** `internal/imapproto/mailbox.go:1422`.
+**Location:** `internal/imapproto/mailbox.go:1422`.
 
-Anders als APPEND verlassen die frühen Rechte-/Zielprüfungen REPLACE ohne `drain`. Bei einem bereits gesendeten nicht synchronisierenden Literal wird dessen Nachrichtentext anschließend als neue IMAP-Kommandos gelesen. Dadurch verliert die Verbindung ihre Kommandogrenzen.
+Unlike APPEND, the early rights/target checks leave REPLACE without a `drain`. With a non-synchronizing literal that has already been sent, its message text is subsequently read as new IMAP commands. The connection thereby loses its command boundaries.
 
-**Fix:** Auf allen frühen Ablehnungspfaden verbleibende Argumente einschließlich bereits angekündigter Literale korrekt konsumieren.
+**Fix:** on all early rejection paths, correctly consume the remaining arguments including literals that have already been announced.
 
-### 16. EXAMINE verbraucht durch späteres Polling doch `\Recent`
+### 16. EXAMINE consumes `\Recent` after all through later polling
 
-**Fundstellen:** `internal/imapproto/selected.go:121`, `internal/imapproto/selected.go:222`.
+**Locations:** `internal/imapproto/selected.go:121`, `internal/imapproto/selected.go:222`.
 
-SELECT überspringt `MarkRecent` bei EXAMINE korrekt. Trifft danach eine neue Nachricht ein, ruft NOOP-/IDLE-Polling jedoch uneingeschränkt `claimRecent` auf und verändert das dauerhafte Wasserzeichen. Eine nachfolgende Session sieht diese Nachrichten nicht mehr als recent.
+SELECT correctly skips `MarkRecent` for EXAMINE. If a new message arrives afterwards, however, NOOP/IDLE polling calls `claimRecent` without restriction and changes the durable watermark. A subsequent session no longer sees those messages as recent.
 
-**Fix:** Den EXAMINE-Zustand auch beim Claim berücksichtigen. [RFC 3501 §6.3.2](https://www.rfc-editor.org/rfc/rfc3501.html#section-6.3.2)
+**Fix:** take the EXAMINE state into account for the claim as well. [RFC 3501 §6.3.2](https://www.rfc-editor.org/rfc/rfc3501.html#section-6.3.2)
 
-### 17. MOVE kann konkurrierende Änderungen dauerhaft aus dem Session-Snapshot verlieren
+### 17. MOVE can permanently lose concurrent changes from the session snapshot
 
-**Fundstellen:** `internal/imapproto/selected.go:333`, `internal/imapproto/selected.go:718`.
+**Locations:** `internal/imapproto/selected.go:333`, `internal/imapproto/selected.go:718`.
 
-`announceExpunge` übernimmt den neuesten Mailbox-Header, ohne sämtliche Änderungen bis zu dessen ModSeq einzulesen. Trifft während MOVE eine weitere Nachricht ein, kann ihr ModSeq damit bereits als verarbeitet gelten. Beim MOVE in dieselbe Mailbox werden anschließend nur die eigenen Kopien angehängt; weitere Polls überspringen die fremde Zustellung.
+`announceExpunge` adopts the newest mailbox header without reading in all changes up to its ModSeq. If another message arrives during MOVE, its ModSeq can therefore already count as processed. On a MOVE into the same mailbox, only the session's own copies are appended afterwards; further polls skip the foreign delivery.
 
-**Fix:** Snapshot und verarbeiteten ModSeq gemeinsam fortschreiben; den Wasserstand ausschließlich bis zu tatsächlich eingelesenen Änderungen anheben.
+**Fix:** advance the snapshot and the processed ModSeq together; raise the watermark only up to changes that were actually read in.
 
-### 18. Adresssuche unterscheidet TO, CC und BCC weiterhin nicht
+### 18. Address search still does not distinguish TO, CC and BCC
 
-**Fundstellen:** `internal/imapproto/search.go:262`, `internal/imapproto/search.go:577`.
+**Locations:** `internal/imapproto/search.go:262`, `internal/imapproto/search.go:577`.
 
-Alle drei Suchschlüssel werden auf `FieldTo` reduziert. Auch die abschließende Header-/Envelope-Prüfung durchsucht wieder alle drei Felder. Eine Nachricht mit dem gesuchten Empfänger ausschließlich in `Cc` trifft deshalb auch `SEARCH TO`.
+All three search keys are reduced to `FieldTo`. The final header/envelope check also searches all three fields again. A message with the searched-for recipient only in `Cc` therefore also matches `SEARCH TO`.
 
-**Fix:** Den ursprünglichen Headernamen im Suchkriterium erhalten; den gemeinsamen FTS-Index nur zur Kandidatenauswahl verwenden.
+**Fix:** preserve the original header name in the search criterion; use the shared FTS index only for candidate selection.
 
-## Niedrige Schwere
+## Low severity
 
-### 19. Adressparser verändert gültige quoted Localparts
+### 19. The address parser modifies valid quoted local parts
 
-**Fundstelle:** `internal/mailmeta/address.go:173`.
+**Location:** `internal/mailmeta/address.go:173`.
 
-Bei `"a b"@example.org` bewahrt `word()` das Leerzeichen zunächst korrekt. Der anschließende `ReplaceAll` macht daraus jedoch `ab@example.org`. Die Schreibweise `<"a b"@example.org>` läuft durch einen anderen Pfad und liefert ein anderes Ergebnis.
+For `"a b"@example.org`, `word()` initially preserves the space correctly. The subsequent `ReplaceAll`, however, turns it into `ab@example.org`. The spelling `<"a b"@example.org>` runs through a different path and returns a different result.
 
-**Fix:** Syntaktische Zwischenräume getrennt von Zeichen innerhalb quoted strings behandeln; keine pauschale Leerzeichenentfernung auf dem fertigen Localpart.
+**Fix:** handle syntactic whitespace separately from characters inside quoted strings; no blanket space removal on the finished local part.
 
-### 20. Verschachteltes MODSEQ fehlt in SEARCH-/ESEARCH-Antworten
+### 20. Nested MODSEQ is missing from SEARCH/ESEARCH responses
 
-**Fundstellen:** `internal/imapproto/search.go:374`, `internal/imapproto/search.go:406`.
+**Locations:** `internal/imapproto/search.go:374`, `internal/imapproto/search.go:406`.
 
-Die Ausgabe prüft ausschließlich `cr.modseq` des Wurzelknotens. Bei beispielsweise `SEARCH RETURN (MIN) (MODSEQ 1)` liegt der Schlüssel im Unterknoten: Die Suche wird ausgewertet, aber der erforderliche MODSEQ-Rückgabewert fehlt.
+The output only checks `cr.modseq` of the root node. With `SEARCH RETURN (MIN) (MODSEQ 1)`, for example, the key lies in a subnode: the search is evaluated, but the required MODSEQ return value is missing.
 
-**Fix:** Das Vorkommen eines MODSEQ-Kriteriums über den gesamten Kriterienbaum erfassen. [RFC 7162 §3.1.5](https://www.rfc-editor.org/rfc/rfc7162.html#section-3.1.5)
+**Fix:** record the occurrence of a MODSEQ criterion across the entire criteria tree. [RFC 7162 §3.1.5](https://www.rfc-editor.org/rfc/rfc7162.html#section-3.1.5)
 
-### 21. memstore-RENAME gibt eine weiter veränderbare ACL-Map ungesperrt weiter
+### 21. memstore RENAME passes on a still mutable ACL map unlocked
 
-**Fundstellen:** `internal/memstore/memstore.go:187`, `internal/memstore/memstore.go:194`, `internal/memstore/memstore.go:157`.
+**Locations:** `internal/memstore/memstore.go:187`, `internal/memstore/memstore.go:194`, `internal/memstore/memstore.go:157`.
 
-Die Deadlock-Korrektur gibt den Eigentümermutex vor `repoint` frei, kopiert aber die ACL-Map nicht. Ein paralleles SETACL auf dem umbenannten Ordner schreibt dieselbe Map, während `repoint` darüber iteriert: Data Race bis zum fatalen Concurrent-Map-Fehler. Betroffen ist der Test-Store.
+The deadlock fix releases the owner mutex before `repoint`, but does not copy the ACL map. A parallel SETACL on the renamed folder writes to the same map while `repoint` iterates over it: a data race up to the fatal concurrent map error. The test store is affected.
 
-**Fix:** ACLs unter dem Eigentümermutex tief kopieren und ausschließlich diese Snapshots für die anschließenden Pointer-Änderungen verwenden.
+**Fix:** deep-copy ACLs under the owner mutex and use only those snapshots for the subsequent pointer changes.
 
 ---
 
-**Validierungsgrenze:** Die beschriebenen Abläufe sind statisch nachvollzogen, nicht laufzeitseitig reproduziert. Insbesondere RADOS-CAS-, Crash- und Race-Verhalten bleiben ohne entsprechende Tests unbestätigt. Bereits dokumentierte ältere Scrubber-/Recovery-Probleme sind hier nicht erneut vollständig aufgeführt.
+**Limits of validation:** the described sequences were traced statically, not reproduced at runtime. RADOS CAS, crash and race behavior in particular remain unconfirmed without corresponding tests. Older scrubber/recovery problems that are already documented are not listed here again in full.

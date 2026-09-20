@@ -1,0 +1,86 @@
+.TH SHARDPOSTCTL-SERVER 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-server \- version and state of a ShardPost server
+.SH SYNOPSIS
+.B shardpostctl version
+.br
+.B shardpostctl server status
+.RB [ \-\-json ]
+.SH DESCRIPTION
+Both commands ask the server about itself. Neither touches an account.
+.SS version
+Prints the version of the server the client is talking to and the Go
+version it was built with. Use it to check which build answers on this
+socket or endpoint, for example after a rollout.
+.PP
+Requires no role beyond being an accepted caller.
+.SS server status
+Prints the state of this one server process:
+.TP
+.B version
+Server version.
+.TP
+.B instance
+Name of the process, in the cluster the pod name. Two pods serve the
+same accounts, so the same command can answer from either one.
+.TP
+.B started
+When the process started.
+.TP
+.B config fingerprint
+Hash over the effective configuration, with secrets left out. Two
+servers that answer with different fingerprints run different
+configurations, which is almost always a rollout that did not finish.
+.TP
+.B store
+Result of a ping against the RADOS store, plus the pools in use.
+.PP
+Requires the role
+.BR diagnose .
+.SH OPTIONS
+.TP
+.B \-\-json
+Print the answer as JSON instead of a table.
+.SH EXAMPLES
+Which build is live, and do both pods agree on their configuration?
+.PP
+.nf
+.RS
+for p in $(kubectl -n shardpost get pod \\
+        -l app.kubernetes.io/name=shardpost-server -o name); do
+    kubectl -n shardpost exec $p -c import -- \\
+        shardpostctl server status
+done
+.RE
+.fi
+.PP
+Version only, for a deployment check:
+.PP
+.nf
+.RS
+shardpostctl version
+.RE
+.fi
+.PP
+Feed the state into a monitoring script:
+.PP
+.nf
+.RS
+shardpostctl server status --json | jq -r '.store.ok, .config_fingerprint'
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+The server answered.
+.TP
+.B 75
+The server is not reachable or reports a temporary failure, for example
+because the store ping failed.
+.TP
+.B 77
+The caller lacks the role
+.BR diagnose .
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-account (1)

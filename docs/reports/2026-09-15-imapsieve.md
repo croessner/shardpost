@@ -1,60 +1,60 @@
-# Viper-Konfiguration und IMAPSieve
+# Viper configuration and IMAPSieve
 
-## Ergebnis
+## Result
 
-Am 15.09.2026 produktiv ausgerollt: **0.10.1**, zwei gesunde Serverreplikas.
+Rolled out to production on 2026-09-15: **0.10.1**, two healthy server replicas.
 Image: `docker.io/chrroessner/imapcephpoc:0.10.1@sha256:f9bdea21100a3bcd76a1e8de40fec52f4e70109b2e6770247307c79e8a25574b`.
 
-- Typisierte Viper-Konfiguration mit validator/v10, strikter YAML-/Env-Konvertierung, Secret-Dateien und `config check`. Bisherige Env-Namen bleiben Overrides.
-- IMAPSieve für APPEND, COPY/MOVE und echte Flagänderungen einschließlich FETCH/Seen. Zuordnung über METADATA, begrenzte Ausführung, ACL-Prüfung und getrennte Zustellaktivierung.
-- Konfigurierbare Rspamd-Regeln mit dauerhafter Ceph-Lernqueue, unabhängigen Payloads, atomaren Commitnachweisen, Retry und erhaltenen Fehleraufträgen.
-- YAML: `deploy/overlays/croessner-nauthilus/server.yaml`; bestehende Secret-Verweise erhalten. Aktive ConfigMap: `imap/imap-server-config-8dhg8g7h7k`.
-- ManageSieve-Capability: `sieve://mail.roessner-net.de:4190`, über den bestehenden Director für beide Testaccounts geprüft.
-- Rspamd: separater Lernzugang `192.168.0.2:11336`, Worker-Quelladressen, eigener Token, exakt POST /learnspam und /learnham, Header-Allowlist und 4-MiB-Limit.
+- Typed Viper configuration with validator/v10, strict YAML/env conversion, secret files and `config check`. The existing env names remain as overrides.
+- IMAPSieve for APPEND, COPY/MOVE and real flag changes including FETCH/Seen. Assignment via METADATA, bounded execution, ACL check and a separate delivery activation.
+- Configurable Rspamd rules with a durable Ceph learning queue, independent payloads, atomic commit proofs, retry and preserved failed jobs.
+- YAML: `deploy/overlays/croessner-nauthilus/server.yaml`; existing secret references preserved. Active ConfigMap: `imap/imap-server-config-8dhg8g7h7k`.
+- ManageSieve capability: `sieve://mail.roessner-net.de:4190`, verified through the existing director for both test accounts.
+- Rspamd: separate learning endpoint `192.168.0.2:11336`, worker source addresses, its own token, exactly POST /learnspam and /learnham, header allowlist and a 4 MiB limit.
 
-## Abnahme
+## Acceptance
 
-| Prüfung | Ergebnis |
+| Check | Result |
 | --- | --- |
-| Gesamtes Serverprojekt unter Linux: `go test -race -tags tentacle ./...` | bestanden |
-| Docker-Build einschließlich `go vet` | bestanden |
-| Kubernetes-YAML mit gebautem Image: `config check` | bestanden mit isolierten Test-Secrets |
-| OTLP-HTTP-Integrationstest mit tatsächlichem Export | bestanden, einschließlich Basispfad |
-| Neue Sieve-IMAPSieve-Fixture | bestanden |
-| Pigeonhole-Konformität | 117 bestanden, 31 fehlgeschlagen von 148; bestehende Abdeckungslücken |
-| Separater Fork: `go test ./...` | TestTestAddress scheitert an fehlender `test-address.svtest`; übrige getestete Pakete bestanden |
-| Mailstack Stack-/Secret-/Render-/Runtime-Verträge | bestanden |
-| HAProxy 3.2.19 Syntax und isolierte Zugriffstests | bestanden; Body unverändert, Token entfernt |
-| Native Kandidatenabnahme mit beiden Testaccounts | APPEND, FETCH/Seen, MOVE nach Junk und zurück bestanden; 4 Lernaufträge bestätigt |
-| Native öffentliche Abnahme über Director, beide Testaccounts | bestanden |
-| Öffentliche Abnahme über Ceph-Shardgrenze, beide Testaccounts | bestanden; Ziel-UID 21 bei Shardgröße 20 |
-| Lernqueue regulärer Server nach öffentlichen Abnahmen | 8 vorbereitet, 8 bestätigt; zusätzlich zuvor 4 im Kandidaten bestätigt |
-| Bestehende Rspamd-Adminports von Node1 | 11334 und 11335 jeweils HTTP 200 |
-| Unerlaubte Zugriffe auf Lernport | Adminpfad, falscher Token und Query jeweils HTTP 403 |
-| Postflight | beide Server gesund mit identischem Digest; Primary/Shadow Rspamd gesund; 0 IMAPSieve- und 0 OTLP-Exportfehler im Prüfzeitraum |
+| Entire server project on Linux: `go test -race -tags tentacle ./...` | passed |
+| Docker build including `go vet` | passed |
+| Kubernetes YAML with the built image: `config check` | passed with isolated test secrets |
+| OTLP HTTP integration test with an actual export | passed, including the base path |
+| New Sieve IMAPSieve fixture | passed |
+| Pigeonhole conformance | 117 passed, 31 failed out of 148; existing coverage gaps |
+| Separate fork: `go test ./...` | TestTestAddress fails on the missing `test-address.svtest`; the remaining tested packages passed |
+| Mailstack stack/secret/render/runtime contracts | passed |
+| HAProxy 3.2.19 syntax and isolated access tests | passed; body unchanged, token removed |
+| Native candidate acceptance with both test accounts | APPEND, FETCH/Seen, MOVE to Junk and back passed; 4 learning jobs confirmed |
+| Native public acceptance through the director, both test accounts | passed |
+| Public acceptance across the Ceph shard boundary, both test accounts | passed; target UID 21 at shard size 20 |
+| Learning queue of the regular server after the public acceptance runs | 8 prepared, 8 confirmed; additionally 4 confirmed earlier on the candidate |
+| Existing Rspamd admin ports of node1 | 11334 and 11335, HTTP 200 each |
+| Unauthorized access to the learning port | admin path, wrong token and query, HTTP 403 each |
+| Postflight | both servers healthy with an identical digest; primary/shadow Rspamd healthy; 0 IMAPSieve and 0 OTLP export errors during the observation period |
 
-Der native Test `hack/imapsieve-live-test.py` legt eindeutige Testordner und ein unaktiviertes Skript an und entfernt sie danach. Keine SMTP-Nachrichten wurden versandt. `IMAP_TEST_SHARD_BOUNDARY=20` prüft höhere Indexshards.
+The native test `hack/imapsieve-live-test.py` creates unique test folders and an inactive script and removes them afterwards. No SMTP messages were sent. `IMAP_TEST_SHARD_BOUNDARY=20` exercises higher index shards.
 
-Die vollständige imaptest-Suite wurde zweimal gegen den Kandidaten gestartet. Beide Läufe brachen an `NO [UNAVAILABLE]` durch den bereits dokumentierten Nauthilus-Tempfail ab. Die korrelierten Testanfragen zeigten `authn=true`, `authz=true` und `director_routing:ok`, danach `authenticated=tempfail`. Diese Läufe sind **nicht bestanden**. Zusätzlich bleibt der bekannte `fetch-envelope`-Unterschied bei veralteten Source-Routes sichtbar. Es wurden keine Authentifizierungsprüfungen abgeschwächt.
+The full imaptest suite was started twice against the candidate. Both runs aborted at `NO [UNAVAILABLE]` because of the already documented Nauthilus tempfail. The correlated test requests showed `authn=true`, `authz=true` and `director_routing:ok`, then `authenticated=tempfail`. These runs are **not passed**. In addition, the known `fetch-envelope` difference with stale source routes remains visible. No authentication checks were weakened.
 
-## Review- und Fixrunden
+## Review and fix rounds
 
-Mehrere unabhängige Runden bis zum Abschluss ohne weitere P1/P2-Befunde. Korrigiert wurden unter anderem strikte Konvertierung, leere Skripte, dauerhafte Zielkopien vor Deleted, mehrdeutige Speicherfehler, Queue-Fairness, DELETE/Link-Konkurrenz, Sperrverluste und SETACTIVE-Trennung.
+Several independent rounds until completion without further P1/P2 findings. Among the things corrected were strict conversion, empty scripts, durable target copies before Deleted, ambiguous storage errors, queue fairness, DELETE/link contention, lock losses and SETACTIVE separation.
 
-Die Kandidatenabnahme fand zusätzlich den fehlenden Signalpfad des HTTP-Tracing-Exporters. Version 0.10.1 ergänzt `/v1/traces` zur OTLP-Basis-URL; ein echter Exporttest schützt das Verhalten. 0.10.0 bleibt ein bereits veröffentlichtes, nicht produktiv eingesetztes Vorgängerimage.
+The candidate acceptance additionally found the missing signal path of the HTTP tracing exporter. Version 0.10.1 appends `/v1/traces` to the OTLP base URL; a real export test protects this behavior. 0.10.0 remains an already published predecessor image that was never used in production.
 
-Die ConfigMap-Namespace-Angabe ist ausschließlich am Generator gesetzt. Der unabhängige vollständige Rendercheck bestätigt alle 17 Ressourcen einschließlich Ceph/RBAC in `rook-ceph`, ServiceAccount-Zuordnung, Selektoren und Secret-/Zertifikatsreferenzen. Produktiv angewandt wurden nur Server-Deployment, ConfigMap und Scrub-CronJob; Ceph/RBAC wurden nicht verändert.
+The ConfigMap namespace setting is applied exclusively at the generator. The independent full render check confirms all 17 resources including Ceph/RBAC in `rook-ceph`, the ServiceAccount assignment, the selectors and the secret/certificate references. Only the server deployment, the ConfigMap and the scrub CronJob were applied in production; Ceph/RBAC were not changed.
 
-## Rollout und Grenzen
+## Rollout and limits
 
-Der Benutzer hat Docker-Hub-Push und vollständigen Rollout trotz des ungenutzten Backup-Wartungsfensters ausdrücklich freigegeben. Der Proxy wurde gezielt neu erstellt; Rspamd und andere Maildienste wurden nicht neu gestartet. Temporäre Kandidaten-, Testjob- und überzählige ConfigMap-Ressourcen sowie lokale Kopien des Lerntokens wurden entfernt.
+The user explicitly approved the Docker Hub push and the full rollout despite the unused backup maintenance window. The proxy was recreated deliberately; Rspamd and other mail services were not restarted. Temporary candidate, test job and surplus ConfigMap resources as well as local copies of the learning token were removed.
 
-Extprograms bleiben zurückgestellt. IMAP-fileinto benötigt eine vorhandene Zielmailbox. Fehleraufträge bleiben für Betreiberbearbeitung gespeichert. Transport ist mindestens einmalig, keine verteilte Exactly-once-Garantie. Die oben genannten Konformitäts- und Nauthilus-Testlücken bleiben offen.
+Extprograms remain deferred. IMAP fileinto requires an existing target mailbox. Failed jobs stay stored for operator handling. Transport is at-least-once, there is no distributed exactly-once guarantee. The conformance and Nauthilus test gaps mentioned above remain open.
 
 ## Rollback
 
-Deployment-Ausgangszustand: `/private/tmp/imap-server-before.json`, vorherige Version 0.9.0; zusätzlich bestehende Kubernetes-Deployment-Historie. Quell-Ausgangskopie: `/private/tmp/imapcephpoc-before-imapsieve.tgz`.
+Deployment starting state: `/private/tmp/imap-server-before.json`, previous version 0.9.0; in addition, the existing Kubernetes deployment history. Source starting copy: `/private/tmp/imapcephpoc-before-imapsieve.tgz`.
 
-Proxy-Sicherung auf dem Mailhost: ursprüngliche Quelle unter `/srv/docker/mailstack/temp/imapsieve-rollback-20260915T184447/source.yaml`; ursprüngliche gerenderte Compose-Datei und Render-Env unter `/srv/docker/mailstack/temp/imapsieve-rollback-20260915T184744/`. Nur den Proxy gezielt mit wiederhergestellter Compose-Konfiguration neu erstellen. Keine Mail-, Rspamd- oder Archivdaten löschen.
+Proxy backup on the mail host: the original source under `/srv/docker/mailstack/temp/imapsieve-rollback-20260915T184447/source.yaml`; the original rendered compose file and render env under `/srv/docker/mailstack/temp/imapsieve-rollback-20260915T184744/`. Recreate only the proxy, deliberately, with the restored compose configuration. Do not delete any mail, Rspamd or archive data.
 
-Das Workspace-Verzeichnis besitzt kein `.git`; es wurde kein Commit/Tag erzeugt. Das Kubernetes-Overlay referenziert das veröffentlichte Image per Digest.
+The workspace directory has no `.git`; no commit/tag was created. The Kubernetes overlay references the published image by digest.

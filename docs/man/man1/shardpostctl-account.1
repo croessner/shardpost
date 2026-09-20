@@ -1,0 +1,120 @@
+.TH SHARDPOSTCTL-ACCOUNT 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-account \- look up an account, its quota and its shares
+.SH SYNOPSIS
+.B shardpostctl account show
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl quota show
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl shared list
+.RB [ \-\-json ]
+.I account
+.SH DESCRIPTION
+These commands read. They change nothing and are the usual first step
+when someone reports a problem with an account.
+.SS account show
+Answers the question "does this account exist, and what does the server
+see?" in one place:
+.TP
+.B lookup
+What the user database (Nauthilus) says about the name you passed:
+.B canonical
+(this is the account itself),
+.B alias
+(with the canonical account it belongs to),
+.B unknown
+or
+.B unavailable
+(the directory did not answer). Most support cases end here, because the
+name in the ticket is an alias or a typo.
+.TP
+.B store
+Whether the account has data in the store, and how many mailboxes.
+.TP
+.B quota
+Usage and limit, in bytes and messages.
+.TP
+.B import lock
+Whether an import or a maintenance job currently holds the account. While
+it does, IMAP, POP3 and LMTP refuse the account on purpose.
+.TP
+.B trace
+Whether a protocol trace is switched on; see
+.BR shardpostctl-trace (1).
+.PP
+The account must be given in its canonical form; an alias is reported as
+such but is not followed.
+.SS quota show
+Usage and limit only. The limit comes from the user database (the LDAP
+attribute in the operating profile), the usage from the store's counters.
+If the two look implausible, recount them with the
+.B quota_recalc
+job; see
+.BR shardpostctl-job (1).
+.SS shared list
+Lists the mailboxes of other accounts this account was granted rights on,
+as the client sees them under
+.IR "Other Users/" .
+For the other direction (who may see this account's mailboxes) use
+.BR shardpostctl-acl (1).
+.PP
+All three commands require the role
+.BR diagnose .
+.SH OPTIONS
+.TP
+.B \-\-json
+Print the answer as JSON instead of a table.
+.SH EXAMPLES
+A user says "my mail client cannot log in":
+.PP
+.nf
+.RS
+shardpostctl account show user@example.org
+.RE
+.fi
+.PP
+Check whether an address is only an alias:
+.PP
+.nf
+.RS
+shardpostctl account show info@example.org
+.RE
+.fi
+.PP
+"Is my mailbox full?"
+.PP
+.nf
+.RS
+shardpostctl quota show user@example.org
+.RE
+.fi
+.PP
+Before deleting an account, see what it would take away from others:
+.PP
+.nf
+.RS
+shardpostctl shared list user@example.org
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+The account was looked up.
+.TP
+.B 67
+No such account.
+.TP
+.B 77
+The caller lacks the role
+.BR diagnose ,
+or the account is outside its scope.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-acl (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-mailbox (1),
+.BR shardpostctl-trace (1)

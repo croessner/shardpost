@@ -1,0 +1,122 @@
+.TH SHARDPOSTCTL-DELIVER 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-deliver \- deliver a message like a local delivery agent
+.SH SYNOPSIS
+.B shardpostctl deliver
+.BI \-d " recipient"
+.RB [ \-f
+.IR sender ]
+.RB [ \-m
+.IR mailbox ]
+.RB [ \-\-no-sieve ]
+.RB [ \-\-no-enforce-quota ]
+.RB [ \-\-json ]
+.RI < " message"
+.SH DESCRIPTION
+Reads one message (RFC 5322) from standard input and delivers it to one
+recipient, the way a local delivery agent does. This is the path an MTA
+uses when it hands mail over locally, and the same path LMTP takes:
+the recipient is resolved in the user database, the account's Sieve
+script runs, and the message is stored where the script decides.
+.PP
+The command prints where the message was stored, with mailbox and UID.
+If Sieve discarded the message, nothing is stored and the result says so.
+.PP
+Role:
+.B deliver
+and, for
+.BR \-\-no-enforce-quota ,
+additionally
+.BR deliver:noenforce .
+.SH OPTIONS
+.TP
+.BI \-d " recipient"
+Envelope recipient, as an address or an account. Required. An alias is
+resolved to its canonical account.
+.TP
+.BI \-f " sender"
+Envelope sender. Empty means the null sender, as for bounces.
+.TP
+.BI \-m " mailbox"
+Store directly into this existing mailbox and do not run Sieve. Use it
+when a message must land in a specific mailbox, for example while
+re-injecting mail.
+.TP
+.B \-\-no-sieve
+Do not run the user's Sieve script; the message goes to INBOX.
+.TP
+.B \-\-no-enforce-quota
+Store even if the account is over its limit. The usage is still counted.
+This is what a local delivery must do when a bounce is not acceptable.
+.TP
+.B \-\-json
+Print the result as JSON.
+.SH EXAMPLES
+Deliver a file as if it had arrived by mail:
+.PP
+.nf
+.RS
+shardpostctl deliver -d user@example.org -f sender@example.net < mail.eml
+.RE
+.fi
+.PP
+Put a message back into a specific mailbox, without letting Sieve move it
+again:
+.PP
+.nf
+.RS
+shardpostctl deliver -d user@example.org -m Archive < 933.eml
+.RE
+.fi
+.PP
+Re-inject a message that was exported earlier:
+.PP
+.nf
+.RS
+shardpostctl message export user@example.org INBOX 933 > 933.eml
+shardpostctl deliver -d user@example.org --no-sieve < 933.eml
+.RE
+.fi
+.PP
+Deliver a system notice to an account that is over quota:
+.PP
+.nf
+.RS
+shardpostctl deliver -d user@example.org --no-enforce-quota < notice.eml
+.RE
+.fi
+.PP
+Check whether delivery works at all, end to end:
+.PP
+.nf
+.RS
+printf 'From: test@example.org\\nSubject: probe\\n\\nbody\\n' \\
+    | shardpostctl deliver -d user@example.org --json
+.RE
+.fi
+.SH EXIT STATUS
+The codes follow
+.IR sysexits.h ,
+so an MTA can act on them:
+.TP
+.B 0
+Delivered (or deliberately discarded by Sieve).
+.TP
+.B 67
+No such recipient or mailbox.
+.TP
+.B 69
+The message was rejected by Sieve or is too large.
+.TP
+.B 73
+Over quota.
+.TP
+.B 75
+Temporary failure. The MTA should try again.
+.TP
+.B 77
+The caller lacks the role.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-message (1),
+.BR shardpostctl-sieve (1)

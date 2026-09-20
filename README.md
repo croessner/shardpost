@@ -1,94 +1,95 @@
-# ShardPost — Mailserver mit direktem RADOS-Speicher
+# ShardPost — Mail Server with Direct RADOS Storage
 
-Dieses Projekt implementiert einen verteilbar betriebenen Mailserver in Go:
-IMAP und POP3 für den Zugriff, LMTP für die Zustellung, ManageSieve für die
-Skriptverwaltung sowie Sieve und IMAPSieve für die Verarbeitung. Metadaten,
-Nachrichten und dauerhafte Lernaufträge liegen direkt in Ceph RADOS.
-Nauthilus übernimmt im Betriebsprofil Authentifizierung und Identitätsauflösung.
+This project implements a mail server in Go that can be run in a distributed
+fashion: IMAP and POP3 for access, LMTP for delivery, ManageSieve for script
+management, plus Sieve and IMAPSieve for processing. Metadata, messages and
+durable learning jobs live directly in Ceph RADOS. In the operational profile,
+Nauthilus handles authentication and identity resolution.
 
-**ShardPost** ist der Projekt- und Produktname seit Version 0.12.0; seit
-0.13.0 heißen auch Namespace, Deployment, RADOS-Pools, Director-Shard und
-externe Identitäten `shardpost`. Go-Modul und Serverbinary heißen `shardpost`,
-der Lastgenerator `shardpost-load`. Die [Namensmigration](docs/decisions/project-name.md)
-beschreibt den Ablauf und die bewusst stabilen Metrikfamilien.
+**ShardPost** has been the project and product name since version 0.12.0; since
+0.13.0 the namespace, deployment, RADOS pools, Director shard and external
+identities are named `shardpost` as well. The Go module and the server binary
+are called `shardpost`, the load generator `shardpost-load`. The
+[name migration](docs/decisions/project-name.md) describes the procedure and the
+deliberately stable metric families.
 
-## Einstieg
+## Getting Started
 
-| Du möchtest … | Dokument |
+| You want to … | Document |
 |---|---|
-| das Gesamtsystem verstehen | [Architektur mit System- und Komponentenskizzen](ARCHITECTURE.md) |
-| den Code ändern und testen | [Entwicklerhandbuch](docs/development/README.md) |
-| Schnittstellen und Abläufe verfolgen | [UML, Zustände und Sequenzen](docs/architecture/runtime.md) |
-| Speichern, Parallelität und Fehlerbehandlung verstehen | [RADOS-Datenmodell und Konsistenz](docs/architecture/storage.md) |
-| konfigurieren | [Konfiguration](docs/configuration.md) |
-| Sieve oder Lernprogramme erweitern | [Sieve, IMAPSieve und externe Programme](docs/imapsieve.md) |
-| Quota-Regeln, Warnungen, Over-Flag | [Quota](docs/quota.md) |
-| Admin-API, shardpostctl, lokale Zustellung | [Admin-API und LDA](docs/admin-api.md) |
-| ausrollen oder eine Störung untersuchen | [Betrieb und Releases](docs/operations/README.md) |
-| Logs, Metriken und Traces verstehen | [Observability](docs/observability.md) |
-| Grenzen und Testabdeckung beurteilen | [Qualitätsstand](docs/development/quality.md) |
+| understand the system as a whole | [Architecture with system and component sketches](ARCHITECTURE.md) |
+| change and test the code | [Developer guide](docs/development/README.md) |
+| trace interfaces and flows | [UML, states and sequences](docs/architecture/runtime.md) |
+| understand storage, concurrency and error handling | [RADOS data model and consistency](docs/architecture/storage.md) |
+| configure | [Configuration](docs/configuration.md) |
+| extend Sieve or learning programs | [Sieve, IMAPSieve and external programs](docs/imapsieve.md) |
+| quota rules, warnings, over flag | [Quota](docs/quota.md) |
+| Admin API, shardpostctl, local delivery | [Admin API and LDA](docs/admin-api.md) |
+| roll out or investigate an incident | [Operations and releases](docs/operations/README.md) |
+| understand logs, metrics and traces | [Observability](docs/observability.md) |
+| assess limits and test coverage | [Quality status](docs/development/quality.md) |
 
-Der [Dokumentationsindex](docs/README.md) enthält die vollständige Lesereihenfolge,
-Entscheidungen, historische Reviews und Release-Nachweise.
+The [documentation index](docs/README.md) contains the complete reading order,
+decisions, historical reviews and release evidence.
 
-## System im Überblick
+## System Overview
 
-![Systemkontext](docs/diagrams/context.svg)
+![System context](docs/diagrams/context.svg)
 
-Der Server ist die Mailbox- und Verarbeitungsschicht. Ein vorgeschalteter MTA
-übernimmt Internet-SMTP und Warteschlangen; ausgehende Sieve-Aktionen verwenden
-einen konfigurierten SMTP-Relay. Director, Nauthilus, Ceph/Rook, cert-manager,
-Rspamd und Monitoring sind eigene Komponenten mit eigenen Betriebsverträgen.
+The server is the mailbox and processing layer. An upstream MTA handles internet
+SMTP and queuing; outgoing Sieve actions use a configured SMTP relay. Director,
+Nauthilus, Ceph/Rook, cert-manager, Rspamd and monitoring are separate
+components with their own operational contracts.
 
-Mehrere Serverreplikas teilen die RADOS-Pools. Sitzungen, Parser und Caches sind
-prozesslokal; dauerhafter Mailzustand liegt in RADOS. Ein Podwechsel erfordert
-eine neue Clientverbindung. Die Architektur ermöglicht mehrere Replikas,
-belegt aber allein noch keine bestimmte Maximalzahl von Benutzern.
+Several server replicas share the RADOS pools. Sessions, parsers and caches are
+process-local; durable mail state lives in RADOS. Switching pods requires a new
+client connection. The architecture makes multiple replicas possible, but on its
+own it does not establish any particular maximum number of users.
 
-## Lokal entwickeln
+## Developing Locally
 
-Voraussetzungen: Go gemäß [go.mod](go.mod) (aktuell 1.27.1), vorhandener
-Vendor-Bestand und für den kompletten Server Linux mit passenden librados-
-Entwicklungsbibliotheken. Der Docker-Build stellt diese Umgebung bereit.
+Prerequisites: Go as specified in [go.mod](go.mod) (currently 1.27.1), a
+populated vendor tree and, for the complete server, Linux with matching librados
+development libraries. The Docker build provides this environment.
 
-Eine schnelle, Ceph-unabhängige Prüfung:
+A quick check that does not depend on Ceph:
 
 ```bash
 go test -race ./internal/config ./internal/logging ./internal/imapproto ./internal/pop3proto ./internal/sieve
 ```
 
-Der vollständige Server einschließlich LMTP importiert den Ceph-Adapter.
-`go test ./internal/...` ist deshalb **kein** Ceph-freier Einstieg.
-Der [vollständige Linux-Testlauf](docs/development/README.md) bindet außerdem
-die Sieve-Test-Fixtures aus `third_party` ein.
+The complete server, including LMTP, imports the Ceph adapter.
+`go test ./internal/...` is therefore **not** a Ceph-free entry point.
+The [full Linux test run](docs/development/README.md) additionally pulls in the
+Sieve test fixtures from `third_party`.
 
-Ein lokales Image bauen und nur seine Konfiguration prüfen:
+Build a local image and check only its configuration:
 
 ```bash
 docker build --platform linux/amd64 -t shardpost:dev .
 docker run --rm -e LOG_LEVEL=info shardpost:dev config check
 ```
 
-`config check` validiert Konfiguration und Secret-Dateien, stellt aber keine
-Verbindung zu Ceph oder Nauthilus her. Ein echter Serverstart benötigt diese
-Abhängigkeiten bzw. ein ausdrücklich isoliertes Testprofil.
+`config check` validates the configuration and the secret files, but does not
+connect to Ceph or Nauthilus. Actually starting the server requires those
+dependencies, or an explicitly isolated test profile.
 
-## Betriebsprofil und aktueller Nachweis
+## Operational Profile and Current Evidence
 
-Das Betriebsprofil ist `deploy/overlays/croessner-nauthilus`. Das Basisprofil
-und `croessner` enthalten statische Testzugänge; sie sind keine Vorlage für
-einen öffentlich erreichbaren Produktivdienst. Das Makefile verwendet das Betriebsprofil ausdrücklich als Default;
-für isolierte Testumgebungen das Overlay bewusst überschreiben.
+The operational profile is `deploy/overlays/croessner-nauthilus`. The base
+profile and `croessner` contain static test credentials; they are not a template
+for a publicly reachable production service. The Makefile explicitly uses the operational profile as its default;
+for isolated test environments, override the overlay deliberately.
 
-Am 18.09.2026 wurde **ShardPost 0.13.0** in den Namespace `shardpost` mit den
-Pools `shardpost-index`/`shardpost-data` umgezogen (objektweise verifizierte
-Kopie). Direkte und Director-Abnahme (IMAP, LMTP, ManageSieve, Sieve,
-IMAPSIEVE) bestanden für beide Testkonten; imaptest unverändert bis auf den
-bekannten `fetch-envelope`-Fall. `make lint` meldet 0 Issues.
-Dies ist ein datierter Abnahmenachweis, keine fortlaufende Zustandsanzeige.
+On 2026-09-18, **ShardPost 0.13.0** was moved into the namespace `shardpost`
+with the pools `shardpost-index`/`shardpost-data` (object-by-object verified
+copy). Direct and Director acceptance runs (IMAP, LMTP, ManageSieve, Sieve,
+IMAPSIEVE) passed for both test accounts; imaptest unchanged apart from the
+known `fetch-envelope` case. `make lint` reports 0 issues.
+This is a dated acceptance record, not a continuous status display.
 Details: [ShardPost 0.13.0](docs/reports/2026-09-18-shardpost-0.13.0.md),
-vorher [0.12.0](docs/reports/2026-09-16-shardpost.md).
+previously [0.12.0](docs/reports/2026-09-16-shardpost.md).
 
-Die [Qualitätsübersicht](docs/development/quality.md) unterscheidet aktuelle
-Tests von älteren Konformitätsergebnissen und ausdrücklich ausgeschlossenen
-Fällen. Der historische [Ausbauplan](ROADMAP.md) ersetzt diese Übersicht nicht.
+The [quality overview](docs/development/quality.md) distinguishes current tests
+from older conformance results and from explicitly excluded cases. The
+historical [expansion plan](ROADMAP.md) does not replace this overview.

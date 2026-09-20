@@ -1,121 +1,123 @@
 # Observability
 
-## Signalquellen
+## Signal sources
 
-Der Service stellt Prometheus-Metriken unter `/metrics` am `HTTP_ADDR`
-(Standard `:8080`) bereit. `/healthz` prüft den HTTP-Prozess; `/readyz` prüft
-zusätzlich den Store und berücksichtigt den Drain-Zustand. Ein erfolgreicher
-Scrape allein beweist deshalb keine funktionierende Mailzustellung.
+The service exposes Prometheus metrics at `/metrics` on `HTTP_ADDR`
+(default `:8080`). `/healthz` checks the HTTP process; `/readyz`
+additionally checks the store and takes the drain state into account. A
+successful scrape alone is therefore no proof of working mail delivery.
 
-OpenTelemetry exportiert Traces, sobald `OTEL_EXPORTER_OTLP_ENDPOINT` gesetzt
-ist. `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` wählt HTTP; andernfalls nutzt
-der Service gRPC. `telemetry.service_name` bzw. `OTEL_SERVICE_NAME` bestimmt
-`service.name` (Standard `shardpost`, seit 0.13.0 auch im Betriebsprofil; bis
-0.12.x `imapcephpoc`). Die Collector-Redaktion hängt nicht vom Servicenamen ab;
-`service.instance.id` ist der Hostname. Der Sampler ist ParentBased mit einem
-TraceIDRatioBased-Root-Sampler: `OTEL_TRACES_SAMPLER_ARG=0.1` erfasst ungefähr
-zehn Prozent der Root-Traces. Ohne Argument ist der Anteil 1. Ein anderer
-`OTEL_TRACES_SAMPLER`-Wert ändert diese im Code festgelegte Auswahl nicht.
+OpenTelemetry exports traces as soon as `OTEL_EXPORTER_OTLP_ENDPOINT` is
+set. `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` selects HTTP; otherwise the
+service uses gRPC. `telemetry.service_name` and `OTEL_SERVICE_NAME`
+determine `service.name` (default `shardpost`, since 0.13.0 in the
+production profile as well; up to 0.12.x `imapcephpoc`). The collector
+redaction does not depend on the service name; `service.instance.id` is the
+host name. The sampler is ParentBased with a TraceIDRatioBased root
+sampler: `OTEL_TRACES_SAMPLER_ARG=0.1` captures roughly ten percent of the
+root traces. Without an argument the ratio is 1. A different
+`OTEL_TRACES_SAMPLER` value does not change this selection, which is fixed in code.
 
-## Messwerte richtig lesen
+## Reading the metrics correctly
 
-| Messwert | Bedeutung und Grenze |
+| Metric | Meaning and limitation |
 | --- | --- |
-| `imapceph_connections{proto}` | Aktive IMAP-/POP3-Verbindungen; keine vollständige Verbindungszahl aller Protokolle. |
-| `imapceph_command_seconds` | Histogramm der instrumentierten IMAP-/POP3-Befehle. `_count` eignet sich zur Befehlsrate; `_bucket` für Quantile. |
-| `imapceph_commands_total` | Protokollspezifische Ereignisse. Kein universeller Request-Counter. IMAP `ok/no/bad` getrennt von Auth-, Verbindungs- und Poll-Ereignissen auswerten. |
-| `imapceph_lmtp_deliveries_total{outcome}` | Erfolgreiche bzw. fehlgeschlagene instrumentierte Zustellversuche. |
-| `imapceph_lmtp_delivered_bytes_total` | Bytes erfolgreicher LMTP-Zustellungen. |
-| `imapceph_rados_op_seconds{op}` | Latenzen ausgewählter Header-/Indexoperationen: `header_read`, `header_cas`, `list_entries`, `get_entries`. Kein vollständiges RADOS-I/O-Profil. |
-| `imapceph_rados_cas_retries_total{kind}` | Wiederholungen nach Compare-and-swap-Konflikten. |
-| `imapceph_rados_notify_seconds` | Registriert, aber aktuell ohne Messaufruf. Nicht als bestätigte Notify-Latenz interpretieren. |
-| `imapceph_scrub_findings_total{kind}` | Befunde im jeweiligen Scrubber-Prozess. Ein Server-Scrape beweist keinen erfolgreichen externen Scrub-Lauf. |
+| `imapceph_connections{proto}` | Active IMAP/POP3 connections; not a complete connection count for all protocols. |
+| `imapceph_command_seconds` | Histogram of the instrumented IMAP/POP3 commands. `_count` is suitable for the command rate; `_bucket` for quantiles. |
+| `imapceph_commands_total` | Protocol-specific events. Not a universal request counter. Evaluate IMAP `ok/no/bad` separately from auth, connection and poll events. |
+| `imapceph_lmtp_deliveries_total{outcome}` | Successful and failed instrumented delivery attempts. |
+| `imapceph_lmtp_delivered_bytes_total` | Bytes of successful LMTP deliveries. |
+| `imapceph_rados_op_seconds{op}` | Latencies of selected header/index operations: `header_read`, `header_cas`, `list_entries`, `get_entries`. Not a complete RADOS I/O profile. |
+| `imapceph_rados_cas_retries_total{kind}` | Retries after compare-and-swap conflicts. |
+| `imapceph_rados_notify_seconds` | Registered, but currently without a measuring call. Do not interpret it as a confirmed notify latency. |
+| `imapceph_scrub_findings_total{kind}` | Findings in the respective scrubber process. A server scrape is no proof of a successful external scrub run. |
 
-POP3 zählt in `commands_total` nur ausgewählte Ereignisse; `DELE` zählt dabei
-gelöschte Nachrichten. Bei IMAP können Auth-Ereignisse zusätzlich zur
-Protokollantwort gezählt werden. Eine Summe aller Outcomes als Nenner einer
-Fehlerquote würde unterschiedliche Ereignisse vermischen. IMAP `UID`-Befehle
-werden im aktuellen Histogramm gemeinsam unter `UID` erfasst.
+In `commands_total`, POP3 counts only selected events; there `DELE` counts
+deleted messages. With IMAP, auth events can be counted in addition to the
+protocol response. Using the sum of all outcomes as the denominator of an
+error rate would mix different events. In the current histogram, IMAP `UID`
+commands are recorded together under `UID`.
 
-Fehlende Serien sind keine Nullwerte. Insbesondere entstehen viele gelabelte
-Serien erst beim ersten Ereignis. Bei Quantilen müssen Histogramm-Buckets über
-die ausgewählten Pods summiert werden, bevor das Quantil berechnet wird;
-Pod-Quantile dürfen nicht gemittelt werden. Bei fehlenden Beobachtungen sind
-Quantile nicht aussagekräftig.
+Missing series are not zero values. In particular, many labeled series only
+come into existence with the first event. For quantiles, the histogram
+buckets have to be summed across the selected pods before the quantile is
+computed; per-pod quantiles must not be averaged. Without observations,
+quantiles are not meaningful.
 
-## Traces und Zugriff
+## Traces and access
 
-Instrumentiert sind IMAP-/POP3-Befehle und `lmtp.deliver`. Die Traces enthalten
-derzeit auch Benutzerattribute (`imap.user`, `pop3.user`, `lmtp.user`), bei IMAP
-gegebenenfalls Mailbox und Gegenstelle (`imap.mailbox`, `net.peer`). Die
-Collector-Konfiguration und Zugriffsrechte müssen die geltenden Regeln für
-diese Daten umsetzen. Zugangsdaten gehören weder in Dashboards noch in
-Exportdateien oder Betriebsberichte.
+IMAP/POP3 commands and `lmtp.deliver` are instrumented. The traces
+currently also contain user attributes (`imap.user`, `pop3.user`,
+`lmtp.user`), and for IMAP possibly the mailbox and the peer
+(`imap.mailbox`, `net.peer`). The collector configuration and the access
+rights have to implement the applicable rules for this data. Credentials
+belong neither in dashboards nor in export files or operational reports.
 
-## Betriebsverantwortung und Abnahme
+## Operational responsibility and acceptance
 
-Die produktive Aktivierung gehört in die maßgeblichen Manifeste des
-Kubernetes-Owner-Repos. Scrape-Annotationen in diesem Quellprojekt allein
-beweisen keine Erfassung durch einen Prometheus-Server. Der Metrics-Owner
-verantwortet die Anbindung an `metrics.roessner-net.de`, Datenquellen und das
-Operator-Dashboard im Grafana-Ordner **Mail**.
+Enabling this in production belongs in the authoritative manifests of the
+Kubernetes owner repository. Scrape annotations in this source project
+alone are no proof of collection by a Prometheus server. The metrics owner
+is responsible for the connection to `metrics.roessner-net.de`, for the data
+sources and for the operator dashboard in the Grafana folder **Mail**.
 
-Eine vollständige Abnahme umfasst Ready-Pods, aktuelle Prometheus-Serien je
-erwartetem Target, einen tatsächlichen Service-Trace in Tempo sowie das
-gespeicherte und gerenderte Dashboard. Ein lesender IMAP-Befehl kann den
-Trace-Pfad ohne Testzustellung prüfen; bei Sampling sind mehrere Befehle
-gegebenenfalls erforderlich. Fehlende Live-Belege bleiben ausdrücklich offen.
+A complete acceptance comprises ready pods, current Prometheus series for
+every expected target, an actual service trace in Tempo as well as the
+stored and rendered dashboard. A read-only IMAP command can verify the
+trace path without a test delivery; with sampling, several commands may be
+necessary. Missing live evidence explicitly stays open.
 
-## Produktionsabnahme am 15.09.2026
+## Production acceptance on 2026-09-15
 
-- Namespace `imap`, Deployment `imap-server`: zwei Ready-Pods; beide zentralen
-  Prometheus-Targets `up=1` nach dem abschließenden Rollout.
-- Scrape-Labels: `job="kubernetes-pods"`, `namespace="imap"`,
+- Namespace `imap`, deployment `imap-server`: two ready pods; both central
+  Prometheus targets `up=1` after the final rollout.
+- Scrape labels: `job="kubernetes-pods"`, `namespace="imap"`,
   `app_kubernetes_io_name="imap-server"`, `pod`.
-- OTLP: `http://192.168.0.102:4318`, `http/protobuf`, Sampling `0.1`.
+- OTLP: `http://192.168.0.102:4318`, `http/protobuf`, sampling `0.1`.
 - [Mail Operator in Grafana](https://metrics.roessner-net.de/d/imapcephpoc-mail-operator/imapcephpoc-c2b7-mail-operator):
-  Version 2, 21 Panels einschließlich Abschnittsüberschriften und Interpretation;
-  API-Readback, gerenderte Raten/Latenzen/LMTP-Panels und Logs-/Tempo-Links geprüft.
-- Ein frischer echter Trace nach der endgültigen Aktivierung (13:58:38 UTC,
-  `5e9e1e204e89112703b8ea9f284236f2`, `imap.STARTTLS`) wurde durch den
-  Kubernetes-Owner unabhängig in Tempo geprüft: keine der fünf oben genannten
-  Benutzer-/Mailbox-/Gegenstellenattribute. Vorheriger synthetischer Filtertest
-  wurde von beiden Ownern bestätigt.
-- CPU-/RAM-Serien sind im zentralen Prometheus derzeit nicht vorhanden.
-  Das Dashboard weist die Lücke aus. Fehlende POP3-/Fehlerserien werden nicht
-  künstlich auf Null gesetzt. Rate-Abfragen nutzen mindestens vier Minuten;
-  dieses Fenster wurde gegen vorhandene Serien geprüft.
+  version 2, 21 panels including section headings and interpretation;
+  API readback, rendered rate/latency/LMTP panels and logs/Tempo links verified.
+- A fresh, real trace after the final activation (13:58:38 UTC,
+  `5e9e1e204e89112703b8ea9f284236f2`, `imap.STARTTLS`) was verified
+  independently in Tempo by the Kubernetes owner: none of the five
+  user/mailbox/peer attributes named above. The preceding synthetic filter test
+  was confirmed by both owners.
+- CPU/RAM series are currently not present in the central Prometheus.
+  The dashboard shows the gap. Missing POP3/error series are not
+  artificially set to zero. Rate queries use at least four minutes;
+  this window was verified against existing series.
 
-Beim ersten Filter-Rollout ersetzte die Aktivierung die Hostdatei atomar,
-erzwang aber keinen neuen Collector-Container. Der weiterhin gesunde Collector
-exportierte deshalb noch nicht gefilterte Traces. Der Service-Export wurde
-zurückgenommen, der Collector gezielt neu erstellt und die Filterwirkung vor
-der erneut ausdrücklich freigegebenen Aktivierung synthetisch geprüft.
-Bereits gespeicherte ältere Traces werden dadurch nicht rückwirkend bereinigt.
+During the first filter rollout, the activation replaced the host file
+atomically but did not force a new collector container. The still healthy
+collector therefore kept exporting unfiltered traces. The service export was
+rolled back, the collector was deliberately recreated, and the effect of the
+filter was verified synthetically before the activation was explicitly
+approved again. Older traces that are already stored are not cleaned up
+retroactively by this.
 
-Reproduzierbare Dashboard-Quelle im Metrics-Owner-Repo (seit 0.13.0):
-`grafana/tools/build-shardpost-operator-dashboard.py` und
-`grafana/dashboards/shardpost-operator.dashboard.json`, Dashboard-UID
+Reproducible dashboard source in the metrics owner repository (since 0.13.0):
+`grafana/tools/build-shardpost-operator-dashboard.py` and
+`grafana/dashboards/shardpost-operator.dashboard.json`, dashboard UID
 `shardpost-mail-operator`
 ([Grafana](https://metrics.roessner-net.de/d/shardpost-mail-operator/shardpost-c2b7-mail-operator),
-seit 18.09.2026; das alte `imapcephpoc-mail-operator` ist gesichert und entfernt). Die Abfragen decken alte und neue Labels ab
+since 2026-09-18; the old `imapcephpoc-mail-operator` has been backed up and removed). The queries cover the old and the new labels
 (`namespace` `imap|shardpost`, `service.name` `imapcephpoc|shardpost`).
-Kubernetes-Owner-Vertrag: `shardpost/telemetry-patch.yaml` und
+Kubernetes owner contract: `shardpost/telemetry-patch.yaml` and
 `reports/2026-09-15-imapcephpoc-observability.md`.
 
 
-## Strukturierte Sitzungslogs ab 0.11.3
+## Structured session logs from 0.11.3
 
-`slog` schreibt JSON nach stdout; Kubernetes verwendet `LOG_LEVEL=info`.
-`connection_open`, `auth_success`/`auth_failed`, `tls_established` und
-`connection_close` machen den Verbindungslebenszyklus sichtbar. `session_id`
-verbindet die Ereignisse; `remote` ist die effektive PROXY-Client-Adresse.
-Auch Director-Healthchecks erzeugen Verbindungslogs. Logs werden nicht durch
-die OTLP-Samplingrate gefiltert.
+`slog` writes JSON to stdout; Kubernetes uses `LOG_LEVEL=info`.
+`connection_open`, `auth_success`/`auth_failed`, `tls_established` and
+`connection_close` make the connection lifecycle visible. `session_id`
+ties the events together; `remote` is the effective PROXY client address.
+Director health checks produce connection logs as well. Logs are not
+filtered by the OTLP sampling rate.
 
-Debug ergänzt bekannte Befehlsnamen und Laufzeiten ohne Argumente oder
-Mailinhalte. Für die Fehlersuche mit einem Client gibt es ab 0.18.0 den
-befristeten Protokoll-Trace pro Konto (`event=protocol_trace`, siehe
-[Admin-API](admin-api.md#protokoll-trace-eines-kontos)). Details, Einschränkungen und Loki-Beispiel stehen in der
-[Konfigurationsdokumentation](configuration.md), der datierte Nachweis im
-[Logging-Bericht](reports/2026-09-16-logging.md).
+Debug adds the known command names and durations, without arguments or
+mail contents. For troubleshooting with a client, 0.18.0 introduced the
+time-limited protocol trace per account (`event=protocol_trace`, see
+[Admin API](admin-api.md#protocol-trace-for-an-account)). Details, limitations and a Loki example are in the
+[configuration documentation](configuration.md), the dated evidence in the
+[logging report](reports/2026-09-16-logging.md).

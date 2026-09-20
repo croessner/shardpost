@@ -1,321 +1,328 @@
-# Stufe 8: Betriebsverwaltung mit shardpostctl und OpenAPI
+# Stage 8: Operational administration with shardpostctl and OpenAPI
 
-Status: **geplant; Kern vorgezogen** (18.09.2026): Vertrag mit Generierung,
-Unix-Socket- und mTLS-Listener, Rollen, Audit-Logzeile, `version` und die
-lokale Zustellung (LDA) mit `shardpostctl`, siehe
-[Admin-API und LDA](../admin-api.md). Außerdem umgesetzt: der
-identitätserhaltende Kontoimport aus 8e (0.17.0), ein befristeter
-Protokoll-Trace pro Konto (0.18.0, Rolle `trace`) als erstes Supportwerkzeug
-und **8a** (0.19.0): lesende Diagnose für Server, Konto, Postfächer
-(paginiert), ACL mit Erklärung, Quota und Freigaben sowie ein Konten-Scope
-je mTLS-Client, siehe [Admin-API: Diagnose](../admin-api.md#lesende-diagnose-stufe-8a).
-Der Jobstatus aus 8a folgt mit den Jobs in 8c. **8b** (0.20.0):
-Postfächer anlegen, umbenennen, abonnieren und ACLs versioniert ändern
-(Rolle `provision`), siehe [Admin-API: Provisionierung](../admin-api.md#provisionierung-und-berechtigungen-stufe-8b).
-**8c** (0.21.0): dauerhafte Jobs mit Lease, Fencing, Checkpoints und
-Übernahme, Plan → Apply mit Drift-Prüfung, Idempotency-Key, Jobstatus (Rest
-von 8a); Arten `index_check`, `scrub` (Klassen), `quota_recalc`,
-`acl_reconcile`, `fts_rebuild` (Wartungsmodus), `mailbox_delete`, `purge`
-(Rollen `repair`, `delete`), siehe [Admin-API: Wartungsjobs](../admin-api.md#wartungsjobs-stufe-8c).
-Der periodische Scrub-CronJob bleibt eigenständig; die gemeinsame
-Koordination ist die Kontosperre, die er respektiert. **8d** (0.22.0):
-Nachrichten auflisten, begrenzt suchen, Kopfzeilen zeigen, exportieren
-(Rolle `content`), Flags, Kopieren/Verschieben (Rolle `support`),
-geplantes Expunge (Job `expunge`, Rolle `delete`), Sieve
-list/show/put/delete/activate und eine Prüfung ohne Nebenwirkungen,
-Lernqueue list/show/retry, siehe [Admin-API: Supportwerkzeuge](../admin-api.md#supportwerkzeuge-stufe-8d).
-**8e** (0.23.0): Kontoexport als versioniertes Archiv mit Prüfsummen
-(Rolle `export`), `archive verify` und `restore` über den Kontoimport,
-isolierter Restore ohne ACL und aktives Sieve, siehe
-[Admin-API: Export und Wiederherstellung](../admin-api.md#export-und-wiederherstellung-stufe-8e).
-Damit ist Stufe 8 abgeschlossen. Entwurf vom 16.09.2026 auf Basis
-von ShardPost 0.12.0. Die Nummer setzt die bisherigen Stufen 6/7 für JMAP
-fort; sie schreibt keine zeitliche Abhängigkeit von JMAP vor. Die ersten
-Teilpakete dieser Stufe sollten vor einer größeren Backend-Migration kommen.
+Status: **complete** (2026-09-19): every package 8a to 8e is implemented
+and live; 0.23.0 carries the last of them. The sections below keep the
+plan and the decisions behind it. What was built, in order: the contract
+with code generation, the Unix socket and mTLS listeners, roles, the audit
+log line, `version` and local delivery (LDA) via `shardpostctl`, see
+[Admin API and LDA](../admin-api.md). Also implemented: the
+identity-preserving account import from 8e (0.17.0), a time-limited
+protocol trace per account (0.18.0, role `trace`) as the first support tool,
+and **8a** (0.19.0): read-only diagnosis for the server, an account, mailboxes
+(paginated), ACLs with an explanation, quota and shares, plus an account scope
+per mTLS client, see [Admin API: diagnosis](../admin-api.md#read-only-diagnosis-stage-8a).
+The job status from 8a follows with the jobs in 8c. **8b** (0.20.0):
+create, rename and subscribe mailboxes and change ACLs with version checks
+(role `provision`), see [Admin API: provisioning](../admin-api.md#provisioning-and-permissions-stage-8b).
+**8c** (0.21.0): durable jobs with lease, fencing, checkpoints and takeover,
+plan → apply with a drift check, idempotency key, job status (the rest
+of 8a); kinds `index_check`, `scrub` (classes), `quota_recalc`,
+`acl_reconcile`, `fts_rebuild` (maintenance mode), `mailbox_delete`, `purge`
+(roles `repair`, `delete`), see [Admin API: maintenance jobs](../admin-api.md#maintenance-jobs-stage-8c).
+The periodic scrub CronJob remains separate; the shared coordination point is
+the account lock, which it respects. **8d** (0.22.0):
+list messages, search within limits, show headers, export
+(role `content`), flags, copy/move (role `support`),
+scheduled expunge (job `expunge`, role `delete`), Sieve
+list/show/put/delete/activate and a check without side effects,
+learning queue list/show/retry, see [Admin API: support tools](../admin-api.md#support-tools-stage-8d).
+**8e** (0.23.0): account export as a versioned archive with checksums
+(role `export`), `archive verify` and `restore` via the account import,
+isolated restore without ACLs and without an active Sieve script, see
+[Admin API: export and restore](../admin-api.md#export-and-restore-stage-8e).
+Stage 8 is therefore complete. Drafted on 2026-09-16 on the basis
+of ShardPost 0.12.0. The number continues the previous stages 6/7 for JMAP;
+it does not impose any temporal dependency on JMAP. The first work packages
+of this stage should come before a larger backend migration.
 
-## Ziel und Architekturentscheidung
+## Goal and architecture decision
 
-Administratoren sollen Postfächer untersuchen, Berechtigungen erklären,
-gezielt reparieren und nachvollziehbar verwalten können, ohne RADOS-Objekte
-von Hand zu ändern oder IMAP als privilegierte Administrationsschnittstelle
-zu missbrauchen. Vorbild ist der betriebliche Nutzen von doveadm, nicht dessen
-vollständiger Befehlsumfang oder Wire-Protokoll.
+Administrators should be able to inspect mailboxes, explain permissions, repair
+specific problems and administer the system in an auditable way, without
+editing RADOS objects by hand or abusing IMAP as a privileged administration
+interface. The model is the operational value of doveadm, not its complete
+command set or its wire protocol.
 
-**Vorgesehen sind `shardpostctl` und eine interne, versionierte HTTP-API mit
-OpenAPI als führendem Vertrag.** Daraus werden Go-Transporttypen,
-Server-Schnittstellen und der von der CLI verwendete Client generiert.
-Die fachlichen Operationen liegen in einem gemeinsamen Admin-Service hinter
-schmalen Store-Interfaces. Die CLI enthält weder Ceph-Zugangsdaten noch einen
-zweiten Reparaturalgorithmus. Kein universeller Endpunkt zum Ausführen von
-Shellbefehlen oder beliebigen RADOS-Schreiboperationen.
+**The plan is `shardpostctl` plus an internal, versioned HTTP API with
+OpenAPI as the leading contract.** Go transport types, server interfaces and
+the client used by the CLI are generated from it.
+The domain operations live in a shared admin service behind narrow store
+interfaces. The CLI contains neither Ceph credentials nor a second repair
+algorithm. There is no universal endpoint for running shell commands or
+arbitrary RADOS writes.
 
-Der Admin-Listener läuft zunächst im Serverprozess, getrennt von Mailports
-und Metriken. Langläufer werden als dauerhafte Jobs ausgeführt. Eine eigene
-Deployment-Komponente ist erst bei belegtem Bedarf erforderlich.
+The admin listener initially runs inside the server process, separate from the
+mail ports and the metrics endpoint. Long-running work is executed as durable
+jobs. A deployment component of its own is only required once the need is
+demonstrated.
 
 ```mermaid
 flowchart LR
-    CLI[shardpostctl] --> SDK[Generierter API-Client]
-    SDK --> API[Interner Admin-Listener]
-    AUTO[Betriebsautomatisierung] --> API
-    API --> AUTH[Admin-Authentifizierung und Rechteprüfung]
-    AUTH --> SVC[Admin-Service]
-    SVC --> STORE[Bestehende Store-Operationen]
-    SVC --> JOBS[Dauerhafte Wartungsjobs]
+    CLI[shardpostctl] --> SDK[Generated API client]
+    SDK --> API[Internal admin listener]
+    AUTO[Operations automation] --> API
+    API --> AUTH[Admin authentication and authorization]
+    AUTH --> SVC[Admin service]
+    SVC --> STORE[Existing store operations]
+    SVC --> JOBS[Durable maintenance jobs]
     JOBS --> STORE
     STORE --> RADOS[RADOS]
 ```
 
-OpenAPI beschreibt Ein- und Ausgaben, Fehler und Authentifizierung. Es ersetzt
-weder Autorisierungslogik noch Jobkoordination oder Konsistenzprüfungen.
-Der konkrete Vertrag wird in Teilpaket 8a unter `api/admin/openapi.yaml`
-angelegt; diese Planung behauptet noch keine verfügbaren Endpunkte.
+OpenAPI describes inputs and outputs, errors and authentication. It replaces
+neither authorization logic nor job coordination or consistency checks.
+The concrete contract is created in work package 8a under
+`api/admin/openapi.yaml`; this plan does not yet claim any available endpoints.
 
-## Zuständigkeiten
+## Responsibilities
 
-- **ShardPost:** Mailboxen, Nachrichten, Mailbox-ACLs, Quota, Sieve-Daten,
-  FTS, Store-Integrität und eigene Wartungsjobs.
-- **Nauthilus beziehungsweise Provisionierung:** Identitäten, Passwörter,
-  Authentifizierungsrichtlinien, Account-Lebenszyklus und kanonische Konten.
-  Ein Speichernamespace ist kein Nachweis eines gültigen Benutzerkontos.
-- **nauthilus-director:** Platzierung, Routing, aktive Sessions, Hold, Kick,
-  Drain und Move. Diese Funktionen werden nicht nochmals in ShardPost gebaut.
-- **Betriebsorchestrierung:** Verknüpft Director-Hold, Datenübertragung und
-  Umschaltung. Ein Director-Hold allein sperrt keine direkten Store-Schreiber.
+- **ShardPost:** mailboxes, messages, mailbox ACLs, quota, Sieve data,
+  FTS, store integrity and its own maintenance jobs.
+- **Nauthilus, respectively provisioning:** identities, passwords,
+  authentication policies, account lifecycle and canonical accounts.
+  A storage namespace is not evidence of a valid user account.
+- **nauthilus-director:** placement, routing, active sessions, hold, kick,
+  drain and move. These functions are not rebuilt in ShardPost.
+- **Operational orchestration:** ties together director hold, data transfer
+  and cutover. A director hold alone does not lock out direct store writers.
 
-„Benutzer-ACLs“ bezeichnet hier Rechte eines Principals auf einer Mailbox.
-Admin-Rollen für die HTTP-API sind davon getrennt; ein Mailbox-ACL-Adminrecht
-verleiht keine systemweite Betriebsberechtigung.
+"User ACLs" here means the rights of a principal on a mailbox.
+Admin roles for the HTTP API are separate from that; a mailbox ACL admin right
+does not grant any system-wide operational authority.
 
-## Kandidaten und Priorität
+## Candidates and priority
 
-Priorität P0: vor größerem Pilot/Migration; P1: im Anschluss für regulären
-Betrieb; P2: eigener Ausbau nach Bedarf. Die CLI-Namen sind Entwurfsnamen.
+Priority P0: before a larger pilot/migration; P1: afterwards for regular
+operation; P2: a separate extension as needed. The CLI names are draft names.
 
-| Funktion / doveadm-Vorbild | Nutzen und geplante Oberfläche | Bestand und erforderlicher Ausbau | Priorität |
+| Function / doveadm model | Benefit and planned surface | Existing code and required extension | Priority |
 |---|---|---|---|
-| `mailbox list/status` | `mailbox list/show`: stabile ID, Name, UIDVALIDITY, UIDNEXT, MODSEQ, Anzahl, Special-Use, Subscriptions, Shards | `ListMailboxes`, `Info` vorhanden; paginierte, kostenbewusste Admin-Sicht fehlt | P0 |
-| `mailbox create/rename/delete/subscribe` | Ordner provisionieren, umbenennen, abonnieren und kontrolliert entfernen | Store-Operationen vorhanden; geschützte Admin-Fassade, Vorbedingungen und Löschplan fehlen | P0; Löschen 8c |
-| `acl get/rights/debug` | `acl list/explain`: Warum sieht ein Benutzer ein freigegebenes Postfach nicht? Explizite und effektive Rechte, Besitzer und SharedRef erklären | ACLs und SharedRefs vorhanden; Erklärung muss dieselbe Rechteberechnung wie IMAP nutzen | P0 |
-| `acl set/add/remove/delete/recalc` | Rechte ändern und beschädigte Freigabeverweise abgleichen | `SetACL` und Generationen vorhanden; selektiver Abgleich und atomare relative Rechteänderungen ergänzen | P0 |
-| `quota get/recalc` | `quota show/check/recalculate`: Grenzwert, Belegung, Abweichung; lokale Limits gezielt ändern | Quota-API und Scrub-Abgleich vorhanden; eigenständiger Job ohne weitere Scrub-Reparaturen fehlt | P0 |
-| `force-resync`, `dump`, `rebuild` | `index inspect/check/repair`: Registry, Header, Shards, UIDs, MODSEQ, Pending, Intents und Referenzen prüfen | Scrubber vorhanden; fein abgegrenzte Prüfer/Reparaturen und strukturierte Berichte fehlen | P0 |
-| `index`, `fts rescan/check` | `fts status/check/rebuild`: fehlende/veraltete Einträge erkennen, Suchindex kontrolliert neu aufbauen | Indexierung/Suche/`DeleteFTS` vorhanden; kein sicherer administrativer Neuaufbau als Job | P0 |
-| `fts optimize` | Postinglisten/Trigramme untersuchen, eventuell verdichten | Kein pauschaler Nutzen bewiesen; nur bei gemessener Fragmentierung oder Kosten ergänzen | P2 |
-| `search`, `fetch`, `flags`, `copy`, `move`, `expunge` | Nachrichten gezielt finden, Metadaten lesen, Flags korrigieren, verschieben und löschen | Store-Bausteine vorhanden; begrenzte Abfrage, Rechte und stabile Zielmenge fehlen; Inhaltslesen gesondert autorisieren | P1 |
-| `sieve` | Skripte auflisten, validieren, versioniert sichern und aktivieren; Diagnose ohne Mailversand/Lernen | Skriptverwaltung vorhanden; Admin-Fassade und garantiert nebenwirkungsfreie Prüfung fehlen | P1 |
-| Lernqueue (ShardPost-spezifisch) | `learning list/show/retry`: Rückstände, Fehler und Dead-Jobs untersuchen; einzelne Jobs erneut versuchen | Worker vorhanden; paginierte Diagnose und sichere Wiederholung fehlen | P1 |
-| `backup`, `sync`, `import` | Inventar, Export/Import, Vergleich, Fortschritt und wiederaufnehmbare Migration | Eigener Datenübertragungsvertrag nötig; keine Behauptung von dsync-Kompatibilität | P1, separates Teilpaket 8e |
-| `user`, `who`, `kick`, `proxy`, `auth`, `pw` | Kanonisches Speicherkonto anzeigen; Routing-/Sessiondiagnose mit Director korrelieren | Identitätsverwaltung und Routing bleiben bei deren Ownern; keine Passwortverwaltung in ShardPost | Diagnose P0; Rest extern |
-| `stats`, `log`, `config` | Version, Konfigurationsfingerprint ohne Secrets, Store-Status und Jobzustand; Verweise auf Metriken/Logs | Config-Prüfung, slog und Prometheus vorhanden; keine zweite Monitoring-Datenbank | P0 |
-| `purge`, Benutzerlöschung | Vollständiges Offboarding mit Referenzen, Freigaben, Skripten, Lernjobs und dokumentiertem Retentionsumfang | Nicht aus `DeleteMailbox` ableitbar; eigenes Verfahren mit Provisionierung und Backup-Policy | P2 |
-| `fs`, `dict`, `exec`, `deduplicate` | Keine allgemeine Rohdaten- oder Shellverwaltung; Deduplikation nur mit eigenem fachlichem Vertrag | Direkte Änderungen würden Store-Invarianten umgehen; Message-ID allein beweist keine Duplikate | Nicht in erster Umsetzung |
+| `mailbox list/status` | `mailbox list/show`: stable ID, name, UIDVALIDITY, UIDNEXT, MODSEQ, count, special-use, subscriptions, shards | `ListMailboxes`, `Info` exist; a paginated, cost-aware admin view is missing | P0 |
+| `mailbox create/rename/delete/subscribe` | Provision, rename, subscribe and remove mailboxes in a controlled way | Store operations exist; a protected admin facade, preconditions and a deletion plan are missing | P0; deletion 8c |
+| `acl get/rights/debug` | `acl list/explain`: why does a user not see a shared mailbox? Explain explicit and effective rights, owner and SharedRef | ACLs and SharedRefs exist; the explanation must use the same rights computation as IMAP | P0 |
+| `acl set/add/remove/delete/recalc` | Change rights and reconcile damaged share references | `SetACL` and generations exist; add selective reconciliation and atomic relative rights changes | P0 |
+| `quota get/recalc` | `quota show/check/recalculate`: limit, usage, deviation; change local limits selectively | The quota API and the scrub reconciliation exist; a standalone job without further scrub repairs is missing | P0 |
+| `force-resync`, `dump`, `rebuild` | `index inspect/check/repair`: check registry, header, shards, UIDs, MODSEQ, pending state, intents and references | The scrubber exists; narrowly scoped checks/repairs and structured reports are missing | P0 |
+| `index`, `fts rescan/check` | `fts status/check/rebuild`: detect missing/stale entries, rebuild the search index in a controlled way | Indexing/search/`DeleteFTS` exist; there is no safe administrative rebuild as a job | P0 |
+| `fts optimize` | Inspect posting lists/trigrams, possibly compact them | No general benefit demonstrated; add only on measured fragmentation or cost | P2 |
+| `search`, `fetch`, `flags`, `copy`, `move`, `expunge` | Find specific messages, read metadata, correct flags, move and delete | Store building blocks exist; a bounded query, permissions and a stable target set are missing; reading content requires separate authorization | P1 |
+| `sieve` | List, validate, version and activate scripts; diagnosis without mail sending or learning | Script management exists; an admin facade and a guaranteed side-effect-free check are missing | P1 |
+| Learning queue (ShardPost-specific) | `learning list/show/retry`: inspect backlogs, errors and dead jobs; retry individual jobs | The worker exists; paginated diagnosis and safe retries are missing | P1 |
+| `backup`, `sync`, `import` | Inventory, export/import, comparison, progress and resumable migration | A data transfer contract of our own is needed; no claim of dsync compatibility | P1, separate work package 8e |
+| `user`, `who`, `kick`, `proxy`, `auth`, `pw` | Show the canonical storage account; correlate routing/session diagnosis with the director | Identity management and routing stay with their owners; no password management in ShardPost | Diagnosis P0; the rest external |
+| `stats`, `log`, `config` | Version, configuration fingerprint without secrets, store status and job state; pointers to metrics/logs | Config checking, slog and Prometheus exist; no second monitoring database | P0 |
+| `purge`, user deletion | Complete offboarding covering references, shares, scripts, learning jobs and a documented retention scope | Cannot be derived from `DeleteMailbox`; needs its own procedure together with provisioning and the backup policy | P2 |
+| `fs`, `dict`, `exec`, `deduplicate` | No general raw-data or shell administration; deduplication only with a domain contract of its own | Direct changes would bypass store invariants; a Message-ID alone does not prove a duplicate | Not in the first implementation |
 
-Doveadm kann unter anderem Mailboxen, ACLs, Quota, Nachrichten und Sieve
-verwalten; die Auswahl oben priorisiert unsere Betriebsfälle anhand der
-[Befehlsübersicht](https://doc.dovecot.org/2.4.1/core/summaries/doveadm.html).
-ACL-Erklärung und Freigabeabgleich orientieren sich am Zweck von
+Doveadm can administer mailboxes, ACLs, quota, messages and Sieve among other
+things; the selection above prioritizes our operational cases based on the
+[command overview](https://doc.dovecot.org/2.4.1/core/summaries/doveadm.html).
+ACL explanation and share reconciliation follow the purpose of
 [`acl debug/rights/recalc`](https://doc.dovecot.org/2.4.0/core/man/doveadm-acl.1.html),
-Quota-Abgleich an
+quota reconciliation that of
 [`quota recalc`](https://doc.dovecot.org/2.4.0/core/man/doveadm-quota.1.html).
 
-## Fachliche Grenzen der Reparaturen
+## Domain limits of the repairs
 
-**Mailboxindex ist nicht gleich Volltextindex.** FTS ist aus verfügbaren
-Nachrichten rekonstruierbar. Verlorene UID-Zuordnungen, Flags oder MODSEQ-
-Historien sind nicht zuverlässig aus dem MIME-Inhalt rekonstruierbar.
-`index repair` darf deshalb weder UIDVALIDITY stillschweigend ersetzen noch
-Nachrichten umnummerieren. Nicht reparierbarer Zustand wird als solcher
-gemeldet und verlangt Restore oder einen gesonderten Wiederherstellungsplan.
+**A mailbox index is not a full-text index.** FTS can be reconstructed from the
+available messages. Lost UID assignments, flags or MODSEQ histories cannot be
+reliably reconstructed from the MIME content.
+`index repair` must therefore neither silently replace UIDVALIDITY nor
+renumber messages. State that cannot be repaired is reported as such and
+requires a restore or a separate recovery plan.
 
-Der vorhandene Scrubber darf nicht unverändert als generischer
-„alles reparieren“-Endpunkt veröffentlicht werden: Er kann unter anderem
-verwaiste Daten löschen und Einträge für fehlende Blobs entfernen. Befunde
-werden in Prüfklassen und einzeln wählbare Reparaturaktionen zerlegt.
-Altersgrenzen, Objektversionen und Intent-Behandlung bleiben erhalten.
-Ein fehlender Blob wird nicht als reparierter Mailinhalt ausgegeben.
+The existing scrubber must not be exposed unchanged as a generic
+"repair everything" endpoint: among other things it can delete orphaned data
+and remove entries for missing blobs. Findings are broken down into check
+classes and individually selectable repair actions.
+Age thresholds, object versions and intent handling are preserved.
+A missing blob is not reported as repaired mail content.
 
-**FTS-Neuaufbau:** Kein `DeleteFTS` gefolgt von ungeschütztem Live-Scan.
-Ein implementierter Vertrag muss Zustellung, COPY/MOVE und EXPUNGE während
-des Aufbaus berücksichtigen. Vorzugsweise neue Indexgeneration erstellen,
-Änderungen nachführen, Vollständigkeit prüfen und atomar umschalten; die alte
-Generation erst danach freigeben. Falls dies zunächst nicht umgesetzt wird,
-ist ein expliziter, im Backend durchgesetzter Wartungsmodus mit begrenzter
-Unterbrechung erforderlich. Teilindizes dürfen keine scheinbar vollständigen
-Suchergebnisse liefern. Da FTS heute pro Konto/GUID organisiert ist, bleibt
-der erste Rebuild kontoweit; Mailboxfilter versprechen keine isolierte
-Löschung gemeinsam verwendeter FTS-Einträge.
+**FTS rebuild:** no `DeleteFTS` followed by an unprotected live scan.
+An implemented contract must account for delivery, COPY/MOVE and EXPUNGE
+during the rebuild. Preferably create a new index generation, track changes,
+verify completeness and switch over atomically; release the old generation
+only afterwards. If this is not implemented right away, an explicit
+maintenance mode enforced in the backend with a bounded interruption is
+required. Partial indexes must not return search results that appear
+complete. Since FTS is organized per account/GUID today, the first rebuild
+remains account-wide; mailbox filters promise no isolated deletion of shared
+FTS entries.
 
-Dovecots [`fts rescan`](https://doc.dovecot.org/2.4.0/core/man/doveadm-fts.1.html)
-vergleicht konzeptionell Index und Nachrichtenbestand; manche Treiber löschen
-stattdessen den Index. Diese treiberabhängige Semantik übernehmen wir nicht
-als undifferenziertes „rescan“.
+Dovecot's [`fts rescan`](https://doc.dovecot.org/2.4.0/core/man/doveadm-fts.1.html)
+conceptually compares the index against the message set; some drivers delete
+the index instead. We do not adopt that driver-dependent semantics as an
+undifferentiated "rescan".
 
-**Quota und ACL:** Laufende Reservierungen dürfen nicht durch einen einfachen
-Neuzählwert überschrieben werden. ACL-Reparaturen beachten Owner, Generationen
-und beide Seiten der Freigabeverweise. Add/Remove von Rechten ist eine
-serverseitige, versionsgeprüfte Operation, kein Read-Modify-Write in der CLI.
+**Quota and ACL:** in-flight reservations must not be overwritten by a simple
+recount value. ACL repairs respect the owner, the generations and both sides
+of the share references. Adding/removing rights is a server-side,
+version-checked operation, not a read-modify-write in the CLI.
 
-**Nachrichtenoperationen:** Ziel ist Konto + stabile Mailbox-ID + UIDVALIDITY
-+ UID, ergänzend GUID; keine flüchtigen IMAP-Sequenznummern. Bei selektiertem
-MOVE/EXPUNGE wird die tatsächlich betroffene Menge fixiert und erneut geprüft.
-Kontoübergreifendes Verschieben ist zunächst ausgeschlossen. Löschung,
-Papierkorb und Backup-Aufbewahrung werden getrennt ausgewiesen.
+**Message operations:** the target is account + stable mailbox ID +
+UIDVALIDITY + UID, plus the GUID; never volatile IMAP sequence numbers. For a
+MOVE/EXPUNGE in the selected state, the actually affected set is pinned and
+re-checked. Moving across accounts is excluded for now. Deletion,
+trash and backup retention are reported separately.
 
-## API-, Sicherheits- und Jobvertrag
+## API, security and job contract
 
-- Versionierter Pfad `/admin/v1`; typisierte Ressourcen statt beliebiger
-  Befehlsstrings. Beispiele: Accounts/Mailboxes/ACL/Quota, Wartungspläne,
-  Jobs und Diagnose. Undurchsichtige IDs statt Mailboxnamen als URL-Pfadteile.
-- Standardmäßig deaktivierter Listener; intern exponiert, TLS und
-  authentifizierte Admin-Identität. Für den ersten Transport mTLS mit
-  expliziter Zuordnung von Zertifikatsidentität zu Rollen/Kontenumfang.
-  Endnutzer-Login oder bloße Netzzugehörigkeit genügt nicht. Zusätzlich
-  (Entscheidung 18.09.2026) ein Unix-Socket im Pod für lokale Aufrufer
-  wie `shardpostctl` und die Quota-Programme: Identität ist die Peer-UID
-  (nur die des Servers), die Rollen sind konfiguriert.
-- Getrennte Rechte für Diagnose, ACL/Provisionierung, Reparatur,
-  Nachrichteninhalt, Export und endgültiges Löschen; Konto-/Tenant-Scope wird
-  bei jedem Zugriff geprüft. Keine Mandantentrennung allein durch RADOS-Namespace.
-- Lesende Requests verändern keinen Store-Zustand. Teure Prüfungen sind
-  explizite Jobs mit I/O-, Zeit-, Speicher- und Parallelitätsbudget.
-- Pagination und maximale Ergebnismengen; keine implizite Auswahl aller
-  Benutzer. Inventar unterscheidet Store-Konten von provisionierten Konten
-  und schließt interne Namespaces aus. Bulk-Jobs arbeiten auf fixierten Listen.
-- Gefährliche Aktionen nutzen Plan → Apply: Plan enthält Zielmenge,
-  Auswirkungen, Ablaufzeit und Versionen; Apply referenziert den Plan und
-  prüft Drift erneut. Das ermöglicht unbeaufsichtigte autorisierte Automation,
-  ohne eine interaktive Bestätigung für jeden normalen Schreibzugriff.
-- Kurze Änderungen nutzen Versionsvorbedingungen (`ETag`/`If-Match`);
-  nicht erfüllte Vorbedingungen liefern `412`, fachliche Konflikte `409`.
-  Maschinenlesbare Fehlercodes unterscheiden fehlend, verboten, nicht
-  reparierbar, Wartung erforderlich, temporär gestört und teilweise erledigt.
-- Langläufer liefern `202` mit Job-ID. Zustände: queued, running, succeeded,
-  partially_failed, failed, cancel_requested, cancelled. Fortschritt,
-  Checkpoints, Teilfehler, Wiederaufnahme und Ergebnis bleiben nach Pod-Neustart
-  erhalten. Abbruch erfolgt an sicheren Grenzen und ist kein Rollbackversprechen.
-- Idempotency-Key bindet Identität, Scope und Request-Hash an das Ergebnis;
-  Wiederholung erzeugt keinen zweiten Auftrag. Kein Exactly-once-Versprechen
-  für externe Lernprogramme oder SMTP-Seiteneffekte.
-- Jobübernahme braucht Lease, Generation und Prüfung dieser Generation an
-  Mutationsgrenzen. Abgelaufene Worker dürfen nach Übernahme nicht weiter
-  schreiben. Konfliktmatrix für Scrub, Rebuild, Import und Quota-Reparatur;
-  gemeinsame Registrierung gilt auch für Cron-/CLI-Wartung. CAS bleibt bestehen.
-- Audit: Admin-Identität, Operation, Scope, Plan/Job, Zeitpunkt, Ergebnis,
-  nachvollziehbare Änderungen; keine Tokens, Passwörter, Nachrichtentexte
-  oder Skriptinhalte. Geschützte externe Aufbewahrung und definierte Retention.
-  Konten/Job-IDs dürfen nicht zu hochkardinalen Prometheus-Labels werden.
-- CLI: menschenlesbare Tabellen und `--json`, stabile Exitcodes (Erfolg,
-  Teilfehler, fehlgeschlagen); `job wait` wertet den Endzustand aus.
-  SDK/Server-Generierung, Spezifikationsprüfung und Prüfung auf veraltete
-  generierte Dateien sind reproduzierbare Build-Ziele.
+- Versioned path `/admin/v1`; typed resources instead of arbitrary command
+  strings. Examples: accounts/mailboxes/ACL/quota, maintenance plans,
+  jobs and diagnosis. Opaque IDs instead of mailbox names as URL path segments.
+- A listener that is disabled by default; exposed internally, with TLS and an
+  authenticated admin identity. For the first transport, mTLS with an
+  explicit mapping from certificate identity to roles/account scope.
+  An end-user login or mere network membership is not enough. In addition
+  (decision of 2026-09-18) a Unix socket in the pod for local callers
+  such as `shardpostctl` and the quota programs: the identity is the peer UID
+  (only the server's own), and the roles are configured.
+- Separate rights for diagnosis, ACL/provisioning, repair,
+  message content, export and permanent deletion; the account/tenant scope is
+  checked on every access. No tenant separation by RADOS namespace alone.
+- Read requests do not change store state. Expensive checks are
+  explicit jobs with an I/O, time, memory and concurrency budget.
+- Pagination and maximum result sizes; no implicit selection of all
+  users. The inventory distinguishes store accounts from provisioned accounts
+  and excludes internal namespaces. Bulk jobs work on pinned lists.
+- Dangerous actions use plan → apply: the plan contains the target set,
+  the effects, an expiry time and versions; apply references the plan and
+  re-checks for drift. This enables unattended authorized automation
+  without requiring an interactive confirmation for every ordinary write.
+- Short changes use version preconditions (`ETag`/`If-Match`);
+  unmet preconditions return `412`, domain conflicts `409`.
+  Machine-readable error codes distinguish missing, forbidden, not
+  repairable, maintenance required, temporarily disrupted and partially done.
+- Long-running work returns `202` with a job ID. States: queued, running,
+  succeeded, partially_failed, failed, cancel_requested, cancelled. Progress,
+  checkpoints, partial failures, resumption and the result survive a pod
+  restart. Cancellation happens at safe boundaries and is not a rollback promise.
+- The idempotency key binds identity, scope and request hash to the result;
+  a retry does not create a second job. There is no exactly-once promise
+  for external learning programs or SMTP side effects.
+- Job takeover requires a lease, a generation and a check of that generation at
+  mutation boundaries. Expired workers must not keep writing after a takeover.
+  There is a conflict matrix for scrub, rebuild, import and quota repair;
+  shared registration also applies to cron/CLI maintenance. CAS remains in place.
+- Audit: admin identity, operation, scope, plan/job, timestamp, result,
+  traceable changes; no tokens, passwords, message bodies
+  or script contents. Protected external retention and a defined retention period.
+  Account and job IDs must not become high-cardinality Prometheus labels.
+- CLI: human-readable tables and `--json`, stable exit codes (success,
+  partial failure, failed); `job wait` evaluates the final state.
+  SDK/server generation, specification checking and a check for stale
+  generated files are reproducible build targets.
 
-## Umsetzungspakete und Abnahme
+## Implementation packages and acceptance criteria
 
-### 8a — Vertrag, CLI und lesende Diagnose (P0)
+### 8a — Contract, CLI and read-only diagnosis (P0)
 
-OpenAPI, generierter Client/Server, `shardpostctl`, Admin-Identität/Rollen,
-Mailbox-/ACL-/Quota-/Versionsansichten und Jobstatus implementieren.
-Bestehende Fachoperationen wiederverwenden; paginierte Store-Zugriffe ergänzen,
-statt vollständige Kontenlisten nur nachträglich in der API abzuschneiden.
+Implement OpenAPI, the generated client/server, `shardpostctl`, the admin
+identity/roles, the mailbox/ACL/quota/version views and the job status.
+Reuse the existing domain operations; add paginated store access
+instead of truncating complete account lists after the fact in the API.
 
-Abnahme: echte HTTPS-Requests und CLI gegen den Server; unberechtigt,
-falscher Scope, abgelaufenes Zertifikat, Pagination und leere Ergebnisse.
-Nachweis, dass Diagnose keine Maildaten verändert und keine Secrets ausgibt.
+Acceptance criteria: real HTTPS requests and the CLI against the server;
+unauthorized access, wrong scope, expired certificate, pagination and empty
+results. Evidence that diagnosis does not change mail data and emits no secrets.
 
-### 8b — Provisionierung und Berechtigungen (P0)
+### 8b — Provisioning and permissions (P0)
 
-Mailbox create/rename/subscription, ACL set/add/remove/explain, Quota-Limits.
-Für Limits vorab genau eine maßgebliche Quelle festlegen; keine konkurrierenden
-Werte zwischen Provisionierung und Store. Keine externe Identität anlegen.
+Mailbox create/rename/subscription, ACL set/add/remove/explain, quota limits.
+For limits, define exactly one authoritative source up front; no competing
+values between provisioning and the store. Do not create external identities.
 
-Abnahme: zwei Konten und Shared Mailbox, gleichzeitige ACL-Änderungen,
-Unicode-Namen, geschützte INBOX-Regeln, Benachrichtigung aktiver IMAP-Sessions,
-Versionskonflikte und Idempotenz bei verlorener HTTP-Antwort.
+Acceptance criteria: two accounts and a shared mailbox, concurrent ACL changes,
+Unicode names, protected INBOX rules, notification of active IMAP sessions,
+version conflicts and idempotency when the HTTP response is lost.
 
-### 8c — Wartungsjobs und gezielte Reparaturen (P0)
+### 8c — Maintenance jobs and targeted repairs (P0)
 
-Dauerhafte Jobausführung, Diagnose/Plan/Apply, Quota-Abgleich,
-ACL-Verweisabgleich, Index-/Intent-Prüfung, selektiver Scrub, FTS-Rebuild und
-kontrolliertes Mailbox-Löschen. Bestehendes `shardpost scrub` und CronJob an
-denselben Service/Koordinationsvertrag anbinden; keine unkoordinierte Zweitspur.
+Durable job execution, diagnosis/plan/apply, quota reconciliation,
+ACL reference reconciliation, index/intent checking, selective scrub, FTS
+rebuild and controlled mailbox deletion. Connect the existing
+`shardpost scrub` and the CronJob to the same service and coordination
+contract; no uncoordinated second track.
 
-Abnahme gegen echtes Ceph: Pod-Abbruch und Lease-Verlust an Schreibgrenzen,
-Wiederaufnahme ohne doppelte Wirkung, parallele Zustellung/STORE/MOVE/EXPUNGE,
-abgelaufene Pläne, volle Ressourcenbudgets und Teilfehler. Bekannte Suchmengen
-vor/nach Rebuild gleich; UIDVALIDITY/UIDs bleiben bei Reparaturen erhalten.
-Bei fehlenden Daten muss der Bericht offen bleiben statt Erfolg zu behaupten.
+Acceptance criteria against a real Ceph: pod termination and lease loss at write
+boundaries, resumption without duplicate effects, concurrent
+delivery/STORE/MOVE/EXPUNGE, expired plans, exhausted resource budgets and
+partial failures. Known search result sets identical before and after a rebuild;
+UIDVALIDITY/UIDs preserved across repairs.
+When data is missing, the report has to stay open instead of claiming success.
 
-### 8d — Supportwerkzeuge (P1)
+### 8d — Support tools (P1)
 
-Begrenzte Nachrichtensuche, gesondert autorisiertes Fetch/Export, Flags,
-Copy/Move innerhalb eines Kontos, geplantes Expunge; Sieve-Prüfung und
-Aktivierung sowie Lernqueue-Diagnose/Retry. Nebenwirkungsfreie Sieve-Prüfung
-muss Redirect, Vacation, Notify und externe Programme unterdrücken.
+Bounded message search, separately authorized fetch/export, flags,
+copy/move within one account, scheduled expunge; Sieve checking and
+activation as well as learning queue diagnosis/retry. A side-effect-free Sieve
+check must suppress redirect, vacation, notify and external programs.
 
-Abnahme: stabile Zielidentitäten bei paralleler Änderung, sichere Vorschau,
-Datenschutz in Logs/Audit und klare Behandlung nicht idempotenter Lernziele.
+Acceptance criteria: stable target identities under concurrent changes, a safe
+preview, data protection in logs/audit and clear handling of learning targets
+that are not idempotent.
 
-### 8e — Migrations- und Wiederherstellungswerkzeuge (P1)
+### 8e — Migration and restore tools (P1)
 
-Export-/Importformat und Prüfsummen festlegen; Rohmail, Datum, Flags,
-Mailboxidentitäten, UIDVALIDITY/UIDs, MODSEQ-Vertrag, ACLs, Subscriptions,
-Special-Use, Metadaten und Sieve berücksichtigen. POP3-UIDLs ausdrücklich
-prüfen. Reproduzierbare FTS-Daten müssen nicht Teil des Transfers sein.
-Import bestehender UID-Identitäten erfordert neue Store-Funktionen; APPEND
-allein verspricht diese Erhaltung nicht.
+Define the export/import format and its checksums; cover raw mail, date, flags,
+mailbox identities, UIDVALIDITY/UIDs, the MODSEQ contract, ACLs, subscriptions,
+special-use, metadata and Sieve. Check POP3 UIDLs explicitly.
+Reproducible FTS data need not be part of the transfer.
+Importing existing UID identities requires new store functions; APPEND
+alone does not promise that preservation.
 
-Inventar → Erstkopie → Delta → Director-Hold und Nachweis ruhender
-Schreibpfade → finaler Abgleich → Routing-Umschaltung → Protokollprüfung.
-Rückweg berücksichtigt nach Umschaltung hinzugekommene Änderungen.
-Abnahme: repräsentative Dovecot-Konten, wiederholbarer Import, Client-Identitäten,
-Sieve ohne unbeabsichtigten Versand, Ausfälle während Transfer und Rückmigration.
-Zusätzlich isolierten Restore aus einer echten Sicherung prüfen; ein
-erfolgreicher Export ist kein Backup-/Restore-Nachweis.
+Inventory → initial copy → delta → director hold with evidence of quiesced
+write paths → final reconciliation → routing cutover → protocol check.
+The way back accounts for changes made after the cutover.
+Acceptance criteria: representative Dovecot accounts, a repeatable import,
+client identities, Sieve without unintended sending, failures during the
+transfer and migration back.
+In addition, verify an isolated restore from a real backup; a
+successful export is not evidence of backup/restore.
 
-**Vorgezogener Kern: identitätserhaltender Kontoimport** (Planung vom
-18.09.2026, umgesetzt und ausgerollt mit 0.17.0; Bedienung und Semantik in
-[Admin-API: Kontoimport](../admin-api.md#kontoimport-mit-erhaltenen-imap-identitäten)). Anlass: Die erste Produktivmigration per imapsync erzeugte neue
-UIDVALIDITY/UIDs, alle Clients luden ihre Ordner vollständig neu. Geplant ist
-ein Import über die Admin-API (Rolle `import`, Import-Sitzung mit
-kontoweiter Sperre), der UIDVALIDITY, UIDs samt Lücken, UIDNEXT, Flags,
-Keywords, INTERNALDATE/SAVEDATE und MODSEQ übernimmt; `h:modseq` und
-`h:logstart` werden auf den Quellstand gesetzt, damit CONDSTORE/QRESYNC-
-Caches der Clients gültig bleiben. Der Quellleser `shardpostctl migrate imap`
-liest Dovecot per IMAP mit Master-User (UID FETCH mit MODSEQ), kopiert
-initial und in wiederholbaren Deltas; nur der letzte Delta liegt im
-Director-Hold. Umgesetzt über einen Sidecar im Server-Pod am Admin-Socket (kein mTLS nötig).
-Abnahmekriterium: vorher synchronisierte Clients (Thunderbird, Apple Mail,
-iOS) laden nach der Umschaltung nichts vollständig neu.
+**Core pulled forward: identity-preserving account import** (planned on
+2026-09-18, implemented and rolled out with 0.17.0; usage and semantics in
+[Admin API: account import](../admin-api.md#account-import-with-preserved-imap-identities)). Reason: the first production migration via imapsync created new
+UIDVALIDITY/UIDs, and all clients reloaded their folders completely. The plan is
+an import through the Admin API (role `import`, an import session with an
+account-wide lock) that carries over UIDVALIDITY, UIDs including gaps, UIDNEXT,
+flags, keywords, INTERNALDATE/SAVEDATE and MODSEQ; `h:modseq` and
+`h:logstart` are set to the source state so that the clients' CONDSTORE/QRESYNC
+caches stay valid. The source reader `shardpostctl migrate imap`
+reads Dovecot over IMAP with a master user (UID FETCH with MODSEQ), copies
+initially and then in repeatable deltas; only the last delta happens inside the
+director hold. Implemented through a sidecar in the server pod on the admin socket (no mTLS needed).
+Acceptance criterion: previously synchronized clients (Thunderbird, Apple Mail,
+iOS) reload nothing completely after the cutover.
 
-## Entscheidungen (19.09.2026)
+## Decisions (2026-09-19)
 
-1. Betreiberidentitäten und Rollen wie bisher: Unix-Socket (Peer-UID) und
-   mTLS-Clientzertifikate mit Rollen und Konten-Scope; Audit ist die
-   Logzeile `admin_request`, aufbewahrt im zentralen Logsystem.
-2. Jobdaten im Indexpool (eigener Namespace), Übernahme per Lease mit
-   Generation, konto-exklusive Jobs zusätzlich unter der Kontosperre.
-3. FTS-Neuaufbau zunächst im **Wartungsmodus** (Kontosperre), keine
-   Indexgenerationen.
-4. **LDAP (`rnsMSQuota`) bleibt maßgeblich** für Quota-Grenzen; die Admin-API
-   setzt keine Grenzen und gleicht nur die Belegung ab. Konten werden über
-   Nauthilus kanonisch aufgelöst.
-5. Import wie umgesetzt (Dovecot 2.4 per IMAP-Master-User); Export und
-   Backup als **eigenes versioniertes Archiv**, Restore über den Import.
-6. Konto-Löschung (purge) gehört zur Stufe; eine Rückmigration zu Dovecot
-   nicht.
+1. Operator identities and roles as before: Unix socket (peer UID) and
+   mTLS client certificates with roles and an account scope; the audit trail is
+   the log line `admin_request`, retained in the central logging system.
+2. Job data in the index pool (in a namespace of its own), takeover by lease with
+   a generation, account-exclusive jobs additionally under the account lock.
+3. FTS rebuild initially in **maintenance mode** (account lock), no
+   index generations.
+4. **LDAP (`rnsMSQuota`) remains authoritative** for quota limits; the Admin API
+   sets no limits and only reconciles the usage. Accounts are resolved
+   canonically through Nauthilus.
+5. Import as implemented (Dovecot 2.4 over an IMAP master user); export and
+   backup as a **versioned archive of our own**, restore through the import.
+6. Account deletion (purge) belongs to this stage; migrating back to Dovecot
+   does not.
 
-Kein Teilpaket setzt einen CAS-Umbau voraus. Zusätzliche Schreibserialisierung
-oder FTS-Optimierung wird erst durch Messungen begründet. Diese Stufe baut
-administrative Fähigkeiten und überprüfbare Betriebsabläufe aus.
+No work package requires a CAS redesign. Additional write serialization
+or FTS optimization will only be justified by measurements. This stage builds
+out administrative capabilities and verifiable operational procedures.
 
-## Geprüfte Codebasis
+## Reviewed code base
 
-- [Store-Vertrag](../../internal/model/model.go): Mailboxen, ACL, Quota,
-  Nachrichten, Metadaten und Sieve.
-- [Bestehender Scrub-Einstieg](../../cmd/shardpost/main.go) und
-  [Scrubber](../../internal/cephstore/scrub.go).
-- [FTS](../../internal/cephstore/fts.go): interne Indizierung, Suche und
-  kontoweites Löschen; noch kein administrativer Rebuild-Vertrag.
-- [Speichermodell](../architecture/storage.md) und
-  [Qualitätsstand](quality.md): Atomarität, Reparaturgrenzen und Nachweise.
+- [Store contract](../../internal/model/model.go): mailboxes, ACL, quota,
+  messages, metadata and Sieve.
+- [Existing scrub entry point](../../cmd/shardpost/main.go) and the
+  [scrubber](../../internal/cephstore/scrub.go).
+- [FTS](../../internal/cephstore/fts.go): internal indexing, search and
+  account-wide deletion; no administrative rebuild contract yet.
+- [Storage model](../architecture/storage.md) and
+  [quality status](quality.md): atomicity, repair limits and evidence.

@@ -1,54 +1,54 @@
-# Admin-API, shardpostctl und lokale Zustellung (LDA)
+# Admin API, shardpostctl, and local delivery (LDA)
 
-Vorgezogener Kern von [Stufe 8](development/admin-stage.md): versionierter
-OpenAPI-Vertrag, Admin-Listener mit Identität und Rollen, Audit-Log und die
-lokale Zustellung. Jobs, Plan/Apply und die Admin-Ansichten folgen in den
-Teilpaketen 8a bis 8c.
+The core of [stage 8](development/admin-stage.md), pulled forward: a
+versioned OpenAPI contract, admin listeners with identity and roles, an
+audit log, and local delivery. Jobs, plan/apply, and the admin views
+follow in sub-packages 8a through 8c.
 
-## Vertrag und Generierung
+## Contract and code generation
 
-- Vertrag: [`api/admin/openapi.yaml`](../api/admin/openapi.yaml), Pfad `/admin/v1`.
-- Generiert mit `oapi-codegen` v2.8.0 (Modelle, `net/http`-Server-Interface,
-  Client) nach `internal/adminapi/api.gen.go`; Konfiguration in
-  `api/admin/oapi-codegen.yaml`. Handgeschriebene Client-Helfer für
-  Socket und mTLS liegen in `internal/adminapi/client.go`.
-- `make generate` erzeugt den Code neu, `make check-generate` schlägt fehl,
-  wenn der eingecheckte Code nicht zum Vertrag passt. Der Generator läuft
-  im Modulmodus (Netzzugriff), die Laufzeitbibliothek
-  `github.com/oapi-codegen/runtime` ist vendort.
+- Contract: [`api/admin/openapi.yaml`](../api/admin/openapi.yaml), path `/admin/v1`.
+- Generated with `oapi-codegen` v2.8.0 (models, `net/http` server
+  interface, client) into `internal/adminapi/api.gen.go`; configuration in
+  `api/admin/oapi-codegen.yaml`. Hand-written client helpers for the
+  socket and for mTLS live in `internal/adminapi/client.go`.
+- `make generate` regenerates the code, `make check-generate` fails if the
+  checked-in code does not match the contract. The generator runs in
+  module mode (network access); the runtime library
+  `github.com/oapi-codegen/runtime` is vendored.
 
-## Listener und Identität
+## Listeners and identity
 
-Beide Listener sind ohne Konfiguration aus und von Mail- und Metrikports
-getrennt. Wirkungslose Einstellungen werden abgelehnt: `socket` und
-`socket_roles` nur gemeinsam, `addr` nur mit `tls_cert`, `tls_key`,
-`client_ca` und mindestens einem Eintrag in `clients`, TLS-Einstellungen
-nicht ohne `addr`.
+Both listeners are off unless configured, and both are separate from the
+mail and metrics ports. Settings that have no effect are rejected:
+`socket` and `socket_roles` only together, `addr` only with `tls_cert`,
+`tls_key`, `client_ca` and at least one entry in `clients`, TLS settings
+not without `addr`.
 
-| Listener | Identität | Rollen |
+| Listener | Identity | Roles |
 | --- | --- | --- |
-| Unix-Socket (`admin.socket`, Modus 0600) | Peer-UID per `SO_PEERCRED`; nur die UID des Serverprozesses wird zugelassen | `admin.socket_roles` |
-| TCP mit mTLS (`admin.addr`) | verifiziertes Clientzertifikat; Subject-CN oder DNS-/URI-SAN (ohne Groß-/Kleinschreibung) | `admin.clients[].roles` |
+| Unix socket (`admin.socket`, mode 0600) | peer UID via `SO_PEERCRED`; only the UID of the server process is allowed | `admin.socket_roles` |
+| TCP with mTLS (`admin.addr`) | verified client certificate; subject CN or DNS/URI SAN (case-insensitive) | `admin.clients[].roles` |
 
-Der Socket ist nur innerhalb des Pods erreichbar, also dieselbe
-Vertrauensgrenze wie `extprograms`. Netzzugehörigkeit allein berechtigt nie.
-Für mTLS werden `admin.tls_cert`, `admin.tls_key` und `admin.client_ca`
-bei Dateiänderung neu gelesen (höchstens alle 10 s geprüft). Damit greift
-eine Rotation durch cert-manager ohne Neustart. Eine defekte neue Version
-wird geloggt, bis dahin bleibt die alte in Gebrauch. Clientzertifikate
-brauchen `extKeyUsage clientAuth`.
+The socket is reachable only inside the pod, so it is the same trust
+boundary as `extprograms`. Being on the network is never an authorization
+by itself. For mTLS, `admin.tls_cert`, `admin.tls_key` and
+`admin.client_ca` are re-read when the files change (checked at most every
+10 s). A rotation by cert-manager therefore takes effect without a
+restart. A broken new version is logged, and until it is fixed the old one
+stays in use. Client certificates need `extKeyUsage clientAuth`.
 
-Rollen: `diagnose` (Version, Serverstatus und lesende Diagnose), `deliver` (Zustellung mit Quota-Durchsetzung),
-`deliver:noenforce` (zusätzlich für `enforce_quota=false`), `import`
-(Kontoimport), `trace` (Protokoll-Trace eines Kontos, siehe unten),
-`provision` (Postfächer anlegen, umbenennen, abonnieren; ACLs ändern),
-`repair` (Wartungsjobs, die reparieren; Lernjobs wiederholen), `delete`
-(Postfach, Nachrichten und Konto endgültig löschen), `content`
-(Nachrichteninhalte lesen: Suche, Kopfzeilen, Export, Sieve-Skripte) und
-`support` (Flags, Kopieren/Verschieben, Sieve-Skripte ändern und
-aktivieren) und `export` (ganze Konten als Archiv exportieren; der
-Restore läuft über `import`). `content` ist bewusst von `diagnose` getrennt: Diagnose sieht
-Metadaten, aber keine Inhalte.
+Roles: `diagnose` (version, server status and read-only diagnosis), `deliver` (delivery with quota enforcement),
+`deliver:noenforce` (additionally required for `enforce_quota=false`),
+`import` (account import), `trace` (protocol trace of an account, see
+below), `provision` (create, rename and subscribe mailboxes; change
+ACLs), `repair` (maintenance jobs that repair; retry learning jobs),
+`delete` (permanently delete a mailbox, messages and an account),
+`content` (read message content: search, headers, export, Sieve scripts)
+and `support` (flags, copy/move, change and activate Sieve scripts) and
+`export` (export whole accounts as an archive; the restore runs through
+`import`). `content` is deliberately separate from `diagnose`: diagnosis
+sees metadata, but no content.
 
 ```yaml
 admin:
@@ -63,61 +63,61 @@ admin:
       roles: [diagnose]
     - identity: support.example.org
       roles: [diagnose, trace]
-      accounts: ["*@example.org"]      # optional: Konten-Scope
+      accounts: ["*@example.org"]      # optional: account scope
 ```
 
-`clients[].accounts` begrenzt die Konten, die ein mTLS-Client ansprechen
-darf (`path.Match`-Muster auf das kleingeschriebene Konto; leer = alle).
-Der Scope gilt für jede kontobezogene Operation: Diagnose, Trace, Import,
-Zustellung (auf das aufgelöste Konto), bei `account show` zusätzlich für das
-kanonische Konto eines Alias und bei `acl explain` für den erklärten
-Principal. Clients mit Scope dürfen Konten nur kleingeschrieben ansprechen
-(RADOS-Namespaces unterscheiden Groß- und Kleinschreibung). Außerhalb des
-Scopes antwortet die API `403 forbidden`.
-Aufrufer am Unix-Socket sind nicht begrenzt.
+`clients[].accounts` limits the accounts an mTLS client may address
+(`path.Match` patterns against the lowercased account; empty = all). The
+scope applies to every account-related operation: diagnosis, trace,
+import, delivery (against the resolved account), for `account show` also
+to the canonical account of an alias, and for `acl explain` to the
+principal being explained. Clients with a scope may address accounts only
+in lowercase (RADOS namespaces are case-sensitive). Outside the scope the
+API answers `403 forbidden`.
+Callers on the Unix socket are not limited.
 
-Umgebung: `ADMIN_SOCKET`, `ADMIN_ADDR`, `ADMIN_TLS_CERT`, `ADMIN_TLS_KEY`,
-`ADMIN_CLIENT_CA`; Rollen und Clients nur per YAML.
+Environment: `ADMIN_SOCKET`, `ADMIN_ADDR`, `ADMIN_TLS_CERT`, `ADMIN_TLS_KEY`,
+`ADMIN_CLIENT_CA`; roles and clients only via YAML.
 
-Jede Anfrage erzeugt eine Logzeile `admin request` (`event=admin_request`)
-mit Principal, Transport, Methode, Pfad, Status, Fehlercode, Dauer und den
-fachlichen Feldern der Operation (bei der Zustellung Empfänger, Absender,
-Konto, Optionen, Anzahl gespeicherter Kopien), aber ohne Nachrichteninhalt
-oder Secrets. Abgelehnte mTLS-Clients erscheinen mit der vorgelegten
-Zertifikatsidentität, abgelehnte Socket-Aufrufer mit ihrer UID.
-Metrik: `shardpost_admin_requests_total{operation,code}`.
+Every request produces a log line `admin request` (`event=admin_request`)
+with principal, transport, method, path, status, error code, duration and
+the operation's domain fields (for a delivery: recipient, sender, account,
+options, number of stored copies), but without message content or
+secrets. Rejected mTLS clients appear with the certificate identity they
+presented, rejected socket callers with their UID.
+Metric: `shardpost_admin_requests_total{operation,code}`.
 
-## Lokale Zustellung
+## Local delivery
 
-`POST /admin/v1/deliveries` stellt eine Nachricht (`message/rfc822`) für einen
-Empfänger zu, wie `dovecot-lda`. Die Empfängerauflösung läuft wie bei LMTP
-(Aliase, kanonisches Konto, Userdb-Attribute). Sieve läuft standardmäßig,
-inklusive Redirect, Vacation und Notify. LMTP und LDA teilen dieselbe
-Zustellung (`internal/delivery`). Vor die Nachricht setzt der Server
-`Received: from <transport> <principal> by <lmtp_hostname> with LDA`.
-Empfänger und Absender dürfen keine Steuer- oder Leerzeichen und keine
-weiteren spitzen Klammern enthalten. Auflösung (10 s) und Zustellung
-(5 min) laufen vom HTTP-Request entkoppelt: Bricht der Client ab, wird
-die Zustellung trotzdem vollständig ausgeführt.
+`POST /admin/v1/deliveries` delivers a message (`message/rfc822`) to a
+recipient, like `dovecot-lda`. Recipient resolution works as it does for
+LMTP (aliases, canonical account, userdb attributes). Sieve runs by
+default, including redirect, vacation and notify. LMTP and LDA share the
+same delivery path (`internal/delivery`). The server prepends
+`Received: from <transport> <principal> by <lmtp_hostname> with LDA` to
+the message. Recipient and sender must not contain control characters or
+spaces and no further angle brackets. Resolution (10 s) and delivery
+(5 min) run decoupled from the HTTP request: if the client aborts, the
+delivery still runs to completion.
 
-| Parameter | Bedeutung |
+| Parameter | Meaning |
 | --- | --- |
-| `recipient` | Empfänger (Adresse oder Konto), Pflicht |
-| `from` | Envelope-Absender, leer = Null-Absender |
-| `mailbox` | direkt in dieses vorhandene Postfach, ohne Sieve |
-| `sieve=false` | ohne Benutzerskript nach INBOX |
-| `enforce_quota=false` | auch über dem Limit speichern (Nutzung wird gezählt); Rolle `deliver:noenforce` |
+| `recipient` | recipient (address or account), required |
+| `from` | envelope sender, empty = null sender |
+| `mailbox` | straight into this existing mailbox, without Sieve |
+| `sieve=false` | without the user script, into INBOX |
+| `enforce_quota=false` | store even above the limit (usage is still counted); role `deliver:noenforce` |
 
-Fehlercodes: `bad_request` 400, `unauthenticated` 401, `forbidden` 403,
+Error codes: `bad_request` 400, `unauthenticated` 401, `forbidden` 403,
 `no_such_user`/`no_such_mailbox` 404, `too_large` 413, `rejected` 422
-(Sieve-Reject), `over_quota` 507, `temporary` 503, `internal` 500.
+(Sieve reject), `over_quota` 507, `temporary` 503, `internal` 500.
 
 ## shardpostctl
 
-Im Image unter `/usr/local/bin/shardpostctl`. Standard ist der Socket
-`/run/shardpost/admin.sock` (`-socket`, `SHARDPOST_ADMIN_SOCKET`). Mit
-`-url https://host:port -cert -key -ca` (oder `SHARDPOST_ADMIN_*`) geht es
-über mTLS.
+In the image at `/usr/local/bin/shardpostctl`. The default is the socket
+`/run/shardpost/admin.sock` (`-socket`, `SHARDPOST_ADMIN_SOCKET`). With
+`-url https://host:port -cert -key -ca` (or `SHARDPOST_ADMIN_*`) it goes
+over mTLS.
 
 ```sh
 shardpostctl version
@@ -125,75 +125,77 @@ shardpostctl deliver -d user@example.org -f postmaster@example.org < mail.eml
 shardpostctl deliver -d user@example.org --no-enforce-quota --json < warning.eml
 ```
 
-Exitcodes von `deliver` (sysexits): 0 ok, 64 Aufruf, 67 unbekannter Empfänger
-oder Postfach, 69 abgelehnt oder zu groß, 70 unerwartete Antwort, 73 über
-Quota, 75 temporär (erneut versuchen), 77 keine Berechtigung.
+Exit codes of `deliver` (sysexits): 0 ok, 64 usage, 67 unknown recipient
+or mailbox, 69 rejected or too large, 70 unexpected response, 73 over
+quota, 75 temporary (try again), 77 not permitted.
 
-## Lesende Diagnose (Stufe 8a)
+## Read-only diagnosis (stage 8a)
 
-Alle Operationen lesen nur (Rolle `diagnose`). Ein Test führt jede davon
-gegen einen Store aus, der bei jeder Schreiboperation fehlschlägt.
+All operations only read (role `diagnose`). A test runs every one of them
+against a store that fails on every write operation.
 
 ```sh
-shardpostctl server status                   # Version, Pod, Start, Config-Fingerprint, Store
-shardpostctl account show user@example.org   # Nauthilus-Auflösung, Store, Quota, Importsperre, Trace
+shardpostctl server status                   # version, pod, start, config fingerprint, store
+shardpostctl account show user@example.org   # Nauthilus resolution, store, quota, import lock, trace
 shardpostctl mailbox list [-limit 100] [-after NAME] [-all] user@example.org
-shardpostctl mailbox show user@example.org INBOX            # Name oder Mailbox-ID
+shardpostctl mailbox show user@example.org INBOX            # name or mailbox ID
 shardpostctl acl list user@example.org Shared
 shardpostctl acl explain user@example.org Shared kollege@example.org
 shardpostctl quota show user@example.org
 shardpostctl shared list kollege@example.org
 ```
 
-Jeder Befehl kennt `--json`; Flags dürfen auch hinter den Argumenten stehen.
-Exitcodes wie bei `deliver`: 67 unbekanntes Konto/Postfach, 64 Aufruf (auch
-Alias statt kanonischem Konto), 77 fehlende Rolle oder Scope.
+Every command supports `--json`; flags may also follow the arguments.
+Exit codes as for `deliver`: 67 unknown account/mailbox, 64 usage (an
+alias instead of the canonical account counts as usage too), 77 missing
+role or scope.
 
-| API | Inhalt | Kosten |
+| API | Contents | Cost |
 | --- | --- | --- |
-| `GET /admin/v1/server` | Version, Instanz (Pod), Startzeit, `config_fingerprint`, Store-Ping | ein Ping |
-| `GET /admin/v1/accounts/{account}` | Nauthilus-Lookup (`canonical`, `alias` mit kanonischem Konto, `unknown`, `unavailable`), Store vorhanden, Anzahl Postfächer, Quota, Importsperre, Trace | Registry, Quota |
-| `GET …/mailboxes?after=&limit=&name=` | Postfächer in Namensreihenfolge: ID, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, Shard-Größe, Abo, Special-Use, Zahl der ACL-Einträge; `next` für die Folgeseite | ein Registry-Ausschnitt, ein Header je Postfach |
-| `GET …/mailboxes/{id}` | zusätzlich Nachrichten, ungelesen, gelöscht markiert, Größe, Shards, Log-Beginn (QRESYNC-Horizont), Keywords | liest alle Index-Shards des Postfachs |
-| `GET …/mailboxes/{id}/acl` | explizite Einträge und ACL-Generation (der Eigentümer hat implizit alle Rechte) | Registry |
-| `GET …/mailboxes/{id}/acl/explain?principal=` | Rechte des Principals (dieselbe Funktion wie IMAP), Zeiger in seiner Registry und Befunde im Klartext | zwei Registries |
-| `GET …/quota` | Belegung und Grenze (0 = unbegrenzt) | Quota-Zähler |
-| `GET …/shared` | Freigabe-Zeiger des Kontos (`Other Users/…`) | Registry |
+| `GET /admin/v1/server` | version, instance (pod), start time, `config_fingerprint`, store ping | one ping |
+| `GET /admin/v1/accounts/{account}` | Nauthilus lookup (`canonical`, `alias` with the canonical account, `unknown`, `unavailable`), store present, number of mailboxes, quota, import lock, trace | registry, quota |
+| `GET …/mailboxes?after=&limit=&name=` | mailboxes in name order: ID, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, shard size, subscription, special-use, number of ACL entries; `next` for the following page | one registry excerpt, one header per mailbox |
+| `GET …/mailboxes/{id}` | additionally messages, unseen, marked deleted, size, shards, start of the log (QRESYNC horizon), keywords | reads all index shards of the mailbox |
+| `GET …/mailboxes/{id}/acl` | explicit entries and ACL generation (the owner implicitly has all rights) | registry |
+| `GET …/mailboxes/{id}/acl/explain?principal=` | the principal's rights (the same function IMAP uses), the pointer in their registry and findings in plain text | two registries |
+| `GET …/quota` | usage and limit (0 = unlimited) | quota counter |
+| `GET …/shared` | the account's share pointers (`Other Users/…`) | registry |
 
-`account show` akzeptiert auch Aliase und nennt dann das kanonische Konto;
-die Store-Felder beschreiben dann den (meist leeren) Namespace unter dem
-angegebenen Namen. Alle anderen Operationen verlangen das kanonische Konto,
-weil die Daten darunter liegen. Postfächer werden in der URL über ihre
-stabile ID adressiert. `shardpostctl` löst Namen selbst auf (`?name=`, ein
-Registry-Schlüssel); die Auflösung einer ID liest die ganze Registry des
-Kontos. Eine Seite endet nach `limit` gelesenen Registry-Einträgen, auch
-unlesbaren; ein defekter Eintrag verschiebt oder beendet die Liste nicht.
+`account show` also accepts aliases and then names the canonical account;
+the store fields describe the (usually empty) namespace under the name
+that was given. All other operations require the canonical account,
+because the data lives underneath it. Mailboxes are addressed in the URL
+by their stable ID. `shardpostctl` resolves names itself (`?name=`, a
+single registry key); resolving an ID reads the account's entire
+registry. A page ends after `limit` registry entries have been read,
+including unreadable ones; a broken entry neither shifts nor ends the
+list.
 
-`acl explain` beantwortet „Warum sieht X die Freigabe nicht?“ mit Befunden:
+`acl explain` answers "Why doesn't X see the share?" with findings:
 
-- Alias statt kanonischem Konto; ein ACL-Eintrag unter dem Alias greift nie.
-- Keine Rechte, also existiert das Postfach für den Principal nicht (`NONEXISTENT`).
-- Rechte ohne `l`: nicht gelistet, aber per Name ansprechbar.
-- Rechte nur über `anyone`: Dafür werden keine Zeiger geschrieben, LIST
-  zeigt das Postfach nicht.
-- Fehlender Zeiger (LIST zeigt das Postfach nicht; ein SETACL für den
-  Principal schreibt ihn) oder Zeiger ohne Recht `l` (LIST blendet aus, der
-  Zeiger bleibt bis zum Löschen des Postfachs oder bis ein SETACL ihn
-  zurückzieht). Die Generation des Zeigers ist nur Information: SETACLs für
-  andere Identifier erhöhen die Generation des Postfachs, ohne ihn zu
-  berühren.
+- An alias instead of the canonical account; an ACL entry under the alias never takes effect.
+- No rights, so the mailbox does not exist for the principal (`NONEXISTENT`).
+- Rights without `l`: not listed, but addressable by name.
+- Rights only through `anyone`: no pointers are written for that, so LIST
+  does not show the mailbox.
+- A missing pointer (LIST does not show the mailbox; a SETACL for the
+  principal writes it) or a pointer without the `l` right (LIST hides it,
+  the pointer stays until the mailbox is deleted or a SETACL withdraws
+  it). The generation of the pointer is informational only: SETACLs for
+  other identifiers raise the mailbox's generation without touching it.
 
-`config_fingerprint` ist ein SHA-256 über die wirksame Konfiguration ohne
-die Werte der mit `secret:"true"` markierten Felder; ein Test verlangt diese
-Markierung für jedes neue Feld, dessen Name nach Passwort, Secret oder Token
-aussieht. Gleiche Fingerprints bedeuten gleiche Einstellungen der Pods.
+`config_fingerprint` is a SHA-256 over the effective configuration without
+the values of the fields marked `secret:"true"`; a test requires this
+marker for every new field whose name looks like a password, secret or
+token. Identical fingerprints mean the pods have identical settings.
 
-Den Jobstatus liefern die Wartungsjobs (Stufe 8c, unten).
+Job status comes from the maintenance jobs (stage 8c, below).
 
-## Provisionierung und Berechtigungen (Stufe 8b)
+## Provisioning and permissions (stage 8b)
 
-Rolle `provision`. Quota-Grenzen setzt die Admin-API nicht: maßgeblich ist
-LDAP (`rnsMSQuota`), übernommen bei der Anmeldung (Entscheidung 19.09.2026).
+Role `provision`. The Admin API does not set quota limits: LDAP
+(`rnsMSQuota`) is authoritative, taken over at login (decision of
+2026-09-19).
 
 ```sh
 shardpostctl mailbox create [-special-use '\Archive'] user@example.org "Projekte/2026"
@@ -203,52 +205,51 @@ shardpostctl acl set [-mode replace|add|remove] [-if-match '"acl-3"'] user@examp
 shardpostctl acl delete user@example.org Shared kollege@example.org
 ```
 
-| API | Semantik |
+| API | Semantics |
 | --- | --- |
-| `POST …/mailboxes` `{name, special_use}` | 201 angelegt. Existiert das Postfach schon mit gleichem Special-Use: 200 (Wiederholung nach verlorener Antwort), sonst 409. Special-Use wird wie bei IMAP CREATE in Standardschreibweise gespeichert (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`), andere Attribute lehnt die API ab. |
-| `PATCH …/mailboxes/{id}` `{name?, subscribed?}` | Umbenennen samt Unterordnern (INBOX nicht, belegtes Ziel 409), Abo setzen; gleicher Name ist ein No-op. |
-| `PUT …/mailboxes/{id}/acl/{identifier}` `{rights, mode}` | `replace` setzt, `add`/`remove` ändern relativ; der Server rechnet und schreibt in einem versionierten Schritt, parallele Änderungen gehen nicht verloren. |
-| `DELETE …/mailboxes/{id}/acl/{identifier}` | Eintrag entfernen. |
+| `POST …/mailboxes` `{name, special_use}` | 201 created. If the mailbox already exists with the same special-use: 200 (a retry after a lost response), otherwise 409. Special-use is stored in the standard spelling, as with IMAP CREATE (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`); other attributes are rejected by the API. |
+| `PATCH …/mailboxes/{id}` `{name?, subscribed?}` | Rename including child mailboxes (not INBOX; an occupied target gives 409), set the subscription; the same name is a no-op. |
+| `PUT …/mailboxes/{id}/acl/{identifier}` `{rights, mode}` | `replace` sets the rights, `add`/`remove` change them relative to the current ones; the server computes and writes in one versioned step, so concurrent changes are not lost. |
+| `DELETE …/mailboxes/{id}/acl/{identifier}` | Remove the entry. |
 
-- **Versionen:** `GET …/mailboxes/{id}` und Änderungen liefern das
-  Postfach-ETag (`"m-…"`), `GET …/acl` und ACL-Änderungen das ACL-ETag
-  (`"acl-<Generation>"`). Mit `If-Match` wird eine Änderung bedingt;
-  passt die Version nicht, antwortet die API `412 precondition_failed`.
-  Die ACL-Version wird im selben Schreibschritt geprüft. Beim Postfach
-  (Umbenennen, Abo) wird sie unmittelbar vor der Änderung geprüft; das
-  Postfach-ETag umfasst auch die ACL, eine ACL-Änderung macht es also
-  ebenfalls ungültig. Ein ungültig geformtes `If-Match` ergibt 400.
-- **Identifier** sind kanonische Konten (Nauthilus) oder `anyone`: Aliase
-  werden mit dem kanonischen Namen abgelehnt, unbekannte Konten mit 404,
-  der Eigentümer mit 400. Der Freigabe-Zeiger des Empfängers folgt wie bei
-  IMAP SETACL (für `anyone` gibt es keinen); eine Änderung ohne Wirkung
-  schreibt keinen. Scheitert nur das Schreiben des Zeigers, gilt die
-  Änderung trotzdem (maßgeblich ist die ACL; Warnung im Log, `acl explain`
-  zeigt den fehlenden Zeiger, ein `replace` mit denselben Rechten schreibt
-  ihn nach).
-- **Namen** speichert der Server so, wie sie ankommen (UTF-8). IMAP-Clients
-  mit `UTF8=ACCEPT` sehen dieselben Namen; ältere Clients mit modified
-  UTF-7 senden `&AOQ-…`-Formen und sehen Admin-angelegte Umlautnamen
-  nicht unter derselben Bezeichnung.
-- **Idempotenz** ergibt sich aus der Semantik: absolute Werte, Postfächer
-  über ihre stabile ID. Eine wiederholte Anfrage nach verlorener Antwort
-  liefert denselben Zustand. Relative ACL-Änderungen dafür mit `If-Match`
-  schicken.
-- Laufende IMAP-Sitzungen sehen die Änderungen wie die eines anderen
-  Clients: Rechte gelten ab dem nächsten Befehl, neue oder umbenannte
-  Ordner beim nächsten LIST.
-- Exitcodes von `shardpostctl`: 65 bei Konflikt oder veralteter Version
-  (409/412), sonst wie bei der Diagnose.
+- **Versions:** `GET …/mailboxes/{id}` and changes return the mailbox ETag
+  (`"m-…"`), `GET …/acl` and ACL changes the ACL ETag
+  (`"acl-<generation>"`). `If-Match` makes a change conditional; if the
+  version does not match, the API answers `412 precondition_failed`.
+  The ACL version is checked in the same write step. For the mailbox
+  (rename, subscription) it is checked immediately before the change; the
+  mailbox ETag also covers the ACL, so an ACL change invalidates it as
+  well. A malformed `If-Match` gives 400.
+- **Identifiers** are canonical accounts (Nauthilus) or `anyone`: aliases
+  are rejected together with the canonical name, unknown accounts with
+  404, the owner with 400. The recipient's share pointer follows as it
+  does for IMAP SETACL (there is none for `anyone`); a change with no
+  effect writes none. If only the pointer write fails, the change still
+  stands (the ACL is authoritative; a warning is logged, `acl explain`
+  shows the missing pointer, and a `replace` with the same rights writes
+  it afterwards).
+- **Names** are stored by the server as they arrive (UTF-8). IMAP clients
+  with `UTF8=ACCEPT` see the same names; older clients using modified
+  UTF-7 send `&AOQ-…` forms and do not see admin-created names with
+  umlauts under the same designation.
+- **Idempotence** follows from the semantics: absolute values, mailboxes
+  addressed by their stable ID. A repeated request after a lost response
+  returns the same state. Send relative ACL changes with `If-Match` for
+  that reason.
+- Running IMAP sessions see the changes like those of another client:
+  rights apply from the next command, new or renamed mailboxes at the
+  next LIST.
+- Exit codes of `shardpostctl`: 65 on a conflict or a stale version
+  (409/412), otherwise as for diagnosis.
 
-## Wartungsjobs (Stufe 8c)
+## Maintenance jobs (stage 8c)
 
-Langläufer und gefährliche Änderungen laufen als dauerhafte Jobs. Jeder
-Server führt einen Runner; Jobs liegen im gemeinsamen Admin-Speicher
-(Namespace `~admin` im Indexpool, ein Objekt je Job und Plan) und überleben
-Neustarts.
+Long-running and dangerous changes run as durable jobs. Every server runs
+one runner; jobs live in the shared admin storage (namespace `~admin` in
+the index pool, one object per job and per plan) and survive restarts.
 
 ```sh
-shardpostctl check -wait user@example.org                  # Prüfung ohne Reparatur (Rolle diagnose)
+shardpostctl check -wait user@example.org                  # check without repair (role diagnose)
 shardpostctl plan scrub -classes refs,orphans user@example.org
 shardpostctl plan quota_recalc user@example.org
 shardpostctl plan acl_reconcile user@example.org
@@ -260,83 +261,83 @@ shardpostctl job list -account user@example.org
 shardpostctl job show|wait|cancel <job-id>
 ```
 
-**Plan → Apply.** `plan` rechnet trocken und zeigt Zielmenge und Wirkung
-(Befunde, Zählerdifferenz, fehlende Zeiger, betroffene Ordner, Nachrichten
-und Bytes). `apply` startet den Plan als Job, einmal und vor Ablauf
-(`jobs.plan_ttl_seconds`). Beim Löschen eines Postfachs und bei purge
-vergleicht der Job vor dem ersten Schreibzugriff den Stand (IDs,
-UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, bei purge auch die Sieve-Skripte) mit
-dem Plan; weicht er ab, endet der Job ohne Änderung mit „the account changed
-since the plan“. Ein Abgleich der Freigaben wendet nur Reparaturen an, die
-geplant und noch nötig sind.
+**Plan → apply.** `plan` computes a dry run and shows the target set and
+the effect (findings, counter difference, missing pointers, affected
+mailboxes, messages and bytes). `apply` starts the plan as a job, once and
+before it expires (`jobs.plan_ttl_seconds`). When a mailbox is deleted and
+on purge, the job compares the state (IDs, UIDVALIDITY, UIDNEXT,
+HIGHESTMODSEQ, and on purge the Sieve scripts as well) with the plan
+before the first write; if it differs, the job ends without a change and
+reports "the account changed since the plan". A share reconcile applies
+only the repairs that were planned and are still needed.
 
-| Art | Rolle | Kontosperre | Wirkung |
+| Kind | Role | Account lock | Effect |
 | --- | --- | --- | --- |
-| `index_check` (ohne Plan) | `diagnose` | nein | Scrubber ohne Reparatur, Befunde als Ergebnis |
-| `scrub` | `repair` | nein | Scrubber mit gewählten Klassen: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (ohne Angabe alle) |
-| `quota_recalc` | `repair` | ja | Belegung aus dem Index neu zählen und setzen |
-| `acl_reconcile` | `repair` | nein | fehlende Zeiger bei Empfängern schreiben, eigene Zeiger ohne Rechte entfernen |
-| `fts_rebuild` | `repair` | ja | Volltextindex löschen und aus allen Nachrichten neu aufbauen |
-| `mailbox_delete` | `delete` | ja | Postfach samt Unterordnern löschen (INBOX nicht) |
-| `expunge` | `delete` | nein | Nachrichten eines Postfachs endgültig entfernen: `uids` oder `deleted: true` (alle mit `\Deleted`) |
-| `purge` | `delete` | ja | Freigaben in beide Richtungen entziehen, Lernjobs und alle Objekte des Kontos löschen |
+| `index_check` (no plan) | `diagnose` | no | scrubber without repair, findings as the result |
+| `scrub` | `repair` | no | scrubber with the chosen classes: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (all of them if none are given) |
+| `quota_recalc` | `repair` | yes | recount the usage from the index and set it |
+| `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
+| `fts_rebuild` | `repair` | yes | delete the full-text index and rebuild it from all messages |
+| `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
+| `expunge` | `delete` | no | permanently remove messages of a mailbox: `uids` or `deleted: true` (all with `\Deleted`) |
+| `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account |
 
-- **Kontosperre** (Wartungsmodus, Entscheidung 19.09.2026): Der Job hält die
-  Sperre, die auch der Import nutzt. IMAP und POP3 antworten solange
-  „Mailbox maintenance in progress“, LMTP mit `451 4.2.1`. Bereits offene
-  IMAP/POP3-Sitzungen prüfen die Sperre höchstens alle 5 Sekunden beim
-  Befehlsstart und trennen dann mit `BYE [UNAVAILABLE]` bzw.
-  `-ERR [SYS/TEMP]`. Der Job wartet nach dem Sperren `jobs.settle_seconds`
-  (Standard 10), bevor er schreibt. Eine Sitzung, die in dieser Zeit
-  keinen Befehl schickt (etwa ein IDLE-Client), schreibt auch nichts.
-  Andere Konto-Jobs, Importe und der periodische Scrub bleiben draußen.
-  Ist das Konto beim Start schon gesperrt (Import, anderer Job), wartet der
-  Job in `running` mit der Phase „waiting for the account lock“ und
-  versucht es je Lease-Periode erneut, höchstens `jobs.plan_ttl_seconds`
-  nach dem Anlegen. Danach endet er `failed`. Verliert ein Job die Sperre,
-  endet er mit „maintenance lock lost“.
-- **Übernahme:** Ein Job gehört dem Server, der ihn übernommen hat (Lease mit
-  Generation, `jobs.lease_seconds`). Vor jedem Schreibschritt prüft der Job
-  seine Lease (Fencing). Stirbt der Server, übernimmt ein anderer nach
-  Ablauf der Lease und setzt am letzten Checkpoint fort. Beim geordneten
-  Herunterfahren gibt der Server laufende Jobs sofort ab. `fts_rebuild`
-  hat keinen Checkpoint und beginnt nach einer Übernahme von vorn.
-  Leases vergleichen Uhrzeiten verschiedener Server, deshalb müssen die
-  Uhren per NTP synchron laufen. Eine Abweichung weit unter
-  `jobs.lease_seconds` ist unkritisch.
-- **Abbrechen** (`job cancel`): Ein wartender Job endet sofort, ein laufender
-  am nächsten sicheren Punkt. Bereits Getanes wird nicht zurückgenommen.
-- **Zustände:** `queued`, `running`, `succeeded`, `partially_failed`,
-  `failed`, `cancel_requested`, `cancelled`. `apply -wait` und `job wait`
-  enden mit 0 (Erfolg), 1 (Teilfehler) oder 69 (Fehler, abgebrochen).
-- **Idempotenz:** `apply -idempotency-key K` bzw. der Header
-  `Idempotency-Key` liefert bei Wiederholung denselben Job (200). Mit einer
-  anderen Anfrage wird der Schlüssel abgelehnt (409). Schlüssel gelten je
-  Aufrufer.
-- **Scope:** Pläne, die andere Konten ändern (Freigabe-Abgleich, purge),
-  brauchen diese im Scope des Clients, beim Anlegen und erneut beim
-  `apply`. Clients mit Scope sehen Jobs nur mit Kontoangabe. Jobs und
-  Pläne außerhalb ihres Scopes gelten für sie als nicht vorhanden (404).
-- Ohne Jobsystem (`jobs.enabled: false`) antworten die Job-Endpunkte mit
+- **Account lock** (maintenance mode, decision of 2026-09-19): the job
+  holds the lock the import uses as well. While it is held, IMAP and POP3
+  answer "Mailbox maintenance in progress", LMTP answers `451 4.2.1`.
+  IMAP/POP3 sessions that are already open check the lock at most every 5
+  seconds at the start of a command and then disconnect with
+  `BYE [UNAVAILABLE]` or `-ERR [SYS/TEMP]` respectively. After taking the
+  lock, the job waits `jobs.settle_seconds` (default 10) before it writes.
+  A session that sends no command during that time (an IDLE client, for
+  example) writes nothing either. Other account jobs, imports and the
+  periodic scrub stay out. If the account is already locked when the job
+  starts (an import, another job), the job waits in `running` with the
+  phase "waiting for the account lock" and retries once per lease period,
+  at most until `jobs.plan_ttl_seconds` after it was created. After that
+  it ends `failed`. If a job loses the lock, it ends with "maintenance
+  lock lost".
+- **Ownership:** a job belongs to the server that took it over (a lease
+  with a generation, `jobs.lease_seconds`). Before every write step the job
+  checks its lease (fencing). If the server dies, another one takes over
+  once the lease has expired and continues from the last checkpoint. On an
+  orderly shutdown the server gives up running jobs immediately.
+  `fts_rebuild` has no checkpoint and starts over after a takeover.
+  Leases compare the clocks of different servers, so those clocks have to
+  be kept in sync with NTP. A deviation well below `jobs.lease_seconds` is
+  harmless.
+- **Cancelling** (`job cancel`): a waiting job ends immediately, a running
+  one at the next safe point. What has already been done is not rolled back.
+- **States:** `queued`, `running`, `succeeded`, `partially_failed`,
+  `failed`, `cancel_requested`, `cancelled`. `apply -wait` and `job wait`
+  exit with 0 (success), 1 (partial failure) or 69 (failed, cancelled).
+- **Idempotence:** `apply -idempotency-key K`, or the header
+  `Idempotency-Key`, returns the same job on a retry (200). With a
+  different request the key is rejected (409). Keys are per caller.
+- **Scope:** plans that change other accounts (share reconcile, purge)
+  need those accounts in the client's scope, both when the plan is created
+  and again at `apply`. Clients with a scope see jobs only when an account
+  is given. Jobs and plans outside their scope do not exist for them (404).
+- Without the job system (`jobs.enabled: false`) the job endpoints answer
   503 `temporary`.
-- **purge** entfernt nur die Daten im Store. Die Identität (LDAP) gehört
-  ihrem Owner. Meldet sich das Konto danach wieder an, legt ShardPost eine
-  leere INBOX an.
-- Beendete Jobs und Pläne bleiben `jobs.retention_days` lang abrufbar.
+- **purge** removes only the data in the store. The identity (LDAP)
+  belongs to its owner. If the account logs in again afterwards, ShardPost
+  creates an empty INBOX.
+- Finished jobs and plans stay retrievable for `jobs.retention_days`.
 
-## Supportwerkzeuge (Stufe 8d)
+## Support tools (stage 8d)
 
-Werkzeuge für den Support an einzelnen Nachrichten, Sieve-Skripten und der
-Lernqueue.
+Tools for support work on individual messages, Sieve scripts and the
+learning queue.
 
 ```sh
-shardpostctl messages alice@example.org INBOX                       # Metadaten (diagnose)
+shardpostctl messages alice@example.org INBOX                       # metadata (diagnose)
 shardpostctl search -subject Rechnung -since 2026-09-01 alice@example.org   # (content)
-shardpostctl message show alice@example.org INBOX 42                # Umschlag + Kopfzeilen (content)
+shardpostctl message show alice@example.org INBOX 42                # envelope + headers (content)
 shardpostctl message export alice@example.org INBOX 42 > 42.eml     # (content)
 shardpostctl flags -add '\Seen' -remove '$Junk' alice@example.org INBOX 42,43   # (support)
 shardpostctl move alice@example.org Junk 42 INBOX                   # copy|move (support)
-shardpostctl plan -mailbox Trash -deleted expunge alice@example.org # dann apply (delete)
+shardpostctl plan -mailbox Trash -deleted expunge alice@example.org # then apply (delete)
 shardpostctl sieve list|show alice@example.org [name]
 shardpostctl sieve put -activate alice@example.org main < main.sieve  # (support)
 shardpostctl sieve check -message INBOX:1789839043:42 alice@example.org
@@ -344,264 +345,267 @@ shardpostctl learning list -state dead
 shardpostctl learning retry -confirm-repeat <id>                   # (repair)
 ```
 
-- **Stabile Ziele:** Nachrichten werden über Postfach-ID, UIDVALIDITY und
-  UID adressiert. Passt die UIDVALIDITY nicht (Postfach neu angelegt),
-  antwortet die API mit 412. Ohne `-uidvalidity` nimmt shardpostctl die
-  aktuelle. Für strikte Identität den Wert aus einer vorherigen Liste
-  mitgeben. Nicht mehr vorhandene UIDs meldet die Antwort als `missing`.
-  Kopieren/Verschieben liefert die neue UID je Nachricht (wie UIDPLUS).
-- **Expunge** läuft als geplanter Job. Der Plan hält UID und GUID jeder
-  Nachricht fest. Beim Anwenden wird nur entfernt, was noch dieselbe GUID
-  trägt, bei `deleted` nur, was noch `\Deleted` ist. Eine geänderte
-  UIDVALIDITY bricht ab.
-- **Suche** ist begrenzt: höchstens `admin.search_scan_limit` Nachrichten
-  je Anfrage und 200 Treffer je Seite. `next` setzt fort (in
-  Postfach-ID-Reihenfolge). `from`, `to` (auch Cc) und `subject` sind
-  Teilstrings im Umschlag, `text` nutzt den Volltextindex. Fehlt der Index
-  (nie aufgebaut oder während `fts_rebuild`), findet `text` nichts.
-- **Expunge-Pläne** umfassen höchstens 40 000 Nachrichten. Größere Mengen
-  in mehreren Plänen erledigen (`-uids`).
-- **Datenschutz:** Das Audit-Log nennt bei Suchen nur die Namen der
-  Kriterien, nie ihre Werte. Bei Nachrichten und Skripten nennt es die
-  Identität und Größe, nie den Inhalt.
-- **Sieve** wird vor dem Speichern kompiliert, mit den Includes des Kontos.
-  Ein fehlerhaftes Skript wird nicht gespeichert (400). Versionen laufen
-  über ETags (`If-Match`, `If-None-Match: *` nur anlegen). Das aktive
-  Skript lässt sich nicht löschen.
-- **Sieve-Prüfung ohne Nebenwirkungen:** `sieve check` kompiliert und führt
-  das Skript auf Wunsch über eine gespeicherte Nachricht (Rolle `content`)
-  oder einen mitgeschickten Text (`diagnose`) aus. Dabei wird nichts
-  ausgeführt: kein Redirect, keine Abwesenheitsnotiz, keine
-  Benachrichtigung, kein externes Programm (`execute`/`filter` gelten als
-  mit Exit 0 gelaufen, ohne zu laufen), kein Duplikat- oder
-  Abwesenheitseintrag, kein Ablegen. Die Antwort listet, was geschähe, und
-  unter `suppressed` jede unterdrückte Nebenwirkung. Mit einem
-  mitgeschickten Skript und Text (Rolle `diagnose`) sind die
-  Store-Tests (`mailboxexists`, `mboxmetadata`, `specialuse_exists`)
-  aktiv. So erfährt `diagnose` nicht mehr als über `mailbox list`. Das
-  ist eine bewusste Entscheidung.
-- **Lernqueue:** `learning list|show` zeigt Jobs mit Zustand (`pending`,
-  `dead`, `delivered`), Programm, Versuchen und nächstem Termin. `retry`
-  nimmt nur tote Jobs wieder auf. Lernprogramme sind nicht idempotent:
-  Hat das Programm die Nachricht womöglich schon bekommen (Versuche > 0),
-  ist `-confirm-repeat` nötig. Ein Job, dessen Nachricht nie festgeschrieben
-  wurde (kein Beleg), lässt sich nicht wiederholen.
-- Clients mit Konten-Scope sehen Lernjobs nur mit Kontoangabe. Jobs
-  anderer Konten gelten für sie als nicht vorhanden (404).
+- **Stable targets:** messages are addressed by mailbox ID, UIDVALIDITY
+  and UID. If the UIDVALIDITY does not match (the mailbox was recreated),
+  the API answers 412. Without `-uidvalidity`, shardpostctl uses the
+  current one. For strict identity, pass the value from an earlier
+  listing. UIDs that no longer exist are reported as `missing` in the
+  response. Copy/move returns the new UID for each message (as UIDPLUS
+  does).
+- **Expunge** runs as a planned job. The plan records the UID and GUID of
+  every message. On apply, only what still carries the same GUID is
+  removed, and with `deleted` only what is still `\Deleted`. A changed
+  UIDVALIDITY aborts it.
+- **Search** is bounded: at most `admin.search_scan_limit` messages per
+  request and 200 hits per page. `next` continues (in mailbox ID order).
+  `from`, `to` (Cc as well) and `subject` are substrings in the envelope,
+  `text` uses the full-text index. If the index is missing (never built,
+  or during `fts_rebuild`), `text` finds nothing.
+- **Expunge plans** cover at most 40,000 messages. Handle larger sets in
+  several plans (`-uids`).
+- **Privacy:** for searches the audit log names only the criteria, never
+  their values. For messages and scripts it names the identity and the
+  size, never the content.
+- **Sieve** is compiled before it is stored, together with the account's
+  includes. A faulty script is not stored (400). Versions go through ETags
+  (`If-Match`, `If-None-Match: *` to create only). The active script
+  cannot be deleted.
+- **Checking Sieve without side effects:** `sieve check` compiles the
+  script and, on request, runs it against a stored message (role
+  `content`) or a text supplied with the request (`diagnose`). Nothing is
+  actually carried out: no redirect, no vacation reply, no notification,
+  no external program (`execute`/`filter` count as having run with exit 0,
+  without running), no duplicate or vacation record, no filing. The
+  response lists what would happen and, under `suppressed`, every
+  suppressed side effect. With a script and a text supplied in the request
+  (role `diagnose`), the store tests (`mailboxexists`, `mboxmetadata`,
+  `specialuse_exists`) are active. That way `diagnose` learns no more than
+  it would through `mailbox list`. This is a deliberate decision.
+- **Learning queue:** `learning list|show` shows jobs with their state
+  (`pending`, `dead`, `delivered`), program, attempts and next due time.
+  `retry` picks up dead jobs only. Learning programs are not idempotent:
+  if the program may already have received the message (attempts > 0),
+  `-confirm-repeat` is required. A job whose message was never committed
+  (no evidence) cannot be retried.
+- Clients with an account scope see learning jobs only when an account is
+  given. Jobs of other accounts do not exist for them (404).
 
-## Export und Wiederherstellung (Stufe 8e)
+## Export and restore (stage 8e)
 
-Ein Konto lässt sich als versioniertes Archiv sichern und über den
-Kontoimport wiederherstellen, mit denselben IMAP-Identitäten.
+An account can be backed up as a versioned archive and restored through
+the account import, with the same IMAP identities.
 
 ```sh
-shardpostctl export -o alice.tar alice@example.org          # Rolle export, prüft das Archiv nach dem Schreiben
-shardpostctl archive verify alice.tar                       # offline, ohne Server
-shardpostctl restore alice.tar                              # Rolle import, ins exportierte Konto
-shardpostctl restore -account restore-test@example.org alice.tar   # isolierter Restore
+shardpostctl export -o alice.tar alice@example.org          # role export, verifies the archive after writing
+shardpostctl archive verify alice.tar                       # offline, without a server
+shardpostctl restore alice.tar                              # role import, into the exported account
+shardpostctl restore -account restore-test@example.org alice.tar   # isolated restore
 ```
 
-**Format** `shardpost-account-export`, Version 1: ein tar-Strom mit
+**Format** `shardpost-account-export`, version 1: a tar stream with
 
-| Eintrag | Inhalt |
+| Entry | Contents |
 | --- | --- |
-| `shardpost-export.json` | Format, Version, Konto, Zeitpunkt, Serverversion |
-| `mailboxes/<id>/mailbox.json` | ID, Name, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, Abo, Special-Use, ACL, Annotationen (METADATA) |
-| `mailboxes/<id>/<uid>.json` | UID, GUID, Flags, MODSEQ, INTERNALDATE, SAVEDATE, POP3-UIDL, Größe, SHA-256 |
-| `mailboxes/<id>/<uid>.eml` | die Nachricht, wie gespeichert |
-| `sieve/<name>.sieve` | ein Sieve-Skript |
-| `manifest.json` | vollständig ja/nein, Zähler, aktives Skript, übersprungene Nachrichten, Größe und SHA-256 jedes Eintrags |
+| `shardpost-export.json` | format, version, account, timestamp, server version |
+| `mailboxes/<id>/mailbox.json` | ID, name, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, subscription, special-use, ACL, annotations (METADATA) |
+| `mailboxes/<id>/<uid>.json` | UID, GUID, flags, MODSEQ, INTERNALDATE, SAVEDATE, POP3 UIDL, size, SHA-256 |
+| `mailboxes/<id>/<uid>.eml` | the message as stored |
+| `sieve/<name>.sieve` | one Sieve script |
+| `manifest.json` | complete yes/no, counters, active script, skipped messages, size and SHA-256 of every entry |
 
-Der Volltextindex ist nicht enthalten, er wird aus den Nachrichten neu
-aufgebaut.
+The full-text index is not included; it is rebuilt from the messages.
 
-- **Konsistenz:** Der Export sperrt das Konto nicht. Jedes Postfach wird in
-  dem Stand gelesen, den es beim Export hatte. Nachrichten, die inzwischen
-  gelöscht wurden, stehen im Manifest unter `skipped`, ebenso gelöschte
-  Ordner unter `skipped_mailboxes`. Scheitert ein Export
-  mittendrin, endet das Archiv mit `complete: false` und wird bei Prüfung
-  und Restore abgelehnt. Für einen exakten Stand vorher `users hold` im
-  Director setzen.
-- **Prüfung:** Jede Nachricht wird gegen Größe und SHA-256 ihrer
-  Beschreibung geprüft, am Ende jeder Eintrag gegen das Manifest.
-  `restore` liest das ganze Archiv vorher einmal und stellt ein
-  beschädigtes oder unvollständiges Archiv gar nicht erst her (Exit 65).
-- **Restore** nutzt den Kontoimport (Sitzung mit Kontosperre): Ordner mit
-  UIDVALIDITY und ID, Nachrichten mit UIDs, Flags, MODSEQ, Daten und
-  POP3-UIDL, danach je Ordner UIDNEXT/HIGHESTMODSEQ (Finalize), ACL und
-  Annotationen und zum Schluss die Sieve-Skripte. Jeder Ordner wird gegen
-  das Inventar des Ziels geprüft (`verified`). Ein Restore ist
-  wiederholbar, vorhandene Nachrichten werden übersprungen. Das Ziel muss
-  leer sein oder denselben Stand haben. Ein Ordner mit anderer UIDVALIDITY
-  und Nachrichten ist ein Konflikt.
-- **Isolierter Restore** (anderes Zielkonto, etwa für den
-  Wiederherstellungsnachweis): ACLs werden nicht übernommen (sie würden
-  echten Konten Rechte auf die Kopie geben) und kein Sieve-Skript wird
-  aktiviert (keine Abwesenheitsnotizen oder Weiterleitungen aus der
-  Kopie). `-acl` und `-activate-sieve` schalten das ausdrücklich ein.
-- Der Export schiebt die Schreibfrist des Admin-Listeners mit dem
-  Fortschritt weiter und läuft deshalb auch bei großen Konten durch.
-  `shardpostctl export` hat keinen Gesamt-Timeout. `-timeout` begrenzt nur
-  die Wartezeit auf den Beginn der Antwort und jede Pause ohne Daten. Ein
-  abgebrochener Export hinterlässt keine Datei.
-- **Nicht im Archiv:** Abos auf nicht vorhandene Ordner, Server-Annotationen
-  (METADATA ohne Postfach), der Trace-Schalter und das Quota-Limit (kommt
-  aus LDAP). Der Volltextindex wird aus den Nachrichten neu aufgebaut.
-- Exitcodes: 0 in Ordnung, 1 Restore teilweise gescheitert (erneut
-  ausführen), 65 Archiv beschädigt oder unvollständig, 64 Aufruf, 69
-  Export gescheitert, 73 Zieldatei existiert.
+- **Consistency:** the export does not lock the account. Every mailbox is
+  read in the state it had at export time. Messages that have been deleted
+  in the meantime appear in the manifest under `skipped`, deleted
+  mailboxes likewise under `skipped_mailboxes`. If an export fails part
+  way through, the archive ends with `complete: false` and is rejected by
+  both verification and restore. For an exact point in time, set
+  `users hold` in the Director beforehand.
+- **Verification:** every message is checked against the size and SHA-256
+  in its description, and at the end every entry is checked against the
+  manifest. `restore` reads the whole archive once beforehand and does not
+  even start restoring a damaged or incomplete archive (exit 65).
+- **Restore** uses the account import (a session holding the account
+  lock): mailboxes with UIDVALIDITY and ID, messages with UIDs, flags,
+  MODSEQ, dates and POP3 UIDL, then UIDNEXT/HIGHESTMODSEQ per mailbox
+  (finalize), ACL and annotations, and finally the Sieve scripts. Every
+  mailbox is checked against the target's inventory (`verified`). A
+  restore can be repeated; messages that are already present are skipped.
+  The target has to be empty or in the same state. A mailbox with a
+  different UIDVALIDITY that holds messages is a conflict.
+- **Isolated restore** (a different target account, for restore evidence
+  for example): ACLs are not carried over (they would give real accounts
+  rights on the copy) and no Sieve script is activated (no vacation
+  replies or forwards out of the copy). `-acl` and `-activate-sieve` turn
+  that on explicitly.
+- The export keeps moving the admin listener's write deadline forward as
+  it progresses and therefore runs through even for large accounts.
+  `shardpostctl export` has no overall timeout. `-timeout` bounds only the
+  wait for the response to start and each pause without data. An aborted
+  export leaves no file behind.
+- **Not in the archive:** subscriptions to mailboxes that do not exist,
+  server annotations (METADATA without a mailbox), the trace switch and
+  the quota limit (which comes from LDAP). The full-text index is rebuilt
+  from the messages.
+- Exit codes: 0 fine, 1 restore partially failed (run it again), 65
+  archive damaged or incomplete, 64 usage, 69 export failed, 73 target
+  file exists.
 
-## Protokoll-Trace eines Kontos
+## Protocol trace for an account
 
-Zur Fehlersuche mit einem bestimmten Client lässt sich für ein Konto
-befristet ein Mitschnitt des IMAP-Protokolls einschalten (Rolle `trace`):
+To debug a problem with a particular client, a recording of the IMAP
+protocol can be switched on for an account for a limited time (role
+`trace`):
 
 ```sh
-shardpostctl trace on -for 30m user@example.org   # ohne -for: trace.default_duration_seconds
+shardpostctl trace on -for 30m user@example.org   # without -for: trace.default_duration_seconds
 shardpostctl trace status user@example.org
 shardpostctl trace off user@example.org
 ```
 
-API: `GET`/`PUT`/`DELETE /admin/v1/accounts/{account}/trace`, `PUT` mit
-optionalem `{"duration_seconds": n}`. Der Schalter liegt als Registry-Key
-`trace` im Ceph-Konto und gilt daher für alle Server des Clusters, egal
-welcher Pod die Anfrage bekommt. Er muss auf das kanonische Konto gesetzt
-werden (ein Alias wird wie beim Import mit dem kanonischen Namen
-abgelehnt) und läuft spätestens nach `trace.max_duration_seconds` ab.
+API: `GET`/`PUT`/`DELETE /admin/v1/accounts/{account}/trace`, `PUT` with
+an optional `{"duration_seconds": n}`. The switch lives as the registry
+key `trace` in the Ceph account and therefore applies to every server in
+the cluster, no matter which pod receives the request. It has to be set on
+the canonical account (an alias is rejected together with the canonical
+name, as it is for the import) and expires after
+`trace.max_duration_seconds` at the latest.
 
-Wirkung:
+Effect:
 
-- Neue IMAP-Sitzungen des Kontos protokollieren ab der erfolgreichen
-  Anmeldung jede Zeile beider Richtungen als `event=protocol_trace` mit
-  `dir` (`C` Client→Server, `S` Server→Client), `line`, `session_id` und
-  `user`. Zeilen über `trace.max_line_bytes` werden gekürzt (`cut_bytes`).
-- Literale (Nachrichteninhalte, APPEND-Daten, abgerufene Abschnitte)
-  erscheinen nur als `<literal N bytes>`, der Text von `PREVIEW` als
-  `"<masked>"`. Client-Zeilen und -Literale meldet der IMAP-Parser, also
-  genau das, was der Server verarbeitet; Pipelining, abgelehnte Literale
-  und Lesepuffer verschieben die Sicht nicht. Server-Zeilen stammen aus
-  dem gesendeten Datenstrom.
-- Anmeldedaten erscheinen nie: der Mitschnitt beginnt nach der Anmeldung
-  und endet bei `UNAUTHENTICATE`. Eine Client-Zeile mit `LOGIN` oder
-  `AUTHENTICATE` im angemeldeten Zustand wird durch
-  `<authentication command, trace stopped>` ersetzt und hält den Trace
-  bis zur nächsten Anmeldung an (auch folgende Literale oder SASL-Zeilen
-  erscheinen nicht).
-- Bereits laufende Sitzungen werden erst bei der nächsten Anmeldung
-  erfasst. Der Ablauf wirkt sofort. Ausschalten wirkt in laufenden Sitzungen
-  beim nächsten Befehl, sobald `trace.recheck_seconds` vergangen sind; eine
-  Sitzung in IDLE wird bis zum Ende von IDLE oder bis zum Ablauf weiter
-  mitgeschnitten. Wird der Trace vor dem Ablauf verlängert, setzt eine
-  bereits mitgeschnittene Sitzung ihn nach dem alten Ende fort.
-- `protocol_trace_start` und `protocol_trace_stop` (mit `reason`) markieren
-  Beginn und Ende; das Audit-Log der Admin-API enthält, wer den Trace wann
-  und bis wann eingeschaltet hat.
+- New IMAP sessions of the account log every line in both directions from
+  the successful login onwards as `event=protocol_trace` with `dir`
+  (`C` client→server, `S` server→client), `line`, `session_id` and
+  `user`. Lines over `trace.max_line_bytes` are truncated (`cut_bytes`).
+- Literals (message content, APPEND data, fetched sections) appear only as
+  `<literal N bytes>`, the text of `PREVIEW` as `"<masked>"`. Client lines
+  and literals are reported by the IMAP parser, that is, exactly what the
+  server processes; pipelining, rejected literals and read buffers do not
+  shift that view. Server lines come from the data stream that was sent.
+- Credentials never appear: the recording starts after the login and ends
+  at `UNAUTHENTICATE`. A client line with `LOGIN` or `AUTHENTICATE` in the
+  authenticated state is replaced by
+  `<authentication command, trace stopped>` and stops the trace until the
+  next login (any literals or SASL lines that follow do not appear
+  either).
+- Sessions that are already running are only picked up at their next
+  login. Expiry takes effect immediately. Switching the trace off takes
+  effect in running sessions at the next command, once
+  `trace.recheck_seconds` have passed; a session in IDLE keeps being
+  recorded until IDLE ends or the trace expires. If the trace is extended
+  before it expires, a session that is already being recorded continues
+  past the old end time.
+- `protocol_trace_start` and `protocol_trace_stop` (with `reason`) mark the
+  beginning and the end; the Admin API's audit log records who switched
+  the trace on, when and until when.
 
-Der Trace enthält Betreffzeilen, Adressen, Dateinamen (ENVELOPE,
-BODYSTRUCTURE), Suchbegriffe und Ordnernamen des Kontos. Er
-ist deshalb eine eigene Rolle, befristet und nur für die Fehlersuche
-gedacht. Auslesen, zum Beispiel:
+The trace contains the account's subject lines, addresses, file names
+(ENVELOPE, BODYSTRUCTURE), search terms and mailbox names. That is why it
+is a role of its own, time-limited and intended only for debugging.
+Reading it out, for example:
 
 ```sh
 kubectl -n shardpost logs -l app.kubernetes.io/name=shardpost-server -c server --since=30m \
   | jq -r 'select(.event=="protocol_trace" and .user=="user@example.org") | "\(.time) \(.session_id[0:8]) \(.dir): \(.line)"'
 ```
 
-## Betrieb im Cluster (mTLS)
+## Cluster operation (mTLS)
 
-Die Komponente `deploy/components/admin-mtls` (im Overlay
-`croessner-nauthilus` aktiv) stellt den mTLS-Listener bereit:
+The component `deploy/components/admin-mtls` (active in the
+`croessner-nauthilus` overlay) provides the mTLS listener:
 
-- Eigene CA `shardpost-admin-ca` (cert-manager, gebootstrappt über
-  `shardpost-selfsigned`). Sie ist bewusst getrennt von `shardpost-ca`, die
-  Serverzertifikate für IMAP/LMTP ausstellt; nur Zertifikate dieser CA
-  werden als Admin-Clients akzeptiert.
-- Serverzertifikat `shardpost-admin-tls` für den Service
-  `shardpost-admin:8443` (Pod-Port `admin`), als Verzeichnis nach
-  `/secrets/admin-tls` gemountet (ohne `subPath`, Rotation ohne Neustart).
-- Clientzertifikat `shardpost-admin-operator` (CN = Identität) mit der
-  Rolle `diagnose`. Weitere Clients bekommen je ein eigenes `Certificate`
-  mit `usages: [client auth]` und einen Eintrag in `admin.clients`.
-- NetworkPolicy `shardpost-admin-ingress`: Port 8443 nur für Pods im
-  Namespace `shardpost` mit Label
+- A dedicated CA `shardpost-admin-ca` (cert-manager, bootstrapped via
+  `shardpost-selfsigned`). It is deliberately separate from
+  `shardpost-ca`, which issues server certificates for IMAP/LMTP; only
+  certificates from this CA are accepted as admin clients.
+- Server certificate `shardpost-admin-tls` for the service
+  `shardpost-admin:8443` (pod port `admin`), mounted as a directory at
+  `/secrets/admin-tls` (without `subPath`, so rotation needs no restart).
+- Client certificate `shardpost-admin-operator` (CN = identity) with the
+  role `diagnose`. Further clients each get their own `Certificate` with
+  `usages: [client auth]` and an entry in `admin.clients`.
+- NetworkPolicy `shardpost-admin-ingress`: port 8443 only for pods in the
+  namespace `shardpost` with the label
   `shardpost.roessner-net.de/admin-client: "true"`.
 
-Aufruf aus einem solchen Pod mit eingehängtem Client-Secret:
+Calling it from such a pod with the client secret mounted:
 
 ```sh
 shardpostctl -url https://shardpost-admin.shardpost.svc:8443 \
   -cert /op/tls.crt -key /op/tls.key -ca /op/ca.crt version
 ```
 
-Abgenommen am 2026-09-18: Operator `version` 200, `deliver` ohne Rolle 403,
-Client der fremden CA und ohne Zertifikat im Handshake abgewiesen, Pod
-ohne Label von der NetworkPolicy blockiert; Audit-Zeilen mit
-`transport=mtls` und der Identität.
+Accepted on 2026-09-18: operator `version` 200, `deliver` without the role
+403, a client of a foreign CA and a client without a certificate rejected
+in the handshake, a pod without the label blocked by the NetworkPolicy;
+audit lines with `transport=mtls` and the identity.
 
-## Kontoimport mit erhaltenen IMAP-Identitäten
+## Account import with preserved IMAP identities
 
-Kern von Teilpaket 8e ([Stufe 8](development/admin-stage.md)). Ein Konto
-wird so übernommen, dass IMAP-Clients nach der Umschaltung nur inkrementell
-synchronisieren: UIDVALIDITY, UIDs mit ihren Lücken, UIDNEXT, Flags und
-Keywords, INTERNALDATE/SAVEDATE und MODSEQ je Nachricht bleiben erhalten,
-HIGHESTMODSEQ wird mindestens der Quellwert. imapsync kann das nicht, weil
-IMAP-APPEND die UIDs immer neu vergibt.
+The core of sub-package 8e ([stage 8](development/admin-stage.md)). An
+account is taken over in such a way that IMAP clients only synchronize
+incrementally after the cutover: UIDVALIDITY, UIDs with their gaps,
+UIDNEXT, flags and keywords, INTERNALDATE/SAVEDATE and MODSEQ per message
+are preserved, and HIGHESTMODSEQ becomes at least the source value.
+imapsync cannot do this, because IMAP APPEND always assigns new UIDs.
 
-### Semantik
+### Semantics
 
-- **Sperre:** `POST /admin/v1/accounts/{account}/import` (Rolle `import`)
-  nimmt die kontoweite Import-Sperre für eine Sitzung (Header
-  `X-Import-Session` bei allen weiteren Aufrufen; jeder Aufruf verlängert
-  sie, `admin.import.lock_ttl_seconds`). Solange sie besteht, lehnen IMAP,
-  POP3, ManageSieve, LMTP (`451 4.2.1`) und die lokale Zustellung das Konto
-  vorübergehend ab. Nur das kanonische Konto der Userdb wird angenommen.
-- **Ordner:** `PUT .../import/mailboxes` legt den Ordner mit der
-  UIDVALIDITY der Quelle an (Dovecot-Mailbox-GUID als stabile ID, wenn
-  verfügbar) oder übernimmt einen vorhandenen mit gleicher UIDVALIDITY. Ein
-  leerer Ordner mit anderer UIDVALIDITY (etwa ein INBOX vom ersten Login)
-  wird ersetzt, ein nicht leerer ist ein Konflikt (`409 conflict`). Hat die
-  Quelle einen Ordner umbenannt, folgt der Import über die stabile ID.
-  Neue Ordner bekommen `admin.import.shard_size` als Shardgröße.
-- **Nachrichten:** `POST .../mailboxes/{id}/messages` mit
-  `multipart/mixed`; jeder Teil ist `message/rfc822` mit der Identität als
-  JSON im Teil-Header `X-Import-Meta` (`uid`, `modseq`, `flags`,
-  `internal_date`, `save_date`, `guid`, `pop3_uidl`). UIDs aufsteigend. Eine
-  UID mit gleich großer Nachricht wird übersprungen (Wiederaufnahme), mit
-  anderer ist sie ein Konflikt. Quota wird gezählt, nicht durchgesetzt.
-  Gleiche Quell-GUID in mehreren Ordnern teilt sich einen Blob.
-- **Deltas:** `POST .../changes` setzt Flags mit dem Quell-MODSEQ und
-  entfernt UIDs, die die Quelle nicht mehr hat. `GET .../messages`
-  liefert das Inventar seitenweise (`after`, `limit`).
-- **Abschluss je Ordner:** `POST .../finalize` setzt UIDNEXT und
-  HIGHESTMODSEQ auf mindestens die Quellwerte, die \Recent-Marke auf
-  UIDNEXT und den Beginn des Änderungslogs hinter HIGHESTMODSEQ. Ein Client,
-  der mit einem älteren Quellstand per QRESYNC/CONDSTORE wiederkommt, bekommt
-  so die vollständige Antwort (alle neueren Einträge, VANISHED für alle
-  Lücken), einer mit aktuellem Stand nichts.
-- **Sieve und ACL:** `PUT .../import/sieve` ersetzt Skripte und aktives
-  Skript; alle Skripte werden vorher wie bei ManageSieve übersetzt
-  (`422 rejected`, wenn eines nicht geht; dann ändert sich nichts).
-  `PUT .../mailboxes/{id}/acl` ersetzt die expliziten ACL-Einträge.
-- **POP3:** Mit `-pop3-uidl-format` (Dovecot-Syntax 2.3 `%08Xu%08Xv` oder
-  2.4 `%{uid | hex(8)}`) wird je INBOX-Nachricht die UIDL der Quelle
-  gespeichert; POP3 `UIDL` gibt sie statt der GUID aus. COPY/MOVE übernehmen
-  sie nicht (sie muss je Maildrop eindeutig bleiben).
+- **Lock:** `POST /admin/v1/accounts/{account}/import` (role `import`)
+  takes the account-wide import lock for one session (header
+  `X-Import-Session` on all further calls; every call extends it,
+  `admin.import.lock_ttl_seconds`). While it is held, IMAP, POP3,
+  ManageSieve, LMTP (`451 4.2.1`) and local delivery reject the account
+  temporarily. Only the canonical account from the userdb is accepted.
+- **Mailboxes:** `PUT .../import/mailboxes` creates the mailbox with the
+  UIDVALIDITY of the source (with the Dovecot mailbox GUID as its stable
+  ID where available) or takes over an existing one with the same
+  UIDVALIDITY. An empty mailbox with a different UIDVALIDITY (an INBOX
+  from the first login, say) is replaced, a non-empty one is a conflict
+  (`409 conflict`). If the source has renamed a mailbox, the import
+  follows it through the stable ID. New mailboxes get
+  `admin.import.shard_size` as their shard size.
+- **Messages:** `POST .../mailboxes/{id}/messages` with
+  `multipart/mixed`; every part is a `message/rfc822` with the identity as
+  JSON in the part header `X-Import-Meta` (`uid`, `modseq`, `flags`,
+  `internal_date`, `save_date`, `guid`, `pop3_uidl`). UIDs ascending. A
+  UID whose message has the same size is skipped (resumption), one with a
+  different size is a conflict. Quota is counted, not enforced. The same
+  source GUID in several mailboxes shares one blob.
+- **Deltas:** `POST .../changes` sets flags with the source MODSEQ and
+  removes UIDs the source no longer has. `GET .../messages` returns the
+  inventory page by page (`after`, `limit`).
+- **Finalization per mailbox:** `POST .../finalize` sets UIDNEXT and
+  HIGHESTMODSEQ to at least the source values, the \Recent mark to
+  UIDNEXT and the start of the change log past HIGHESTMODSEQ. A client
+  that comes back with an older source state via QRESYNC/CONDSTORE then
+  gets the complete answer (all newer entries, VANISHED for all gaps), one
+  with the current state gets nothing.
+- **Sieve and ACL:** `PUT .../import/sieve` replaces the scripts and the
+  active script; all scripts are compiled beforehand as they are in
+  ManageSieve (`422 rejected` if one does not compile; nothing changes
+  then). `PUT .../mailboxes/{id}/acl` replaces the explicit ACL entries.
+- **POP3:** with `-pop3-uidl-format` (Dovecot syntax 2.3 `%08Xu%08Xv` or
+  2.4 `%{uid | hex(8)}`) the UIDL of the source is stored for every INBOX
+  message; POP3 `UIDL` then returns it instead of the GUID. COPY/MOVE do
+  not carry it over (it has to stay unique per maildrop).
 
 ### Migrator `shardpostctl migrate`
 
-Liest die Quelle per IMAP (Master-User, `UID FETCH ... MODSEQ X-GUID
-SAVEDATE`) und ManageSieve (mit PROXY-Kopf, wo der Load-Balancer ihn
-verlangt), vergleicht mit dem Inventar des Ziels und schickt nur die
-Unterschiede. Jeder Lauf ist wiederholbar und prüft am Ende je Ordner, dass
-UIDs, Größen und Flags dem gelesenen Quellstand entsprechen (`verified`).
-Ziel-Ordner, die die Quelle nicht mehr hat, werden entfernt
-(`-no-prune` schaltet das ab; INBOX bleibt immer).
+Reads the source over IMAP (master user, `UID FETCH ... MODSEQ X-GUID
+SAVEDATE`) and ManageSieve (with a PROXY header where the load balancer
+requires one), compares it with the target's inventory and sends only the
+differences. Every run is repeatable and checks at the end, per mailbox,
+that UIDs, sizes and flags match the source state that was read
+(`verified`). Target mailboxes the source no longer has are removed
+(`-no-prune` turns that off; INBOX always stays).
 
-Im Cluster läuft er im Sidecar `import` des Server-Pods (Komponente
-`deploy/components/import-sidecar`) gegen den Admin-Socket. Quelle und
-Sieve-Endpunkt stehen als `SHARDPOST_MIGRATE_*` in der Komponente, das
-Master-Passwort im Secret `shardpost-migrate-source` (Schlüssel
-`password`):
+In the cluster it runs in the `import` sidecar of the server pod
+(component `deploy/components/import-sidecar`) against the admin socket.
+The source and the Sieve endpoint are set as `SHARDPOST_MIGRATE_*` in the
+component, the master password is in the secret
+`shardpost-migrate-source` (key `password`):
 
 ```sh
 kubectl -n shardpost create secret generic shardpost-migrate-source \
@@ -610,27 +614,27 @@ kubectl -n shardpost exec deploy/shardpost-server -c import -- \
   shardpostctl -timeout 10m migrate user@example.org
 ```
 
-Für lange Läufe losgelöst mit Protokoll unter `/work`:
+For long runs, detached with a log under `/work`:
 
 ```sh
 kubectl -n shardpost exec deploy/shardpost-server -c import -- sh -c \
   'nohup shardpostctl -timeout 10m migrate --json user@example.org >/work/user.json 2>/work/user.log &'
 ```
 
-Exitcodes: 0 alles verifiziert, 1 Teile fehlgeschlagen (erneut laufen
-lassen), 64 Aufruf, 69 Lauf abgebrochen.
+Exit codes: 0 everything verified, 1 parts failed (run it again), 64
+usage, 69 run aborted.
 
-### Ablauf einer Migration mit dem Director
+### Migration procedure with the Director
 
-1. Erstkopie im laufenden Betrieb (Konto noch auf mailstack):
-   `migrate` beliebig oft, bis ein Lauf kaum noch Änderungen meldet.
+1. First copy while the account is still in service (still on mailstack):
+   run `migrate` as often as needed until a run reports almost no changes.
 2. Director: `users hold`, `users kick`.
-3. Letzter `migrate`-Lauf (Delta, Sieve, ACL); alle Ordner `verified`.
-4. Pin im Director/`director.lua` auf `shardpost`,
+3. Final `migrate` run (delta, Sieve, ACL); all mailboxes `verified`.
+4. Pin in the Director/`director.lua` to `shardpost`,
    `users move --to-shard shardpost --strategy kick_existing`,
    `hold clear`.
-5. Kontrolle mit einem Client: gleiche UIDVALIDITY, kein Voll-Download.
+5. Check with a client: same UIDVALIDITY, no full download.
 
-Solange mailstack nach der Umschaltung unverändert bleibt, ist der Rückweg
-ein Zurück-Routen; danach eingegangene Änderungen müssten zurückkopiert
-werden (dann mit Voll-Resync auf dem Rückweg).
+As long as mailstack stays unchanged after the cutover, the way back is a
+re-route; changes that arrived after that would have to be copied back
+(with a full resync on the way back in that case).

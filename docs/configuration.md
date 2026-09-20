@@ -1,6 +1,6 @@
-# Serverkonfiguration
+# Server configuration
 
-Der Server lädt seine Konfiguration einmal vor dem Öffnen von Ceph, Authentifizierung und Listenern. Bibliotheken: Viper und go-playground/validator.
+The server loads its configuration once, before it opens Ceph, authentication and the listeners. Libraries: Viper and go-playground/validator.
 
 ```sh
 shardpost --config /etc/shardpost/server.yaml
@@ -8,12 +8,12 @@ shardpost --config /etc/shardpost/server.yaml config check
 shardpost --config /etc/shardpost/server.yaml scrub
 ```
 
-Alternativ bestimmt `SHARDPOST_CONFIG` den Dateipfad. `IMAP_CONFIG` bleibt
-als Rückfall erhalten, sofern `SHARDPOST_CONFIG` nicht gesetzt ist. Ein
-explizites `--config` hat Vorrang vor beiden Variablen. Ein ausdrücklich
-leeres `SHARDPOST_CONFIG` deaktiviert den alten Rückfall. Priorität: eingebaute Standardwerte, explizite YAML-Datei, explizit gesetzte bisherige Env-Variablen. Es gibt keine implizite Dateisuche und keinen automatischen Reload. Kubernetes-Änderungen erfolgen per kontrolliertem Deployment-Rollout. Go-Runtime-Einstellungen wie `GOMEMLIMIT` bleiben Umgebungsvariablen; zusätzliche standardisierte OTEL-SDK-Optionen werden weiterhin vom SDK ausgewertet.
+Alternatively, `SHARDPOST_CONFIG` determines the file path. `IMAP_CONFIG`
+is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
+explicit `--config` takes precedence over both variables. An explicitly
+empty `SHARDPOST_CONFIG` disables the old fallback. Precedence: built-in defaults, explicit YAML file, explicitly set legacy env variables. There is no implicit file lookup and no automatic reload. Changes in Kubernetes are applied through a controlled deployment rollout. Go runtime settings such as `GOMEMLIMIT` remain environment variables; additional standardized OTEL SDK options are still evaluated by the SDK.
 
-Die Abschnitte sind `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota` und `admin`. Die vollständige Feld- und Env-Zuordnung steht in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go` und `internal/config/admin.go`; `extprograms`, die Lernregeln, Quota-Regeln und -Warnungen sowie Admin-Rollen und -Clients sind nur per YAML konfigurierbar (siehe `docs/imapsieve.md`, `docs/quota.md` und `docs/admin-api.md`).
+The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota` and `admin`. The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go` and `internal/config/admin.go`; `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
 
 ```yaml
 server:
@@ -48,104 +48,106 @@ telemetry:
   sample_ratio: 0.1
 ```
 
-Unbekannte Schlüssel, falsch typisierte YAML-Werte, ungültige Env-Zahlen, ungültige Bool-Werte, widersprüchliche TLS-Paare und fehlende/leer gelesene explizite Secret-Dateien führen zu einem Startfehler. Env-Zahlen werden immer dezimal interpretiert. Secret-Dateien haben gegenüber dem dazugehörigen direkten Secret-Wert Vorrang. Fehlermeldungen drucken keine Werte.
+Unknown keys, mistyped YAML values, invalid env numbers, invalid boolean values, contradictory TLS pairs and explicit secret files that are missing or read as empty cause a startup error. Env numbers are always interpreted as decimal. A secret file takes precedence over the corresponding direct secret value. Error messages never print values.
 
-`config check` validiert die Konfigurationsstruktur und liest referenzierte Secret-Dateien. Es ist kein Verbindungsnachweis für Ceph, Nauthilus, SMTP oder die externen Programme; Programmdateien werden beim Aufruf geprüft. Zertifikate werden beim anschließenden Serverstart geladen. Ohne Dateipfad bleiben die bisherigen Env-Deployments verwendbar.
+`config check` validates the configuration structure and reads the referenced secret files. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards. Without a file path, the existing env-based deployments remain usable.
 
-## Client-IP hinter dem Director
+## Client IP behind the Director
 
-`server.proxy_protocol_trusted_cidrs` steuert die Übernahme von Clientadressen
-aus PROXY-Protocol v1/v2 vor dem eigentlichen Mailprotokoll/TLS. Dazu muss
-auch der Director für die betreffenden Backends `haproxy.enabled: true`
-setzen. Die Konfiguration gilt gemeinsam für IMAP, POP3, ManageSieve und LMTP.
+`server.proxy_protocol_trusted_cidrs` controls whether client addresses from
+PROXY protocol v1/v2 are adopted ahead of the actual mail protocol/TLS. For
+this to work, the Director must also set `haproxy.enabled: true` for the
+backends in question. The setting applies jointly to IMAP, POP3, ManageSieve
+and LMTP.
 
-Das produktive Overlay verwendet das nachgewiesene Calico-Podnetz
-`172.16.0.0/12` zusammen mit `network-policy.yaml`. Mailports sind nur für
-Director-Pods im Namespace `director` sowie die kontrollierten Testwerkzeuge
-`mailtest`/`imaptest` im Namespace `shardpost` erreichbar. Diese Testwerkzeuge
-gehören ausdrücklich zur Proxy-Vertrauensgrenze. HTTP-Health und Metriken
-bleiben erreichbar. Bei Änderungen der Calico-Pools ist die CIDR-Liste
-mitzuprüfen; einzelne dynamische Director-Pod-IP-Adressen werden nicht fest
-hinterlegt.
+The production overlay uses the verified Calico pod network
+`172.16.0.0/12` together with `network-policy.yaml`. The mail ports are
+reachable only for Director pods in the `director` namespace and for the
+controlled test tools `mailtest`/`imaptest` in the `shardpost` namespace.
+These test tools are explicitly part of the proxy trust boundary. HTTP
+health and metrics remain reachable. Whenever the Calico pools change, the
+CIDR list has to be reviewed as well; individual dynamic Director pod IP
+addresses are not recorded permanently.
 
-Ohne PROXY-Präambel kann bei direkten serverseitig begrüßenden Verbindungen
-bis zu fünf Sekunden Erkennungszeit entstehen. Der Director sendet deshalb
-auch zum LMTP-Backend die Präambel. Direkte Operatorproben benötigen ein
-entsprechendes Timeout oder senden selbst PROXY-Protocol.
+Without a PROXY preamble, direct connections in which the server greets
+first can take up to five seconds of detection time. That is why the
+Director sends the preamble to the LMTP backend as well. Direct operator
+probes need a matching timeout or have to send PROXY protocol themselves.
 
-## Strukturierte Betriebslogs
+## Structured operational logs
 
-`slog` schreibt JSON nach stdout. `logging.level` (YAML) bzw. `LOG_LEVEL`
-(Environment hat Vorrang) akzeptiert `debug`, `info`, `warn`, `error`; Standard
-und Kubernetes-Rollout sind `info`. Ungültige Werte verhindern den Start.
+`slog` writes JSON to stdout. `logging.level` (YAML) and `LOG_LEVEL`
+(the environment takes precedence) accept `debug`, `info`, `warn`, `error`;
+the default and the Kubernetes rollout use `info`. Invalid values prevent
+startup.
 
-- `info`: Verbindungsbeginn/-ende, Authentifizierungserfolg/-ablehnung,
-  Zustellungen und Server-Lebenszyklus.
-- `debug`: zusätzlich bekannte Befehlsnamen und Laufzeiten für IMAP, POP3
-  und ManageSieve. `handler_error` bezeichnet einen Handlerfehler, nicht
-  jeden negativen Protokollstatus. IDLE erscheint nach Befehlsende.
-- `warn`: temporär gestörte Authentifizierung, Verbindungslimits und
-  vorhandene Fallback-Meldungen.
-- `error`: Speicherfehler, fehlgeschlagene Zustellungen und interne Fehler.
+- `info`: connection start and end, authentication success and rejection,
+  deliveries and the server lifecycle.
+- `debug`: additionally the known command names and durations for IMAP,
+  POP3 and ManageSieve. `handler_error` denotes a handler error, not
+  every negative protocol status. IDLE appears once the command has ended.
+- `warn`: temporarily disrupted authentication, connection limits and the
+  existing fallback messages.
+- `error`: storage errors, failed deliveries and internal errors.
 
-Sitzungen tragen `proto`, eine zufällige `session_id`, `remote` und `local`.
-`remote` enthält die vom vertrauenswürdigen PROXY-Absender übermittelte
-Client-Adresse; beim direkten Zugang die TCP-Gegenstelle. Erfolgreiche
-Anmeldungen enthalten den kanonischen `user`. Die Sitzungs-ID bleibt bei
-IMAP UNAUTHENTICATE gleich, die Benutzerbindung wird entfernt.
-`connection_close` enthält die Sitzungsdauer in Millisekunden. Bei LMTP
-beginnt die Backend-Sitzung nach LHLO. Das `tls`-Feld beschreibt TLS zum
-Backend, nicht einen bereits am Director terminierten TLS-Kanal.
+Sessions carry `proto`, a random `session_id`, `remote` and `local`.
+`remote` holds the client address supplied by the trusted PROXY sender;
+for direct access it holds the TCP peer. Successful logins include the
+canonical `user`. The session ID stays the same across IMAP
+UNAUTHENTICATE, only the user binding is removed.
+`connection_close` carries the session duration in milliseconds. For LMTP,
+the backend session begins after LHLO. The `tls` field describes TLS to
+the backend, not a TLS channel already terminated at the Director.
 
-Auch Debug protokolliert keine Befehlsargumente, SASL-Daten, Passwörter,
-Tokens, Skripttexte oder Mailinhalte. Die einzige Ausnahme ist der
-ausdrücklich pro Konto eingeschaltete, befristete Protokoll-Trace
-(`event=protocol_trace`, siehe [Admin-API](admin-api.md#protokoll-trace-eines-kontos)):
-er enthält die Protokollzeilen nach der Anmeldung, Literale nur als Größe.
-Unbekannte Befehle heißen `UNKNOWN`. Die Logs enthalten betriebsnotwendige
-Client-IP-Adressen und Kontonamen; diese Felder werden nicht als Metrik-Labels verwendet.
+Not even debug logs command arguments, SASL data, passwords, tokens,
+script texts or mail contents. The only exception is the time-limited
+protocol trace that is switched on explicitly per account
+(`event=protocol_trace`, see [Admin API](admin-api.md#protocol-trace-for-an-account)):
+it contains the protocol lines after login, with literals recorded only as
+a size. Unknown commands are named `UNKNOWN`. The logs contain client IP
+addresses and account names that are necessary for operations; these fields are not used as metric labels.
 
-Beispiel für Loki (Client-IP durch die gesuchte öffentliche IP ersetzen):
+Example for Loki (replace the client IP with the public IP you are looking for):
 
 ```logql
 {namespace="shardpost", app_kubernetes_io_name="shardpost-server"} | json | remote =~ "203\\.0\\.113\\.10:.*"
 ```
 
-Für die weitere Korrelation nach `session_id` filtern. Bei `info` erzeugen
-NOOP/FETCH/IDLE keine einzelnen Befehlslogs; Öffnen, Login und Schließen
-bleiben sichtbar. Bereits vor dem Rollout geschlossene Verbindungen lassen
-sich nachträglich nicht rekonstruieren. Leveländerungen erfordern Neustart.
+For further correlation, filter by `session_id`. At `info`, NOOP/FETCH/IDLE
+produce no individual command logs; open, login and close remain visible.
+Connections that were already closed before the rollout cannot be
+reconstructed after the fact. Changing the level requires a restart.
 
-### Protokoll-Trace (`trace`)
+### Protocol trace (`trace`)
 
-| Schlüssel | Standard | Bedeutung |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `trace.max_line_bytes` | 2048 | geloggte Länge einer Zeile (80–65536) |
-| `trace.default_duration_seconds` | 1800 | Dauer ohne Angabe im Aufruf |
-| `trace.max_duration_seconds` | 86400 | Obergrenze jeder Einschaltung (60–604800) |
-| `trace.recheck_seconds` | 60 | wie oft eine mitgeschnittene Sitzung den Schalter neu liest |
+| `trace.max_line_bytes` | 2048 | logged length of a line (80–65536) |
+| `trace.default_duration_seconds` | 1800 | duration when the call does not specify one |
+| `trace.max_duration_seconds` | 86400 | upper bound for every activation (60–604800) |
+| `trace.recheck_seconds` | 60 | how often a traced session re-reads the switch |
 
-Nur per YAML. Eingeschaltet wird über die Admin-API (Rolle `trace`), siehe
-[Admin-API](admin-api.md#protokoll-trace-eines-kontos).
+YAML only. It is switched on through the Admin API (role `trace`), see
+[Admin API](admin-api.md#protocol-trace-for-an-account).
 
-### Wartungsjobs (`jobs`)
+### Maintenance jobs (`jobs`)
 
-| Schlüssel | Standard | Bedeutung |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `jobs.enabled` | true | Runner in diesem Server (Jobs teilen sich alle Server) |
-| `jobs.poll_seconds` | 5 | Abstand der Suche nach neuen Jobs |
-| `jobs.lease_seconds` | 60 | Dauer einer Übernahme ohne Erneuerung (Übernahme durch andere danach) |
-| `jobs.retention_days` | 14 | Aufbewahrung beendeter Jobs und Pläne |
-| `jobs.plan_ttl_seconds` | 3600 | Gültigkeit eines Plans |
-| `jobs.max_parallel` | 2 | Jobs je Server gleichzeitig |
-| `jobs.settle_seconds` | 10 | Wartezeit eines exklusiven Jobs nach dem Setzen der Wartungssperre, damit laufende Zustellungen enden und offene IMAP/POP3-Sitzungen die Sperre bemerken (sie prüfen sie höchstens alle 5 s beim Befehlsstart und trennen mit BYE) |
+| `jobs.enabled` | true | runner in this server (all servers share the jobs) |
+| `jobs.poll_seconds` | 5 | interval between scans for new jobs |
+| `jobs.lease_seconds` | 60 | how long a claim holds without renewal (another server may take over afterwards) |
+| `jobs.retention_days` | 14 | retention of finished jobs and plans |
+| `jobs.plan_ttl_seconds` | 3600 | how long a plan stays valid |
+| `jobs.max_parallel` | 2 | concurrent jobs per server |
+| `jobs.settle_seconds` | 10 | how long an exclusive job waits after setting the maintenance lock, so that running deliveries can finish and open IMAP/POP3 sessions notice the lock (they check it at most every 5 s when a command starts and disconnect with BYE) |
 
-Nur per YAML. Bedienung siehe [Admin-API: Wartungsjobs](admin-api.md#wartungsjobs-stufe-8c).
+YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c).
 
-### Supportwerkzeuge (`admin.search_scan_limit`)
+### Support tools (`admin.search_scan_limit`)
 
-| Schlüssel | Standard | Bedeutung |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `admin.search_scan_limit` | 50000 | höchstens so viele Nachrichten prüft eine Suchanfrage (Rolle `content`); eine längere Suche setzt mit ihrem Cursor fort |
+| `admin.search_scan_limit` | 50000 | a search request examines at most this many messages (role `content`); a longer search resumes with its cursor |
 
-Nur per YAML. Siehe [Admin-API: Supportwerkzeuge](admin-api.md#supportwerkzeuge-stufe-8d).
+YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).

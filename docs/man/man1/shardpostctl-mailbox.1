@@ -1,0 +1,185 @@
+.TH SHARDPOSTCTL-MAILBOX 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-mailbox \- list, inspect, create, rename and subscribe mailboxes
+.SH SYNOPSIS
+.B shardpostctl mailbox list
+.RB [ \-all ]
+.RB [ \-limit
+.IR n ]
+.RB [ \-after
+.IR name ]
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl mailbox show
+.RB [ \-\-json ]
+.I account mailbox
+.br
+.B shardpostctl mailbox create
+.RB [ \-special-use
+.IR list ]
+.I account name
+.br
+.B shardpostctl mailbox rename
+.RB [ \-if-match
+.IR etag ]
+.I account mailbox "new name"
+.br
+.B shardpostctl mailbox subscribe
+.RB [ \-if-match
+.IR etag ]
+.I account mailbox
+.br
+.B shardpostctl mailbox unsubscribe
+.RB [ \-if-match
+.IR etag ]
+.I account mailbox
+.SH DESCRIPTION
+A
+.I mailbox
+argument is either the mailbox name as the client sees it
+.RI ( INBOX ", " Archive/2026 )
+or its stable id. The client resolves a name to its id first, so a
+mailbox that is renamed between two commands is still the same object.
+.SS mailbox list
+Mailboxes in name order with id, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ,
+subscription, special-use and the number of ACL entries. One page holds
+.B \-limit
+entries (default 100);
+.B \-after
+continues after a name, and
+.B \-all
+fetches every page. This command reads the registry and one header per
+mailbox, so it stays cheap even for large accounts.
+.PP
+Role:
+.BR diagnose .
+.SS mailbox show
+One mailbox in detail. On top of the listing it reports the message
+count, how many are unseen and flagged deleted, the total size, the
+number of index shards and their size, where the change log starts (the
+QRESYNC horizon) and the keywords in use. It reads every index shard of
+the mailbox, so it costs more than
+.BR "mailbox list" .
+.PP
+The shard line is worth knowing:
+.I "shards 47 of 20 UIDs"
+means the mailbox was created when
+.I mbox_shard_size
+was 20. The size is fixed when the mailbox is created and never changes
+afterwards; only a rebuild (export, purge, restore) moves an existing
+mailbox to the current size.
+.PP
+Role:
+.BR diagnose .
+.SS mailbox create
+Creates a mailbox, with parents as needed.
+.B \-special-use
+takes a comma-separated list
+.RI ( \e\fBArchive\fP ", " \e\fBSent\fP ", " \e\fBJunk\fP ", " \e\fBTrash\fP ", "
+.IR \e\fBDrafts\fP ", " \e\fBAll\fP ", " \e\fBFlagged\fP ", " \e\fBImportant\fP );
+it is stored in the usual spelling. If the mailbox already exists with
+the same special-use, the command succeeds and changes nothing, so a
+repeated run after a lost answer is safe. With a different special-use it
+is a conflict.
+.PP
+Role:
+.BR provision .
+.SS mailbox rename
+Renames a mailbox together with its children. INBOX cannot be renamed,
+and an existing target is a conflict. Renaming to the current name does
+nothing.
+.PP
+Role:
+.BR provision .
+.SS mailbox subscribe, mailbox unsubscribe
+Sets or clears the subscription flag that clients use to decide which
+mailboxes to show.
+.PP
+Role:
+.BR provision .
+.SH OPTIONS
+.TP
+.BI \-limit " n"
+Mailboxes per page (mailbox list), 1 to 500.
+.TP
+.BI \-after " name"
+Continue the listing after this mailbox name.
+.TP
+.B \-all
+Fetch every page.
+.TP
+.BI \-special-use " list"
+Special-use attributes of a new mailbox, comma-separated.
+.TP
+.BI \-if-match " etag"
+Make the change conditional. The ETag is printed by every command that
+changes a mailbox; if the mailbox changed meanwhile, the server refuses
+with exit code 65 instead of overwriting someone else's change.
+.TP
+.B \-\-json
+Print the answer as JSON.
+.SH EXAMPLES
+Which mailboxes does the account have, and how big is the INBOX?
+.PP
+.nf
+.RS
+shardpostctl mailbox list -all user@example.org
+shardpostctl mailbox show user@example.org INBOX
+.RE
+.fi
+.PP
+Create an archive mailbox for a user who asked for one:
+.PP
+.nf
+.RS
+shardpostctl mailbox create -special-use '\eArchive' \\
+    user@example.org Archive
+.RE
+.fi
+.PP
+Rename a mailbox, but only if nobody else changed it since you looked:
+.PP
+.nf
+.RS
+shardpostctl mailbox show user@example.org Projekte      # prints the etag
+shardpostctl mailbox rename -if-match '"m-0808d3b73bb67293"' \\
+    user@example.org Projekte Projects
+.RE
+.fi
+.PP
+Make a mailbox visible in the client:
+.PP
+.nf
+.RS
+shardpostctl mailbox subscribe user@example.org Projects
+.RE
+.fi
+.PP
+Deleting a mailbox is not done here. It is a planned job, so you can see
+what would be removed before anything happens; see
+.BR shardpostctl-job (1):
+.PP
+.nf
+.RS
+shardpostctl plan -mailbox 'Archive/2019' mailbox_delete user@example.org
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 65
+Conflict, or the ETag no longer matches.
+.TP
+.B 67
+No such account or mailbox.
+.TP
+.B 77
+The caller lacks the role.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-acl (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-message (1)

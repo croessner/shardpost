@@ -1,0 +1,327 @@
+.TH SHARDPOSTCTL-JOB 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-job \- plan, apply and watch maintenance jobs
+.SH SYNOPSIS
+.B shardpostctl plan
+.RB [ \-classes
+.IR list ]
+.RB [ \-mailbox
+.IR mailbox ]
+.RB [ \-uids
+.IR list " | " \-deleted ]
+.RB [ \-\-json ]
+.I kind account
+.br
+.B shardpostctl plan show
+.RB [ \-\-json ]
+.I plan-id
+.br
+.B shardpostctl apply
+.RB [ \-wait ]
+.RB [ \-poll
+.IR duration ]
+.RB [ \-idempotency-key
+.IR key ]
+.RB [ \-\-json ]
+.I plan-id
+.br
+.B shardpostctl check
+.RB [ \-wait ]
+.RB [ \-poll
+.IR duration ]
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl job list
+.RB [ \-account
+.IR account ]
+.RB [ \-state
+.IR state ]
+.RB [ \-limit
+.IR n ]
+.RB [ \-after
+.IR id ]
+.RB [ \-\-json ]
+.br
+.B shardpostctl job show
+.RI [ \-\-json ]
+.I job-id
+.br
+.B shardpostctl job wait
+.RB [ \-poll
+.IR duration ]
+.I job-id
+.br
+.B shardpostctl job cancel
+.I job-id
+.SH DESCRIPTION
+Everything that runs long or cannot be undone runs as a job. Jobs live in
+the shared admin store, survive restarts and are taken over by another
+server if the one running them dies, continuing at their last checkpoint.
+.PP
+Dangerous work is done in two steps.
+.B plan
+computes what the job
+.I would
+do and stores that plan; nothing is changed yet.
+.B apply
+runs the plan, once, and only while it is valid
+.RI ( jobs.plan_ttl_seconds ,
+one hour by default). Before the first write the job compares the account
+with the plan: if it drifted, the job ends without changing anything.
+.PP
+.B check
+needs no plan: it runs the read-only index check on an account.
+.SS Kinds
+.TP
+.B index_check
+Role
+.BR diagnose .
+Checks the index and reports findings. Repairs nothing. This is what
+.B check
+runs.
+.TP
+.B scrub
+Role
+.BR repair .
+Checks and repairs.
+.B \-classes
+selects what may be repaired:
+.IR deliveries ", " moves ", " retired ", " uncovered ", " entries ", "
+.IR refs ", " orphans ", " unknown ", " quota .
+Without the flag every class is repaired.
+.TP
+.B quota_recalc
+Role
+.BR repair ,
+locks the account. Counts the usage from the index again and stores it.
+.TP
+.B acl_reconcile
+Role
+.BR repair .
+Writes missing share pointers at the grantees and removes pointers that
+no longer carry rights.
+.TP
+.B fts_rebuild
+Role
+.BR repair ,
+locks the account. Drops the full-text index and builds it again from
+every message. It has no checkpoint: after a takeover it starts over.
+.TP
+.B mailbox_delete
+Role
+.BR delete ,
+locks the account. Deletes the mailbox named by
+.B \-mailbox
+with its children. INBOX is refused.
+.TP
+.B expunge
+Role
+.BR delete .
+Removes the messages named by
+.B \-uids
+or, with
+.BR \-deleted ,
+every message that carried
+.I \eDeleted
+when the plan was made. Only messages that still have the UID and GUID
+from the plan are removed, at most 40000 per plan.
+.TP
+.B purge
+Role
+.BR delete ,
+locks the account. Withdraws shares in both directions, deletes the
+learning jobs and every object of the account. The identity itself (LDAP)
+is not touched: if the account logs in again, it gets an empty INBOX.
+.SS The account lock
+Jobs marked above as "locks the account" take the same lock an import
+uses. While it is held, IMAP and POP3 answer "Mailbox maintenance in
+progress", LMTP answers
+.IR "451 4.2.1" ,
+and other jobs and imports stay out. Sessions that were already open
+notice within five seconds and are disconnected. The job waits
+.I jobs.settle_seconds
+(10 by default) after locking before it writes, so deliveries in flight
+can finish.
+.PP
+If the account is already locked when a job starts, the job waits in
+state
+.I running
+with the phase "waiting for the account lock" and tries again every lease
+period, up to
+.I jobs.plan_ttl_seconds
+after it was created.
+.SS States
+.IR queued ", " running ", " succeeded ", " partially_failed ", " failed ", "
+.IR cancel_requested ", " cancelled .
+.B job cancel
+stops a queued job at once and a running one at its next safe point; what
+it already did is not rolled back.
+.SH OPTIONS
+.TP
+.BI \-classes " list"
+Repair classes of
+.BR scrub ,
+comma-separated.
+.TP
+.BI \-mailbox " mailbox"
+Mailbox for
+.B mailbox_delete
+and
+.BR expunge ,
+by name or id.
+.TP
+.BI \-uids " list"
+UIDs for
+.BR expunge ,
+comma-separated.
+.TP
+.B \-deleted
+.B expunge
+takes every message flagged
+.IR \eDeleted .
+.TP
+.B \-wait
+Wait until the job ends. The exit code is then the job's outcome.
+.TP
+.BI \-poll " duration"
+How often
+.B \-wait
+asks. Default:
+.IR 2s .
+.TP
+.BI \-idempotency-key " key"
+Repeating a request with the same key returns the job the first request
+created instead of starting a second one. A different request with the
+same key is refused.
+.TP
+.BI \-account " account"
+.TQ
+.BI \-state " state"
+.TQ
+.BI \-limit " n"
+.TQ
+.BI \-after " id"
+Narrow and page
+.BR "job list" .
+A client with an account scope must name an account.
+.TP
+.B \-\-json
+Print the answer as JSON.
+.SH EXAMPLES
+Is this account's index sound?
+.PP
+.nf
+.RS
+shardpostctl check -wait user@example.org
+.RE
+.fi
+.PP
+Delete a mailbox: look first, then act.
+.PP
+.nf
+.RS
+shardpostctl plan -mailbox 'Archive/2019' mailbox_delete user@example.org
+shardpostctl apply -wait 20260919T173044Z-38cd01e99e31
+.RE
+.fi
+.PP
+Empty the trash of an account for good:
+.PP
+.nf
+.RS
+shardpostctl plan -mailbox Trash -deleted expunge user@example.org
+shardpostctl plan show <plan-id>          # how many, and which UIDs
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+The usage counter looks wrong after an incident:
+.PP
+.nf
+.RS
+shardpostctl plan quota_recalc user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+Search finds nothing although the mail is there: rebuild the index. The
+account is locked while this runs, so do it in a quiet window.
+.PP
+.nf
+.RS
+shardpostctl plan fts_rebuild user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+Repair only what the check found, not everything:
+.PP
+.nf
+.RS
+shardpostctl plan -classes refs,orphans scrub user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+Offboarding: remove every trace of an account from the store (the
+identity stays in LDAP):
+.PP
+.nf
+.RS
+shardpostctl plan purge user@example.org
+shardpostctl plan show <plan-id>          # mailboxes, messages, shares
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+Retry an apply safely from a script, without risking a second run:
+.PP
+.nf
+.RS
+shardpostctl apply -idempotency-key nightly-2026-09-20 <plan-id>
+.RE
+.fi
+.PP
+What is running right now, and what happened to a job?
+.PP
+.nf
+.RS
+shardpostctl job list -account user@example.org
+shardpostctl job show 20260919T173049Z-a26a9aabfc44
+shardpostctl job cancel 20260919T173049Z-a26a9aabfc44
+.RE
+.fi
+.SH EXIT STATUS
+Without
+.BR \-wait ,
+the exit code only says whether the request was accepted. With
+.B \-wait
+(and for
+.BR "job wait" )
+it is the outcome of the job:
+.TP
+.B 0
+The job succeeded.
+.TP
+.B 1
+The job partly failed; its errors are printed.
+.TP
+.B 65
+The plan was already applied, has expired, or the account drifted from
+it.
+.TP
+.B 67
+No such job, plan or account.
+.TP
+.B 69
+The job failed or was cancelled.
+.TP
+.B 77
+The caller lacks the role of this kind.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-account (1),
+.BR shardpostctl-export (1),
+.BR shardpostctl-mailbox (1),
+.BR shardpostctl-message (1)

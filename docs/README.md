@@ -1,55 +1,58 @@
-# Dokumentation
+# Documentation
 
-Diese Dokumentation beschreibt den Code-Stand ShardPost 0.13.0 vom
-18.09.2026. Architektur beschreibt vorhandene Mechanismen; konkrete
-Betriebsergebnisse tragen ein Datum und einen Nachweis. Ziele sind als Ziele
-gekennzeichnet. Der Produktname ist ShardPost, seit 0.13.0 auch in allen Betriebsbezeichnern.
+This documentation describes the ShardPost code base; the sections below
+carry the version and date they were written for. The architecture describes mechanisms that exist; concrete
+operational results carry a date and a piece of evidence. Goals are marked
+as goals. The product name is ShardPost, since 0.13.0 also in every
+operational identifier.
 
-## Lesepfade
+## Reading paths
 
-**Neu im Projekt:** [Überblick](../README.md) → [Architektur](../ARCHITECTURE.md)
-→ [Laufzeit und UML](architecture/runtime.md) → [Entwicklerhandbuch](development/README.md).
+**New to the project:** [Overview](../README.md) → [Architecture](../ARCHITECTURE.md)
+→ [Runtime and UML](architecture/runtime.md) → [Developer guide](development/README.md).
 
-**Speicheränderung:** [Konsistenz und Datenmodell](architecture/storage.md)
-→ [Architekturentscheidungen](decisions/architecture.md) →
-[Tests und Grenzen](development/quality.md).
+**Storage change:** [Consistency and data model](architecture/storage.md)
+→ [Architecture decisions](decisions/architecture.md) →
+[Tests and limits](development/quality.md).
 
-**Betrieb:** [Konfiguration](configuration.md) → [Betrieb und Releases](operations/README.md)
-→ [Logs, Metriken und Traces](observability.md).
+**Operations:** [Configuration](configuration.md) → [Operations and releases](operations/README.md)
+→ [Logs, metrics, and traces](observability.md). The day-to-day commands
+are documented as [manual pages](man/README.md).
 
-| Dokument | Inhalt |
+| Document | Contents |
 |---|---|
-| [Architektur](../ARCHITECTURE.md) | Systemgrenzen, Komponenten, Deployment, Auswirkungen von Ausfällen |
-| [Laufzeit und UML](architecture/runtime.md) | Go-Interfaces, Anmeldung, Zustellung, IMAP-Zustände |
-| [RADOS-Speicher](architecture/storage.md) | Objektlayout, CAS, Shards, Intents, Referenzen, Reparatur |
-| [Entwicklerhandbuch](development/README.md) | Codekarte, Build, Tests, Änderungspfade, Vendor-Fork |
-| [Qualität](development/quality.md) | Testebenen, Konformitätsgrenzen, aktuelle und historische Evidenz |
-| [Stufe 8: Betriebsverwaltung](development/admin-stage.md) | Geplant: shardpostctl, OpenAPI, Mailboxen, ACL, Quota, FTS, Reparaturen und Migration |
-| [Betrieb](operations/README.md) | Abhängigkeiten, sichere Diagnose, Release und Rollback |
-| [Konfiguration](configuration.md) | Viper, Umgebungsvariablen, Secret-Dateien, Log-Level |
-| [Sieve und Lernen](imapsieve.md) | Skriptausführung, externe Programme, Lernqueue |
-| [Quota](quota.md) | Grace, Mailbox-Regeln, Warnprogramme, Over-Flag |
-| [Admin-API und LDA](admin-api.md) | OpenAPI-Vertrag, shardpostctl, Rollen, lokale Zustellung |
-| [Observability](observability.md) | Metrikbedeutung, Sampling, Datenschutz, Betriebslogs |
-| [Architekturentscheidungen](decisions/architecture.md) | Gründe und Folgen der zentralen Entwurfsentscheidungen |
-| [Projektname](decisions/project-name.md) | Kandidaten und kompatible Umbenennung |
-| [Diagramme](diagrams/README.md) | Mermaid-Quellen, SVGs und reproduzierbares Rendern |
+| [Architecture](../ARCHITECTURE.md) | System boundaries, components, deployment, impact of outages |
+| [Runtime and UML](architecture/runtime.md) | Go interfaces, login, delivery, IMAP states |
+| [RADOS storage](architecture/storage.md) | Object layout, CAS, shards, intents, references, repair |
+| [Developer guide](development/README.md) | Code map, build, tests, change paths, vendor fork |
+| [Quality](development/quality.md) | Test levels, conformance limits, current and historical evidence |
+| [Stage 8: operational administration](development/admin-stage.md) | Planned: shardpostctl, OpenAPI, mailboxes, ACL, quota, FTS, repairs, and migration |
+| [Operations](operations/README.md) | Dependencies, safe diagnosis, release and rollback |
+| [Configuration](configuration.md) | Viper, environment variables, secret files, log levels |
+| [Sieve and learning](imapsieve.md) | Script execution, external programs, learning queue |
+| [Quota](quota.md) | Grace, mailbox rules, warning programs, over flag |
+| [Admin API and LDA](admin-api.md) | OpenAPI contract, shardpostctl, roles, local delivery |
+| [Manual pages](man/README.md) | `shardpostctl` command by command, with examples |
+| [Observability](observability.md) | What the metrics mean, sampling, privacy, operational logs |
+| [Architecture decisions](decisions/architecture.md) | Reasons for and consequences of the central design decisions |
+| [Project name](decisions/project-name.md) | Candidates and a compatible rename |
+| [Diagrams](diagrams/README.md) | Mermaid sources, SVGs, and reproducible rendering |
 
-## Nachweise und Historie
+## Evidence and history
 
-- [ShardPost 0.13.0](reports/2026-09-18-shardpost-0.13.0.md): Lint-Bereinigung, Namespace-/Pool-/Identitätsumzug, aktueller Rollout.
-- [ShardPost 0.12.0](reports/2026-09-16-shardpost.md): Umbenennung und Kompatibilität.
-- [Logging 0.11.3](reports/2026-09-16-logging.md): Logging-Erweiterung und damaliger Protokollnachweis.
-- [Sieve-Korrekturen bis 0.11.2](reports/2026-09-16-sieve-conformance-fixes.md).
-- [Externe Programme](reports/2026-09-16-extprograms.md).
-- [IMAPSieve](reports/2026-09-15-imapsieve.md) und [PROXY-Protokoll](reports/2026-09-15-proxy-protocol.md).
-- [Konformitätsergebnisse](../hack/conformance.md): versionierte Resultate, kein pauschales Grün.
-- [Review-Runde 1](review-round1.md), [2](review-round2.md), [3](review-round3.md),
-  [4](review-round4.md), [5](review-round5.md), [6](review-round6.md): historische Befunde und Änderungen.
-- [Frühere Architektur](history/architecture-before-2026-09-16.md),
-  [frühere README](history/readme-before-2026-09-16.md), [Ausbauhistorie](../ROADMAP.md).
+- [ShardPost 0.13.0](reports/2026-09-18-shardpost-0.13.0.md): lint cleanup, namespace/pool/identity move, current rollout.
+- [ShardPost 0.12.0](reports/2026-09-16-shardpost.md): rename and compatibility.
+- [Logging 0.11.3](reports/2026-09-16-logging.md): logging extension and the protocol evidence of the time.
+- [Sieve fixes up to 0.11.2](reports/2026-09-16-sieve-conformance-fixes.md).
+- [External programs](reports/2026-09-16-extprograms.md).
+- [IMAPSieve](reports/2026-09-15-imapsieve.md) and [PROXY protocol](reports/2026-09-15-proxy-protocol.md).
+- [Conformance results](../hack/conformance.md): versioned results, no blanket green.
+- [Review round 1](review-round1.md), [2](review-round2.md), [3](review-round3.md),
+  [4](review-round4.md), [5](review-round5.md), [6](review-round6.md): historical findings and changes.
+- [Earlier architecture](history/architecture-before-2026-09-16.md),
+  [earlier README](history/readme-before-2026-09-16.md), [build-out history](../ROADMAP.md).
 
-Historische Dokumente bleiben als Begründung und Nachweis erhalten. Für neue
-Implementierungen gelten die aktuelle Codekarte und die tatsächlich
-implementierten Interfaces. Ändert sich ein Ablauf, werden Beschreibung,
-Mermaid-Quelle und gerendertes SVG gemeinsam aktualisiert.
+Historical documents are kept as rationale and evidence. New
+implementations follow the current code map and the interfaces that are
+actually implemented. When a flow changes, its description, the Mermaid
+source, and the rendered SVG are updated together.

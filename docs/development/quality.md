@@ -1,75 +1,77 @@
-# Qualitätsstand und Teststrategie
+# Quality status and test strategy
 
-[Entwicklerhandbuch](README.md) · [Konformitätsprotokoll](../../hack/conformance.md)
+[Developer guide](README.md) · [Conformance log](../../hack/conformance.md)
 
-## Was die einzelnen Ebenen beweisen
+## What each level proves
 
-| Ebene | Prüft | Prüft nicht automatisch |
+| Level | Checks | Does not check automatically |
 |---|---|---|
-| Config-/Unit-Tests | Validierung, Datenstrukturen, definierte Fehlerpfade | Erreichbarkeit produktiver Dienste |
-| TCP-Protokolltests mit memstore | Parser, Zustände, Antworten, ACL- und Logging-Verträge | RADOS-CAS, OSD-Ausfälle, echte Schlüsselrotation |
-| Linux-Tests mit librados-Build | Kompilierung und Tests in der Serverplattform | Vollständigen Betrieb gegen ein echtes Ceph |
-| Pigeonhole-Forktests | Skriptcompiler und Interpreter im Testadapter | Vollständige Dovecot-Umgebung oder externe Zustellung |
-| imaptest | Konkrete IMAP-Konformitätsgruppen | Nicht angebotene oder übersprungene Capabilities |
-| Native Abnahme | Tatsächlichen Netzwerk-, TLS-, Auth- und Store-Pfad | Andere Konten, unbekannte Clientvarianten oder Langzeitlast |
-| Last-/Abbruchtests | Gemessene Last und getestete Fehlerzeitpunkte | Allgemeine Kapazitäts- oder Verfügbarkeitsgarantie |
+| Config/unit tests | Validation, data structures, defined error paths | Reachability of production services |
+| TCP protocol tests with memstore | Parser, states, responses, ACL and logging contracts | RADOS CAS, OSD failures, real key rotation |
+| Linux tests with a librados build | Compilation and tests on the server platform | Full operation against a real Ceph |
+| Pigeonhole fork tests | Script compiler and interpreter in the test adapter | A complete Dovecot environment or external delivery |
+| imaptest | Specific IMAP conformance groups | Capabilities that are not offered or are skipped |
+| Native acceptance | The actual network, TLS, auth and store path | Other accounts, unknown client variants or long-term load |
+| Load/abort tests | The load measured and the failure points tested | A general capacity or availability guarantee |
 
-## Stand ShardPost 0.13.0, 18.09.2026
+## Status: ShardPost 0.13.0, 2026-09-18
 
-`make lint` (golangci-lint 2.13.2 im Docker-Image mit librados) meldet über
-den ganzen Baum 0 Issues ohne `//nolint`; `make test-docker` besteht mit
-`-race` in allen 17 Testpaketen. Die Lint-Umbauten wurden gegen den Stand
-vor der Bereinigung auf Verhaltensgleichheit reviewt. Live-Abnahme siehe
-[Bericht 0.13.0](../reports/2026-09-18-shardpost-0.13.0.md).
+`make lint` (golangci-lint 2.13.2 in the Docker image with librados) reports
+0 issues across the whole tree without any `//nolint`; `make test-docker`
+passes with `-race` in all 17 test packages. The lint-driven refactorings were
+reviewed against the state before the cleanup for behavioral equivalence.
+For the live acceptance see [report 0.13.0](../reports/2026-09-18-shardpost-0.13.0.md).
 
-## Vorheriger Stand ShardPost 0.12.0, 16.09.2026
+## Previous status: ShardPost 0.12.0, 2026-09-16
 
-Für die Umbenennung bestanden `go vet` und die vollständige Linux-Server-
-Race-Suite `go test -p 1 -race -tags tentacle ./...`. Ergänzende Tests prüfen
-neue/alte Config-Variablen, Vorrangregeln, OTel-Serviceidentität und IMAP ID.
-Runtime-Checks bestätigen Binary-Aliase, Konfiguration und neuen Helperpfad.
-Beide Testkonten bestanden nach Rollout öffentlich IMAP und ManageSieve
-inklusive ShardPost-Identität, TLS, Anmeldung und vollständiger Log-Korrelation.
-Siehe [Releasebericht](../reports/2026-09-16-shardpost.md).
+For the rename, `go vet` and the complete Linux server race suite
+`go test -p 1 -race -tags tentacle ./...` passed. Additional tests cover
+new and old config variables, precedence rules, the OTel service identity and
+IMAP ID. Runtime checks confirmed the binary aliases, the configuration and the
+new helper path. After the rollout, both test accounts passed public IMAP and
+ManageSieve including the ShardPost identity, TLS, login and complete log
+correlation. See the [release report](../reports/2026-09-16-shardpost.md).
 
-## Vorherige Logging-Abnahme 0.11.3, 16.09.2026
+## Previous logging acceptance 0.11.3, 2026-09-16
 
-Für die Logging-Änderung bestanden `go vet`, der vollständige Linux-
-Serverlauf `go test -tags tentacle ./...` sowie gezielte Race-Tests für
-Config, Logging, IMAP, POP3 und ManageSieve. Neue Tests prüfen Filterung,
-Validierung, PROXY-Adresse, Sitzungs-ID und Geheimnisfreiheit der neuen
-Debug-Ereignisse. `config check` im fertigen Runtime-Image bestand.
+For the logging change, `go vet`, the complete Linux server run
+`go test -tags tentacle ./...` and targeted race tests for
+config, logging, IMAP, POP3 and ManageSieve passed. New tests cover filtering,
+validation, the PROXY address, the session ID and the absence of secrets in the
+new debug events. `config check` passed in the finished runtime image.
 
-Nach dem Rollout bestanden beide Testkonten öffentlich IMAP und ManageSieve:
-TLS, Login, NOOP und Logout sowie Log-Korrelation inklusive öffentlicher
-Client-IP. Zwei Replikas waren Ready, ohne Neustarts. Siehe
-[Release-Nachweis](../reports/2026-09-16-logging.md).
+After the rollout, both test accounts passed public IMAP and ManageSieve:
+TLS, login, NOOP and logout as well as log correlation including the public
+client IP. Two replicas were Ready, with no restarts. See the
+[release evidence](../reports/2026-09-16-logging.md).
 
-Diese Version hat nicht alle historischen Last-, RADOS-Abbruch- und
-Konformitätssuiten erneut ausgeführt. Ein grüner Logging-Test ersetzt sie nicht.
+This version did not re-run all historical load, RADOS abort and
+conformance suites. A green logging test does not replace them.
 
-## Letzter dokumentierter Konformitätsstand
+## Last documented conformance status
 
-Der [Bericht bis 0.11.2](../reports/2026-09-16-sieve-conformance-fixes.md)
-und [hack/conformance.md](../../hack/conformance.md) dokumentieren für
-Pigeonhole 139 bestandene, 0 fehlgeschlagene und 9 ausdrücklich ausgenommene
-Dateien von 148. Ausnahmen zählen nicht als bestanden. Der Adapter vergleicht
-bei Fehleranzahlen Fehlerfreiheit gegen Fehlerzustand, nicht exakt die Anzahl
-der Dovecot-Diagnosen. Linux/TZ=UTC ist die Referenz für diese Suite.
+The [report up to 0.11.2](../reports/2026-09-16-sieve-conformance-fixes.md)
+and [hack/conformance.md](../../hack/conformance.md) document, for
+Pigeonhole, 139 passed, 0 failed and 9 explicitly excluded
+files out of 148. Exclusions do not count as passed. When error counts are
+involved, the adapter compares absence of errors against presence of errors,
+not the exact number of Dovecot diagnostics. Linux/TZ=UTC is the reference for
+this suite.
 
-Der letzte dokumentierte vollständige IMAP-Lauf an 0.11.0 hatte eine
-fehlgeschlagene Gruppe (`fetch-envelope`, historische Source-Routes) und
-11 wegen fehlender Capabilities übersprungene Gruppen von 72. Diese Einschränkung
-wird durch den späteren Logging-Rollout nicht aufgehoben.
+The last documented complete IMAP run, at 0.11.0, had one
+failed group (`fetch-envelope`, historical source routes) and
+11 groups out of 72 skipped for missing capabilities. That limitation
+is not lifted by the later logging rollout.
 
-## Integrationsskripte gezielt auswählen
+## Choosing integration scripts deliberately
 
-Die älteren `hack/test*.sh`-Skripte setzen teilweise statische Konten und
-Testinfrastruktur voraus. `acceptance-nauthilus.sh` schreibt Nachrichten und
-ändert kurzzeitig Mailboxen/ACLs. Es ist kein rein lesender Gesundheitstest.
-`imapsieve-live-test.py` erzeugt temporäre Mailboxen/Skripte und kann Lernregeln
-auslösen. Vor dem Ausführen Zielprofil, Konten, Seiteneffekte und Cleanup lesen.
+Some of the older `hack/test*.sh` scripts assume static accounts and
+test infrastructure. `acceptance-nauthilus.sh` writes messages and
+temporarily changes mailboxes/ACLs. It is not a read-only health test.
+`imapsieve-live-test.py` creates temporary mailboxes/scripts and can trigger
+learning rules. Before running them, read the target profile, the accounts, the
+side effects and the cleanup.
 
-Neue Release-Nachweise halten fest: Quell-/Imageidentität, Testplattform,
-Endpunkte, Kontenumfang, Seiteneffekte, Ergebnis, Cleanup und offene Lücken.
-Weder ein übersprungener Test noch fehlende Metriken sind ein Erfolg.
+New release evidence records: source/image identity, test platform,
+endpoints, account scope, side effects, result, cleanup and open gaps.
+Neither a skipped test nor missing metrics is a success.

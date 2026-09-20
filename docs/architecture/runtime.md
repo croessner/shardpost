@@ -1,120 +1,121 @@
-# Laufzeit, Interfaces und Protokollabläufe
+# Runtime, interfaces and protocol flows
 
-[Dokumentationsindex](../README.md) · [Architektur](../../ARCHITECTURE.md)
+[Documentation index](../README.md) · [Architecture](../../ARCHITECTURE.md)
 
-## UML: die wichtigsten Verträge
+## UML: the key contracts
 
-![UML-Interfaces](../diagrams/interfaces.svg)
+![UML interfaces](../diagrams/interfaces.svg)
 
-Die UML zeigt einen Ausschnitt der Go-Verträge, keine vollständige API-
-Referenz. Methodensignaturen sind zur Lesbarkeit verkürzt, insbesondere
-Fehlerrückgaben. In Go erfolgt die Implementierung implizit über Methodensätze.
-Die maßgebliche vollständige Definition ist [model.go](../../internal/model/model.go).
+The UML shows an excerpt of the Go contracts, not a complete API
+reference. Method signatures are shortened for readability, error returns in
+particular. In Go, implementation is implicit through method sets.
+The authoritative, complete definition is [model.go](../../internal/model/model.go).
 
-`auth.Authenticator` trennt Zugangsdatenprüfung von Protokollverarbeitung.
-`Authenticate` liefert das kanonische Konto; `Lookup` löst LMTP-Empfänger
-ohne Benutzerpasswort auf. `ErrInvalid` und `ErrTemporary` sind verschiedene
-Ergebnisse: Ein Backend-Ausfall darf nicht als sicher falsches Passwort gelten.
+`auth.Authenticator` separates credential checking from protocol processing.
+`Authenticate` returns the canonical account; `Lookup` resolves LMTP recipients
+without a user password. `ErrInvalid` and `ErrTemporary` are different
+results: a backend outage must not count as a definitely wrong password.
 
-`model.User` ist eine kontogebundene Sicht auf Mailboxen, Nachrichten,
-Skripte, Metadaten und Kontingente. Der Aufrufer muss `Close()` ausführen.
-Watches und Leases haben eigene Lebenszyklen; ein verlorenes Lease verlangt
-das Ende geschützter Änderungen. Der In-Memory-Store ist ein Testbackend,
-kein Beweis für die Fehlersemantik verteilter RADOS-Operationen.
+`model.User` is an account-bound view of mailboxes, messages,
+scripts, metadata and quotas. The caller must call `Close()`.
+Watches and leases have lifecycles of their own; a lost lease requires
+protected changes to stop. The in-memory store is a test backend,
+not proof of the error semantics of distributed RADOS operations.
 
-Die tatsächlichen Store-Typen und Adapter stehen in
+The actual store types and adapters are in
 [cephstore/store.go](../../internal/cephstore/store.go),
-[memstore.go](../../internal/memstore/memstore.go) und
+[memstore.go](../../internal/memstore/memstore.go) and
 [main.go](../../cmd/shardpost/main.go).
 
-## Start und Shutdown
+## Startup and shutdown
 
-1. `loadConfig` wählt Datei und Unterbefehl; `config.Load` führt Defaults,
-   YAML und explizite Umgebungswerte zusammen und validiert sie.
-2. Nach erfolgreicher Konfiguration wird der JSON-Logger mit dem gewählten
-   Level eingerichtet. `config check` endet hier ohne Öffnen der Dienste.
-3. `run` richtet Signalbehandlung und Telemetrie ein. Ceph-Zugang kommt aus
-   Konfiguration oder aus dem durch RBAC lesbaren Rook-Secret.
-4. Store und Authenticator werden geöffnet; TLS-Schlüssel, Sieve- und
-   Programmkonfiguration sowie optionaler Lernworker werden verbunden.
-5. Mail-Listener und HTTP-Endpunkte werden gestartet. Ohne TLS-Konfiguration
-   werden keine impliziten TLS-Listener gestartet.
-6. Bei Shutdown wird Readiness zuerst deaktiviert. Nach einer kurzen
-   Verteilungsfrist werden Dienste beendet und IMAP/POP3 begrenzt geleert.
-   Worker und Tracing werden durch die vorgesehenen Abschlussfunktionen beendet.
+1. `loadConfig` selects the file and the subcommand; `config.Load` merges
+   defaults, YAML and explicitly set environment values and validates them.
+2. Once the configuration is valid, the JSON logger is set up with the chosen
+   level. `config check` ends here without opening any services.
+3. `run` sets up signal handling and telemetry. Ceph access comes from the
+   configuration or from the Rook secret made readable through RBAC.
+4. The store and the authenticator are opened; TLS keys, the Sieve and
+   program configuration and the optional learning worker are connected.
+5. The mail listeners and the HTTP endpoints are started. Without TLS
+   configuration, no implicit TLS listeners are started.
+6. On shutdown, readiness is disabled first. After a short
+   propagation delay, services are stopped and IMAP/POP3 are drained within
+   limits. Workers and tracing are stopped through the designated teardown
+   functions.
 
-`/healthz` meldet, dass der HTTP-Prozess antwortet. `/readyz` prüft zusätzlich
-Drain-Zustand und Ceph-Erreichbarkeit. Keiner der beiden Endpunkte prüft
-vollständig Nauthilus, Sieve, Lernziel oder einen Mailboxzugriff.
+`/healthz` reports that the HTTP process is responding. `/readyz` additionally
+checks the drain state and Ceph reachability. Neither endpoint fully checks
+Nauthilus, Sieve, the learning target or mailbox access.
 
-## Anmeldung und Sitzungszuordnung
+## Login and session correlation
 
-![Login-Sequenz](../diagrams/login.svg)
+![Login sequence](../diagrams/login.svg)
 
-Das Diagramm zeigt den Backend-Pfad; Director und Nauthilus können im
-Frontend weitere Prüfungen durchführen. Die konkrete Backend-Anmeldung
-hängt vom Director-Vertrag ab (z. B. Master-User oder Bearer-Replay).
-Der Server öffnet erst nach erfolgreicher Authentifizierung und Kontolimit-
-Prüfung die kontogebundene Store-Sicht. Speicherfehler können einen Login
-auch nach erfolgreicher Identitätsprüfung noch verhindern.
+The diagram shows the backend path; the director and Nauthilus may perform
+further checks in the frontend. The concrete backend login
+depends on the director contract (for example master user or bearer replay).
+The server only opens the account-bound store view after successful
+authentication and the account limit check. Storage errors can still prevent a
+login after the identity has been verified successfully.
 
-Einstiegspunkte: `newConn`, `serve`, `handleLine`, `authenticate`,
+Entry points: `newConn`, `serve`, `handleLine`, `authenticate`,
 `finishLogin` in [imapproto/conn.go](../../internal/imapproto/conn.go).
-Die SASL-Zerlegung liegt in [auth/sasl.go](../../internal/auth/sasl.go),
-die Backend-Auswahl in [cmd/shardpost/auth.go](../../cmd/shardpost/auth.go).
+SASL decoding lives in [auth/sasl.go](../../internal/auth/sasl.go),
+backend selection in [cmd/shardpost/auth.go](../../cmd/shardpost/auth.go).
 
-## IMAP-Zustände
+## IMAP states
 
-![IMAP-Zustandsdiagramm](../diagrams/imap-states.svg)
+![IMAP state diagram](../diagrams/imap-states.svg)
 
-Ausgewählte Mailbox, Sequenznummern und Watches gehören zur Sitzung.
-`SELECT`/`EXAMINE` laden eine Sicht; `EXAMINE` ist schreibgeschützt.
-`CLOSE` kann markierte Nachrichten expungieren, `UNSELECT` beendet nur die
-Auswahl. Transportende und Shutdown können aus jedem Zustand eintreten.
-Das Diagramm verdichtet diese Abbruchpfade als Übergang zu `Logout`.
+The selected mailbox, the sequence numbers and the watches belong to the session.
+`SELECT`/`EXAMINE` load a view; `EXAMINE` is read-only.
+`CLOSE` may expunge marked messages, `UNSELECT` only ends the
+selection. End of transport and shutdown can occur in any state.
+The diagram condenses these abort paths into a transition to `Logout`.
 
-`UNAUTHENTICATE` gibt Kontozustand und Watches frei, erhält aber den Transport
-und die Logging-Sitzungs-ID. Ein nachfolgender Login darf keine Benutzer-
-Attribute der vorigen Identität erben. `IDLE` ist hier ein Wartezustand
-innerhalb der ausgewählten Mailbox, kein zusätzlicher Authentifizierungsstatus.
+`UNAUTHENTICATE` releases the account state and the watches but keeps the
+transport and the logging session ID. A subsequent login must not inherit any
+user attributes of the previous identity. `IDLE` is a waiting state here
+within the selected mailbox, not an additional authentication status.
 
-## LMTP-Zustellung
+## LMTP delivery
 
-![LMTP-Zustellung](../diagrams/delivery.svg)
+![LMTP delivery](../diagrams/delivery.svg)
 
-Die Empfängerauflösung erfolgt vor DATA. LMTP kann für einzelne Empfänger
-unterschiedliche Ergebnisse zurückgeben. Sieve liefert einen Aktionsplan;
-mehrere lokale Ziele werden mit einem Delivery-Intent zusammengehalten.
-`RecordDelivery` speichert Mailbox und vorab gewählte GUID **vor** dem
-Nachrichtenschreiben. Erst erfolgreiches `EndDelivery` erlaubt den dafür
-vorgesehenen positiven Abschluss.
+Recipient resolution happens before DATA. LMTP can return different results for
+individual recipients. Sieve produces an action plan;
+several local targets are held together by one delivery intent.
+`RecordDelivery` stores the mailbox and the pre-selected GUID **before** the
+message is written. Only a successful `EndDelivery` permits the
+positive completion intended for it.
 
-Die Abbildung zeigt den lokalen Erfolgspfad. Reject, Discard, Pipe,
-Redirect, Vacation und Notify besitzen eigene Regeln. Externe Effekte
-lassen sich nicht durch RADOS-Rollback rückgängig machen. Der vollständige
-Ablauf einschließlich Fehlerpfaden steht in
-[lmtpd.go](../../internal/lmtpd/lmtpd.go) (`LMTPData`, Status pro
-Empfänger) und im gemeinsamen Zustell-Service
-[internal/delivery](../../internal/delivery/delivery.go) (Sieve, Speichern,
-Rollback, Relay-Helfer), den auch die lokale Zustellung der
-[Admin-API](../admin-api.md) nutzt.
+The figure shows the local success path. Reject, discard, pipe,
+redirect, vacation and notify have rules of their own. External effects
+cannot be undone by a RADOS rollback. The complete
+flow including the error paths is in
+[lmtpd.go](../../internal/lmtpd/lmtpd.go) (`LMTPData`, per-recipient
+status) and in the shared delivery service
+[internal/delivery](../../internal/delivery/delivery.go) (Sieve, storing,
+rollback, relay helpers), which the local delivery of the
+[Admin API](../admin-api.md) uses as well.
 
-## Ereignisse und Lernaufträge
+## Events and learning jobs
 
-![Lernjob-Zustände](../diagrams/learning.svg)
+![Learning job states](../diagrams/learning.svg)
 
-Für den vorbereiteten Lernpfad wird eine unabhängige Nachrichtenkopie vor
-dem Zielcommit persistiert. Commit-Belege verbinden Lernjob und sichtbare
-Mailboxänderung. Der Worker prüft diese vor dem externen Aufruf. EXPUNGE
-kann die bereits persistierte Lernkopie deshalb nicht ungültig machen.
+For the prepared learning path, an independent copy of the message is persisted
+before the target commit. Commit receipts connect the learning job and the
+visible mailbox change. The worker checks them before the external call. An
+EXPUNGE therefore cannot invalidate the already persisted learning copy.
 
-`Delivered` trennt den externen Erfolg von späterer Bereinigung. Trotzdem
-besteht ein Crash-Fenster zwischen externem Erfolg und dessen Speicherung:
-Der Aufruf kann wiederholt werden. Exactly-once ist nicht zugesichert.
-Dead-Jobs sind keine erfolgreichen Jobs und benötigen eine Betreiberentscheidung.
+`Delivered` separates external success from later cleanup. Even so,
+a crash window remains between external success and recording it:
+the call can be repeated. Exactly-once is not guaranteed.
+Dead jobs are not successful jobs and require an operator decision.
 
-Die Darstellung konzentriert sich auf `Prepare`/Commit-Belege. Der Code
-enthält außerdem `Enqueue` für direkt eingereihte Jobs ohne Prepared-Phase.
+The illustration focuses on `Prepare`/commit receipts. The code
+also contains `Enqueue` for jobs queued directly without a prepared phase.
 Details: [learning.go](../../internal/imapsieve/learning.go),
-[RADOS-Queue](../../internal/cephstore/learning.go),
-[Sieve-Verhalten](../imapsieve.md).
+[RADOS queue](../../internal/cephstore/learning.go),
+[Sieve behavior](../imapsieve.md).

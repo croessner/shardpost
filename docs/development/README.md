@@ -1,71 +1,71 @@
-# Entwicklerhandbuch
+# Developer Guide
 
-[Dokumentationsindex](../README.md) · [UML und Laufzeit](../architecture/runtime.md)
+[Documentation index](../README.md) · [UML and runtime](../architecture/runtime.md)
 
-## Voraussetzungen und Buildmodell
+## Prerequisites and build model
 
-Die Go-Version steht in [go.mod](../../go.mod), aktuell `1.27.1`.
-Der Server baut gegen Ceph Tentacle/librados mit Buildtag `tentacle`.
-Der [Dockerfile](../../Dockerfile) enthält die dazu passende Linux-Umgebung,
-führt `go vet` aus und erzeugt Server und Lastgenerator. Die Runtime läuft
-als UID/GID `167:167`; die externen Programme bleiben root-owned.
+The Go version is declared in [go.mod](../../go.mod), currently `1.27.1`.
+The server builds against Ceph Tentacle/librados with the build tag `tentacle`.
+The [Dockerfile](../../Dockerfile) provides the matching Linux environment,
+runs `go vet` and produces the server and the load generator. The runtime runs
+as UID/GID `167:167`; the external programs stay root-owned.
 
-`vendor` ist der reproduzierbare Dependency-Bestand des Containerbuilds.
-Der go-sieve-Fork liegt zusätzlich in `third_party/go-sieve`; `go.mod`
-enthält dafür ein lokales `replace`. Änderungen am Fork müssen bewusst in
-den Vendor-Bestand übernommen werden. Nur eine der beiden Kopien zu ändern
-kann dazu führen, dass Tests und ausgeliefertes Image verschiedenen Code nutzen.
+`vendor` is the reproducible dependency set of the container build.
+The go-sieve fork additionally lives in `third_party/go-sieve`; `go.mod`
+carries a local `replace` for it. Changes to the fork must be deliberately
+carried over into the vendor set. Changing only one of the two copies can
+make tests and the shipped image use different code.
 
-## Codekarte
+## Code map
 
-| Bereich | Einstieg | Verantwortung |
+| Area | Entry point | Responsibility |
 |---|---|---|
-| Start/Konfiguration | [main.go](../../cmd/shardpost/main.go), [config.go](../../internal/config/config.go) | Verdrahtung, Defaults, Validierung, Lifecycle |
-| Listener | [listen.go](../../cmd/shardpost/listen.go) | TCP, vertrauensgebundenes PROXY, TLS |
-| IMAP | [conn.go](../../internal/imapproto/conn.go), [wire.go](../../internal/imapproto/wire.go) | Parser, Zustände, Befehlsdispatch, Antwortkodierung |
-| Mailbox-Synchronisierung | [selected.go](../../internal/imapproto/selected.go), [notify.go](../../internal/imapproto/notify.go) | MODSEQ, Snapshots, IDLE/NOTIFY |
-| POP3 | [pop3.go](../../internal/pop3proto/pop3.go) | Maildrop, Lease, Löschmarkierungen |
-| LMTP | [lmtpd.go](../../internal/lmtpd/lmtpd.go) | Empfängerauflösung, Puffern, Status pro Empfänger |
-| Zustellung | [delivery](../../internal/delivery/delivery.go) | Sieve-Aktionen, Speichern, Rückabwicklung, Redirect/Vacation/Notify; gemeinsam für LMTP und LDA |
-| Admin-API | [admin](../../internal/admin/admin.go), [Vertrag](../../api/admin/openapi.yaml), [shardpostctl](../../cmd/shardpostctl/main.go) | Listener, Rollen, Audit, lokale Zustellung |
-| Identität | [auth.go](../../internal/auth/auth.go), [SASL](../../internal/auth/sasl.go) | Request/Result-Vertrag, Nauthilus, Master-User, OIDC |
-| Store-Vertrag | [model.go](../../internal/model/model.go) | Persistenzunabhängige Typen, User, Watch, Lease |
-| Persistenz | [cephstore](../../internal/cephstore/store.go), [user.go](../../internal/cephstore/user.go) | RADOS, Kontosicht, CAS, Indexoperationen |
-| Testbackend | [memstore.go](../../internal/memstore/memstore.go) | Protokolltests ohne librados |
-| Suche | [fts](../../internal/fts/tokenize.go), [postings](../../internal/postings/postings.go) | Tokenisierung und kompakte Postinglisten |
-| Sieve | [sieve.go](../../internal/sieve/sieve.go), [ManageSieve](../../internal/sieve/managesieve.go) | Auswertung und Skriptverwaltung |
-| IMAPSieve | [engine.go](../../internal/imapsieve/engine.go), [learning.go](../../internal/imapsieve/learning.go) | Mailereignisse und dauerhafte Lernjobs |
-| Externe Programme | [runner.go](../../internal/extprograms/runner.go), [learn.py](../../programs/learn.py) | Allowlist, Ressourcenlimits, austauschbarer Klassifizierer |
-| Betrieb | [logging](../../internal/logging/logging.go), [metrics](../../internal/metrics/metrics.go), [telemetry](../../internal/telemetry/telemetry.go) | JSON-Logs, Prometheus, OTLP |
-| Ressourcen | [membudget](../../internal/membudget/membudget.go), [rookcreds](../../internal/rookcreds/rookcreds.go) | Nachrichtenbudget und Ceph-Schlüsselrotation |
+| Startup/configuration | [main.go](../../cmd/shardpost/main.go), [config.go](../../internal/config/config.go) | Wiring, defaults, validation, lifecycle |
+| Listener | [listen.go](../../cmd/shardpost/listen.go) | TCP, trust-bound PROXY, TLS |
+| IMAP | [conn.go](../../internal/imapproto/conn.go), [wire.go](../../internal/imapproto/wire.go) | Parser, states, command dispatch, response encoding |
+| Mailbox synchronization | [selected.go](../../internal/imapproto/selected.go), [notify.go](../../internal/imapproto/notify.go) | MODSEQ, snapshots, IDLE/NOTIFY |
+| POP3 | [pop3.go](../../internal/pop3proto/pop3.go) | Maildrop, lease, deletion markers |
+| LMTP | [lmtpd.go](../../internal/lmtpd/lmtpd.go) | Recipient resolution, buffering, per-recipient status |
+| Delivery | [delivery](../../internal/delivery/delivery.go) | Sieve actions, storing, rollback, redirect/vacation/notify; shared by LMTP and LDA |
+| Admin API | [admin](../../internal/admin/admin.go), [contract](../../api/admin/openapi.yaml), [shardpostctl](../../cmd/shardpostctl/main.go) | Listener, roles, audit, local delivery |
+| Identity | [auth.go](../../internal/auth/auth.go), [SASL](../../internal/auth/sasl.go) | Request/result contract, Nauthilus, master user, OIDC |
+| Store contract | [model.go](../../internal/model/model.go) | Persistence-independent types, user, watch, lease |
+| Persistence | [cephstore](../../internal/cephstore/store.go), [user.go](../../internal/cephstore/user.go) | RADOS, account view, CAS, index operations |
+| Test backend | [memstore.go](../../internal/memstore/memstore.go) | Protocol tests without librados |
+| Search | [fts](../../internal/fts/tokenize.go), [postings](../../internal/postings/postings.go) | Tokenization and compact posting lists |
+| Sieve | [sieve.go](../../internal/sieve/sieve.go), [ManageSieve](../../internal/sieve/managesieve.go) | Evaluation and script management |
+| IMAPSieve | [engine.go](../../internal/imapsieve/engine.go), [learning.go](../../internal/imapsieve/learning.go) | Mail events and durable learning jobs |
+| External programs | [runner.go](../../internal/extprograms/runner.go), [learn.py](../../programs/learn.py) | Allowlist, resource limits, replaceable classifier |
+| Operations | [logging](../../internal/logging/logging.go), [metrics](../../internal/metrics/metrics.go), [telemetry](../../internal/telemetry/telemetry.go) | JSON logs, Prometheus, OTLP |
+| Resources | [membudget](../../internal/membudget/membudget.go), [rookcreds](../../internal/rookcreds/rookcreds.go) | Message budget and Ceph key rotation |
 
-## Schnelle Tests ohne Ceph
+## Quick tests without Ceph
 
-Vom Projektverzeichnis aus:
+From the project directory:
 
 ```bash
 go test -race ./internal/config ./internal/logging ./internal/auth ./internal/imapproto ./internal/pop3proto ./internal/sieve ./internal/imapsieve ./internal/extprograms ./internal/fts ./internal/postings
 ```
 
-Die Tests öffnen teilweise lokale Sockets und starten Testprogramme. Eine
-Umgebung, die Loopback oder Prozessausführung sperrt, ist dafür ungeeignet.
-Das ist von einem tatsächlichen Protokollfehler zu unterscheiden.
+Some of these tests open local sockets and start test programs. An environment
+that blocks loopback or process execution is unsuitable for them. That has to
+be distinguished from an actual protocol bug.
 
-`make test` führt die cgo-freie Race-Suite aus. Der frühere schreibende
-Cluster-Test ist ausdrücklich als `make test-static-cluster` benannt und
-setzt ein isoliertes statisches Testprofil voraus.
+`make test` runs the cgo-free race suite. The former writing cluster test is
+explicitly named `make test-static-cluster` and requires an isolated static
+test profile.
 
-Ein einzelner Regressionstest:
+A single regression test:
 
 ```bash
 go test -race ./internal/imapproto -run TestSessionLoggingAndSecretSafety -count=1
 ```
 
 `newTestServer` in [memstore_test.go](../../internal/imapproto/memstore_test.go)
-erzeugt einen echten TCP-Listener vor dem In-Memory-Store. Ergänzungen sollten
-sichtbares Protokollverhalten prüfen, nicht nur interne Implementierungsdetails.
+creates a real TCP listener in front of the in-memory store. Additions should
+check observable protocol behavior, not just internal implementation details.
 
-## Vollständiger Linux-Build und Tests
+## Full Linux build and tests
 
 ```bash
 docker build --platform linux/amd64 --target build -t shardpost-build:dev .
@@ -76,74 +76,72 @@ docker build --platform linux/amd64 -t shardpost:dev .
 docker run --rm -e LOG_LEVEL=info shardpost:dev config check
 ```
 
-Der Fixture-Mount ist erforderlich: Ein Server-Regressionstest lädt
-Pigeonhole-Testdateien aus `third_party`; der produktive Dockerfile kopiert
-diesen Testbestand nicht in seine Buildstufe. Die Go-Pakete werden aus
-`vendor` gebaut. `go test` ist hier kein produktiver Ceph-End-to-End-Test.
+The fixture mount is required: one server regression test loads Pigeonhole
+test files from `third_party`, and the production Dockerfile does not copy
+that test data into its build stage. The Go packages are built from `vendor`.
+`go test` is not a production Ceph end-to-end test here.
 
-Bei Änderungen an Nebenläufigkeit die komplette Linux-Suite zusätzlich mit
-`go test -p 1 -race -tags tentacle ./...` ausführen. Umfang und Plattform der
-ausgeführten Prüfungen in einem Release-Bericht festhalten.
+When changing concurrency, additionally run the complete Linux suite with
+`go test -p 1 -race -tags tentacle ./...`. Record the scope and platform of
+the checks actually run in a release report.
 
-Für einen isolierten echten Serverstart werden Ceph-Pools, cephx-Zugang,
-TLS und ein Authentifizierungsprofil benötigt. Keine produktiven Secrets
-in Shell-Historie, Beispielkonfiguration oder Logs kopieren. Die vorhandenen
-Kubernetes-Profile sind infrastrukturspezifisch; sie sind kein lokales
-Ein-Befehl-Entwicklungssystem.
+An isolated real server start requires Ceph pools, cephx access, TLS and an
+authentication profile. Do not copy production secrets into shell history,
+example configuration or logs. The existing Kubernetes profiles are specific
+to that infrastructure; they are not a local one-command development system.
 
-## Typische Änderungen
+## Typical changes
 
-**Neuer IMAP-Befehl:** Parser-/Dispatchpfad in `conn.go`, passendes Fachmodul,
-Zustands- und Rechteprüfung, Antwortsemantik, Ressourcenfreigabe und Tests
-gegen den TCP-Testserver ergänzen. Capability nur ankündigen, wenn die
-Semantik tragfähig ist. Den bekannten Befehlsnamen für Metriken und Debug-
-Logs ergänzen; keine frei eingegebenen Argumente zu Labels machen.
+**New IMAP command:** add the parser/dispatch path in `conn.go`, the matching
+domain module, state and permission checks, response semantics, resource
+release and tests against the TCP test server. Only advertise a capability
+once its semantics hold up. Add the known command name for metrics and debug
+logs; never turn freely entered arguments into labels.
 
-**Neue Store-Operation:** Vertrag in `model.User`, In-Memory-Implementierung
-und Ceph-Implementierung zusammen ändern. CAS-, Lease- und Absturzverhalten
-im Speicherkapitel erklären. Bei mehreren Objekten eine Wiederherstellungs-
-strategie und Tests an den Abbruchgrenzen vorsehen.
+**New store operation:** change the contract in `model.User`, the in-memory
+implementation and the Ceph implementation together. Explain CAS, lease and
+crash behavior in the storage chapter. When several objects are involved,
+plan for a recovery strategy and tests at the abort boundaries.
 
-**Neue Konfigurationsoption:** typisiertes Feld mit `mapstructure`, bei
-passenden skalaren Werten `env`, Default und Validierung ergänzen. YAML,
-Env-Vorrang, ungültige Werte und geheimnisfreie Fehlermeldung testen.
-Neue Secrets bevorzugt über Datei-Verweise laden. Dateibeispiele und
-Betriebsprofil getrennt halten.
+**New configuration option:** add a typed field with `mapstructure`, `env`
+for suitable scalar values, a default and validation. Test YAML, environment
+precedence, invalid values and a secret-free error message. Prefer loading
+new secrets through file references. Keep file examples and the operational
+profile separate.
 
-**Neue Sieve-Erweiterung:** zuerst den Fork-Vertrag und dessen
-[AGENTS.md](../../third_party/go-sieve/AGENTS.md) lesen. Loader und Runtime,
-Capability-/Require-Prüfung, Aktionssemantik und beide Protokollkontexte
-beachten. Der Fork hat eigenständige Compiler- und Pigeonhole-Tests.
-Anschließend Vendor-Parität und das tatsächlich gebaute Image prüfen.
+**New Sieve extension:** first read the fork contract and its
+[AGENTS.md](../../third_party/go-sieve/AGENTS.md). Mind the loader and the
+runtime, the capability/require check, the action semantics and both protocol
+contexts. The fork has its own compiler and Pigeonhole tests. Afterwards check
+vendor parity and the image that was actually built.
 
-**Neues Lernziel:** einen begrenzten Helper bereitstellen und als Programm
-konfigurieren. Eingabe auf stdin; keine Shell. Exit 0 bedeutet Erfolg,
-75 temporären Fehler, andere Codes endgültigen Fehler. Ein bereits gespeicherter
-Job referenziert den Programmnamen; diesen nicht ohne Übergang entfernen.
+**New learning target:** provide a constrained helper and configure it as a
+program. Input on stdin; no shell. Exit 0 means success, 75 a temporary error,
+other codes a permanent error. An already stored job references the program
+name; do not remove it without a transition.
 
-## Ressourcen und Logging
+## Resources and logging
 
-Jede geöffnete `model.User`-Sicht, Watch, Lease und Memory-Reservation braucht
-einen passenden Abschluss. Callback-Code darf nach Freigabe der RADOS-
-IOContexts nicht weiter darauf zugreifen. Schreibe keine Antwort gleichzeitig
-zum IMAP-NOTIFY-Pusher; beachte dessen `cmdMu`-Vertrag.
+Every opened `model.User` view, watch, lease and memory reservation needs a
+matching teardown. Callback code must not keep using the RADOS IOContexts
+after they have been released. Do not write a response concurrently with the
+IMAP NOTIFY pusher; observe its `cmdMu` contract.
 
-Logs verwenden `slog`/JSON. Für Verbindungen `logging.Session` und
-`logging.Begin` verwenden; `session_id`, `proto`, `remote` und `local` bilden
-den Zusammenhang. Info trägt Lebenszyklus und Auth-Ergebnis, Debug bekannte
-Befehlsnamen/Laufzeiten, Warn einen beeinträchtigten Betrieb und Error einen
-fehlgeschlagenen Vorgang. Keine Auth-Requests, Mailtexte oder Skriptargumente
-als Ganzes loggen. Details: [Log-Konfiguration](../configuration.md).
+Logs use `slog`/JSON. For connections use `logging.Session` and
+`logging.Begin`; `session_id`, `proto`, `remote` and `local` establish the
+context. Info carries lifecycle and authentication result, debug carries known
+command names and durations, warn a degraded operation and error a failed
+operation. Never log whole authentication requests, mail bodies or script
+arguments. Details: [log configuration](../configuration.md).
 
-## Dokumentation und Review
+## Documentation and review
 
-Vor einer Änderung den betroffenen Vertrag und einen realen Aufrufer lesen.
-Nach der Änderung Quelllinks, Diagramme, Konfigurationsbeschreibung und
-Regressionstest gemeinsam aktualisieren. Das [Diagrammwerkzeug](../diagrams/README.md)
-hält Mermaid-Quellen und SVGs synchron. Release- und Testberichte nennen
-Version, Plattform, tatsächlich ausgeführte Prüfungen und verbleibende Lücken.
+Before a change, read the affected contract and one real caller. After the
+change, update source links, diagrams, configuration description and
+regression test together. The [diagram tooling](../diagrams/README.md) keeps
+Mermaid sources and SVGs in sync. Release and test reports state the version,
+the platform, the checks actually run and the remaining gaps.
 
-Im aktuellen Arbeitsverzeichnis fehlt Git-Metadatenbestand. Deshalb lässt
-sich hier kein Commit- oder Tag-Nachweis ableiten. In einem späteren Repository
-gehören Quellstand, Vendor-Stand, Tests und Release-Digest in denselben
-nachvollziehbaren Freigabeprozess.
+The current working directory has no Git metadata. No commit or tag evidence
+can therefore be derived here. In a later repository, source state, vendor
+state, tests and release digest belong in the same auditable approval process.

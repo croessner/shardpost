@@ -1,0 +1,265 @@
+.TH SHARDPOSTCTL 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl \- administrative client for a ShardPost mail server
+.SH SYNOPSIS
+.B shardpostctl
+.RI [ connection-flags ]
+.I command
+.RI [ subcommand ]
+.RI [ options ]
+.RI [ arguments ]
+.SH DESCRIPTION
+.B shardpostctl
+talks to the admin API of a ShardPost server. It connects either to the
+Unix socket inside the server pod or, with a client certificate, to the
+mutual-TLS listener. Everything it can do is an operation of that API:
+there is no direct access to the RADOS store and no way around the roles
+described below.
+.PP
+An
+.I account
+argument is always the canonical account of the user database. An alias
+is refused with "not the canonical account" and exit code 64; the only
+command that accepts one is
+.BR "account show" ,
+which reports it as an alias and names the canonical account. Account
+names are compared in lower case.
+.PP
+Commands are grouped by subject. Each group has its own manual page:
+.TP
+.BR shardpostctl-server (1)
+Version and state of the server itself.
+.TP
+.BR shardpostctl-account (1)
+Look up an account, its quota and the mailboxes shared with it.
+.TP
+.BR shardpostctl-mailbox (1)
+List and inspect mailboxes; create, rename and subscribe them.
+.TP
+.BR shardpostctl-acl (1)
+Read, explain and change mailbox permissions.
+.TP
+.BR shardpostctl-message (1)
+List, search, show, export, flag, copy and move messages.
+.TP
+.BR shardpostctl-sieve (1)
+Manage Sieve scripts and run a script without side effects.
+.TP
+.BR shardpostctl-job (1)
+Maintenance jobs: plan, apply, watch and cancel.
+.TP
+.BR shardpostctl-learning (1)
+Inspect and retry jobs of the IMAPSieve learning queue.
+.TP
+.BR shardpostctl-export (1)
+Export an account to an archive, verify it and restore it.
+.TP
+.BR shardpostctl-deliver (1)
+Deliver a message like a local delivery agent.
+.TP
+.BR shardpostctl-migrate (1)
+Copy an account from another IMAP server, keeping its identities.
+.TP
+.BR shardpostctl-trace (1)
+Switch on a protocol trace for one account.
+.SH CONNECTION FLAGS
+These flags come before the command. They select the listener and apply
+to every command.
+.TP
+.BI \-socket " path"
+Unix socket of the admin API. Default:
+.IR $SHARDPOST_ADMIN_SOCKET ,
+otherwise
+.IR /run/shardpost/admin.sock .
+The caller's roles are the ones configured for the socket
+.RI ( admin.socket_roles ).
+.TP
+.BI \-url " https://host:port"
+Address of the mutual-TLS listener. Overrides
+.BR \-socket .
+Needs
+.BR \-cert ,
+.B \-key
+and
+.BR \-ca .
+The roles are those of the client certificate identity.
+.TP
+.BI \-cert " file"
+Client certificate (with
+.BR \-url ).
+.TP
+.BI \-key " file"
+Private key of the client certificate.
+.TP
+.BI \-ca " file"
+CA that signed the server certificate.
+.TP
+.BI \-timeout " duration"
+Request timeout, for example
+.IR 30s ,
+.IR 10m .
+Default:
+.IR 2m .
+For
+.B export
+it does not limit the whole download, only the wait for the response and
+each pause without data.
+.SH ROLES
+The admin API authorizes every operation by role. A caller on the Unix
+socket has the roles listed in
+.IR admin.socket_roles ;
+a TLS client has the roles of its certificate identity, and optionally an
+account scope
+.RI ( admin.clients[].accounts ).
+.TP
+.B diagnose
+Read-only: server state, accounts, mailboxes, ACLs, quota, job and
+learning-queue status. Sees metadata, never message content.
+.TP
+.B deliver
+Local delivery. With
+.B deliver:noenforce
+also over the quota limit.
+.TP
+.B import
+Account import and restore.
+.TP
+.B trace
+Switch the protocol trace of an account.
+.TP
+.B provision
+Create, rename and subscribe mailboxes; change ACLs.
+.TP
+.B repair
+Maintenance jobs that repair; retry learning jobs.
+.TP
+.B delete
+Delete mailboxes and messages, and purge accounts.
+.TP
+.B content
+Read message content: search, headers, export, Sieve script text.
+.TP
+.B support
+Change messages (flags, copy, move) and Sieve scripts.
+.TP
+.B export
+Export whole accounts.
+.SH EXIT STATUS
+The exit codes follow
+.IR sysexits.h :
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Partly failed; running the command again is safe and is the usual fix
+(migrate, restore).
+.TP
+.B 64
+Usage error: unknown command, missing or invalid argument.
+.TP
+.B 65
+The data is wrong: a conflict, a stale version
+.RI ( If-Match ),
+or a damaged archive.
+.TP
+.B 67
+No such account, mailbox, message, script or job.
+.TP
+.B 69
+The request was rejected or the run failed.
+.TP
+.B 70
+The server sent an answer the client did not understand.
+.TP
+.B 73
+A file could not be created.
+.TP
+.B 75
+Temporary failure. Try again later.
+.TP
+.B 77
+The caller lacks the role for this operation.
+.SH ENVIRONMENT
+.TP
+.B SHARDPOST_ADMIN_SOCKET
+Default for
+.BR \-socket .
+.TP
+.B SHARDPOST_ADMIN_URL
+Default for
+.BR \-url .
+.TP
+.B SHARDPOST_ADMIN_CERT
+Default for
+.BR \-cert .
+.TP
+.B SHARDPOST_ADMIN_KEY
+Default for
+.BR \-key .
+.TP
+.B SHARDPOST_ADMIN_CA
+Default for
+.BR \-ca .
+.PP
+.BR shardpostctl-migrate (1)
+reads further
+.I SHARDPOST_MIGRATE_*
+variables; see that page.
+.SH OUTPUT
+Most commands print a short table for humans. Add
+.B \-\-json
+to get the API answer as JSON instead, which is what scripts should read.
+.SH EXAMPLES
+In the cluster the client runs in the
+.I import
+sidecar of the server pod, where the socket is:
+.PP
+.nf
+.RS
+kubectl -n shardpost exec deploy/shardpost-server -c import -- \\
+    shardpostctl server status
+.RE
+.fi
+.PP
+From outside, against the mutual-TLS listener:
+.PP
+.nf
+.RS
+shardpostctl -url https://shardpost.example.org:8443 \\
+    -cert ops.crt -key ops.key -ca admin-ca.crt \\
+    account show user@example.org
+.RE
+.fi
+.PP
+Is an account healthy, and what does it hold?
+.PP
+.nf
+.RS
+shardpostctl account show user@example.org
+shardpostctl mailbox list -all user@example.org
+shardpostctl check -wait user@example.org
+.RE
+.fi
+.SH FILES
+.TP
+.I /run/shardpost/admin.sock
+Default admin socket inside the server pod.
+.SH SEE ALSO
+.BR shardpostctl-account (1),
+.BR shardpostctl-acl (1),
+.BR shardpostctl-deliver (1),
+.BR shardpostctl-export (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-learning (1),
+.BR shardpostctl-mailbox (1),
+.BR shardpostctl-message (1),
+.BR shardpostctl-migrate (1),
+.BR shardpostctl-server (1),
+.BR shardpostctl-sieve (1),
+.BR shardpostctl-trace (1)
+.PP
+The admin API itself is documented in
+.IR docs/admin-api.md ,
+the server configuration in
+.IR docs/configuration.md .

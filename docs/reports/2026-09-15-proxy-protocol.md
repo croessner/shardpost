@@ -1,63 +1,63 @@
-# Echte Client-IP hinter dem Director
+# Real client IP behind the director
 
-## Ursache und Ergebnis
+## Cause and result
 
-Zwei Konfigurationsschalter fehlten: Die Liste
-`server.proxy_protocol_trusted_cidrs` war leer und die drei imappoc-Backends
-im Director hatten `haproxy.enabled: false`. Der Backendserver konnte daher
-nur die Director-Pod-IP als Gegenstelle sehen.
+Two configuration switches were missing: the list
+`server.proxy_protocol_trusted_cidrs` was empty and the three imappoc backends
+in the director had `haproxy.enabled: false`. The backend server could
+therefore only see the director pod IP as the peer.
 
-Der Fix ist ausgerollt. Für beide Testaccounts wurde in IMAP und ManageSieve
-nachgewiesen: Die öffentliche Client-IP der Director-Authentifizierung stimmt
-mit der IP des nachfolgenden Backend-Identity-Lookups überein. Der Master-User-
-Pfad prüft seinen eigenen Schlüssel und reicht die Clientadresse an den
-Nauthilus-Lookup weiter. Der Bericht enthält keine Klartext-Client-IP.
+The fix is rolled out. For both test accounts it was demonstrated, in IMAP and
+ManageSieve, that the public client IP of the director authentication matches
+the IP of the subsequent backend identity lookup. The master user path checks
+its own key and passes the client address on to the Nauthilus lookup. This
+report contains no client IP in the clear.
 
-## Änderung
+## Change
 
-- Server vertraut dem live nachgewiesenen Calico-Podnetz `172.16.0.0/12`.
-- Neue `imap/imap-server-ingress` NetworkPolicy beschränkt sämtliche Mailports
-  auf Director-Pods aus Namespace `director` und kontrollierte mailtest-/
-  imaptest-Pods aus Namespace `imap`. Namespace und Podlabel sind gemeinsam
-  erforderlich; reine passende Labels in anderen Namespaces genügen nicht.
-- Die Testwerkzeuge teilen ausdrücklich die Proxy-Vertrauensgrenze. HTTP
-  8080 bleibt für Health/Monitoring erreichbar. Egress bleibt unverändert.
-- `haproxy.enabled: true` bei `imappoc-imap`, `imappoc-sieve`, `imappoc-lmtp`.
-  LMTP ist einbezogen, da der gemeinsame optionale Parser andernfalls vor
-  dem Greeting fünf Sekunden wartet, während Director-Healthchecks drei
-  Sekunden Zeit haben. Alle übrigen Director-Einstellungen sind semantisch
-  unverändert; dies wurde gegen den Live-Ausgangszustand geprüft.
-- Nur Konfiguration geändert: Serverimage bleibt 0.10.1 mit bestehendem Digest.
+- The server trusts the Calico pod network `172.16.0.0/12` as demonstrated live.
+- A new `imap/imap-server-ingress` NetworkPolicy restricts all mail ports
+  to director pods from namespace `director` and to controlled mailtest/
+  imaptest pods from namespace `imap`. Namespace and pod label are required
+  together; matching labels alone in other namespaces are not sufficient.
+- The test tools explicitly share the proxy trust boundary. HTTP
+  8080 remains reachable for health/monitoring. Egress remains unchanged.
+- `haproxy.enabled: true` for `imappoc-imap`, `imappoc-sieve`, `imappoc-lmtp`.
+  LMTP is included because the shared optional parser would otherwise wait
+  five seconds before the greeting, while director health checks have three
+  seconds. All other director settings are semantically
+  unchanged; this was verified against the live starting state.
+- Configuration only was changed: the server image remains 0.10.1 with the existing digest.
 
-## Abnahme
+## Acceptance
 
-- Unabhängiger Review von Trust-Grenze, Selektoren, Render und Rolloutfolge.
-- Server-Dry-Run beider Konfigurationen bestanden.
-- NetworkPolicy: unmarkierter Pod erreicht HTTP-Health, Mail-TCP wird blockiert.
-- Vorgesehenes mailtest-Werkzeug erreicht weiterhin den Mailport.
-- Zwei IMAP- und drei Director-Replikas nach Rollout bereit.
-- Öffentliche, TLS-verifizierte IMAP- und ManageSieve-Logins beider Testaccounts
-  bestanden; STATUS INBOX und NOOP erfolgreich.
-- Nauthilus-Korrelation: in allen vier Kombinationen (zwei Accounts, zwei
-  Protokolle) identische öffentliche IP bei Frontend-Auth und Backend-Lookup.
-- Director-Control-API bestätigt alle drei imappoc-Backends mit
+- Independent review of the trust boundary, selectors, render and rollout order.
+- Server dry run of both configurations passed.
+- NetworkPolicy: an unlabeled pod reaches HTTP health, mail TCP is blocked.
+- The intended mailtest tool still reaches the mail port.
+- Two IMAP and three director replicas ready after the rollout.
+- Public, TLS-verified IMAP and ManageSieve logins of both test accounts
+  passed; STATUS INBOX and NOOP successful.
+- Nauthilus correlation: in all four combinations (two accounts, two
+  protocols) an identical public IP for frontend auth and backend lookup.
+- The director control API confirms all three imappoc backends with
   `outbound_proxy_protocol=true`, `in_service=true`, `maintenance=disabled`.
-- Bestehende Director-Konfigurationstests für Health-Identitäten und SASL
-  EXTERNAL bestanden.
-- LMTP für beide Empfänger bis RCPT erfolgreich geprüft, ohne DATA und ohne Zustellung.
+- The existing director configuration tests for health identities and SASL
+  EXTERNAL passed.
+- LMTP verified successfully up to RCPT for both recipients, without DATA and without delivery.
 
-## Quellen
+## Sources
 
 Server: `deploy/overlays/croessner-nauthilus/server.yaml`,
-`network-policy.yaml` und `kustomization.yaml`; Testjoblabel in
+`network-policy.yaml` and `kustomization.yaml`; the test job label in
 `hack/imaptest-job.yaml`. Director:
-`/Users/croessner/OpenCloud/Persönlich/Kubernetes/director/configmap.yaml`
-und Betriebsdokument `imappoc.md`.
+`/Users/croessner/OpenCloud/Persönlich/Kubernetes/director/configmap.yaml`
+and the operations document `imappoc.md`.
 
 ## Rollback
 
-Zuerst die drei Director-Sender auf `haproxy.enabled: false` zurückstellen
-und den Director-Rollout abwarten; anschließend den Serverempfänger auf den
-vorherigen leeren Vertrauenswert zurückstellen. Die NetworkPolicy kann als
-Zugriffsgrenze bestehen bleiben. Die Ausgangskonfiguration des Directors
-liegt privat unter `/private/tmp/imap-proxy-director-before.json`.
+First set the three director senders back to `haproxy.enabled: false`
+and wait for the director rollout; then set the server receiver back to the
+previous empty trust value. The NetworkPolicy can remain in place as an
+access boundary. The director's starting configuration is stored
+privately under `/private/tmp/imap-proxy-director-before.json`.

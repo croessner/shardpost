@@ -1,0 +1,167 @@
+.TH SHARDPOSTCTL-ACL 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-acl \- read, explain and change mailbox permissions
+.SH SYNOPSIS
+.B shardpostctl acl list
+.RB [ \-\-json ]
+.I account mailbox
+.br
+.B shardpostctl acl explain
+.RB [ \-\-json ]
+.I account mailbox principal
+.br
+.B shardpostctl acl set
+.RB [ \-mode
+.IR replace | add | remove ]
+.RB [ \-if-match
+.IR etag ]
+.I account mailbox identifier rights
+.br
+.B shardpostctl acl delete
+.RB [ \-if-match
+.IR etag ]
+.I account mailbox identifier
+.SH DESCRIPTION
+Permissions follow RFC 4314. The owner of a mailbox always has every
+right; the owner is therefore never listed as an entry. An
+.I identifier
+is another account of the user database, given in its canonical form, or
+the literal
+.BR anyone .
+.PP
+.I rights
+is the usual letter string, for example
+.I lr
+(look and read),
+.I lrs
+(and keep the seen flag),
+.I lrswipkxte
+(nearly everything). The letters
+.B c
+and
+.B d
+expand to the newer letters, as in other servers.
+.SS acl list
+The explicit entries of a mailbox and the ACL generation counter. Role:
+.BR diagnose .
+.SS acl explain
+Answers "why does this person see (or not see) this mailbox?" for one
+principal: the rights that apply, where they come from (an entry for the
+account itself, an entry for
+.BR anyone ,
+or nothing), whether the grantee's registry holds the pointer that makes
+the mailbox appear under
+.IR "Other Users/" ,
+and any findings in plain words. This is the command for share problems,
+not
+.BR "acl list" .
+Role:
+.BR diagnose .
+.SS acl set
+Sets the rights of one identifier.
+.B \-mode replace
+(the default) makes the entry exactly
+.IR rights ,
+.B add
+adds those letters to the existing entry and
+.B remove
+takes them away. The server computes and stores the change in one
+versioned step, so two changes at the same time cannot lose each other.
+The grantee's pointer follows automatically.
+Role:
+.BR provision .
+.SS acl delete
+Removes the entry of one identifier, which is the same as setting empty
+rights. Role:
+.BR provision .
+.SH OPTIONS
+.TP
+.BI \-mode " replace|add|remove"
+How
+.B acl set
+applies the rights. Default:
+.BR replace .
+.TP
+.BI \-if-match " etag"
+Apply the change only if the ACL is still the version you read. Both
+.B acl list
+and every change print the ETag. On mismatch the command fails with exit
+code 65 and changes nothing.
+.TP
+.B \-\-json
+Print the answer as JSON.
+.SH EXAMPLES
+Who has rights on a shared mailbox?
+.PP
+.nf
+.RS
+shardpostctl acl list user@example.org Shared
+.RE
+.fi
+.PP
+A colleague says the shared mailbox does not show up:
+.PP
+.nf
+.RS
+shardpostctl acl explain user@example.org Shared colleague@example.org
+.RE
+.fi
+.PP
+Give a colleague read access, keeping whatever else is set:
+.PP
+.nf
+.RS
+shardpostctl acl set -mode add user@example.org Shared \\
+    colleague@example.org lr
+.RE
+.fi
+.PP
+Take away the right to delete messages, but keep the rest:
+.PP
+.nf
+.RS
+shardpostctl acl set -mode remove user@example.org Shared \\
+    colleague@example.org te
+.RE
+.fi
+.PP
+Withdraw a share completely, but only if nobody changed it meanwhile:
+.PP
+.nf
+.RS
+shardpostctl acl list user@example.org Shared          # prints the etag
+shardpostctl acl delete -if-match '"acl-7"' user@example.org Shared \\
+    colleague@example.org
+.RE
+.fi
+.PP
+After changing ACLs in bulk, let the server check that every grantee's
+pointer matches its entry; see
+.BR shardpostctl-job (1):
+.PP
+.nf
+.RS
+shardpostctl plan acl_reconcile user@example.org
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 65
+The ACL changed meanwhile
+.RI ( \-if-match ),
+or the request conflicts with the current state.
+.TP
+.B 67
+No such account or mailbox.
+.TP
+.B 77
+The caller lacks the role, or the identifier is outside its account
+scope.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-account (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-mailbox (1)

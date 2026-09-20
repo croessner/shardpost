@@ -1,417 +1,416 @@
-> Historischer Stand vor der Dokumentationsüberarbeitung vom 16.09.2026.
-> Keine aktuelle Betriebsanleitung; Aussagen und Messwerte können überholt sein.
-> Einstieg: [aktuelle Dokumentation](../README.md).
+> Historical state before the documentation rework of 2026-09-16.
+> Not a current operations manual; statements and measurements may be outdated.
+> Starting point: [current documentation](../README.md).
 
-# Architektur: Mailstore direkt auf RADOS
+# Architecture: mail store directly on RADOS
 
-## Grundidee
+## Basic idea
 
-Ceph ist im Kern ein Objektspeicher (RADOS). CephFS und RGW sind Schichten
-darüber, die ihre eigenen Metadatenpfade (MDS bzw. Bucket-Index-Shards)
-mitbringen. Ein Mailserver hat ein viel einfacheres Zugriffsmuster als ein
-POSIX-Dateisystem: Nachrichten sind unveränderlich, ein Postfach ist eine
-geordnete Liste von UIDs mit ein paar Flags. Das lässt sich 1:1 auf
-RADOS-Primitive abbilden, ohne MDS und ohne HTTP-Gateway dazwischen.
+At its core, Ceph is an object store (RADOS). CephFS and RGW are layers
+on top of it that bring their own metadata paths (MDS and bucket index shards,
+respectively). A mail server has a far simpler access pattern than a
+POSIX file system: messages are immutable, a mailbox is an
+ordered list of UIDs with a few flags. That maps 1:1 onto
+RADOS primitives, with no MDS and no HTTP gateway in between.
 
-Der Ansatz entspricht dem, was Dovecot mit `obox`/`rbox` (librmb) macht und
-was RGW intern für seinen Bucket-Index tut.
+The approach matches what Dovecot does with `obox`/`rbox` (librmb) and
+what RGW does internally for its bucket index.
 
-## Datenmodell
+## Data model
 
-Pro Benutzer ein **RADOS-Namespace** (im Pool, nicht pro Benutzer ein Pool).
-Namespaces sind ein Prefix im Objektschlüssel, kosten nichts und isolieren
-Benutzer sauber: der IOContext wird einmal auf den Namespace gepinnt.
+One **RADOS namespace** per user (inside the pool, not one pool per user).
+Namespaces are a prefix in the object key, cost nothing and isolate
+users cleanly: the IOContext is pinned to the namespace once.
 
 ```
-Pool imap-index (repliziert, size 3)              Pool imap-data (EC 2+1)
+Pool imap-index (replicated, size 3)              Pool imap-data (EC 2+1)
 namespace <user>                                  namespace <user>
   mailboxes    Registry, omap:                      msg/<guid>/0   Chunk 0, xattr refs=N
                  m:<name>  -> {id, uidvalidity,      msg/<guid>/1   Chunk 1 (4 MiB)
                                subscribed, specialuse}  msg/<guid>/n   ...
-                 q:bytes, q:msgs  Quota-Zähler (atomar reserviert)
-                 d:<id>     -> {started, entries}  Zustell-Intents
-  scrub        omap: o:<guid> -> Objektversion   Waisen-Kandidaten (2 Läufe)
-  mbox/<id>    Shard 0 eines Postfachs, omap:
+                 q:bytes, q:msgs  Quota counters (reserved atomically)
+                 d:<id>     -> {started, entries}  Delivery intents
+  scrub        omap: o:<guid> -> object version  Orphan candidates (2 runs)
+  mbox/<id>    Shard 0 of a mailbox, omap:
                  h:uidnext, h:uidvalidity, h:modseq, h:keywords,
                  h:shardsize, h:logstart
-                 c:<modseq> -> {u:[uids], x:bool}   Änderungslog
-                 v:<modseq> -> [uids]   Vanished-Log für QRESYNC
+                 c:<modseq> -> {u:[uids], x:bool}   Change log
+                 v:<modseq> -> [uids]   Vanished log for QRESYNC
                  m:<uid>    -> {guid,size,chunks,flags,idate,sdate,modseq,env,refs,preview}
-  mbox/<id>/n  Shard n: nur m:<uid>-Einträge, Shard = (uid-1)/shardsize
-  fts/<shard>  omap: <feld>:<term> -> Posting-Liste (Doc-IDs, Delta-Varint)
-  ftsd/<shard> omap: <trigramm> -> Terme          Wörterbuch für Substrings
-  ftsmap       omap: g:<guid> -> id, i:<id> -> guid, n  Doc-ID-Zuordnung
+  mbox/<id>/n  Shard n: only m:<uid> entries, shard = (uid-1)/shardsize
+  fts/<shard>  omap: <field>:<term> -> posting list (doc IDs, delta varint)
+  ftsd/<shard> omap: <trigram> -> terms           Dictionary for substrings
+  ftsmap       omap: g:<guid> -> id, i:<id> -> guid, n  Doc ID mapping
 ```
 
-* **Sharding.** Ein Postfach wächst in neue Objekte statt in eine
-  ever-growing omap. Die Shardgröße steht im Header, damit kein Prozess
-  mit anderer Konfiguration den Index falsch liest. Shard 0 wird atomar
-  per CAS geschrieben, andere Shards zweiphasig (erst Header mit modseq,
-  UID und Änderungslog, dann der Eintrag). Ein Crash dazwischen ist eine
-  UID-Lücke plus ein verwaister Blob, beides Fälle für den Scrubber.
-* **Änderungslog.** Jeder Write hinterlässt `c:<modseq>` mit den
-  betroffenen UIDs. Eine Session liest vor jedem Kommando nur den Header;
-  hat sich HIGHESTMODSEQ bewegt, holt sie das Log ab ihrem Stand und die
-  Einträge der genannten UIDs. Der komplette Reload bleibt der Ausnahme
-  vorbehalten, dass `h:logstart` den Stand nicht mehr deckt.
-* **Stabile Mailbox-IDs.** Der Name ist nur ein Schlüssel in der Registry,
-  das Index-Objekt hängt an der ID. RENAME, auch eines ganzen Teilbaums,
-  ist ein einziger CAS-Write auf das Registry-Objekt und fasst keine
-  Nachricht an. Die ID ist gleichzeitig die MAILBOXID für OBJECTID.
-* **MODSEQ.** Jeder Index-Write erhöht `h:modseq` im selben atomaren
-  Schreibvorgang und stempelt die geänderten Einträge. Damit sind
-  CONDSTORE und QRESYNC im Datenmodell fertig; das Vanished-Log hält die
-  expungierten UIDs pro modseq (begrenzt auf die letzten 10000 Einträge).
-* **Envelope-Cache.** Der Meta-Record enthält den IMAP-Envelope, ein
-  200-Zeichen-Preview und das Speicherdatum. Listenansichten, SORT und
-  THREAD kommen ohne Blob-Zugriff aus.
-* **Quota.** Zähler auf dem Registry-Objekt, geprüft vor Zustellung und
-  COPY, korrigiert nach EXPUNGE. Sie liegen auf einem anderen Objekt als
-  der Postfachindex und sind deshalb eventual consistent; ein Scrubber
-  kann sie aus den Meta-Records neu berechnen.
+* **Sharding.** A mailbox grows into new objects instead of into an
+  ever-growing omap. The shard size is stored in the header so that no process
+  with a different configuration reads the index incorrectly. Shard 0 is written
+  atomically via CAS, other shards in two phases (first the header with modseq,
+  UID and change log, then the entry). A crash in between is a
+  UID gap plus an orphaned blob, both cases for the scrubber.
+* **Change log.** Every write leaves a `c:<modseq>` with the
+  affected UIDs. Before each command, a session reads only the header;
+  if HIGHESTMODSEQ has moved, it fetches the log from its own position and the
+  entries for the UIDs named there. A full reload stays reserved for the exception
+  that `h:logstart` no longer covers the session's position.
+* **Stable mailbox IDs.** The name is only a key in the registry,
+  the index object hangs off the ID. RENAME, even of a whole subtree,
+  is a single CAS write on the registry object and does not touch any
+  message. The ID is at the same time the MAILBOXID for OBJECTID.
+* **MODSEQ.** Every index write increases `h:modseq` in the same atomic
+  write operation and stamps the changed entries. That makes
+  CONDSTORE and QRESYNC complete in the data model; the vanished log keeps the
+  expunged UIDs per modseq (bounded to the last 10000 entries).
+* **Envelope cache.** The meta record contains the IMAP envelope, a
+  200 character preview and the save date. List views, SORT and
+  THREAD work without touching a blob.
+* **Quota.** Counters on the registry object, checked before delivery and
+  COPY, corrected after EXPUNGE. They live on a different object than
+  the mailbox index and are therefore eventually consistent; a scrubber
+  can recompute them from the meta records.
 
-* **Index in omap.** omap ist das Key/Value-Areal, das jeder OSD pro Objekt
-  in RocksDB hält. Es ist sortiert, seitenweise lesbar (`startAfter`,
-  Prefix-Filter) und Änderungen an einem Objekt sind atomar. Die 10-stellige,
-  nullgefüllte UID sorgt dafür, dass Bytefolge == UID-Reihenfolge ist.
-* **Blobs unveränderlich, in Chunks.** Eine Mail wird in 4-MiB-Chunks
-  (`msg/<guid>/<n>`) einmal mit `write_full` geschrieben, parallel über
-  mehrere OSDs/PGs; Lesen ebenso parallel. Damit funktioniert ein
-  Erasure-Coded-Pool ohne `ec_overwrites`, große Mails skalieren in der
-  Latenz nicht linear, und der Speicher-Overhead für die Masse der Daten
-  sinkt von 3x auf 1,5x (bei 2+1; produktiv eher 4+2 oder 8+3).
-* **Referenzzählung statt Kopie.** Chunk 0 trägt im xattr `refs` die Zahl
-  der Index-Einträge, die auf den Blob zeigen. COPY erhöht den Zähler und
-  legt einen Index-Eintrag an, MOVE verschiebt nur den Index-Eintrag,
-  EXPUNGE senkt den Zähler und löscht die Chunks erst bei 0. Payload wird
-  nie kopiert. Löschen ist damit ein omap-Delete plus ein Objekt-Delete
-  pro Chunk, beides O(1) und über alle OSDs verteilt.
-* **Zwei Pools, weil omap nur auf replizierten Pools existiert.** Genau so
-  trennt auch RGW `buckets.index` (repliziert) und `buckets.data` (EC).
+* **Index in omap.** omap is the key/value area that every OSD keeps per object
+  in RocksDB. It is sorted, readable page by page (`startAfter`,
+  prefix filter), and changes to one object are atomic. The 10 digit,
+  zero-padded UID ensures that byte order == UID order.
+* **Blobs immutable, in chunks.** A mail is written once in 4 MiB chunks
+  (`msg/<guid>/<n>`) with `write_full`, in parallel across
+  several OSDs/PGs; reading is parallel as well. That makes an
+  erasure-coded pool work without `ec_overwrites`, keeps the latency of large mails
+  from scaling linearly, and lowers the storage overhead for the bulk of the data
+  from 3x to 1.5x (at 2+1; in production more likely 4+2 or 8+3).
+* **Reference counting instead of copying.** Chunk 0 carries in the xattr `refs` the number
+  of index entries that point at the blob. COPY increases the counter and
+  creates an index entry, MOVE only moves the index entry,
+  EXPUNGE lowers the counter and deletes the chunks only at 0. Payload is
+  never copied. Deleting is therefore an omap delete plus one object delete
+  per chunk, both O(1) and distributed across all OSDs.
+* **Two pools, because omap only exists on replicated pools.** RGW separates
+  `buckets.index` (replicated) and `buckets.data` (EC) in exactly the same way.
 
-## Konsistenz ohne Lock-Service
+## Consistency without a lock service
 
-Alle Writes an ein RADOS-Objekt werden vom Primary-OSD serialisiert und
-jedes Objekt trägt eine Version. Der Server nutzt das als
-Compare-and-Swap:
+All writes to a RADOS object are serialized by the primary OSD and
+every object carries a version. The server uses that as a
+compare-and-swap:
 
-1. Header lesen (`h:uidnext`) und die Objektversion merken.
-2. WriteOp mit `assert_version(version)` + `omap_set(h:uidnext, m:<uid>)`.
-3. Schlägt die Assertion fehl (jemand anderes hat zwischenzeitlich
-   geschrieben), neu lesen und wiederholen.
+1. Read the header (`h:uidnext`) and remember the object version.
+2. WriteOp with `assert_version(version)` + `omap_set(h:uidnext, m:<uid>)`.
+3. If the assertion fails (someone else wrote in the meantime),
+   read again and retry.
 
-Damit können beliebig viele stateless Pods gleichzeitig in dasselbe Postfach
-liefern, ohne Redis, ohne Datenbank, ohne Locking-Daemon. Das ist derselbe
-Mechanismus, den RGW für seine Bucket-Index-Shards verwendet.
+This lets arbitrarily many stateless pods deliver into the same mailbox
+at the same time, without Redis, without a database, without a locking daemon. It is the same
+mechanism that RGW uses for its bucket index shards.
 
-Die Einlieferung schreibt erst den Blob, dann den Indexeintrag. Ein Crash
-dazwischen hinterlässt höchstens einen verwaisten Blob (per Scrubber
-einsammelbar), niemals eine UID ohne Daten.
+Delivery writes the blob first, then the index entry. A crash
+in between leaves at most an orphaned blob (collectible by the scrubber),
+never a UID without data.
 
-## Volltextsuche: "Flatcurve auf RADOS"
+## Full-text search: "Flatcurve on RADOS"
 
-Dovecots flatcurve-Plugin hält pro Postfach eine Xapian-Datenbank auf einem
-Dateisystem. Das lässt sich nicht auf RADOS legen, wohl aber das, was
-flatcurve für IMAP leistet: SEARCH über TEXT, BODY, SUBJECT, FROM, TO
-ohne jede Mail zu lesen. Der POC hält dafür einen **invertierten Index in
+Dovecot's flatcurve plugin keeps one Xapian database per mailbox on a
+file system. That cannot be put on RADOS, but what
+flatcurve delivers for IMAP can: SEARCH over TEXT, BODY, SUBJECT, FROM, TO
+without reading any mail. For that, the POC keeps an **inverted index in
 omap**:
 
-* Pro Benutzer N Shard-Objekte `fts/<shard>` im Index-Pool. Ein Term
-  (`s:invoice`, `f:alice`, `b:sushi`, `h:…` für alle Header) landet per
-  `fnv1a(term) mod N` in genau einem Shard. Damit bleibt die omap eines
-  Objekts klein und die Last verteilt sich über PGs/OSDs.
-* Wert je Term ist die Posting-Liste: die Dokument-IDs aller Mails mit
-  diesem Term, sortiert und als Delta-Varint kodiert (rund ein Byte pro
-  Eintrag statt 16 Byte GUID; Paket `internal/postings`). Die ID wird beim
-  Indizieren einmal pro Blob auf dem Objekt `ftsmap` vergeben und beim
-  Entfernen wieder freigegeben. Listen im alten Format (rohe GUIDs) werden
-  weiter gelesen und beim ersten Schreiben konvertiert; das Format ist an
-  der Länge unterscheidbar (rohe Listen sind Vielfache von 16 Byte, die
-  neue Kodierung nie). Suche = `omap_get_vals_by_keys` über die Terme,
-  Schnittmenge der Listen (boolesches AND), Auflösung der IDs zu GUIDs in
-  einem gebündelten Read, dann Abgleich mit dem Postfach-Snapshot.
-* **Indiziert wird per GUID, nicht per (Postfach, UID).** COPY und MOVE
-  fassen den Index deshalb nie an; eine Mail wird genau dann aus dem Index
-  entfernt, wenn ihr letzter Verweis verschwindet (refs=0).
-* Updates sind dieselben Compare-and-Swap-Writes wie am Postfachindex:
-  Terme lesen, Listen ergänzen, mit `assert_version` schreiben. Beliebig
-  viele Pods indizieren gleichzeitig.
-* **Stemming.** Jeder Token wird zusätzlich als Snowball-Stem (Englisch
-  und Deutsch, ohne Sprachdetektion) indiziert; die Suchanfrage wird
-  genauso expandiert. `SUBJECT invoicing` findet "invoices",
-  `BODY rechnungen` findet "Rechnung".
-* **Substrings über ein Trigramm-Wörterbuch.** Flatcurve beantwortet
-  Wildcards über Xapians Term-Datenbank. Das Gegenstück hier sind N
-  Objekte `ftsd/<shard>`, deren omap jedes Trigramm auf die Liste der
-  Terme abbildet, die es enthalten (`voi -> b:invoic, s:invoices, …`).
-  Eine Anfrage `SUBJECT voic` liest die Listen von `voi` und `oic`
-  (ein gebündelter Read pro betroffenem Shard, parallel), schneidet sie,
-  filtert exakt per `strings.Contains` auf das Feld und holt dann nur die
-  Postings der Treffer-Terme. **Keine Mail wird für eine Suche gelesen.**
-  Das Wörterbuch wächst mit dem Vokabular des Benutzers, nicht mit der
-  Mailanzahl, und schrumpft, wenn der letzte Verweis eines Terms fällt.
-  Anfragen unter drei Zeichen fallen auf einen Prefix-Scan der sortierten
-  omap zurück (`FROM li` findet "lic…", nicht "alice").
-* **Parallelität.** Alle Shard-Writes einer Zustellung (Postings und
-  Wörterbuch) laufen als unabhängige CAS-Operationen gleichzeitig; ein
-  Konflikt kostet nur den Retry des einen Shards. 40 gleichzeitige
-  Zustellungen in dasselbe Postfach liefen im Test ohne Fehler durch.
-* Bewusst kein Xapian: keine Phrasen, kein Ranking, keine
-  Substring-Treffer über Tokengrenzen hinweg (`ce at` in "invoice
-  attached"). Nested NOT/OR mit Textkriterien fallen auf Lesen der Mail
-  zurück.
+* Per user, N shard objects `fts/<shard>` in the index pool. A term
+  (`s:invoice`, `f:alice`, `b:sushi`, `h:…` for all headers) lands via
+  `fnv1a(term) mod N` in exactly one shard. This keeps an object's omap
+  small and spreads the load across PGs/OSDs.
+* The value per term is the posting list: the document IDs of all mails with
+  this term, sorted and encoded as delta varints (roughly one byte per
+  entry instead of a 16 byte GUID; package `internal/postings`). The ID is assigned
+  once per blob on the object `ftsmap` during indexing and released again on
+  removal. Lists in the old format (raw GUIDs) are
+  still read and converted on the first write; the format can be told apart
+  by its length (raw lists are multiples of 16 bytes, the
+  new encoding never is). Search = `omap_get_vals_by_keys` over the terms,
+  intersection of the lists (boolean AND), resolution of the IDs to GUIDs in
+  one bundled read, then reconciliation with the mailbox snapshot.
+* **Indexing happens per GUID, not per (mailbox, UID).** COPY and MOVE
+  therefore never touch the index; a mail is removed from the index exactly
+  when its last reference disappears (refs=0).
+* Updates are the same compare-and-swap writes as on the mailbox index:
+  read terms, extend lists, write with `assert_version`. Arbitrarily
+  many pods index at the same time.
+* **Stemming.** Every token is additionally indexed as a Snowball stem (English
+  and German, without language detection); the query is
+  expanded the same way. `SUBJECT invoicing` finds "invoices",
+  `BODY rechnungen` finds "Rechnung".
+* **Substrings through a trigram dictionary.** Flatcurve answers
+  wildcards through Xapian's term database. The counterpart here is N
+  objects `ftsd/<shard>` whose omap maps every trigram to the list of
+  terms containing it (`voi -> b:invoic, s:invoices, …`).
+  A query `SUBJECT voic` reads the lists of `voi` and `oic`
+  (one bundled read per affected shard, in parallel), intersects them,
+  filters exactly via `strings.Contains` on the field and then fetches only the
+  postings of the matching terms. **No mail is read for a search.**
+  The dictionary grows with the user's vocabulary, not with the
+  number of mails, and shrinks when a term's last reference goes away.
+  Queries shorter than three characters fall back to a prefix scan of the sorted
+  omap (`FROM li` finds "lic…", not "alice").
+* **Parallelism.** All shard writes of one delivery (postings and
+  dictionary) run concurrently as independent CAS operations; a
+  conflict costs only the retry of that one shard. 40 concurrent
+  deliveries into the same mailbox ran through without errors in testing.
+* Deliberately no Xapian: no phrases, no ranking, no
+  substring matches across token boundaries (`ce at` in "invoice
+  attached"). Nested NOT/OR with text criteria fall back to reading the mail.
 
-Für Produktion käme dazu: N-Gramme statt Tokenizer für CJK, Shard-Anzahl
-abhängig von der Postfachgröße, ein per-GUID-Termliste-Objekt, wenn
-Re-Tokenisieren beim Löschen zu teuer wird, und asynchrones
-Indizieren (Queue im omap) statt synchron im Zustellpfad.
+For production, the following would be added: n-grams instead of a tokenizer for CJK, a shard count
+depending on the mailbox size, a per-GUID term list object once
+re-tokenizing on delete becomes too expensive, and asynchronous
+indexing (queue in omap) instead of synchronously in the delivery path.
 
-## Was das Review erzwungen hat
+## What the review forced
 
-Ein externer Code-Review (Codex, `docs/review-round1.md`) hat zehn
-Befunde mit Datenverlust-Potenzial gefunden. Die Antworten darauf sind
-jetzt Teil des Designs:
+An external code review (Codex, `docs/review-round1.md`) found ten
+findings with data loss potential. The answers to them are
+now part of the design:
 
-* **Versionierte Reads auf privaten Kontexten.** librados liefert die
-  Objektversion nur kontextweit (`get_last_version`). Mit parallelen
-  Goroutinen auf einem IOContext konnte ein CAS die Version einer fremden
-  Operation erwischen. Jeder versionierte Read läuft jetzt auf einem
-  Kontext aus einem kleinen Pool, den er bis zur Versionsabfrage exklusiv
-  besitzt (`verpool.go`).
-* **Alles im CAS lesen.** STORE liest Existenz, Flags und MODSEQ der
-  Einträge innerhalb der Header-Transaktion, EXPUNGE entfernt nur, was
-  noch existiert, und gibt nur dafür Referenzen frei.
-* **Pending-Änderungen für Shards.** Ein Write auf einen höheren Shard
-  ist zweiphasig: der Header-CAS vergibt die MODSEQ und kündigt die UIDs
-  als `pending` an, die Entscheidung (Flags, UNCHANGEDSINCE, Existenz)
-  fällt danach als Read-Modify-Write unter der Version des Shard-Objekts
-  selbst, der Commit trägt nach, was tatsächlich geändert oder entfernt
-  wurde. Damit serialisieren parallele STOREs auf derselben Nachricht,
-  ein verspäteter STORE legt keinen expungierten Eintrag neu an, und ein
-  EXPUNGE gibt nur Referenzen frei, die er selbst entfernt hat. Leser
-  bleiben vor einem pending-Eintrag stehen (höchstens 30 s); eine Session
-  mit frischem Snapshot setzt ihren Stand vor die älteste pending-Änderung
-  zurück. Scheitert der Commit nach dem Shard-Write, bleibt der Eintrag
-  gültig, die Ankündigung läuft aus.
-* **Refcount-Null ist endgültig.** Der letzte EXPUNGE schreibt `refs=0`
-  vor dem Löschen; ein COPY gegen null scheitert mit "message is gone".
-  MOVE nimmt wie COPY erst eine eigene Referenz für das Ziel und gibt die
-  Referenzen der Quelle erst frei, wenn deren Einträge tatsächlich
-  entfernt wurden; ein EXPUNGE der Quelle zwischen den beiden
-  Index-Schritten kann dem Ziel den Blob nicht wegnehmen.
-* **MODSEQ pro Nachricht ist monoton.** Die MODSEQ wird im Header-CAS
-  vergeben, der Shard-Write kann aber nach dem eines späteren STORE
-  landen; der Eintrag behält dann die höhere MODSEQ. Weil Leser vor einer
-  pending-Änderung stehen bleiben, sieht CONDSTORE keine Lücke.
-* **Snapshot-Grenze vor dem Snapshot.** SELECT liest erst Header und
-  pending-Änderungen, dann den Bestand; die Session startet vor der
-  ältesten pending-Änderung. Umgekehrt könnte ein Commit zwischen beiden
-  Reads eine Nachricht dauerhaft verbergen.
-* **Scrubber bricht bei unvollständigem Scan ab.** Konnte ein Index
-  nicht vollständig gelesen werden, wird nichts gelöscht und nichts
-  korrigiert. Refcount-Korrekturen sind CAS gegen die beobachtete Version.
-  MOVE-Recovery entfernt die Quelle erst, wenn jeder Eintrag im Ziel
-  bestätigt ist.
-* **Speicherbudget.** Nachrichtenpuffer (Zustellung, APPEND, FETCH mit
-  Body, POP3 RETR) laufen gegen ein prozessweites Budget
-  (`MEMORY_BUDGET_BYTES`, Standard 256 MiB); darüber wird höchstens 10 s
-  gewartet, dann scheitert das Kommando temporär. Die Wartezeit ist
-  begrenzt, weil ein Kommando Teilreservierungen hält (alle Literale
-  eines Kommandos, die Schritte einer LMTP-Nachricht) und zwei solche
-  Warter sich sonst gegenseitig blockieren.
-* **Parser-Grenzen.** Zeilenlänge, Listen-Verschachtelung, Argumentzahl,
-  Literale pro Kommando (256) und Kommando-Labels für Metriken sind
-  begrenzt.
-* **Quota wird reserviert, nicht geprüft.** Limit-Prüfung und Erhöhung
-  der Zähler sind ein CAS auf dem Registry-Objekt; parallele Zustellungen
-  und COPY-Batches sehen die Reservierungen der anderen und können das
-  Limit nicht gemeinsam überschreiten. Scheitert die Operation danach,
-  wird die Reservierung zurückgegeben.
-* **Zustell-Intents.** Sieve mit mehreren `fileinto` und MULTIAPPEND
-  bestehen aus mehreren Index-Updates. Vor dem ersten wird `d:<id>` auf
-  dem Registry-Objekt angelegt; jede Nachricht wird mit Postfach-ID und
-  vorab gewählter GUID eingetragen, **bevor** sie gespeichert wird, am
-  Ende wird der Intent entfernt. Erst wenn das gelungen ist, sieht der
-  Client ein OK; scheitert es, wird zurückgerollt und temporär abgelehnt
-  (sonst könnte der Scrubber bestätigte Mail löschen). Ein Intent älter
-  als zehn Minuten ist ein abgestürzter Prozess: der Scrubber entfernt
-  die Nachrichten anhand von Postfach-ID und GUID (nie per UID, die nach
-  DELETE/CREATE eine andere Nachricht bezeichnen könnte); der Client hat
-  kein OK gesehen und wiederholt.
-* **MODSEQ-Kollision wird nachgestempelt.** Schreibt ein STORE seinen
-  Eintrag nach einem parallelen STORE mit höherer MODSEQ, trüge der
-  Eintrag dieselbe MODSEQ wie der frühere Zustand; CHANGEDSINCE würde die
-  spätere Änderung übersehen. Der Eintrag wird deshalb mit einer danach
-  vergebenen MODSEQ erneut geschrieben.
-* **Quota-Drift erst beim zweiten Blick.** Reservierungen laufender
-  Zustellungen sind im Index noch nicht sichtbar; der Scrubber korrigiert
-  den Zähler nur, wenn zwei Läufe denselben Wert zählten.
-* **Unregistrierte Index-Objekte.** Ein Prozess, der zwischen dem
-  Anlegen eines `mbox/<id>`-Objekts und dem Registry-Eintrag stirbt,
-  hinterlässt ein Objekt, das nichts erreicht (die ID ist zufällig). Der
-  Scrubber entfernt solche Objekte nach der Karenzzeit. Gefunden über
-  einen OOM-Kill unter Last: `EnsureMailbox` legte pro LMTP-Zustellung
-  erst ein Objekt an und löschte es wieder, wenn der Name schon vergeben
-  war; jetzt kommt der (gecachte) Lookup zuerst.
-* **Waisen erst beim zweiten Blick.** Scan und Reparatur des Scrubbers
-  haben keinen gemeinsamen Sperrpunkt. Ein unreferenzierter Blob wird
-  beim ersten Lauf nur mit seiner Objektversion vorgemerkt (`scrub`-Objekt)
-  und erst gelöscht, wenn ein weiterer Lauf ihn unverändert und weiter
-  unreferenziert vorfindet.
-* **PendingFloor ohne festes Fenster.** Der Beginn des Log-Scans wird
-  durch Sondieren einzelner Einträge in verdoppelten Abständen gefunden
-  (log2 Reads bis zum ersten Eintrag älter als 30 s); ein sehr aktives
-  Postfach ist damit genauso abgedeckt wie ein ruhiges.
-* **VANISHED bei Loglücke.** Ohne known-UIDs meldet der Server alle
-  fehlenden UIDs unterhalb UIDNEXT als `VANISHED (EARLIER)`, eine
-  Obermenge, die UIDs enthalten kann, die der Client nie sah; für den
-  Client ist das folgenlos, ein vollständiger UID-Vergleich entfällt.
+* **Versioned reads on private contexts.** librados provides the
+  object version only per context (`get_last_version`). With parallel
+  goroutines on one IOContext, a CAS could catch the version of another
+  operation. Every versioned read now runs on a
+  context from a small pool that it owns exclusively until the version is
+  queried (`verpool.go`).
+* **Read everything inside the CAS.** STORE reads existence, flags and MODSEQ of the
+  entries within the header transaction, EXPUNGE removes only what
+  still exists and releases references only for that.
+* **Pending changes for shards.** A write to a higher shard
+  is two-phase: the header CAS assigns the MODSEQ and announces the UIDs
+  as `pending`, the decision (flags, UNCHANGEDSINCE, existence)
+  is then made as a read-modify-write under the version of the shard object
+  itself, and the commit records what was actually changed or removed.
+  This makes parallel STOREs on the same message serialize,
+  a late STORE does not re-create an expunged entry, and an
+  EXPUNGE releases only references it removed itself. Readers
+  stop before a pending entry (at most 30 s); a session
+  with a fresh snapshot rewinds its position to before the oldest pending change.
+  If the commit fails after the shard write, the entry stays
+  valid and the announcement expires.
+* **A refcount of zero is final.** The last EXPUNGE writes `refs=0`
+  before deleting; a COPY against zero fails with "message is gone".
+  Like COPY, MOVE first takes its own reference for the target and releases the
+  source's references only once its entries have actually been
+  removed; an EXPUNGE of the source between the two
+  index steps cannot take the blob away from the target.
+* **MODSEQ per message is monotonic.** The MODSEQ is assigned in the header CAS,
+  but the shard write can land after that of a later STORE;
+  the entry then keeps the higher MODSEQ. Because readers stop before a
+  pending change, CONDSTORE sees no gap.
+* **Snapshot boundary before the snapshot.** SELECT first reads the header and
+  pending changes, then the contents; the session starts before the
+  oldest pending change. The other way round, a commit between the two
+  reads could hide a message permanently.
+* **The scrubber aborts on an incomplete scan.** If an index
+  could not be read completely, nothing is deleted and nothing is
+  corrected. Refcount corrections are a CAS against the observed version.
+  MOVE recovery removes the source only once every entry in the target
+  is confirmed.
+* **Memory budget.** Message buffers (delivery, APPEND, FETCH with
+  a body, POP3 RETR) run against a process-wide budget
+  (`MEMORY_BUDGET_BYTES`, default 256 MiB); beyond it, it waits at most 10 s,
+  then the command fails temporarily. The wait time is
+  bounded because a command holds partial reservations (all literals
+  of one command, the steps of an LMTP message) and two such
+  waiters would otherwise block each other.
+* **Parser limits.** Line length, list nesting, argument count,
+  literals per command (256) and command labels for metrics are
+  bounded.
+* **Quota is reserved, not checked.** The limit check and the increase of
+  the counters are one CAS on the registry object; parallel deliveries
+  and COPY batches see each other's reservations and cannot jointly exceed
+  the limit. If the operation fails afterwards,
+  the reservation is returned.
+* **Delivery intents.** Sieve with several `fileinto` and MULTIAPPEND
+  consist of several index updates. Before the first one, `d:<id>` is created on
+  the registry object; every message is recorded with its mailbox ID and
+  a GUID chosen in advance **before** it is stored, and at the
+  end the intent is removed. Only once that has succeeded does the
+  client see an OK; if it fails, everything is rolled back and temporarily rejected
+  (otherwise the scrubber could delete confirmed mail). An intent older
+  than ten minutes means a crashed process: the scrubber removes
+  the messages by mailbox ID and GUID (never by UID, which after
+  DELETE/CREATE could denote a different message); the client has
+  seen no OK and retries.
+* **A MODSEQ collision is re-stamped.** If a STORE writes its
+  entry after a parallel STORE with a higher MODSEQ, the entry would carry
+  the same MODSEQ as the earlier state; CHANGEDSINCE would miss the
+  later change. The entry is therefore written again with a MODSEQ
+  assigned afterwards.
+* **Quota drift only on the second look.** Reservations of deliveries in flight
+  are not yet visible in the index; the scrubber corrects
+  the counter only when two runs counted the same value.
+* **Unregistered index objects.** A process that dies between
+  creating an `mbox/<id>` object and the registry entry
+  leaves behind an object that nothing reaches (the ID is random). The
+  scrubber removes such objects after the grace period. Found through
+  an OOM kill under load: `EnsureMailbox` first created an object per LMTP delivery
+  and deleted it again if the name was already taken;
+  now the (cached) lookup comes first.
+* **Orphans only on the second look.** The scrubber's scan and repair
+  have no common locking point. An unreferenced blob is
+  only noted with its object version on the first run (`scrub` object)
+  and deleted only once a further run finds it unchanged and still
+  unreferenced.
+* **PendingFloor without a fixed window.** The start of the log scan is found
+  by probing individual entries at doubling intervals
+  (log2 reads until the first entry older than 30 s); a very active
+  mailbox is thereby covered just as well as a quiet one.
+* **VANISHED on a log gap.** Without known UIDs, the server reports all
+  missing UIDs below UIDNEXT as `VANISHED (EARLIER)`, a
+  superset that can contain UIDs the client never saw; for the
+  client that has no consequences, and a full UID comparison is avoided.
 
 ## Scrubber
 
-Jede nicht-atomare Stelle des Designs (Blob vor Index, Zwei-Phasen-Write
-auf Shards, MOVE über zwei Objekte, Quota auf einem anderen Objekt) ist so
-gewählt, dass ein Crash nur harmlosen Abfall hinterlässt. Der Scrubber
-läuft pro Benutzer-Namespace, ist damit beliebig parallelisierbar, und
-repariert genau diese Fälle mit einer Karenzzeit auf der Objekt-mtime,
-damit laufende Zustellungen unberührt bleiben. Er ist ein Subkommando des
-Server-Binaries und läuft als CronJob mit denselben Credentials.
+Every non-atomic spot in the design (blob before index, two-phase write
+on shards, MOVE across two objects, quota on a different object) is
+chosen so that a crash leaves only harmless debris. The scrubber
+runs per user namespace, is therefore arbitrarily parallelizable, and
+repairs exactly these cases with a grace period on the object mtime,
+so that deliveries in flight stay untouched. It is a subcommand of the
+server binary and runs as a CronJob with the same credentials.
 
-## Benachrichtigungen ohne Message-Bus
+## Notifications without a message bus
 
-RADOS hat Watch/Notify eingebaut. Der Store sendet nach jedem Index-Write
-ein Notify auf das Postfachobjekt, eine IMAP-Session in IDLE hält einen
-Watch darauf. Eine Zustellung auf Pod B erreicht die IDLE-Session auf Pod A
-cluster-weit in rund 25 ms, ohne Kafka, Redis oder Director. Notifies sind
-best effort; ein 60-Sekunden-Ticker deckt verlorene ab.
+RADOS has watch/notify built in. After every index write, the store sends
+a notify on the mailbox object, and an IMAP session in IDLE holds a
+watch on it. A delivery on pod B reaches the IDLE session on pod A
+cluster-wide in about 25 ms, without Kafka, Redis or a director. Notifies are
+best effort; a 60 second ticker covers lost ones.
 
-## Warum das für Millionen Benutzer trägt
+## Why this scales to millions of users
 
-* **Front-Ends sind stateless.** Jeder Pod kann jeden Benutzer bedienen;
-  Skalierung ist `replicas: N`. Kein Director, kein Sticky-Routing nötig
-  (es hilft nur dem Cache).
-* **Kein zentraler Engpass.** Es gibt keine "Mailbox-Datenbank"; die
-  Metadaten jedes Postfachs liegen auf dem Objekt des Postfachs und werden
-  per CRUSH über alle OSDs verteilt. Millionen Postfächer bedeuten Millionen
-  kleine Indexobjekte, gleichmäßig verteilt, nicht eine Tabelle mit
-  Milliarden Zeilen.
-* **Namespaces statt Pools.** Ceph verträgt hunderte Pools, nicht Millionen;
-  Namespaces sind unbegrenzt.
-* **EC für die Masse.** Mail ist zu >95 % Blob-Bytes, die nie geändert
-  werden. Das ist der Idealfall für Erasure Coding.
-* **Keine MDS-Schicht.** CephFS würde jeden Postfachzugriff über den MDS
-  leiten, dessen Metadaten-Cache und Single-Active-Design (bzw. Subtree-
-  Partitionierung) bei Millionen kleiner Dateien der bekannte Engpass sind.
-* **Kein RGW-Hop.** S3 würde jeden Fetch über HTTP+Gateway leiten und
-  den Index in RGW-Shards halten, deren Listing-Semantik für IMAP
-  (UID-Bereiche, Flags) nicht passt.
+* **Front ends are stateless.** Every pod can serve every user;
+  scaling is `replicas: N`. No director, no sticky routing needed
+  (it only helps the cache).
+* **No central bottleneck.** There is no "mailbox database"; the
+  metadata of every mailbox lives on that mailbox's object and is
+  distributed via CRUSH across all OSDs. Millions of mailboxes mean millions of
+  small index objects, evenly distributed, not one table with
+  billions of rows.
+* **Namespaces instead of pools.** Ceph tolerates hundreds of pools, not millions;
+  namespaces are unlimited.
+* **EC for the bulk.** Mail is >95% blob bytes that are never
+  changed. That is the ideal case for erasure coding.
+* **No MDS layer.** CephFS would route every mailbox access through the MDS,
+  whose metadata cache and single-active design (respectively subtree
+  partitioning) are the well-known bottleneck with millions of small files.
+* **No RGW hop.** S3 would route every fetch through HTTP + gateway and
+  keep the index in RGW shards, whose listing semantics do not fit IMAP
+  (UID ranges, flags).
 
-## Was für Produktion dazukäme (keine Architekturänderung)
+## What production would add (no architectural change)
 
-* **Große Postfächer:** ein Indexobjekt pro Postfach reicht bis etwa
-  10^5–10^6 Einträge (omap-Größe). Darüber Sharding des Index nach
-  UID-Bereichen, exakt wie RGW `bucket_index_max_shards`.
-* **Cache:** Header/Index-Snapshots pro Session im Pod cachen; Watch/Notify
-  auf dem Postfachobjekt (RADOS hat das eingebaut) für IDLE statt Polling.
-* **Scrubber/GC** für verwaiste Blobs (Crash zwischen Blob- und
-  Index-Write, Crash zwischen den zwei Index-Writes eines MOVE), Quota im
-  Header-omap.
-* **Verschlüsselung** pro Benutzer auf Blob-Ebene; msgr2 secure mode für
-  den Transport (im Cluster bereits vorausgesetzt: aes256k-Keys).
-* **Eigene Objektklasse (cls)** für "uidnext++ und Eintrag setzen" in einer
-  serverseitigen Operation statt CAS-Retry; das ist der Weg, den RGW geht
-  (`cls_rgw`). Erst nötig, wenn viele parallele Zusteller pro Postfach die
-  Retry-Rate hochtreiben.
-* **Auth** gegen einen echten Backend-Dienst (hier statisch `test:test`).
+* **Large mailboxes:** one index object per mailbox is enough up to about
+  10^5–10^6 entries (omap size). Beyond that, shard the index by
+  UID ranges, exactly like RGW's `bucket_index_max_shards`.
+* **Cache:** cache header/index snapshots per session in the pod; watch/notify
+  on the mailbox object (RADOS has that built in) for IDLE instead of polling.
+* **Scrubber/GC** for orphaned blobs (a crash between the blob and the
+  index write, a crash between the two index writes of a MOVE), quota in the
+  header omap.
+* **Encryption** per user at the blob level; msgr2 secure mode for
+  the transport (already assumed in the cluster: aes256k keys).
+* **A dedicated object class (cls)** for "uidnext++ and set entry" in one
+  server-side operation instead of a CAS retry; that is the route RGW takes
+  (`cls_rgw`). Only needed once many parallel deliverers per mailbox drive
+  the retry rate up.
+* **Auth** against a real backend service (statically `test:test` here).
 
-## Protokollschicht
+## Protocol layer
 
-`internal/imapproto` ist eine eigene IMAP-Implementierung: Tokenizer für
-Atome, Quoted Strings, Literale (synchronisierend, LITERAL+, LITERAL-,
-BINARY `~{n}`) und Listen; ein Dispatcher mit Zustandsautomat
-(nicht authentifiziert, authentifiziert, selektiert); ein Encoder für
-Envelope, BodyStructure und Literale. Die Schicht spricht ausschließlich
-`model.User`, eine cgo-freie Schnittstelle, die `cephstore.User` erfüllt.
-Dadurch läuft die gesamte Protokolllogik in `go test` gegen ein
-In-Memory-Backend, ohne librados, und dieselbe Schicht läuft im Cluster
-gegen RADOS.
+`internal/imapproto` is a dedicated IMAP implementation: a tokenizer for
+atoms, quoted strings, literals (synchronizing, LITERAL+, LITERAL-,
+BINARY `~{n}`) and lists; a dispatcher with a state machine
+(not authenticated, authenticated, selected); an encoder for
+envelope, body structure and literals. The layer speaks exclusively
+`model.User`, a cgo-free interface that `cephstore.User` satisfies.
+As a result, the entire protocol logic runs in `go test` against an
+in-memory backend, without librados, and the same layer runs in the cluster
+against RADOS.
 
-Die Sitzung hält nur einen Snapshot des Postfachindex
-(Sequenznummer = Position). Vor jedem Kommando wird HIGHESTMODSEQ gelesen;
-nur bei Änderung wird der Index neu geladen und die Differenz als EXISTS,
-EXPUNGE bzw. VANISHED und FETCH FLAGS gemeldet. Das ist die Brücke zwischen
-dem MODSEQ im Datenmodell und CONDSTORE/QRESYNC im Protokoll.
+The session only holds a snapshot of the mailbox index
+(sequence number = position). Before each command, HIGHESTMODSEQ is read;
+only on a change is the index reloaded and the difference reported as EXISTS,
+EXPUNGE respectively VANISHED, and FETCH FLAGS. That is the bridge between
+the MODSEQ in the data model and CONDSTORE/QRESYNC in the protocol.
 
-## Authentifizierung und Director
+## Authentication and director
 
-Die Front-Ends kennen nur `auth.Authenticator`: Anmeldeversuch hinein,
-kanonisches Konto heraus. Die Nauthilus-Implementierung spricht bevorzugt
-gRPC (`AuthService.Authenticate` / `LookupIdentity`) mit Basic- oder
-Bearer-Metadaten und bildet `AUTH_DECISION_FAIL` auf eine harte
-Fehlanmeldung, `TEMPFAIL` und Transportfehler auf eine temporäre ab. Der
-Master-User-Wrapper erlaubt dem nauthilus-director `<konto>*director` mit
-Master-Passwort; das Zielkonto wird trotzdem per `LookupIdentity`
-aufgelöst, damit Aliase und Normalisierung greifen. LMTP löst jeden
-RCPT über `LookupIdentity` auf, weil der Director die Envelope-Adresse
-unverändert weiterreicht.
+The front ends only know `auth.Authenticator`: a login attempt goes in,
+the canonical account comes out. The Nauthilus implementation preferably speaks
+gRPC (`AuthService.Authenticate` / `LookupIdentity`) with basic or
+bearer metadata and maps `AUTH_DECISION_FAIL` to a hard
+login failure and `TEMPFAIL` plus transport errors to a temporary one. The
+master user wrapper allows the nauthilus-director `<account>*director` with
+the master password; the target account is nevertheless resolved via `LookupIdentity`,
+so that aliases and normalization take effect. LMTP resolves every
+RCPT via `LookupIdentity`, because the director passes the envelope address
+on unchanged.
 
-## Zugriffsrechte und geteilte Postfächer
+## Access rights and shared mailboxes
 
-* ACLs (RFC 4314) stehen im Registry-Eintrag des Postfachs beim Besitzer
-  (`MailboxRec.ACL`, Kennung → Rechte; der Besitzer hat implizit alle).
-  Jeder Zugriff prüft gegen diesen Eintrag; ein Postfach ohne Rechte für
-  das Konto existiert für dieses Konto nicht (NONEXISTENT statt NOPERM).
-* Berechtigte finden fremde Postfächer über Verweise im eigenen Namensraum
-  (`sh:<besitzer>/<name>` auf dem Registry-Objekt), geschrieben von SETACL
-  auf Besitzerseite, bei RENAME umgehängt, bei DELETE und Entzug
-  entfernt. Der Verweis ist ein Hinweis für LIST, nie eine Berechtigung;
-  LIST prüft jeden Verweis gegen die ACL und räumt veraltete weg.
-  Zugriffe laufen über ein zweites User-Objekt für den Namensraum des
-  Besitzers, das die Session bis zum Logout hält.
-* Blobs sind namensraumgebunden: COPY/MOVE in ein fremdes Postfach liest
-  und speichert die Nachricht neu (Quota des Ziels), innerhalb eines
-  Namensraums bleibt es das Referenz-Linking.
-* Flags in geteilten Postfächern sind geteilt; `\Seen` pro Benutzer wäre
-  ein eigener Index-Eintrag je Konto und ist nicht umgesetzt.
-* METADATA (RFC 5464) liegt auf einem Objekt `metadata` je Namensraum,
-  Schlüssel nach Postfach-ID (überlebt RENAME) und, für `/private/*`, nach
-  zugreifendem Konto. Server-Einträge `/shared/*` liegen im reservierten
-  Namensraum `~server` und sind für Konten nur lesbar.
-* Rechte gelten auch für Flags: ein ersetzendes STORE prüft je Nachricht,
-  welche Flags hinzukommen oder wegfallen; APPEND und COPY lassen Flags
-  weg, für die das Recht fehlt (RFC 4314 §4). Fehlende oder nicht
-  freigegebene fremde Postfächer antworten einheitlich NONEXISTENT, damit
-  ihre Existenz nicht erkennbar wird (TRYCREATE nur im eigenen
-  Namensraum). COPY/MOVE über Namensräume hinweg laufen unter einem
-  Zustell-Intent und werden bei Fehlern vollständig zurückgenommen.
-* NOTIFY (RFC 5465) nutzt dieselben RADOS-Watches wie IDLE: ein Pusher je
-  Session hält beim Schreiben die Kommando-Sperre der Verbindung, die die
-  Kommandoschleife nur während des Wartens auf Eingabe (und in IDLE)
-  freigibt. So mischen sich Benachrichtigungen nie in die Antwort eines
-  laufenden Kommandos. Beobachtet werden höchstens 64 Postfächer.
+* ACLs (RFC 4314) live in the mailbox's registry entry at the owner
+  (`MailboxRec.ACL`, identifier → rights; the owner implicitly has all of them).
+  Every access checks against this entry; a mailbox without rights for
+  the account does not exist for that account (NONEXISTENT instead of NOPERM).
+* Entitled users find other users' mailboxes through references in their own namespace
+  (`sh:<owner>/<name>` on the registry object), written by SETACL
+  on the owner's side, re-pointed on RENAME, removed on DELETE and on
+  revocation. The reference is a hint for LIST, never an authorization;
+  LIST checks every reference against the ACL and cleans up stale ones.
+  Access runs through a second user object for the owner's namespace,
+  which the session holds until logout.
+* Blobs are namespace-bound: COPY/MOVE into another user's mailbox reads
+  and stores the message anew (the target's quota); within one
+  namespace it remains reference linking.
+* Flags in shared mailboxes are shared; a per-user `\Seen` would be
+  a separate index entry per account and is not implemented.
+* METADATA (RFC 5464) lives on an object `metadata` per namespace,
+  keyed by mailbox ID (survives RENAME) and, for `/private/*`, by
+  the accessing account. Server entries `/shared/*` live in the reserved
+  namespace `~server` and are read-only for accounts.
+* Rights apply to flags as well: a replacing STORE checks per message
+  which flags are added or dropped; APPEND and COPY leave out flags
+  for which the right is missing (RFC 4314 §4). Missing or not
+  shared foreign mailboxes uniformly answer NONEXISTENT, so that
+  their existence cannot be detected (TRYCREATE only within one's own
+  namespace). COPY/MOVE across namespaces run under a
+  delivery intent and are fully rolled back on errors.
+* NOTIFY (RFC 5465) uses the same RADOS watches as IDLE: one pusher per
+  session holds the connection's command lock while writing, which the
+  command loop releases only while waiting for input (and in IDLE).
+  That way notifications never mix into the response of a
+  running command. At most 64 mailboxes are watched.
 
 ## Sieve
 
-Skripte liegen als omap des Objekts `sieve` im Benutzer-Namespace, das
-aktive Skript im xattr. Die Zustellung führt das aktive Skript aus und
-legt die Mail in die resultierenden Postfächer (mit Flags) ab; jede
-Ablage ist ein normaler `Deliver`. Ein Skriptfehler zur Laufzeit führt zu
-INBOX, nie zu Verlust.
+Scripts live as the omap of the object `sieve` in the user namespace, the
+active script in an xattr. Delivery executes the active script and
+files the mail into the resulting mailboxes (with flags); every
+placement is a normal `Deliver`. A script error at runtime leads to
+INBOX, never to loss.
 
-## Betrieb im Cluster
+## Operation in the cluster
 
-* Der Server läuft im Namespace `imap` (PSS `restricted`, non-root, read-only
-  root, keine Capabilities). Ports 1143/2424 im Container, 143/24 am Service.
-* cephx-Identität `client.imap` mit minimalen Caps (`mon r`, `osd rwx` auf
-  genau die zwei Pools; `x` für die Lock-Objektklasse des POP3-Maildrop). Rook legt den Key als Secret in `rook-ceph` ab; eine
-  Role dort erlaubt dem ServiceAccount ausschließlich `get` auf dieses eine
-  Secret und die Mon-ConfigMap. Der Server holt beides beim Start über die
-  Kubernetes-API, es wird nichts manuell kopiert und Key-Rotation über Rook
-  funktioniert (Pod-Neustart).
-* Das Image linkt gegen librados 20.2.4 (Tentacle), passend zum Cluster;
-  aes256k-Keys setzen einen Tentacle-Client mit msgr2 voraus.
-* Rotiert Rook den Key (`keyGeneration`), pollt der Server das Secret und
-  baut eine neue Verbindung auf; laufende Sessions behalten die alte, bis
-  sie enden (Referenzzählung auf der Verbindung).
-* Beim Rollout meldet `/readyz` 503, Sessions bekommen `BYE`, der Pod
-  wartet `DRAIN_SECONDS` (Deployment: `terminationGracePeriodSeconds` 40).
+* The server runs in the namespace `imap` (PSS `restricted`, non-root, read-only
+  root, no capabilities). Ports 1143/2424 in the container, 143/24 at the service.
+* cephx identity `client.imap` with minimal caps (`mon r`, `osd rwx` on
+  exactly the two pools; `x` for the lock object class of the POP3 maildrop). Rook stores the key as a secret in `rook-ceph`; a
+  Role there allows the ServiceAccount only `get` on this one
+  secret and the mon ConfigMap. The server fetches both at startup through the
+  Kubernetes API, nothing is copied manually, and key rotation through Rook
+  works (pod restart).
+* The image links against librados 20.2.4 (Tentacle), matching the cluster;
+  aes256k keys require a Tentacle client with msgr2.
+* If Rook rotates the key (`keyGeneration`), the server polls the secret and
+  establishes a new connection; running sessions keep the old one until
+  they end (reference counting on the connection).
+* During a rollout, `/readyz` reports 503, sessions get `BYE`, the pod
+  waits `DRAIN_SECONDS` (deployment: `terminationGracePeriodSeconds` 40).

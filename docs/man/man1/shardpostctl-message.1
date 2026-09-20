@@ -1,0 +1,253 @@
+.TH SHARDPOSTCTL-MESSAGE 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-message \- list, search, show, export, flag, copy and move messages
+.SH SYNOPSIS
+.B shardpostctl messages
+.RB [ \-after-uid
+.IR n ]
+.RB [ \-limit
+.IR n ]
+.RB [ \-\-json ]
+.I account mailbox
+.br
+.B shardpostctl search
+.RI [ criteria ]
+.RB [ \-limit
+.IR n ]
+.RB [ \-after
+.IR cursor ]
+.RB [ \-\-json ]
+.I account
+.br
+.B shardpostctl message show
+.RB [ \-uidvalidity
+.IR v ]
+.RB [ \-\-json ]
+.I account mailbox uid
+.br
+.B shardpostctl message export
+.RB [ \-uidvalidity
+.IR v ]
+.I account mailbox uid
+.br
+.B shardpostctl flags
+.RB [ \-add
+.IR list ]
+.RB [ \-remove
+.IR list ]
+.RB [ \-unchanged-since
+.IR modseq ]
+.RB [ \-uidvalidity
+.IR v ]
+.I account mailbox uids
+.br
+.B shardpostctl copy
+.RB [ \-uidvalidity
+.IR v ]
+.I account mailbox uids destination
+.br
+.B shardpostctl move
+.RB [ \-uidvalidity
+.IR v ]
+.I account mailbox uids destination
+.SH DESCRIPTION
+These are the support tools for single messages. A message is addressed
+by mailbox, UIDVALIDITY and UID, so a mailbox that was deleted and
+recreated in the meantime cannot answer with a different message: the
+server refuses with exit code 65.
+.PP
+Without
+.B \-uidvalidity
+the client reads the mailbox's current value first. That is convenient,
+but it only protects you against a change between the client's two
+requests. When it matters, pass the value you saw in an earlier listing.
+.PP
+.I uids
+is a comma-separated list, for example
+.IR 42 ", " "42,43,50" .
+UIDs that no longer exist are reported as
+.I missing
+instead of failing the whole request.
+.SS messages
+Message metadata of one mailbox in UID order: UID, size, internal date,
+MODSEQ and flags. No headers, no content, so the role
+.B diagnose
+is enough. Page with
+.BR \-after-uid .
+.SS search
+Searches one mailbox
+.RI ( \-mailbox )
+or the whole account. Criteria are combined with AND:
+.TP
+.BI \-from " text"
+.TQ
+.BI \-to " text"
+.TQ
+.BI \-subject " text"
+Case-insensitive substring of the envelope.
+.B \-to
+also matches Cc.
+.TP
+.BI \-message-id " id"
+Exact Message-ID, with or without angle brackets.
+.TP
+.BI \-text " words"
+Full-text search over headers and body. This needs the full-text index;
+while it is being rebuilt, or if it was never built, the search finds
+nothing.
+.TP
+.BI \-since " date"
+.TQ
+.BI \-before " date"
+Internal date, as
+.I 2026-09-01
+or RFC 3339.
+.TP
+.BI \-flag " list"
+.TQ
+.BI \-not-flag " list"
+All of these flags are set, or none of them is.
+.PP
+A search examines at most
+.I admin.search_scan_limit
+messages (50000 by default) and returns at most
+.B \-limit
+hits (50 by default, 200 at most). If it stops early it prints a cursor;
+pass it to
+.B \-after
+to continue. The audit log records which criteria were used, never their
+values. Role:
+.BR content .
+.SS message show
+Envelope and header section of one message, with its flags, size, dates
+and MODSEQ. The body is not printed. Role:
+.BR content .
+.SS message export
+Writes the message as stored (RFC 5322) to standard output. Redirect it
+into a file to hand it to someone or to feed it into another tool.
+Role:
+.BR content .
+.SS flags
+Adds and removes flags, like IMAP STORE.
+.B \-add
+and
+.B \-remove
+take comma-separated lists; system flags are written as
+.IR \eSeen ", " \eAnswered ", " \eFlagged ", " \eDeleted ", " \eDraft ,
+keywords as themselves
+.RI ( $Junk ", " $NotJunk ", " $Forwarded ).
+.I \eRecent
+cannot be set.
+.B \-unchanged-since
+skips every message whose MODSEQ is higher, which is the CONDSTORE rule:
+those UIDs come back as
+.I modified
+and keep their flags.
+Role:
+.BR support .
+.SS copy, move
+Copies or moves messages into another mailbox of the same account. The
+result maps every source UID to its new UID, as IMAP UIDPLUS does.
+.B move
+removes the messages from the source mailbox in the same step.
+Role:
+.BR support .
+.PP
+Deleting messages for good is not done here; it is a planned job, see
+.BR shardpostctl-job (1).
+.SH OPTIONS
+.TP
+.BI \-uidvalidity " v"
+UIDVALIDITY the UIDs belong to. Default: the mailbox's current one.
+.TP
+.BI \-limit " n"
+Messages per page (messages: up to 1000) or hits per page (search: up to
+200).
+.TP
+.BI \-after-uid " n"
+Continue a message listing after this UID.
+.TP
+.BI \-after " cursor"
+Continue a search at the cursor the previous page printed.
+.TP
+.B \-\-json
+Print the answer as JSON.
+.SH EXAMPLES
+What is in the INBOX, and since when?
+.PP
+.nf
+.RS
+shardpostctl messages -limit 20 user@example.org INBOX
+.RE
+.fi
+.PP
+"I never got the invoice from September": find it, then look at it.
+.PP
+.nf
+.RS
+shardpostctl search -subject Rechnung -since 2026-09-01 user@example.org
+shardpostctl message show user@example.org INBOX 933
+.RE
+.fi
+.PP
+Hand a message to someone as a file, exactly as it is stored:
+.PP
+.nf
+.RS
+shardpostctl message export user@example.org INBOX 933 > 933.eml
+.RE
+.fi
+.PP
+A message was marked as spam by mistake: take the flag off and move it
+back:
+.PP
+.nf
+.RS
+shardpostctl flags -remove '$Junk' -add '$NotJunk' \\
+    user@example.org Junk 42
+shardpostctl move user@example.org Junk 42 INBOX
+.RE
+.fi
+.PP
+Mark a batch as read, but only if nothing changed since you looked
+(MODSEQ from
+.BR "shardpostctl messages" ):
+.PP
+.nf
+.RS
+shardpostctl flags -add '\eSeen' -unchanged-since 940 \\
+    -uidvalidity 1789726963 user@example.org INBOX 930,931,932
+.RE
+.fi
+.PP
+Find everything still flagged deleted, then expunge it as a planned job:
+.PP
+.nf
+.RS
+shardpostctl search -mailbox Trash -flag '\eDeleted' user@example.org
+shardpostctl plan -mailbox Trash -deleted expunge user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 65
+The UIDVALIDITY does not match: the mailbox is not the one you addressed.
+.TP
+.B 67
+No such account, mailbox or message.
+.TP
+.B 73
+The copy would exceed the quota.
+.TP
+.B 77
+The caller lacks the role
+.RB ( diagnose ", " content " or " support ).
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-mailbox (1),
+.BR shardpostctl-sieve (1)

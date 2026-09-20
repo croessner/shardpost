@@ -1,0 +1,202 @@
+.TH SHARDPOSTCTL-EXPORT 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-export \- export an account to an archive, verify it and restore it
+.SH SYNOPSIS
+.B shardpostctl export
+.BI \-o " file"
+.I account
+.br
+.B shardpostctl archive verify
+.RB [ \-\-json ]
+.I file
+.br
+.B shardpostctl restore
+.RB [ \-account
+.IR target ]
+.RB [ \-acl ]
+.RB [ \-activate-sieve ]
+.RB [ \-\-json ]
+.I file
+.SH DESCRIPTION
+An account can be written to a single archive file and put back from it,
+with the IMAP identities intact: mail clients do not have to download
+everything again after a restore.
+.SS The archive
+Format
+.IR shardpost-account-export ,
+version 1: a tar stream with a header, then per mailbox its description
+(id, name, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, subscription,
+special-use, ACL, annotations), per message a description (UID, GUID,
+flags, MODSEQ, internal and save date, POP3 UIDL, size, SHA-256)
+immediately followed by the message as stored, then the Sieve scripts,
+and last a manifest with the checksum of every entry.
+.PP
+Not in the archive: subscriptions to mailboxes that do not exist, server
+annotations, the trace switch, and the quota limit (it comes from the
+user database). The full-text index is not stored either; it is rebuilt
+from the messages.
+.SS export
+Streams the account into
+.IR file ,
+which must not exist yet, and verifies it afterwards. Role:
+.BR export .
+.PP
+The export does not lock the account. Each mailbox is read as it was when
+the export reached it; messages deleted in the meantime are listed in the
+manifest as
+.IR skipped ,
+deleted mailboxes as
+.IR skipped_mailboxes .
+For an exact point in time, hold the account in the director first.
+.PP
+If the export fails midway, the archive ends with
+.I "complete: false"
+and is refused by both
+.B archive verify
+and
+.BR restore .
+A download that breaks off leaves no file behind. There is no overall
+timeout on the download;
+.B \-timeout
+only bounds the wait for the response and each pause without data.
+.SS archive verify
+Reads the archive and checks every message against its description and
+every entry against the manifest. It needs no server, so a backup can be
+verified where it is kept. Prints what the archive holds.
+.SS restore
+Verifies the archive completely, then imports it through the account
+import: mailboxes with their UIDVALIDITY and ids, messages with UIDs,
+flags, MODSEQ, dates and POP3 UIDLs, then UIDNEXT and HIGHESTMODSEQ per
+mailbox, the ACLs, the annotations and finally the Sieve scripts. Every
+mailbox is checked against the target's inventory and reported as
+.IR verified .
+Role:
+.BR import .
+.PP
+A restore is repeatable: messages that are already there are skipped, so
+a run that broke off can simply be repeated. The target must be empty or
+hold the same data; a mailbox with the same name but a different
+UIDVALIDITY and messages in it is a conflict.
+.PP
+While the restore runs, the account is locked like during an import.
+Afterwards the change log starts behind the restored state, so clients
+with a QRESYNC cache synchronize once in full.
+.SS Restoring into another account
+With
+.B \-account
+the archive goes into a different account, which is how you prove a
+backup without touching the original. Such a restore is deliberately
+isolated: ACLs are
+.I not
+restored (they would give real accounts rights on the copy) and no Sieve
+script is activated (the copy must not send vacation replies or forward
+mail).
+.B \-acl
+and
+.B \-activate-sieve
+switch that on if you really want it.
+.SH OPTIONS
+.TP
+.BI \-o " file"
+Where to write the archive. The file must not exist.
+.TP
+.BI \-account " target"
+Restore into this account instead of the exported one.
+.TP
+.B \-acl
+Restore ACLs even into another account.
+.TP
+.B \-activate-sieve
+Activate the exported Sieve script even in another account.
+.TP
+.B \-\-json
+Print the report as JSON.
+.SH EXAMPLES
+Back up an account and check the result:
+.PP
+.nf
+.RS
+shardpostctl export -o user.tar user@example.org
+shardpostctl archive verify user.tar
+.RE
+.fi
+.PP
+Prove the backup without touching the live account:
+.PP
+.nf
+.RS
+shardpostctl restore -account restore-test@example.org user.tar
+shardpostctl mailbox list -all restore-test@example.org
+.RE
+.fi
+.PP
+Rebuild an account from its archive (this is also how a mailbox created
+with an old index shard size gets the current one). Hold the account
+first so nothing is delivered in between:
+.PP
+.nf
+.RS
+nauthilus-directorctl users hold set user@example.org --duration 15m \\
+    --reason mailbox-rebuild
+nauthilus-directorctl users kick user@example.org --reason mailbox-rebuild
+
+shardpostctl export -o user.tar user@example.org
+shardpostctl plan purge user@example.org
+shardpostctl apply -wait <plan-id>
+shardpostctl restore user.tar
+
+nauthilus-directorctl users hold clear user@example.org \\
+    --reason mailbox-rebuild-complete
+.RE
+.fi
+.PP
+Check an old backup on a workstation, without a server:
+.PP
+.nf
+.RS
+shardpostctl archive verify /backup/2026-09-20/user.tar
+.RE
+.fi
+.PP
+Inside the cluster the archive is written in the
+.I import
+sidecar, where a volume with room for it is mounted:
+.PP
+.nf
+.RS
+kubectl -n shardpost exec deploy/shardpost-server -c import -- \\
+    shardpostctl -timeout 30m export -o /work/user.tar user@example.org
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done; the archive is intact.
+.TP
+.B 1
+The restore partly failed. Run it again; what is already there is
+skipped.
+.TP
+.B 65
+The archive is damaged, incomplete or not a ShardPost archive. Nothing
+was restored.
+.TP
+.B 67
+No such account.
+.TP
+.B 69
+The export failed. No file was left behind.
+.TP
+.B 73
+The target file already exists or could not be created.
+.TP
+.B 77
+The caller lacks the role
+.RB ( export " for the export, " import " for the restore)."
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-migrate (1)
+.PP
+The archive format and the restore are described in
+.IR docs/admin-api.md .

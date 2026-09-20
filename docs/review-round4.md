@@ -1,40 +1,40 @@
-**Neue Datenverlustrisiken in der Intent-Recovery; deutliche Speicherverstärkung bei der FTS-Migration.** Befunde statisch geprüft, `vendor/` nicht reviewed.
+**New data loss risks in intent recovery; substantial memory amplification during the FTS migration.** Findings verified statically, `vendor/` not reviewed.
 
-1. **Hoch – Bestätigte Zustellungen können nachträglich gelöscht werden.**  
-   [mailbox.go:465](/Users/croessner/GoLandProjects/imapcephpoc/internal/imapproto/mailbox.go:465), `internal/lmtpd/lmtpd.go:282`: Scheitert `EndDelivery`, folgt trotzdem APPEND-OK beziehungsweise LMTP-Erfolg. Der verbliebene Intent wird später durch `scrub.go:147` zurückgerollt. **Abhilfe:** dauerhaften Commit-Zustand vor der Erfolgsantwort verlangen.
+1. **High – Confirmed deliveries can be deleted after the fact.**  
+   [mailbox.go:465](/Users/croessner/GoLandProjects/imapcephpoc/internal/imapproto/mailbox.go:465), `internal/lmtpd/lmtpd.go:282`: if `EndDelivery` fails, an APPEND OK, respectively an LMTP success, still follows. The remaining intent is later rolled back by `scrub.go:147`. **Remedy:** require a durable commit state before the success response.
 
-2. **Hoch – Intent-Rollback kann falsche Nachrichten entfernen.**  
-   [scrub.go:147](/Users/croessner/GoLandProjects/imapcephpoc/internal/cephstore/scrub.go:147), `internal/cephstore/user.go:1625`, `:1421`: Gespeichert werden Mailboxname und Meta; gelöscht wird anhand der UID ohne GUID-Prüfung. Nach DELETE/CREATE desselben Mailboxnamens kann die UID eine andere Nachricht bezeichnen. RENAME lässt umgekehrt den Rollback ins Leere laufen. **Abhilfe:** Mailbox-ID und konkrete Nachrichtenidentität beim Löschen atomar prüfen.
+2. **High – Intent rollback can remove the wrong messages.**  
+   [scrub.go:147](/Users/croessner/GoLandProjects/imapcephpoc/internal/cephstore/scrub.go:147), `internal/cephstore/user.go:1625`, `:1421`: what gets stored is the mailbox name and meta; what gets deleted is based on the UID without a GUID check. After a DELETE/CREATE of the same mailbox name, the UID can denote a different message. RENAME, conversely, makes the rollback run into nothing. **Remedy:** check the mailbox ID and the concrete message identity atomically on deletion.
 
-3. **Mittel – Zustell-Intents schließen das Crash-Fenster nicht.**  
-   [mailbox.go:448](/Users/croessner/GoLandProjects/imapcephpoc/internal/imapproto/mailbox.go:448), `:461`, `internal/lmtpd/lmtpd.go:270`, `:277`: Erst wird zugestellt, danach protokolliert; ein Crash dazwischen hinterlässt nicht erfasste Teilzustellungen. Zusätzlich wird der Intent selbst nach fehlgeschlagenem Rollback entfernt (`mailbox.go:455`, `lmtpd.go:273`). **Abhilfe:** Zielschritte vorab dauerhaft identifizieren und Intents bis zum bestätigten Abschluss behalten.
+3. **Medium – Delivery intents do not close the crash window.**  
+   [mailbox.go:448](/Users/croessner/GoLandProjects/imapcephpoc/internal/imapproto/mailbox.go:448), `:461`, `internal/lmtpd/lmtpd.go:270`, `:277`: delivery happens first and is logged afterwards; a crash in between leaves unrecorded partial deliveries. In addition, the intent is removed even after a failed rollback (`mailbox.go:455`, `lmtpd.go:273`). **Remedy:** identify target steps durably up front and keep intents until completion is confirmed.
 
-4. **Hoch – Legacy-Konvertierung vervielfacht Speicher und Doc-ID-Zuordnungen.**  
-   [fts.go:163](/Users/croessner/GoLandProjects/imapcephpoc/internal/cephstore/fts.go:163), `:279`, `:295`: `need` enthält dieselbe GUID für jeden gemeinsamen Term erneut. `ensureDocIDs` prüft ausschließlich `cur`, vergibt deshalb innerhalb eines Versuchs mehrfach IDs für dieselbe fehlende GUID und hinterlässt überzählige `i:<id>`-Einträge. Dazu kommen vollständige Postinglisten, Hexstrings, Schlüssel und Maps über parallele Shard-Worker, ohne Speicherbudget. **Abhilfe:** vor Sammlung und Vergabe deduplizieren, Migration portionieren und Parallelität begrenzen. Das passt zum einmaligen OOM bei anschließenden 230 MiB RSS; ohne Heap-/RSS-Profil ist die konkrete OOM-Ursache nicht bewiesen.
+4. **High – Legacy conversion multiplies memory and doc ID assignments.**  
+   [fts.go:163](/Users/croessner/GoLandProjects/imapcephpoc/internal/cephstore/fts.go:163), `:279`, `:295`: `need` contains the same GUID again for every shared term. `ensureDocIDs` only checks `cur` and therefore assigns IDs multiple times for the same missing GUID within a single attempt, leaving surplus `i:<id>` entries behind. On top of that come complete posting lists, hex strings, keys and maps across parallel shard workers, without a memory budget. **Remedy:** deduplicate before collection and assignment, chunk the migration and bound the parallelism. This matches the one-off OOM with 230 MiB RSS afterwards; without a heap/RSS profile, the concrete OOM cause is not proven.
 
-5. **Hoch – QRESYNC-Fallback benötigt Speicher proportional zu UIDNEXT.**  
-   [mailbox.go:613](/Users/croessner/GoLandProjects/imapcephpoc/internal/imapproto/mailbox.go:613), `:620`, `internal/imapproto/numset.go:108`: Ohne known-UIDs werden sämtliche historischen UIDs materialisiert, fehlende nochmals gesammelt und für `formatSet` kopiert. Auch eine inzwischen leere Mailbox kann dadurch einen Pod überfordern. **Abhilfe:** VANISHED direkt als komprimierte Lückenintervalle aus den vorhandenen UIDs erzeugen.
+5. **High – The QRESYNC fallback needs memory proportional to UIDNEXT.**  
+   [mailbox.go:613](/Users/croessner/GoLandProjects/imapcephpoc/internal/imapproto/mailbox.go:613), `:620`, `internal/imapproto/numset.go:108`: without known UIDs, all historical UIDs are materialized, the missing ones are collected once more and copied for `formatSet`. Even a mailbox that is empty by now can overwhelm a pod this way. **Remedy:** generate VANISHED directly as compressed gap intervals from the existing UIDs.
 
-6. **Hoch – Neue mbox-Löschung überspringt bei Stat-Fehlern die Karenzprüfung.**  
-   [scrub.go:432](/Users/croessner/GoLandProjects/imapcephpoc/internal/cephstore/scrub.go:432): Jeder `Stat`-Fehler führt weiter zu `Delete`. Eine nach dem Registry-Snapshot angelegte Mailbox kann somit trotz laufender Nutzung gelöscht werden, wenn ihre Altersprüfung fehlschlägt. **Abhilfe:** bei Lesefehlern nicht löschen; Registrierung und Objektversion vor Löschung erneut absichern.
+6. **High – The new mbox deletion skips the grace check on stat errors.**  
+   [scrub.go:432](/Users/croessner/GoLandProjects/imapcephpoc/internal/cephstore/scrub.go:432): every `Stat` error still leads on to `Delete`. A mailbox created after the registry snapshot can thus be deleted despite being in use, if its age check fails. **Remedy:** do not delete on read errors; re-verify registration and object version before deletion.
 
-7. **Mittel – Kurzlebige OIDC-Tokens werden bei jedem Aufruf erneuert.**  
-   [oidc.go:60](/Users/croessner/GoLandProjects/imapcephpoc/internal/auth/oidc.go:60): Bei `expires_in <= 60` liegt jedes frisch geholte Token bereits im festen Refresh-Fenster. Jeder wartende Aufrufer führt deshalb unter dem Mutex einen weiteren Tokenrequest aus. **Abhilfe:** Refresh-Vorlauf relativ zur tatsächlichen Lebensdauer begrenzen.
+7. **Medium – Short-lived OIDC tokens are renewed on every call.**  
+   [oidc.go:60](/Users/croessner/GoLandProjects/imapcephpoc/internal/auth/oidc.go:60): with `expires_in <= 60`, every freshly fetched token already lies within the fixed refresh window. Every waiting caller therefore performs another token request under the mutex. **Remedy:** bound the refresh lead time relative to the actual lifetime.
 
-**Abgleich der gezielt nachgeprüften Punkte aus Runde 3**
+**Review of the specifically re-checked items from round 3**
 
-| Punkt | Status jetzt |
+| Item | Status now |
 |---|---|
-| Neu #1 – dauerhafte Budgetblockade | **Behoben:** begrenztes Warten (`membudget.go:82`); zusätzlicher LMTP-EOF-Schritt korrigiert (`lmtpd.go:149`). |
-| Neu #2 – STORE-ModSeq rückläufig | **Teilweise:** `max` verhindert Rückwärtsbewegung (`user.go:1291`). Zwei verschiedene Flagzustände können jedoch dieselbe ModSeq erhalten; `CHANGEDSINCE` übersieht dann die spätere Änderung. |
-| Neu #3 – PendingFloor nach Snapshot / 512er-Fenster | **Beschriebene Fehler behoben:** Prüfung vor Snapshot (`mailbox.go:675`), Sondierung statt Fenster (`user.go:840`), Fehlerweitergabe. |
-| Neu #4 – STORE-Ergebnis enthält verworfene CAS-Versuche | **Behoben:** Ergebnis pro Versuch zurückgesetzt (`user.go:1269`). |
-| Neu #5 – MOVE ohne eigene Blob-Referenz | **Behoben im regulären Pfad:** Referenz vor Ziel-Link, Freigabe tatsächlich entfernter Quellen (`user.go:1578`, `:1595`). |
-| R1 #13 – parallele Quota-Überschreitung | **Reservierung behoben:** `reserveQuota` in Deliver/Copy. Scrub kann Reservierungen weiterhin überschreiben (`scrub.go:455`). |
-| R1 #18/#26 – MULTIAPPEND/Sieve-Teilzustellung | **Nicht vollständig behoben:** siehe neue Intent-Befunde. |
-| R1 #3/#11 – Pending/QRESYNC | **Teilweise:** Antwort ohne known-UIDs ergänzt. Pending verfällt weiterhin nach 30 Sekunden; VANISHED wird weiterhin vor Shard-Commit geschrieben (`user.go:793`, `:665`). |
-| R1 #6/#7 – destruktiver Scrub | **Weiter offen:** fehlender letzter Shard bleibt ungeschützt; zweistufige Waisenprüfung endet weiterhin ohne atomare Löschabsicherung (`scrub.go:263`, `:406`). |
-| R1 #8/#9 – MOVE-Recovery | **Teilweise:** eigene Referenz ergänzt; irgendein GUID-Treffer im Ziel ersetzt weiterhin die konkrete MOVE-Zielidentität (`scrub.go:211`). |
-| R1 #31 – FTS-Skalierung | **Teilweise:** kompaktere Postings; vollständige Listen und neue Migrationsverstärkung bleiben. |
+| New #1 – permanent budget blockage | **Fixed:** bounded waiting (`membudget.go:82`); the additional LMTP EOF step corrected (`lmtpd.go:149`). |
+| New #2 – STORE ModSeq going backwards | **Partially:** `max` prevents backward movement (`user.go:1291`). Two different flag states can, however, receive the same ModSeq; `CHANGEDSINCE` then misses the later change. |
+| New #3 – PendingFloor after snapshot / 512-entry window | **The described bugs fixed:** the check happens before the snapshot (`mailbox.go:675`), probing instead of a window (`user.go:840`), error propagation. |
+| New #4 – STORE result contains discarded CAS attempts | **Fixed:** the result is reset per attempt (`user.go:1269`). |
+| New #5 – MOVE without its own blob reference | **Fixed in the regular path:** reference before the target link, release of the sources actually removed (`user.go:1578`, `:1595`). |
+| R1 #13 – parallel quota overrun | **Reservation fixed:** `reserveQuota` in Deliver/Copy. Scrub can still overwrite reservations (`scrub.go:455`). |
+| R1 #18/#26 – MULTIAPPEND/partial Sieve delivery | **Not fully fixed:** see the new intent findings. |
+| R1 #3/#11 – Pending/QRESYNC | **Partially:** the response without known UIDs was added. Pending still expires after 30 seconds; VANISHED is still written before the shard commit (`user.go:793`, `:665`). |
+| R1 #6/#7 – destructive scrub | **Still open:** a missing last shard remains unprotected; the two-stage orphan check still ends without atomic deletion safeguards (`scrub.go:263`, `:406`). |
+| R1 #8/#9 – MOVE recovery | **Partially:** an own reference was added; any GUID hit in the target still substitutes for the concrete MOVE target identity (`scrub.go:211`). |
+| R1 #31 – FTS scaling | **Partially:** more compact postings; complete lists and the new migration amplification remain. |
 
-Vorhandene Tests für Auth, Postings, Membudget, IMAP, POP3, FTS und Sieve bestehen aus dem Testcache. Nauthilus-Kustomize-Overlay erfolgreich gerendert. Ceph-/LMTP-/Server-Tests scheitern am fehlenden `rados/librados.h`; Crash-Verhalten und Lastspitzen bleiben laufzeitseitig unbestätigt.
+The existing tests for auth, postings, membudget, IMAP, POP3, FTS and Sieve pass from the test cache. The Nauthilus kustomize overlay rendered successfully. Ceph/LMTP/server tests fail on the missing `rados/librados.h`; crash behavior and load peaks remain unconfirmed at runtime.

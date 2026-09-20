@@ -1,0 +1,150 @@
+.TH SHARDPOSTCTL-LEARNING 1 "2026-09-20" "ShardPost 0.23.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-learning \- inspect and retry jobs of the learning queue
+.SH SYNOPSIS
+.B shardpostctl learning list
+.RB [ \-account
+.IR account ]
+.RB [ \-state
+.IR state ]
+.RB [ \-limit
+.IR n ]
+.RB [ \-after
+.IR id ]
+.RB [ \-\-json ]
+.br
+.B shardpostctl learning show
+.RB [ \-\-json ]
+.I job-id
+.br
+.B shardpostctl learning retry
+.RB [ \-confirm-repeat ]
+.RB [ \-\-json ]
+.I job-id
+.SH DESCRIPTION
+When a user moves a message into the junk mailbox (or out of it),
+IMAPSieve queues a learning job. A worker hands the message to the
+configured program, for example a spam filter's learn command, retries
+with backoff and gives up after
+.I imapsieve.learning.max_attempts
+attempts. These commands look at that queue and put a dead job back into
+it.
+.SS learning list
+The queue, oldest job id first, with account, program, state, attempts
+and the next attempt.
+.B \-state
+narrows it to
+.IR pending ,
+.I dead
+or
+.IR delivered .
+A client with an account scope must pass
+.BR \-account .
+Role:
+.BR diagnose .
+.SS learning show
+One job in detail: account, mailbox id, program, state, attempts, manual
+retries, size, creation time and next attempt. The message itself is
+never printed. Role:
+.BR diagnose .
+.SS learning retry
+Makes a dead job due again: the attempt counter starts over and the
+worker picks it up on its next pass.
+.PP
+Learning programs are not idempotent. A message learned twice counts
+twice and skews the filter, and a job can be dead although its program
+already received the message (a timeout after the handover, for example).
+Therefore a job that was attempted before is only retried with
+.BR \-confirm-repeat .
+A job whose message was never committed to the store (no receipt) cannot
+be retried at all: there is nothing left to learn.
+.PP
+Only dead jobs can be retried. A pending job is already scheduled, and a
+delivered one is on its way out of the queue.
+.PP
+Role:
+.BR repair .
+.SH OPTIONS
+.TP
+.BI \-account " account"
+Only jobs of this account.
+.TP
+.BI \-state " pending|dead|delivered"
+Only jobs in this state.
+.TP
+.BI \-limit " n"
+Jobs per page (up to 500).
+.TP
+.BI \-after " id"
+Continue after this job id.
+.TP
+.B \-confirm-repeat
+Retry although the program may already have seen this message.
+.TP
+.B \-\-json
+Print the answer as JSON.
+.SH EXAMPLES
+Is the queue backing up, and is anything dead?
+.PP
+.nf
+.RS
+shardpostctl learning list -limit 20
+shardpostctl learning list -state dead
+.RE
+.fi
+.PP
+A user says "marking as spam has no effect": look at their jobs.
+.PP
+.nf
+.RS
+shardpostctl learning list -account user@example.org
+shardpostctl learning show 6f1c...e2
+.RE
+.fi
+.PP
+The spam filter was down for an hour. Put the jobs that died because of
+it back into the queue, accepting that a message may be learned twice:
+.PP
+.nf
+.RS
+for id in $(shardpostctl learning list -state dead --json \\
+        | jq -r '.items[].id'); do
+    shardpostctl learning retry -confirm-repeat "$id"
+done
+.RE
+.fi
+.PP
+A job that never reached its program (no attempt yet) needs no
+confirmation:
+.PP
+.nf
+.RS
+shardpostctl learning retry 6f1c...e2
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 65
+The job is not dead, its message was never committed, or it was attempted
+and
+.B \-confirm-repeat
+was not given.
+.TP
+.B 67
+No such learning job.
+.TP
+.B 75
+The learning queue is not available on this server.
+.TP
+.B 77
+The caller lacks the role, or the job belongs to an account outside its
+scope.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-sieve (1)
+.PP
+The learning rules are described in
+.IR docs/imapsieve.md .

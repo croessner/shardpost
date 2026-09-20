@@ -1,6 +1,6 @@
-# IMAPSieve, externe Programme und Lernen
+# IMAPSieve, external programs and learning
 
-IMAPSieve reagiert nach dem Speichern auf APPEND/MULTIAPPEND, COPY, MOVE (Sieve-Ursache COPY), tatsächliche STORE-Flagänderungen und FETCH mit gesetztem Seen-Flag. Ein unverändertes STORE und BODY.PEEK lösen keinen Flaglauf aus. Skripte laufen außerhalb der Verbindungsschreibsperre; Ergebnisänderungen gelangen über den vorhandenen IMAP-Benachrichtigungspfad an Clients.
+IMAPSieve reacts, after the store, to APPEND/MULTIAPPEND, COPY, MOVE (Sieve cause COPY), actual STORE flag changes and FETCH that sets the Seen flag. A STORE that changes nothing and BODY.PEEK do not trigger a flag run. Scripts run outside the connection write lock; the changes they produce reach clients over the existing IMAP notification path.
 
 ```yaml
 imapsieve:
@@ -41,104 +41,105 @@ extprograms:
       env: {LEARN_BACKEND: rspamd, LEARN_URL: "http://classifier:11334", LEARN_TOKEN_FILE: /run/secrets/learning/token}
 ```
 
-## Externe Programme (extprograms)
+## External programs (extprograms)
 
-Der Server kennt keinen Klassifizierer und keine Shell. Alles, was ein
-fremdes Programm startet, läuft über die Tabelle `extprograms.programs`,
-nach dem Muster einer sudoers-Regel: der Name ist der Schlüssel, der
-Eintrag ist genau eine Kommandozeile. Ein Sieve-Skript oder eine Lernregel
-kann nur den Namen wählen.
+The server knows neither a classifier nor a shell. Everything that starts
+an external program goes through the `extprograms.programs` table,
+following the pattern of a sudoers rule: the name is the key, the entry is
+exactly one command line. A Sieve script or a learning rule can only
+choose the name.
 
-* `command` liegt unter `bin_dir`, ohne Verzeichnisanteil, muss eine
-  reguläre Datei sein (kein Symlink) und darf für Gruppe und Andere nicht
-  schreibbar sein. Das Verzeichnis gehört root, der Server läuft als
-  unprivilegierter Benutzer.
-* `args` sind fest; `{account}` und `{mailbox}` werden ersetzt, bei
-  Quota-Programmen zusätzlich die Quota-Platzhalter (siehe `docs/quota.md`). Skripte
-  dürfen nur mit `allow_script_args: true` eigene Argumente anhängen
-  (Zeichenfilter: keine Steuerzeichen, höchstens 64 Argumente zu je 1024 Bytes).
-* `kinds` beschränkt die Verwendung auf `execute`, `pipe`, `filter`,
-  `learning` oder `quota` (Quota-Warnungen und Over-Flag); leer heißt alle.
-* Umgebung: nur `PATH`, `LANG`, `HOME`, die Einträge aus `env` und die
-  Aufrufwerte (bei `quota` die `QUOTA_*`-Werte statt dieser) `SIEVE_ACCOUNT`, `SIEVE_MAILBOX`, `SIEVE_CAUSE`,
-  `SIEVE_CHANGED_FLAGS`. Im Lernworker enthält `SIEVE_MAILBOX` die stabile
-  Mailbox-ID; bei Sieve-Ereignissen den Mailboxnamen. Die Nachricht kommt auf stdin, stdout wird bis
-  `max_output_bytes` gelesen (Standard 1 MiB), `timeout_ms` (Standard
-  10 s) beendet die Prozessgruppe, einschließlich des Wartens auf einen freien Ausführungsplatz. `max_parallel` (Standard 4) begrenzt
-  gleichzeitige Läufe je Eintrag.
-* Exit-Codes: 0 Erfolg, 75 (`EX_TEMPFAIL`) vorübergehender Fehler,
-  alles andere endgültig. Metrik `imap_extprograms_runs_total{program,result}`.
+* `command` lives under `bin_dir`, without a directory component, must be
+  a regular file (not a symlink) and must not be writable by group or
+  others. The directory belongs to root, the server runs as an
+  unprivileged user.
+* `args` are fixed; `{account}` and `{mailbox}` are substituted, and for
+  quota programs the quota placeholders as well (see `docs/quota.md`).
+  Scripts may append arguments of their own only with
+  `allow_script_args: true` (character filter: no control characters, at most
+  64 arguments of 1024 bytes each).
+* `kinds` restricts the use to `execute`, `pipe`, `filter`,
+  `learning` or `quota` (quota warnings and the over flag); empty means all.
+* Environment: only `PATH`, `LANG`, `HOME`, the entries from `env` and the
+  invocation values (for `quota` the `QUOTA_*` values instead of these) `SIEVE_ACCOUNT`, `SIEVE_MAILBOX`, `SIEVE_CAUSE`,
+  `SIEVE_CHANGED_FLAGS`. In the learning worker, `SIEVE_MAILBOX` holds the
+  stable mailbox ID; for Sieve events it holds the mailbox name. The message arrives on stdin, stdout is read up to
+  `max_output_bytes` (default 1 MiB), `timeout_ms` (default
+  10 s) terminates the process group, including the wait for a free execution slot. `max_parallel` (default 4) limits
+  concurrent runs per entry.
+* Exit codes: 0 success, 75 (`EX_TEMPFAIL`) a temporary error,
+  everything else permanent. Metric `imap_extprograms_runs_total{program,result}`.
 
-In Sieve stehen damit Pigeonholes Erweiterungen zur Verfügung, bei der
-Zustellung wie in IMAPSieve-Skripten, mit den Capability-Namen
-`vnd.dovecot.execute`, `vnd.dovecot.pipe` und `vnd.dovecot.filter`
-(ManageSieve zeigt sie nur an, wenn Programme konfiguriert sind):
+This makes Pigeonhole's extensions available in Sieve, during
+delivery as well as in IMAPSieve scripts, under the capability names
+`vnd.dovecot.execute`, `vnd.dovecot.pipe` and `vnd.dovecot.filter`
+(ManageSieve advertises them only when programs are configured):
 
 ```sieve
 require ["vnd.dovecot.execute", "vnd.dovecot.pipe", "vnd.dovecot.filter", "variables", "copy"];
-if execute :pipe :output "score" "classify" { ... }   # Programm liest die Nachricht, stdout in ${score}
-pipe :copy "archive";                                  # Kopie an ein Programm, Zustellung geht weiter
-filter "rewrite";                                      # stdout des Programms ersetzt die Nachricht
+if execute :pipe :output "score" "classify" { ... }   # the program reads the message, stdout into ${score}
+pipe :copy "archive";                                  # copy to a program, delivery continues
+filter "rewrite";                                      # the program's stdout replaces the message
 ```
 
-`execute` und `filter` laufen während der Skriptauswertung. `pipe` wird
-als Zustellaktion vorgemerkt und vor dem Verwerfen beziehungsweise dem
-Setzen von `\Deleted` ausgeführt. Ein Fehler ohne `:try` erhält bei IMAP
-das Original und führt bei LMTP zur sicheren INBOX-Zustellung. Ein
-fehlgeschlagenes `pipe :try` wirkt wie eine nicht ausgeführte Aktion und
-hebt den impliziten Keep nicht auf. Ein Programm darf pro Skript nur eine
-Pipe-Aktion erhalten; Pipe und Reject sind unvereinbar.
+`execute` and `filter` run while the script is evaluated. `pipe` is
+registered as a delivery action and is executed before the message is
+discarded or `\Deleted` is set. Under IMAP, an error without `:try` keeps
+the original; under LMTP it leads to the safe INBOX delivery. A
+failed `pipe :try` behaves like an action that was not performed and
+does not cancel the implicit keep. A program may receive only one
+pipe action per script; pipe and reject are incompatible.
 
-`execute` und `filter` sind auch als Tests verwendbar. Programmnamen sind
-Konstanten. Filter und Headeränderungen gelten für nachfolgende Aktionen;
-bereits vorgemerkte Aktionen behalten ihre eigene Nachrichtenversion.
-Die Ausgabe von `execute :output` wird einschließlich Zeilenenden erhalten.
-Die Eingabe dieser beiden Aufrufe verwendet standardmäßig LF;
-`sieve_execute_input_eol=crlf` beziehungsweise `sieve_filter_input_eol=crlf`
-in `sieve.settings` kann CRLF wählen. Die dauerhafte Lernqueue übergibt die
-Originalnachricht unverändert an den Programmstarter.
+`execute` and `filter` can also be used as tests. Program names are
+constants. Filters and header changes apply to subsequent actions;
+actions that are already registered keep their own version of the message.
+The output of `execute :output` is preserved including its line endings.
+The input of these two invocations uses LF by default;
+`sieve_execute_input_eol=crlf` and `sieve_filter_input_eol=crlf`
+in `sieve.settings` can select CRLF. The durable learning queue hands the
+original message to the program launcher unchanged.
 
-Externe Programme dürfen im IMAP-Pfad nur durch den Mailbox-Eigentümer
-aufgerufen werden. Ein Zugriff auf eine geteilte Mailbox darf keine
-externen Seiteneffekte mit dessen Identität auslösen. Programmaufrufe und
-Ceph-Schreiboperationen sind keine gemeinsame Transaktion: Nach einem
-Abbruch können externe Effekte wiederholt werden. Programme müssen für
-solche Fälle geeignet sein; Exactly-once wird nicht zugesichert.
+In the IMAP path, external programs may only be invoked by the mailbox
+owner. Access to a shared mailbox must not cause external side effects
+under the owner's identity. Program invocations and
+Ceph writes are not one common transaction: after an
+abort, external effects can be repeated. Programs have to be suitable for
+such cases; exactly-once is not guaranteed.
 
-## Lernprogramm
+## Learning program
 
-`programs/learn.py` ist ein Beispiel mit reiner Standardbibliothek, das
-über `LEARN_BACKEND` zwischen `rspamd` (HTTP-Controller, `Password`-
-Header, `/learnspam` und `/learnham`), `spamc` (SpamAssassin) und `log`
-umschaltet und die Ergebnisse auf die Exit-Codes abbildet. Ein anderer
-Klassifizierer braucht ein anderes Programm im Verzeichnis, sonst nichts.
+`programs/learn.py` is an example built purely on the standard library. It
+switches via `LEARN_BACKEND` between `rspamd` (HTTP controller, `Password`
+header, `/learnspam` and `/learnham`), `spamc` (SpamAssassin) and `log`
+and maps the results onto the exit codes. A different classifier needs a
+different program in the directory, nothing else.
 
-Der HTTP-Helper folgt keinen Redirects, damit der Token nicht an andere
-Ziele weitergegeben wird. 208 und bestätigtes „already learned“ gelten als
-Erfolg; Transportfehler, 408, 429 und 5xx werden wiederholt. Der alternative
-`spamc`-Pfad deaktiviert Safe-Fallback mit `-x`; er ist im Standardimage
-nicht installiert und wurde über seinen Aufruf-/Exitcode-Vertrag geprüft.
+The HTTP helper follows no redirects, so that the token is not passed on to
+other targets. 208 and a confirmed "already learned" count as
+success; transport errors, 408, 429 and 5xx are retried. The alternative
+`spamc` path disables the safe fallback with `-x`; it is not installed in
+the standard image and has been verified through its invocation and exit-code contract.
 
-Beim Upgrade von 0.10.1 bleiben im Produktionsprofil **spam** und **ham**
-die Programmnamen. Diese entsprechen den gespeicherten `Action`-Werten
-alter Queue-Einträge und sind auch für alte Worker während des rollenden
-Upgrades verständlich. Programmnamen bleiben generell frei wählbar, dürfen
-aber bei vorhandenen Aufträgen nicht ohne Übergang entfernt oder
-umbenannt werden. Go enthält dazu keine Klassifizierer-Sonderbehandlung.
-Viper normalisiert YAML-Schlüssel; `env`-Schlüssel werden deshalb vor der
-Prüfung in Großbuchstaben überführt. Ihre Werte bleiben unverändert.
+When upgrading from 0.10.1, the program names in the production profile
+remain **spam** and **ham**. They correspond to the stored `Action` values
+of old queue entries and are also understood by old workers during the
+rolling upgrade. Program names remain freely choosable in general, but
+while jobs still exist they must not be removed or renamed without a
+transition. Go contains no special handling for classifiers here.
+Viper normalizes YAML keys; `env` keys are therefore uppercased before
+validation. Their values stay unchanged.
 
-## Benutzer-Skripte
+## User scripts
 
-ManageSieve PUTSCRIPT legt das Skript ab. SETMETADATA ordnet es zu; SETACTIVE betrifft weiterhin ausschließlich die Zustellung und weist Skripte mit `require "imapsieve"` ab.
+ManageSieve PUTSCRIPT stores the script. SETMETADATA assigns it; SETACTIVE still concerns delivery only and rejects scripts with `require "imapsieve"`.
 
 ```text
 SETMETADATA INBOX ("/shared/imapsieve/script" "inbox-events")
 ```
 
-Ein vorhandener Mailbox-Eintrag gewinnt gegenüber dem geteilten Server-Eintrag im reservierten Namespace `~server`. Ein leerer oder auf ein fehlendes Skript verweisender Mailbox-Eintrag deaktiviert den Lauf ohne Fallback. Geteilte Server-Metadaten sind für Benutzer schreibgeschützt. Auf freigegebenen Mailboxen benötigt die Skriptzuordnung das Administrationsrecht `a`; das Skript stammt aus dem Speicher des Eigentümers. Seine Aktionen bleiben durch die Rechte des auslösenden Benutzers begrenzt. Cross-Owner-fileinto und ausgehende Nachrichten aus fremden Mailboxen werden abgewiesen.
+An existing mailbox entry wins over the shared server entry in the reserved namespace `~server`. A mailbox entry that is empty or points to a missing script disables the run without a fallback. Shared server metadata is read-only for users. On shared mailboxes, assigning a script requires the administration right `a`; the script comes from the owner's storage. Its actions remain bounded by the rights of the user who triggered it. Cross-owner fileinto and outgoing messages from other people's mailboxes are rejected.
 
-Beispiel:
+Example:
 
 ```sieve
 require ["imapsieve", "environment", "imap4flags"];
@@ -148,51 +149,51 @@ if allof (environment :is "imap.cause" "FLAG",
 }
 ```
 
-`fileinto` benötigt derzeit eine bereits vorhandene Zielmailbox; `:create` erzeugt im IMAP-Pfad keine Mailbox. `keep` behält das Original; `fileinto` erzeugt eine zusätzliche Nachricht und markiert das Original ohne keep als Deleted. `discard` markiert das Original als Deleted. Es gibt kein automatisches EXPUNGE. Headeränderungen wirken nur auf nachfolgende Kopien/Weiterleitungen. Redirect und mailto-Notify verwenden den konfigurierten SMTP-Relay mit Schleifenschutz; sie setzen eine gültige Eigentümeradresse voraus. Reject, Ereject und Vacation sind im IMAP-Kontext unzulässig; Envelope-Tests erzeugen einen Laufzeitfehler. Acht Aktionen und das konfigurierte Zeitlimit begrenzen einen Lauf. FLAG-Skripte lösen keine weiteren FLAG-Skripte aus; fileinto erzeugt kein COPY-Ereignis.
+`fileinto` currently requires the target mailbox to exist already; `:create` does not create a mailbox in the IMAP path. `keep` retains the original; `fileinto` creates an additional message and, without keep, marks the original as Deleted. `discard` marks the original as Deleted. There is no automatic EXPUNGE. Header changes affect only subsequent copies and forwards. Redirect and mailto notify use the configured SMTP relay with loop protection; they require a valid owner address. Reject, ereject and vacation are not permitted in the IMAP context; envelope tests raise a runtime error. Eight actions and the configured time limit bound a single run. FLAG scripts do not trigger further FLAG scripts; fileinto does not produce a COPY event.
 
-Skriptfehler lassen die ursprüngliche IMAP-Änderung bestehen. Bei konkurrierenden Flags gewinnt die spätere Clientänderung. Zielkopien werden vor einer möglichen Löschmarkierung des Originals dauerhaft bestätigt. Ein Absturz in diesem Zwischenraum kann eine zusätzliche Kopie hinterlassen; er entfernt keine einzige verbleibende Nachrichtenkopie. Bei mehrdeutigem Speicherfehler werden bestätigte Zielkopien nicht zurückgerollt.
+Script errors leave the original IMAP change in place. With competing flags, the later client change wins. Target copies are durably committed before the original is possibly marked as deleted. A crash in that window can leave an additional copy behind; it removes no remaining copy of a message. On an ambiguous storage error, committed target copies are not rolled back.
 
-## Dauerhafte Lernwarteschlange
+## Durable learning queue
 
-Lernen ist eine Betreiberregel und unabhängig von Benutzerskripten; jede
-Regel nennt den `extprograms`-Eintrag, der die Nachricht bekommt. Unterstützt werden COPY/MOVE innerhalb des eigenen Kontos; APPEND/Importe und Cross-Owner-Operationen trainieren nicht. Die erste passende Regel gewinnt; Special-Use-Zuordnungen sind unabhängig von übersetzten Ordnernamen.
+Learning is an operator rule and independent of user scripts; every
+rule names the `extprograms` entry that receives the message. COPY/MOVE within one's own account are supported; APPEND/imports and cross-owner operations do not train. The first matching rule wins; special-use assignments are independent of translated folder names.
 
-Vor dem Ceph-Link wird eine unabhängige Kopie des Inhalts im Datenpool-Namespace `~learning` persistiert. Ein Commitnachweis wird atomar mit dem Zieleintrag geschrieben, auch bei höheren Indexshards. Erst danach kann der Worker senden. EXPUNGE lässt den Payload unberührt. Link und Mailbox-DELETE koordinieren sich über eine Ceph-Lease; vor dem Löschen werden noch benötigte Commitnachweise in die Queue übertragen.
+Before the Ceph link, an independent copy of the content is persisted in the data pool namespace `~learning`. A commit receipt is written atomically together with the target entry, even across higher index shards. Only then can the worker send. EXPUNGE leaves the payload untouched. Link and mailbox DELETE coordinate through a Ceph lease; before the deletion, commit receipts that are still needed are transferred into the queue.
 
-Genau ein Worker hält die clusterweite Lernlease. Fehlversuche werden mit Backoff wiederholt. Die Auswahl priorisiert die ältesten fälligen Einträge. Nach erfolgreicher Antwort wird der Abschlusszustand gespeichert, anschließend werden Receipt und Payload entfernt. Exit 75 des Programms führt zur Wiederholung mit Backoff, jeder andere Fehlschlag beendet den Auftrag endgültig. Ein Absturz zwischen Annahme durch das Programm und lokaler Bestätigung kann einen Wiederholungsaufruf verursachen: der Transport bietet mindestens einmalige Zustellung, keine verteilte Exactly-once-Garantie. Endgültig fehlgeschlagene oder nach 24 Stunden weiterhin unbestätigte Jobs bleiben für die Diagnose erhalten; sie werden nicht still als erfolgreich entfernt.
+Exactly one worker holds the cluster-wide learning lease. Failed attempts are retried with backoff. The selection prioritizes the oldest due entries. After a successful response the final state is stored, and receipt and payload are removed afterwards. Exit 75 from the program leads to a retry with backoff, any other failure ends the job permanently. A crash between the program accepting the message and the local confirmation can cause a repeated invocation: the transport offers at-least-once delivery, not a distributed exactly-once guarantee. Jobs that have permanently failed or are still unconfirmed after 24 hours are kept for diagnosis; they are not silently removed as successful.
 
-Nachrichten oberhalb der Größenbegrenzung werden nicht gelernt und als `oversize` gezählt. Ein Fehler beim dauerhaften Vorbereiten des Lernauftrags verhindert den betreffenden Link, damit kein erfolgreich bestätigter Lernvorgang ohne gespeicherten Auftrag entsteht.
+Messages above the size limit are not learned and are counted as `oversize`. An error while durably preparing the learning job prevents the corresponding link, so that no successfully confirmed learning operation exists without a stored job.
 
-Metriken: `imap_imapsieve_events_total{phase=...}` und `imap_imapsieve_learning_total{result=...}`. Keine Nachrichtentexte, Passwörter oder Skriptfehler mit Nachrichtendaten werden geloggt. Dead-Letter-Aufträge benötigen eine bewusste Betreiberentscheidung; es gibt noch keine grafische Queue-Verwaltung.
+Metrics: `imap_imapsieve_events_total{phase=...}` and `imap_imapsieve_learning_total{result=...}`. No message texts, passwords or script errors containing message data are logged. Dead-letter jobs require a deliberate operator decision; there is no graphical queue management yet.
 
-Der Lernpfad benutzt dieselbe Programmtabelle wie die Sieve-Erweiterungen; im IMAP-Pod läuft nur das konfigurierte Programm, keine Shell.
+The learning path uses the same program table as the Sieve extensions; in the IMAP pod only the configured program runs, no shell.
 
-Referenz: RFC 6785, https://www.rfc-editor.org/rfc/rfc6785.html
-
-
-## Ressourcengrenzen des Sieve-Interpreters (ab 0.11.1)
-
-Ein regulärer Skriptlauf ist standardmäßig auf fünf Sekunden verstrichene
-Zeit begrenzt. `sieve_max_cpu_time` in den Sieve-Einstellungen akzeptiert
-positive Go-Zeitintervalle wie `2s`; die Grenze misst verstrichene Zeit und
-nicht ausschließlich CPU-Zeit. Ein kürzerer Timeout des Aufrufers gewinnt.
-Die bestehende IMAPSieve-Einstellung `timeout_ms` gilt daher auch während
-aufwendiger Regex-Vergleiche. Die Ausführung läuft bei Abbruch nicht in einer
-abgekoppelten Goroutine weiter.
-
-`foreverypart` darf viermal verschachtelt werden, einschließlich Includes.
-Der MIME-Baum ist auf 1000 Teile, Tiefe 20 und 256 KiB Header pro Teil
-begrenzt. Bei Überschreitung wird die Skriptausführung abgebrochen. LMTP
-verwendet seinen bestehenden Fehlerpfad mit Originalnachricht in INBOX;
-IMAPSieve verwirft das fehlgeschlagene Ergebnis und markiert die Nachricht
-nicht als gelöscht. Die Nachricht selbst wird nicht gekürzt, um eine
-Grenzüberschreitung zu kaschieren.
-
-Details: [Sieve-Korrekturbericht](reports/2026-09-16-sieve-conformance-fixes.md).
+Reference: RFC 6785, https://www.rfc-editor.org/rfc/rfc6785.html
 
 
-Ab 0.11.2 akzeptiert der Rspamd-Helper HTTP 204 und 208 als erfolgreiche
-Antworten ohne JSON-Body. Ein leeres HTTP 200 bleibt ein temporärer Fehler.
-HTTP 204 wurde bei der produktiven Abnahme tatsächlich beobachtet; die
-vorherige Version wiederholte solche bereits erfolgreich beantworteten
-Aufträge fälschlich bis zum Fehlerbestand.
+## Resource limits of the Sieve interpreter (from 0.11.1)
+
+A regular script run is limited to five seconds of elapsed time by
+default. `sieve_max_cpu_time` in the Sieve settings accepts
+positive Go durations such as `2s`; the limit measures elapsed time and
+not CPU time alone. A shorter timeout from the caller wins.
+The existing IMAPSieve setting `timeout_ms` therefore also applies during
+expensive regex comparisons. On abort, execution does not continue in a
+detached goroutine.
+
+`foreverypart` may be nested four levels deep, includes counted.
+The MIME tree is limited to 1000 parts, depth 20 and 256 KiB of headers
+per part. If a limit is exceeded, script execution is aborted. LMTP
+uses its existing error path with the original message in INBOX;
+IMAPSieve discards the failed result and does not mark the message
+as deleted. The message itself is not truncated in order to hide an
+exceeded limit.
+
+Details: [Sieve conformance fix report](reports/2026-09-16-sieve-conformance-fixes.md).
+
+
+From 0.11.2 on, the rspamd helper accepts HTTP 204 and 208 as successful
+responses without a JSON body. An empty HTTP 200 remains a temporary error.
+HTTP 204 was actually observed during the production acceptance; the
+previous version wrongly retried such already successfully answered
+jobs until they ended up in the failed set.

@@ -13,7 +13,7 @@ ADMIN_API_GEN         := internal/adminapi/api.gen.go
 LINT_IMAGE ?= shardpost-lint:$(GOLANGCI_LINT_VERSION)
 
 
-.PHONY: build build-tools push deploy undeploy status lint lint-image lint-local test test-docker test-programs test-programs-ldap contrib-ucm-renew-test contrib-ucm-renew-lint contrib-ucm-renew-build test-static-cluster logs generate check-generate
+.PHONY: build build-tools push deploy undeploy status lint lint-image lint-local test test-docker test-programs test-programs-ldap contrib-ucm-renew-test contrib-ucm-renew-lint contrib-ucm-renew-build test-static-cluster logs generate check-generate man
 
 build:
 	docker build --platform linux/amd64 --build-arg VERSION=$(TAG) -t $(IMAGE):$(TAG) .
@@ -49,6 +49,15 @@ check-generate:
 		&& GOFLAGS=-mod=mod $(OAPI_CODEGEN) -config $$tmp/config.yaml $(ADMIN_API_SPEC) \
 		&& cmp -s $$tmp/api.gen.go $(ADMIN_API_GEN); rc=$$?; rm -rf $$tmp; \
 		if [ $$rc -ne 0 ]; then echo "$(ADMIN_API_GEN) is stale, run make generate"; exit 1; fi
+
+# man renders every manual page and fails on a formatting error. Needs
+# mandoc or groff; on macOS man(1) is mandoc.
+man:
+	@for f in docs/man/man1/*.1; do \
+		out=$$(man ./$$f 2>&1 >/dev/null) || exit 1; \
+		if [ -n "$$out" ]; then echo "$$f: $$out"; exit 1; fi; \
+	done; \
+	echo "manual pages ok"
 
 lint: lint-image
 	docker run --rm --platform linux/amd64 --user $$(id -u):$$(id -g) \
