@@ -71,11 +71,18 @@ span.
 
 The protocol layers hand the context of the running command to the store
 view (`model.RequestScoped`), including the views of other users' shared
-mailboxes. The store only ever creates **child** spans: work with no
-command above it — a background notifier, a scrub walking a whole
-namespace — produces no spans at all, so a single job cannot turn into
-millions of traces. A store that does not implement the interface
-produces no store spans either.
+mailboxes. The store only ever creates **child** spans of a sampled
+command: work with no command above it — a background notifier, a scrub
+walking a whole namespace — produces no spans at all, so a single job
+cannot turn into millions of traces. A store that does not implement the
+interface produces no store spans either.
+
+One command or job contributes at most 1000 store spans. A job that
+walks a namespace would otherwise put millions of children into a single
+trace, which the batch processor drops and the backend refuses; when the
+limit is reached, the root span carries `store.spans_truncated=true` and
+the rest of the work is not traced. The job's own progress and
+checkpoints remain the way to follow a long run.
 
 Store spans deliberately carry no mailbox names, only object ids, counts
 and sizes; mailbox names are user content. The traces currently also

@@ -16,7 +16,7 @@ components:
 images:
   - name: docker.io/chrroessner/shardpost
     newTag: 0.24.0
-    digest: sha256:b9cca9751bcf67ec1fd40046e172c070df28831699c3cacb83747c3dadfeb083
+    digest: sha256:cc22240d7c008ca2c4cef6c7ee152aed89f4b281fa1726913fc746df5691af4d
 configMapGenerator:
   - name: shardpost-server-config
     namespace: shardpost

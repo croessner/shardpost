@@ -147,8 +147,9 @@ type User struct {
 	cache   map[string]cachedMailbox
 
 	// traceCtx is the context of the command currently running on this
-	// view (see tracing.go).
+	// view, spans the number of store spans it produced (see tracing.go).
 	traceCtx atomic.Pointer[context.Context]
+	spans    atomic.Int64
 }
 
 type cachedMailbox struct {

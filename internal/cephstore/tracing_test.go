@@ -92,3 +92,52 @@ func TestNoSpansWithoutACommand(t *testing.T) {
 		t.Fatalf("%d spans without a command", n)
 	}
 }
+
+// TestSpanBudget: a job that walks a namespace must not put millions of
+// children into one trace; the root span says that it was truncated.
+func TestSpanBudget(t *testing.T) {
+	rec := recordSpans(t)
+	u := &User{}
+
+	ctx, job := telemetry.Span(context.Background(), "job.purge")
+	u.UseContext(ctx)
+
+	for range maxSpansPerRequest + 50 {
+		u.trace(spanOmapCAS, attrOID("mbox/1"))(nil)
+	}
+
+	job.End()
+
+	children := 0
+	truncated := false
+
+	for _, s := range rec.Ended() {
+		if s.Name() == spanOmapCAS {
+			children++
+		}
+
+		for _, a := range s.Attributes() {
+			if string(a.Key) == "store.spans_truncated" {
+				truncated = a.Value.AsBool()
+			}
+		}
+	}
+
+	if children != maxSpansPerRequest || !truncated {
+		t.Fatalf("%d children, truncated %v", children, truncated)
+	}
+
+	// The next command starts with a fresh budget.
+	next, cmd := telemetry.Span(context.Background(), "imap.FETCH")
+	u.UseContext(next)
+	u.trace(spanBlobRead, attrGUID("abc"))(nil)
+	cmd.End()
+
+	for _, s := range rec.Ended() {
+		if s.Name() == spanBlobRead {
+			return
+		}
+	}
+
+	t.Fatal("the budget was not reset for the next command")
+}

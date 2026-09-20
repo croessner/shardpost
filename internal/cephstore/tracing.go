@@ -26,6 +26,7 @@ func (u *User) UseContext(ctx context.Context) {
 	}
 
 	u.traceCtx.Store(&ctx)
+	u.spans.Store(0)
 }
 
 // reqContext is the context of the command currently running on this
@@ -38,6 +39,12 @@ func (u *User) reqContext() context.Context {
 	return context.Background()
 }
 
+// maxSpansPerRequest bounds the store spans of one command or job. A
+// job that walks a whole namespace would otherwise put millions of
+// children into a single trace, which the batch processor drops and the
+// backend refuses; the root span is marked when that happens.
+const maxSpansPerRequest = 1000
+
 // noSpan is the result of trace without a running command.
 func noSpan(error) {}
 
@@ -48,7 +55,20 @@ func noSpan(error) {}
 // and records a failure; pass nil for success.
 func (u *User) trace(name string, attrs ...attribute.KeyValue) func(error) {
 	ctx := u.reqContext()
-	if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
+
+	// Nothing to hang the operation on, or the command is not sampled:
+	// then the span would cost allocations and be dropped anyway.
+	parent := trace.SpanFromContext(ctx)
+	if sc := parent.SpanContext(); !sc.IsValid() || !sc.IsSampled() {
+		return noSpan
+	}
+
+	switch n := u.spans.Add(1); {
+	case n == maxSpansPerRequest+1:
+		parent.SetAttributes(attribute.Bool("store.spans_truncated", true))
+
+		return noSpan
+	case n > maxSpansPerRequest:
 		return noSpan
 	}
 
