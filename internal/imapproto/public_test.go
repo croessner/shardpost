@@ -623,3 +623,34 @@ func TestPublicFetchBatchesMarks(t *testing.T) {
 		t.Errorf("unread after reading everything: %s", lines)
 	}
 }
+
+// TestPublicFetchReportsForeignMark: when another session of the same
+// account marked the message first, the client is told that the
+// message is read — here through the poll that precedes the command.
+// The same has to hold when the mark lands inside the FETCH, after
+// that poll; that window is too narrow to provoke from outside, so
+// this test covers the guarantee and fetchSetSeen covers the window by
+// reporting the flags whenever the overlay differs from the snapshot.
+func TestPublicFetchReportsForeignMark(t *testing.T) {
+	first, store := newTestServer(t)
+	defer func() { _ = first.conn.Close() }()
+
+	publicFolder(t, store, "Team", map[string]string{"anyone": "lrswipkxte"})
+
+	second, _ := newTestServerClient(t, first)
+	defer func() { _ = second.conn.Close() }()
+
+	for _, c := range []*client{first, second} {
+		c.ok("LOGIN test test")
+		c.ok("SELECT Public/Team")
+	}
+
+	// The first session marks it read; the second still has the old
+	// snapshot and fetches the body.
+	first.ok(`STORE 1 +FLAGS (\Seen)`)
+
+	lines := strings.Join(second.cmd("FETCH 1 (BODY[])"), "\n")
+	if !strings.Contains(lines, `\Seen`) {
+		t.Errorf("the fetch does not report the account's own mark: %s", lines)
+	}
+}

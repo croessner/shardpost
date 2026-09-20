@@ -111,6 +111,16 @@ reports the message GUID.
 Messages per import request. Default:
 .IR 200 .
 .TP
+.BI \-batch-bytes " n"
+Bytes per import request; a batch ends at whichever limit comes first,
+this one or
+.BR \-batch-messages .
+Default:
+.IR 33554432
+(32 MiB). The server has limits of its own
+.RI ( admin.import.max_batch_bytes ", " admin.import.max_batch_messages )
+and refuses a larger batch.
+.TP
 .B \-\-json
 Print the report as JSON.
 .PP

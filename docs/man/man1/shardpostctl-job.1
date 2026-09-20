@@ -72,6 +72,53 @@ with the plan: if it drifted, the job ends without changing anything.
 .PP
 .B check
 needs no plan: it runs the read-only index check on an account.
+.SS plan
+Computes what a job of that kind would do to the account and stores the
+result. Nothing is changed. The plan carries a fingerprint of the state
+it was computed from, and it expires
+.RI ( jobs.plan_ttl_seconds ).
+Role: the one the kind needs, see
+.B Kinds
+below.
+.SS plan show
+Prints a stored plan again, by its id: what it would do, when it was
+made and when it expires. Role:
+.BR diagnose .
+.SS apply
+Runs a stored plan, once. With
+.B \-wait
+the command stays until the job ends and exits with its outcome;
+.B \-idempotency-key
+makes a repeated call return the first job instead of starting a second
+one. Role: the one the kind needs.
+.SS check
+Runs the read-only index check on an account without a plan, because it
+changes nothing. Role:
+.BR diagnose .
+.SS job list
+The jobs of the cluster, newest first, with their state. Narrow it with
+.BR \-account ,
+.B \-state
+and
+.BR \-limit ;
+.B \-after
+continues after the last id of the previous page. Role:
+.BR diagnose .
+.SS job show
+One job: kind, account, state, progress, attempts, the server running
+it, and the error of a failed one. Role:
+.BR diagnose .
+.SS job wait
+Waits for a job to end and exits with its outcome, polling every
+.B \-poll
+(2s by default). This is what a script uses instead of a loop of
+.BR "job show" .
+Role:
+.BR diagnose .
+.SS job cancel
+Asks a job to stop. A job that has not started yet never starts; a
+running one stops at its next checkpoint, and what it has already done
+stays done. Role: the one the kind needs.
 .SS Kinds
 .TP
 .B index_check

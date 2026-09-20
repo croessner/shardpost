@@ -413,21 +413,14 @@ func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []strin
 // own namespace, if the selection options admit it.
 func (c *conn) listOwnEntry(lt *listTree, name string, lsub bool, opts listOptions) {
 	mb := lt.byName[name]
-	childInfo := ""
-	viaChild := false
 
-	if opts.selectSubscribed && (mb == nil || !mb.Subscribed) {
-		if lsub {
+	childInfo, viaChild, list := lt.childInfoOf(mb, name, lsub, opts)
+	if !list {
+		if lsub && opts.selectSubscribed {
 			c.lsubParent(lt, name)
-			return
 		}
 
-		if !opts.selectRecursive || !lt.subscribedChild(name) || !lt.unmatchedChild(name) {
-			return
-		}
-
-		childInfo = childInfoSubscribed
-		viaChild = true
+		return
 	}
 
 	if opts.selectSpecialUse && (mb == nil || len(mb.SpecialUse) == 0) {
@@ -437,6 +430,29 @@ func (c *conn) listOwnEntry(lt *listTree, name string, lsub bool, opts listOptio
 	attrs := lt.attrs(mb, name, viaChild, lsub, opts)
 	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), astringOut(name), childInfo)
 	c.listOwnExtras(mb, name, opts)
+}
+
+// childInfoOf decides whether a name of the own namespace is listed at
+// all, and with which CHILDINFO. A name that does not match the
+// selection itself is listed when it stands in for a subscribed child
+// the pattern does not list; a name that does match says so too
+// (RFC 5258 3.5, example 8A1).
+func (lt *listTree) childInfoOf(mb *model.Mailbox, name string, lsub bool, opts listOptions) (childInfo string, viaChild, list bool) {
+	standsIn := opts.selectRecursive && lt.subscribedChild(name) && lt.unmatchedChild(name)
+
+	if opts.selectSubscribed && (mb == nil || !mb.Subscribed) {
+		if lsub || !standsIn {
+			return "", false, false
+		}
+
+		return childInfoSubscribed, true, true
+	}
+
+	if standsIn {
+		return childInfoSubscribed, false, true
+	}
+
+	return "", false, true
 }
 
 // lsubParent lists a name that is not subscribed itself for LSUB.
@@ -806,7 +822,8 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 
 	childInfo := ""
 
-	if opts.selectSubscribed && (!isBox || !e.sub) {
+	switch {
+	case opts.selectSubscribed && (!isBox || !e.sub):
 		if lsub {
 			c.lsubSharedParent(st, name)
 			return
@@ -816,6 +833,10 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 			return
 		}
 
+		childInfo = childInfoSubscribed
+	case opts.selectRecursive && st.subChild(name) && st.subChildUnmatched(name):
+		// As above: the entry matches itself and still stands in for a
+		// subscribed child the pattern does not list.
 		childInfo = childInfoSubscribed
 	}
 

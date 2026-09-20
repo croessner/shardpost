@@ -427,3 +427,43 @@ func TestSharedNamespaceSubscriptionsInList(t *testing.T) {
 		})
 	}
 }
+
+// TestChildInfoOnMatchingParent: RFC 5258 3.5, example 8A1 — a mailbox
+// that is subscribed itself and has a subscribed child the pattern does
+// not list is reported with CHILDINFO as well, so the client knows to
+// look further. This holds for the account's own mailboxes and for the
+// mailboxes of other accounts.
+func TestChildInfoOnMatchingParent(t *testing.T) {
+	alice, bob := twoUsers(t)
+
+	// Own: a subscribed parent with a subscribed child.
+	bob.ok("CREATE Projekt")
+	bob.ok("CREATE Projekt/2026")
+	bob.ok("SUBSCRIBE Projekt")
+	bob.ok("SUBSCRIBE Projekt/2026")
+
+	// Shared: the same shape below another account.
+	alice.ok("CREATE Team")
+	alice.ok("CREATE Team/2026")
+	alice.ok("SETACL Team bob lrs")
+	alice.ok("SETACL Team/2026 bob lrs")
+	bob.ok(`SUBSCRIBE "Shared/alice/Team"`)
+	bob.ok(`SUBSCRIBE "Shared/alice/Team/2026"`)
+
+	lines := strings.Join(bob.cmd(`LIST (SUBSCRIBED RECURSIVEMATCH) "" "%%"`), "\n")
+
+	for _, want := range []string{
+		`"/" Projekt ("CHILDINFO" ("SUBSCRIBED"))`,
+		`"/" Shared ("CHILDINFO" ("SUBSCRIBED"))`,
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("missing %s in:\n%s", want, lines)
+		}
+	}
+
+	// The child itself is listed by this pattern, so no CHILDINFO there.
+	deep := strings.Join(bob.cmd(`LIST (SUBSCRIBED RECURSIVEMATCH) "" "Projekt/%%"`), "\n")
+	if strings.Contains(deep, "CHILDINFO") {
+		t.Errorf("CHILDINFO although the child is listed itself:\n%s", deep)
+	}
+}

@@ -39,8 +39,20 @@ quote message text, are masked.
 .PP
 Role:
 .BR trace .
+.SS trace on
+Switches the trace on for one account, for
+.B \-for
+or the configured default. An account that is already traced has its
+expiry moved, not doubled. Role:
+.BR trace .
+.SS trace off
+Switches it off at once. Sessions still open stop tracing within
+.I trace.recheck_seconds
+Role:
+.BR trace .
 .SS trace status
-Reports whether a trace is on and when it expires.
+Reports whether a trace is on and when it expires. Role:
+.BR trace .
 .SH OPTIONS
 .TP
 .BI \-for " duration"

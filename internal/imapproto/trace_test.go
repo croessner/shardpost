@@ -14,6 +14,34 @@ import (
 )
 
 // traceLines returns the traced lines ("C: ..." / "S: ...") of the log.
+// waitTrace waits until every wanted line is in the trace and returns
+// the trace joined. The server writes a trace line after it has written
+// the bytes, so a client that has already read the response may be
+// ahead of the log; without the wait the assertion races the logger.
+func waitTrace(t *testing.T, out *logBuffer, want ...string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for {
+		joined := strings.Join(traceLines(t, out.String()), "\n")
+
+		missing := false
+
+		for _, w := range want {
+			if !strings.Contains(joined, w) {
+				missing = true
+			}
+		}
+
+		if !missing || time.Now().After(deadline) {
+			return joined
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func traceLines(t *testing.T, raw string) []string {
 	t.Helper()
 
@@ -67,8 +95,7 @@ func TestProtocolTrace(t *testing.T) {
 	c.cmd("UNAUTHENTICATE")
 	c.cmd("LOGIN test password-after-unauth")
 
-	lines := traceLines(t, out.String())
-	joined := strings.Join(lines, "\n")
+	joined := waitTrace(t, &out, "C: t4 UNAUTHENTICATE")
 
 	for _, want := range []string{"S: t1 OK [CAPABILITY", "C: t2 SELECT INBOX", "S: t2 OK [READ-WRITE]", "C: <literal " + strconv.Itoa(len(msg)) + " bytes>", "C: t4 UNAUTHENTICATE"} {
 		if !strings.Contains(joined, want) {
@@ -113,7 +140,7 @@ func TestProtocolTraceOffAndSwitchedOff(t *testing.T) {
 	c.cmd("CAPABILITY")
 	c.cmd("NOOP")
 
-	joined := strings.Join(traceLines(t, out.String()), "\n")
+	joined := waitTrace(t, &out, "C: t5 NOOP")
 	if !strings.Contains(joined, "C: t5 NOOP") || strings.Contains(joined, "S: t6") || strings.Contains(joined, "t7") {
 		t.Fatalf("unexpected trace:\n%s", joined)
 	}
@@ -161,7 +188,7 @@ func TestProtocolTracePipelinedLogin(t *testing.T) {
 	// the trace halts at the command and stays off until the next login.
 	sendRaw(t, c, "p0 LOGIN test {12+}\r\nliteral-pass\r\nc2VjcmV0\r\np1 NOOP\r\n", "p0", "c2VjcmV0", "p1")
 
-	joined := strings.Join(traceLines(t, out.String()), "\n")
+	joined := waitTrace(t, &out, "C: "+traceMaskedAuth)
 	if !strings.Contains(joined, "C: "+traceMaskedAuth) || strings.Contains(joined, "p1") {
 		t.Fatalf("trace not halted:\n%s", joined)
 	}
@@ -195,7 +222,7 @@ func TestProtocolTraceResumesAfterExtension(t *testing.T) {
 	c.cmd("NOOP")
 	c.cmd("CAPABILITY")
 
-	if !strings.Contains(strings.Join(traceLines(t, out.String()), "\n"), "C: t3 CAPABILITY") {
+	if !strings.Contains(waitTrace(t, &out, "C: t3 CAPABILITY"), "C: t3 CAPABILITY") {
 		t.Fatalf("trace not resumed:\n%s", out.String())
 	}
 }
@@ -228,7 +255,7 @@ func TestProtocolTraceRefusedNonSyncLiteral(t *testing.T) {
 	body := strings.Repeat("body-sentinel\r\n", 6) // 90 bytes > APPENDLIMIT
 	sendRaw(t, c, fmt.Sprintf("r1 APPEND INBOX {%d+}\r\n%s\r\nr2 NOOP\r\n", len(body), body), "r1", "r2")
 
-	joined := strings.Join(traceLines(t, out.String()), "\n")
+	joined := waitTrace(t, &out, "S: r1 NO [TOOBIG]", "S: r2 OK")
 	if strings.Contains(out.String(), "body-sentinel") || !strings.Contains(joined, "S: r1 NO [TOOBIG]") || !strings.Contains(joined, "S: r2 OK") {
 		t.Fatalf("refused literal not skipped:\n%s", joined)
 	}

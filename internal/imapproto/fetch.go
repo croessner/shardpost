@@ -165,7 +165,10 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 		seenSet := false
 
 		if markSeen {
-			if m, seenSet = c.fetchSetSeen(seqs[i], m, marked); seenSet {
+			var changed bool
+
+			m, seenSet, changed = c.fetchSetSeen(seqs[i], m, marked)
+			if changed {
 				flagEvents = append(flagEvents, m)
 			}
 		}
@@ -183,11 +186,15 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 	return flagEvents, failed, nil
 }
 
-// fetchSetSeen sets \Seen on message seq when the session may; it returns
-// the updated message and true when the flag was set.
-func (c *conn) fetchSetSeen(seq int, m model.Meta, marked map[uint32]bool) (model.Meta, bool) {
+// fetchSetSeen sets \Seen on message seq when the session may. It
+// returns the updated message, whether the response is to carry its
+// flags, and whether this session is what changed them — another
+// session of the same account may have set the mark of a public folder
+// first, and then the client still has to be told, but no flag event
+// belongs to this FETCH.
+func (c *conn) fetchSetSeen(seq int, m model.Meta, marked map[uint32]bool) (meta model.Meta, show, changed bool) {
 	if c.readOnly || !model.HasRight(c.mrights, 's') || model.HasFlag(m.Flags, flagSeen) {
-		return m, false
+		return m, false, false
 	}
 
 	// In a public folder "read" belongs to the account, so the implicit
@@ -201,18 +208,20 @@ func (c *conn) fetchSetSeen(seq int, m model.Meta, marked map[uint32]bool) (mode
 		c.privateOverlay(msgs)
 		c.msgs[seq-1] = msgs[0]
 
-		return msgs[0], marked[m.UID]
+		// The snapshot said unread, so a mark that reads as seen now is
+		// news for the client, whoever wrote it.
+		return msgs[0], model.HasFlag(msgs[0].Flags, flagSeen), marked[m.UID]
 	}
 
 	res, err := c.mu.SetFlags(c.mbox.Name, []uint32{m.UID}, 0, addFlags([]string{flagSeenLower}))
 	if err != nil || len(res.Updated) != 1 {
-		return m, false
+		return m, false, false
 	}
 
 	m = res.Updated[0]
 	c.msgs[seq-1] = m
 
-	return m, true
+	return m, true, true
 }
 
 // markSeenBatch writes the account's own \Seen marks for every message
