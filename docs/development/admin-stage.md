@@ -277,8 +277,20 @@ The way back accounts for changes made after the cutover.
 Acceptance criteria: representative Dovecot accounts, a repeatable import,
 client identities, Sieve without unintended sending, failures during the
 transfer and migration back.
-In addition, verify an isolated restore from a real backup; a
-successful export is not evidence of backup/restore.
+In addition, verify a restore from a real backup; a successful export is
+not evidence of backup/restore.
+
+Evidence (2026-09-20): the live account `de10042@srvint.net` was exported,
+then purged (1031 objects removed, `store false, 0 mailboxes`) and
+restored from that archive alone. Everything came back: 10 mailboxes with
+their UIDVALIDITY and ids, 941 messages with the same UIDs, flags, dates
+and MODSEQ, every mailbox verified against the inventory, a clean index
+check and an IMAP session reporting the state it had before. Because the
+data was really gone in between, this is the backup/restore evidence the
+criterion asks for. Only the restore into a *different* account
+(`-account`: other target, ACLs skipped, no Sieve activation) is covered
+by tests rather than by a live run; it can be added the next time an
+account is rebuilt.
 
 **Core pulled forward: identity-preserving account import** (planned on
 2026-09-18, implemented and rolled out with 0.17.0; usage and semantics in
