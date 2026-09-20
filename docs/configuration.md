@@ -174,6 +174,46 @@ Version 0.26.1 changed the default from `Other Users/` to `Shared/`. A
 server that was running before it keeps the old name by setting
 `server.shared_prefix: "Other Users/"` explicitly.
 
+### What an account starts with, and what it is subscribed to
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `server.autocreate` | the five below | mailboxes every account gets besides its INBOX |
+
+```yaml
+server:
+  autocreate:
+    - { name: Drafts,  special_use: "\\Drafts" }
+    - { name: Sent,    special_use: "\\Sent" }
+    - { name: Trash,   special_use: "\\Trash" }
+    - { name: Junk,    special_use: "\\Junk" }
+    - { name: Archive, special_use: "\\Archive" }
+    - { name: Projekte, subscribe: false }
+```
+
+Each entry has a `name`, an optional `special_use` attribute (RFC 6154,
+so a client finds the mailbox whatever it is called) and `subscribe`,
+which defaults to true. This is Dovecot's `auto = create` versus
+`auto = subscribe`, in one place instead of one block per mailbox. An
+empty list (`autocreate: []`) leaves an account with its INBOX.
+
+Two rules decide when this happens:
+
+- A mailbox is created when the account logs in and does not have it, so
+  a mailbox added to the list reaches the accounts that log in
+  afterwards, not only new ones. A mailbox the account deleted comes
+  back the same way.
+- A mailbox is subscribed **only when it is created**, never afterwards.
+  An account that unsubscribed one keeps it unsubscribed; the server
+  does not argue with its user.
+
+Subscriptions are per account everywhere else too: a mailbox of another
+account carries its subscription in the pointer, a public folder in the
+reading account's registry by mailbox id, so a folder that is renamed
+stays subscribed. `shardpostctl mailbox subscribe` sets the flag for an
+account from outside, which is how a migration hands over what the old
+server had.
+
 ### Public folders
 
 | Key | Default | Meaning |

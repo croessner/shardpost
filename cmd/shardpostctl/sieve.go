@@ -150,6 +150,10 @@ func sieveActivate(ctx context.Context, c *adminapi.ClientWithResponses, a suppo
 // sieveCheck: -name checks a stored script (default the active one),
 // otherwise stdin/-file is the script; -message names a stored message
 // (mailbox:uidvalidity:uid) to run it on.
+// maxCheckMessage bounds a test message read from standard input; the
+// server has a limit of its own and answers 413 beyond it.
+const maxCheckMessage = 1 << 20
+
 func sieveCheck(ctx context.Context, c *adminapi.ClientWithResponses, a supportArgs, stdout, stderr io.Writer) int {
 	req := adminapi.SieveCheck{Name: optional(a.name), EnvelopeFrom: optional(a.from), EnvelopeTo: optional(a.to)}
 
@@ -164,13 +168,8 @@ func sieveCheck(ctx context.Context, c *adminapi.ClientWithResponses, a supportA
 		req.Script = &s
 	}
 
-	if a.message != "" {
-		ref, code, ok := sieveMessageRef(ctx, c, a, stderr)
-		if !ok {
-			return code
-		}
-
-		req.Message = ref
+	if code, ok := sieveCheckMessage(ctx, c, a, &req, stderr); !ok {
+		return code
 	}
 
 	return request(stderr, func() (*adminapi.SieveCheckResult, *adminapi.Error, int, error) {
@@ -181,6 +180,45 @@ func sieveCheck(ctx context.Context, c *adminapi.ClientWithResponses, a supportA
 
 		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 	}, func(res *adminapi.SieveCheckResult) int { return printCheck(stdout, a, res) })
+}
+
+// sieveCheckMessage adds the message the script runs on: the stored one
+// that -message names, or a test message from standard input when the
+// script itself came from a file or from the account. Without either,
+// the script is only compiled.
+func sieveCheckMessage(ctx context.Context, c *adminapi.ClientWithResponses, a supportArgs, req *adminapi.SieveCheck, stderr io.Writer) (int, bool) {
+	if a.message != "" {
+		ref, code, ok := sieveMessageRef(ctx, c, a, stderr)
+		if !ok {
+			return code, false
+		}
+
+		req.Message = ref
+
+		return exOK, true
+	}
+
+	if req.Script != nil && a.scriptFile == "" {
+		return exOK, true // standard input carried the script
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(a.stdin, maxCheckMessage+1))
+
+	switch {
+	case err != nil:
+		sayln(stderr, "shardpostctl:", err)
+
+		return exUsage, false
+	case len(raw) > maxCheckMessage:
+		sayln(stderr, "shardpostctl: the test message is too large")
+
+		return exUsage, false
+	case len(raw) > 0:
+		text := string(raw)
+		req.Raw = &text
+	}
+
+	return exOK, true
 }
 
 // sieveMessageRef parses -message mailbox:uidvalidity:uid (the mailbox

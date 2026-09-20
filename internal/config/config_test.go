@@ -205,3 +205,82 @@ func TestNamespacePrefixes(t *testing.T) {
 		})
 	}
 }
+
+// TestAutocreateDefaultsAndChecks: without a configuration an account
+// gets the five special-use mailboxes, and the validator refuses a list
+// nobody could use.
+func TestAutocreateDefaultsAndChecks(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(c.Server.Autocreate) != 5 {
+		t.Fatalf("default autocreate: %+v", c.Server.Autocreate)
+	}
+
+	for _, f := range c.Server.Autocreate {
+		if f.SpecialUse == "" || !f.Subscribed() {
+			t.Errorf("default %q: special-use %q, subscribed %v", f.Name, f.SpecialUse, f.Subscribed())
+		}
+	}
+
+	no := false
+
+	for _, tc := range []struct {
+		name          string
+		folders       []AutocreateFolder
+		wantRejection bool
+	}{
+		{"the defaults", nil, false},
+		{"a plain mailbox", []AutocreateFolder{{Name: "Projekte"}}, false},
+		{"created but not subscribed", []AutocreateFolder{{Name: "Ablage", Subscribe: &no}}, false},
+		{"no name", []AutocreateFolder{{Name: ""}}, true},
+		{"twice", []AutocreateFolder{{Name: "Ablage"}, {Name: "Ablage"}}, true},
+		{"below a namespace", []AutocreateFolder{{Name: "Shared/alice/Box"}}, true},
+		{"a trailing separator", []AutocreateFolder{{Name: "Ablage/"}}, true},
+		{"no special-use attribute", []AutocreateFolder{{Name: "Ablage", SpecialUse: "Archive"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Server.SharedPrefix, cfg.Server.PublicPrefix = "Shared/", "Public/"
+			cfg.Server.Autocreate = tc.folders
+
+			if err := cfg.checkAutocreate(); (err != nil) != tc.wantRejection {
+				t.Errorf("%+v: %v", tc.folders, err)
+			}
+		})
+	}
+}
+
+// TestAutocreateFromYAML: the list is read from the file as written,
+// including an attribute and a mailbox that is created but not
+// subscribed.
+func TestAutocreateFromYAML(t *testing.T) {
+	p := configFile(t, `
+server:
+  autocreate:
+    - name: Entwürfe
+      special_use: "\\Drafts"
+    - name: Projekte
+      subscribe: false
+`)
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(c.Server.Autocreate) != 2 {
+		t.Fatalf("read %+v", c.Server.Autocreate)
+	}
+
+	first, second := c.Server.Autocreate[0], c.Server.Autocreate[1]
+	if first.Name != "Entwürfe" || first.SpecialUse != `\Drafts` || !first.Subscribed() {
+		t.Errorf("first entry: %+v, subscribed %v", first, first.Subscribed())
+	}
+
+	if second.Name != "Projekte" || second.SpecialUse != "" || second.Subscribed() {
+		t.Errorf("second entry: %+v, subscribed %v", second, second.Subscribed())
+	}
+}

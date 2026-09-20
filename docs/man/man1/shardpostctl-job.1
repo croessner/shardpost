@@ -29,6 +29,8 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-wait ]
 .RB [ \-poll
 .IR duration ]
+.RB [ \-idempotency-key
+.IR key ]
 .RB [ \-\-json ]
 .I account
 .br
@@ -44,15 +46,17 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-\-json ]
 .br
 .B shardpostctl job show
-.RI [ \-\-json ]
+.RB [ \-\-json ]
 .I job-id
 .br
 .B shardpostctl job wait
 .RB [ \-poll
 .IR duration ]
+.RB [ \-\-json ]
 .I job-id
 .br
 .B shardpostctl job cancel
+.RB [ \-\-json ]
 .I job-id
 .SH DESCRIPTION
 Everything that runs long or cannot be undone runs as a job. Jobs live in
@@ -96,7 +100,7 @@ Runs the read-only index check on an account without a plan, because it
 changes nothing. Role:
 .BR diagnose .
 .SS job list
-The jobs of the cluster, newest first, with their state. Narrow it with
+The jobs of the cluster, oldest first, with their state. Narrow it with
 .BR \-account ,
 .B \-state
 and
@@ -117,7 +121,7 @@ Role:
 .BR diagnose .
 .SS job cancel
 Asks a job to stop. A job that has not started yet never starts; a
-running one stops at its next checkpoint, and what it has already done
+running one stops at its next safe point, and what it has already done
 stays done. Role: the one the kind needs.
 .SS Kinds
 .TP
@@ -355,14 +359,15 @@ The job succeeded.
 The job partly failed; its errors are printed.
 .TP
 .B 65
-The plan was already applied, has expired, or the account drifted from
-it.
+The plan was already applied or has expired.
 .TP
 .B 67
 No such job, plan or account.
 .TP
 .B 69
-The job failed or was cancelled.
+The job failed or was cancelled — including a job that ended because
+the account had drifted from its plan, which is a failure of the job,
+not of the submission.
 .TP
 .B 77
 The caller lacks the role of this kind.

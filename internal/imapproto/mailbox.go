@@ -982,6 +982,10 @@ func (c *conn) cmdDelete(tag string) error {
 		return err
 	}
 
+	if err := c.r.endOfLine(); err != nil {
+		return err
+	}
+
 	if strings.EqualFold(name, "INBOX") {
 		c.no(tag, "CANNOT", "INBOX cannot be deleted")
 		return nil
@@ -1069,6 +1073,10 @@ func (c *conn) cmdRename(tag string) error {
 func (c *conn) cmdSubscribe(tag string, on bool) error {
 	name, err := c.r.astring()
 	if err != nil {
+		return err
+	}
+
+	if err := c.r.endOfLine(); err != nil {
 		return err
 	}
 
@@ -1523,6 +1531,10 @@ func (c *conn) cmdSelect(tag string, examine bool) error {
 		return err
 	}
 
+	if err := c.r.endOfLine(); err != nil {
+		return err
+	}
+
 	if condstore {
 		c.condstore = true
 	}
@@ -1573,6 +1585,13 @@ func (c *conn) parseSelectParams(tag string) (condstore bool, qr *qresyncParams,
 	t, err := c.r.next()
 	if err != nil {
 		return false, nil, false, err
+	}
+
+	// Whatever follows the mailbox is the parenthesised parameter list
+	// of RFC 7162; anything else is not a select parameter and must not
+	// be swallowed.
+	if t.kind != tokList {
+		return false, nil, false, fmt.Errorf("%w: unexpected data after the mailbox", errSyntax)
 	}
 
 	for i := 0; i < len(t.list); i++ {

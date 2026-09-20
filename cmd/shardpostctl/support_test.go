@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,6 +52,19 @@ func TestSupportCommands(t *testing.T) {
 
 	if code, out, _ := call(socket, "if bogus;", "sieve", "check", "alice"); code != exDataErr || !strings.Contains(out, "invalid") {
 		t.Errorf("broken script check: exit %d %s", code, out)
+	}
+	// A script from a file leaves standard input for a test message, so
+	// a rule can be tried on mail that is not stored anywhere.
+	script := filepath.Join(t.TempDir(), "rules.sieve")
+	if err := os.WriteFile(script, []byte(`require "fileinto"; if header :contains "subject" "invoice" { fileinto "Archive"; }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := "From: shop@example.net\r\nSubject: your invoice\r\n\r\nbody\r\n"
+
+	code, out, errOut := call(socket, msg, "sieve", "check", "-file", script, "alice")
+	if code != exOK || !strings.Contains(out, "Archive") {
+		t.Errorf("test message from standard input: exit %d, out %q, err %q", code, out, errOut)
 	}
 }
 

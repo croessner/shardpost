@@ -40,11 +40,19 @@ type Store interface {
 type SpecialFolder struct {
 	Name string
 	Use  string
+	// Subscribe subscribes the mailbox when it is created. It is not
+	// applied to a mailbox that already exists: an account that
+	// unsubscribed one keeps it that way.
+	Subscribe bool
 }
 
 // DefaultSpecialFolders are provisioned for every user (Dovecot: autocreate).
 var DefaultSpecialFolders = []SpecialFolder{
-	{"Drafts", useDrafts}, {"Sent", useSent}, {"Trash", useTrash}, {"Junk", useJunk}, {"Archive", useArchive},
+	{Name: "Drafts", Use: useDrafts, Subscribe: true},
+	{Name: "Sent", Use: useSent, Subscribe: true},
+	{Name: "Trash", Use: useTrash, Subscribe: true},
+	{Name: "Junk", Use: useJunk, Subscribe: true},
+	{Name: "Archive", Use: useArchive, Subscribe: true},
 }
 
 // Options configures the server.
@@ -1198,29 +1206,54 @@ func closingQuote(s string) int {
 	return -1
 }
 
-// provision creates INBOX and the special-use folders on first login.
+// provision creates INBOX and the configured mailboxes of an account
+// that does not have them. A mailbox is subscribed when it is created,
+// never afterwards: an account that unsubscribed one keeps it that way.
+// A mailbox that is added to the configuration later reaches the
+// accounts that log in after it, as it does in Dovecot.
 func (c *conn) provision() error {
-	if err := c.user.EnsureMailbox("INBOX", nil); err != nil {
+	fresh, err := c.ensureMailbox("INBOX", nil)
+	if err != nil {
 		return err
 	}
 
-	if len(c.s.o.Autocreate) == 0 {
-		return nil
-	}
-
-	if _, err := c.user.Lookup(c.s.o.Autocreate[0].Name); err == nil {
-		return nil // already provisioned
+	if fresh {
+		_ = c.user.SetSubscribed("INBOX", true)
 	}
 
 	for _, f := range c.s.o.Autocreate {
-		if err := c.user.EnsureMailbox(f.Name, []string{f.Use}); err != nil {
+		var use []string
+		if f.Use != "" {
+			use = []string{f.Use}
+		}
+
+		fresh, err := c.ensureMailbox(f.Name, use)
+		if err != nil {
 			return err
 		}
 
-		_ = c.user.SetSubscribed(f.Name, true)
+		if fresh && f.Subscribe {
+			_ = c.user.SetSubscribed(f.Name, true)
+		}
 	}
 
-	return c.user.SetSubscribed("INBOX", true)
+	return nil
+}
+
+// ensureMailbox creates a mailbox if it is missing and reports whether
+// it was created now.
+func (c *conn) ensureMailbox(name string, use []string) (bool, error) {
+	if _, err := c.user.Lookup(name); err == nil {
+		return false, nil
+	} else if !errors.Is(err, model.ErrNoMailbox) {
+		return false, err
+	}
+
+	if err := c.user.EnsureMailbox(name, use); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // --- authenticated: ENABLE, IDLE -------------------------------------------

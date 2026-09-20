@@ -249,6 +249,17 @@ func newIMAPSieve(ctx context.Context, log *slog.Logger, settings *config.Config
 	return imapSieve, stopWorker
 }
 
+// autocreate maps the configured mailboxes to what the IMAP server
+// provisions for an account.
+func autocreate(folders []config.AutocreateFolder) []imapproto.SpecialFolder {
+	out := make([]imapproto.SpecialFolder, 0, len(folders))
+	for _, f := range folders {
+		out = append(out, imapproto.SpecialFolder{Name: f.Name, Use: f.SpecialUse, Subscribe: f.Subscribed()})
+	}
+
+	return out
+}
+
 // manageSieveConfig derives the ManageSieve capability settings.
 func manageSieveConfig(settings *config.Config, sieveCfg map[string]string, programs *extprograms.Runner) map[string]string {
 	manageConfig := map[string]string{}
@@ -384,7 +395,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 		IMAPSieve: imapSieve,
 		Store:     storeAdapter{store}, Auth: authn, Log: log.With("proto", "imap"), TLS: tlsCfg,
 		InsecureAuth:     insecure,
-		Autocreate:       imapproto.DefaultSpecialFolders,
+		Autocreate:       autocreate(settings.Server.Autocreate),
 		PublicPrefix:     settings.Server.PublicPrefix,
 		SharedPrefix:     settings.Server.SharedPrefix,
 		MaxLiteral:       cephstore.MaxMessageLen,

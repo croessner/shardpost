@@ -121,6 +121,18 @@ func (r *reader) readLine() error {
 	return nil
 }
 
+// endOfLine reports a syntax error when a command carries more than its
+// arguments. A name that the parser stopped reading early — an unquoted
+// umlaut, for instance — would otherwise be acted on silently, and the
+// client would be told OK for a mailbox it never named.
+func (r *reader) endOfLine() error {
+	if r.eol() {
+		return nil
+	}
+
+	return fmt.Errorf("%w: unexpected data after the arguments", errSyntax)
+}
+
 func (r *reader) eol() bool {
 	r.skipSpaces()
 	return r.pos >= len(r.line)

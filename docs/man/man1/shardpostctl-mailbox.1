@@ -101,7 +101,7 @@ Role:
 .SH OPTIONS
 .TP
 .BI \-limit " n"
-Mailboxes per page (mailbox list), 1 to 500.
+Mailboxes per page (mailbox list), 1 to 1000; 100 by default.
 .TP
 .BI \-after " name"
 Continue the listing after this mailbox name.
@@ -115,8 +115,9 @@ such a mailbox by its attribute rather than by its name, which is what
 makes "Drafts" work in a client that calls it something else. The server
 creates
 .IR \eDrafts ", " \eSent ", " \eTrash ", " \eJunk " and " \eArchive
-for every account on its own, so this flag is for the rest: RFC 6154
-also defines
+for every account on its own, which
+.I server.autocreate
+configures, so this flag is for the rest: RFC 6154 also defines
 .IR \eAll " and " \eFlagged ,
 RFC 8457 defines
 .IR \eImportant .

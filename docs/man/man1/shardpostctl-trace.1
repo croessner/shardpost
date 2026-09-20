@@ -20,10 +20,13 @@ response of its sessions is written to the server log as
 This is the tool for "it works with every client except this one".
 .PP
 The switch is stored with the account, so it applies on every server of
-the cluster, no matter which one the client happens to reach. Sessions
-that are already open pick it up within
+the cluster, no matter which one the client happens to reach. It reaches
+the sessions that open after it: a session that is already running is
+not traced, and the user has to reconnect. The other direction is
+immediate — a session that is being traced re-reads the switch every
 .I trace.recheck_seconds
-(60 by default), so you do not have to ask the user to reconnect.
+(60 by default), so switching off, and extending a trace that is
+running, take effect without a reconnect.
 .PP
 A trace always expires on its own. Without
 .B \-for
@@ -46,8 +49,8 @@ or the configured default. An account that is already traced has its
 expiry moved, not doubled. Role:
 .BR trace .
 .SS trace off
-Switches it off at once. Sessions still open stop tracing within
-.I trace.recheck_seconds
+Switches it off at once. Sessions that are being traced stop within
+.I trace.recheck_seconds .
 Role:
 .BR trace .
 .SS trace status

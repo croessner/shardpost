@@ -13,7 +13,8 @@ Prints the version of the server the client is talking to and the Go
 version it was built with. Use it to check which build answers on this
 socket or endpoint, for example after a rollout.
 .PP
-Requires no role beyond being an accepted caller.
+Role:
+.BR diagnose .
 .SS server status
 Prints the state of this one server process:
 .TP
@@ -75,8 +76,10 @@ shardpostctl server status --json | jq -r '.store.ok, .config_fingerprint'
 The server answered.
 .TP
 .B 75
-The server is not reachable or reports a temporary failure, for example
-because the store ping failed.
+The server is not reachable. A server that answers but cannot reach its
+store is not a failure of the command: it prints
+.I store unavailable
+with the reason and exits 0 — that is the answer you asked for.
 .TP
 .B 77
 The caller lacks the role

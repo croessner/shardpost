@@ -460,10 +460,118 @@ func TestChildInfoOnMatchingParent(t *testing.T) {
 			t.Errorf("missing %s in:\n%s", want, lines)
 		}
 	}
+	// The line above enters the shared tree through its root, which is
+	// not a mailbox. This one is: an entry that matches the selection
+	// itself and still stands in for a subscribed child below it.
+	deepShared := strings.Join(bob.cmd(`LIST (SUBSCRIBED RECURSIVEMATCH) "" "Shared/alice/%%"`), "\n")
+	if !strings.Contains(deepShared, `Shared/alice/Team ("CHILDINFO" ("SUBSCRIBED"))`) {
+		t.Errorf("no CHILDINFO on a shared mailbox that matches itself:\n%s", deepShared)
+	}
 
-	// The child itself is listed by this pattern, so no CHILDINFO there.
+	// The child itself is listed by this pattern, so no CHILDINFO
+	// there. RFC 5258 3.5 only requires the suppression for a name that
+	// does not match; we are stricter, and clients treat the extra
+	// CHILDINFO as redundant either way.
 	deep := strings.Join(bob.cmd(`LIST (SUBSCRIBED RECURSIVEMATCH) "" "Projekt/%%"`), "\n")
 	if strings.Contains(deep, "CHILDINFO") {
 		t.Errorf("CHILDINFO although the child is listed itself:\n%s", deep)
+	}
+}
+
+// TestAutocreateIsConfigurable: which mailboxes an account gets, and
+// whether they are subscribed, comes from the configuration. A mailbox
+// that is added later reaches the accounts that log in after it; one
+// that the account unsubscribed stays unsubscribed.
+func TestAutocreateIsConfigurable(t *testing.T) {
+	no := []SpecialFolder{{Name: "Ablage", Use: `\Archive`}, {Name: "Entwürfe", Use: `\Drafts`, Subscribe: true}}
+
+	c, store := newTestServer(t, func(o *Options, _ *memstore.Store) { o.Autocreate = no })
+	defer func() { _ = c.conn.Close() }()
+
+	c.ok("LOGIN test test")
+
+	lines := strings.Join(c.cmd(`LIST "" "*"`), "\n")
+	for _, want := range []string{`"/" INBOX`, `"/" Ablage`, `"/" Entwürfe`} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("missing %s in:\n%s", want, lines)
+		}
+	}
+
+	if strings.Contains(lines, "Drafts") || strings.Contains(lines, "Junk") {
+		t.Errorf("mailboxes that are not configured were created:\n%s", lines)
+	}
+
+	// Subscribed only where the configuration says so.
+	lsub := strings.Join(c.cmd(`LSUB "" "*"`), "\n")
+	if !strings.Contains(lsub, "Entwürfe") || strings.Contains(lsub, "Ablage") {
+		t.Errorf("subscriptions do not follow the configuration:\n%s", lsub)
+	}
+
+	// The account unsubscribes one and logs in again: it stays that way.
+	c.ok(`UNSUBSCRIBE "Entwürfe"`)
+	c.ok("LOGOUT")
+
+	again, _ := newTestServerClient(t, c)
+	defer func() { _ = again.conn.Close() }()
+
+	again.ok("LOGIN test test")
+
+	if lsub := strings.Join(again.cmd(`LSUB "" "*"`), "\n"); strings.Contains(lsub, "Entwürfe") {
+		t.Errorf("the login subscribed a mailbox the account had unsubscribed:\n%s", lsub)
+	}
+
+	// A mailbox added to the configuration later is created at the next
+	// login, for an account that exists already: same store, longer list.
+	u, _ := store.User("test")
+	if _, err := u.Lookup("Später"); err == nil {
+		t.Fatal("the mailbox exists before it is configured")
+	}
+
+	third, _ := newTestServer(t, func(o *Options, _ *memstore.Store) {
+		o.Store = store
+
+		o.Autocreate = append(append([]SpecialFolder{}, no...), SpecialFolder{Name: "Später", Subscribe: true})
+	})
+	defer func() { _ = third.conn.Close() }()
+
+	third.ok("LOGIN test test")
+
+	if lines := strings.Join(third.cmd(`LIST "" "*"`), "\n"); !strings.Contains(lines, "Später") {
+		t.Errorf("a mailbox added to the configuration did not reach an existing account:\n%s", lines)
+	}
+}
+
+// TestTrailingDataIsRefused: a command that carries more than its
+// arguments is a syntax error. It used to be accepted, and that was
+// dangerous rather than lenient: "SUBSCRIBE Entwürfe" stops at the
+// umlaut, because an unquoted name is an atom, and the server would
+// have subscribed "Entw" and answered OK.
+func TestTrailingDataIsRefused(t *testing.T) {
+	c, store := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	c.ok("LOGIN test test")
+
+	for _, cmd := range []string{"SUBSCRIBE INBOX nonsense", "UNSUBSCRIBE INBOX nonsense", "SELECT INBOX nonsense", "DELETE Junk nonsense", "SUBSCRIBE Entwürfe"} {
+		if lines := strings.Join(c.cmd("%s", cmd), "\n"); !strings.Contains(lines, "BAD") {
+			t.Errorf("%q was accepted: %s", cmd, lines)
+		}
+	}
+
+	// Quoted, the same name is perfectly fine.
+	c.ok(`CREATE "Entwürfe"`)
+	c.ok(`SUBSCRIBE "Entwürfe"`)
+
+	u, _ := store.User("test")
+
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, b := range boxes {
+		if b.Name == "Entw" {
+			t.Error("a truncated mailbox name was created")
+		}
 	}
 }

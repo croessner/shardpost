@@ -78,6 +78,10 @@ type Server struct {
 	// SharedPrefix is the client-visible prefix of the mailboxes other
 	// accounts share; "" switches that namespace off.
 	SharedPrefix string `mapstructure:"shared_prefix" env:"SHARED_PREFIX" validate:"omitempty,endswith=/"`
+	// Autocreate are the mailboxes every account gets besides its
+	// INBOX, in the order they are created. An empty list leaves an
+	// account with its INBOX alone.
+	Autocreate []AutocreateFolder `mapstructure:"autocreate"`
 	// PublicQuotaBytes and PublicQuotaMsgs bound the public namespace as
 	// a whole (0 = unlimited). Public folders do not count against the
 	// quota of the account that files into them.
@@ -185,6 +189,43 @@ const (
 // productName is the default telemetry service name and cephx user.
 const productName = "shardpost"
 
+// AutocreateFolder is a mailbox the server creates for an account that
+// does not have it. It is what Dovecot calls "auto": create the
+// mailbox, or create and subscribe it. A mailbox is only subscribed
+// when it is created, so an account that unsubscribed one keeps it
+// that way.
+type AutocreateFolder struct {
+	Name       string `mapstructure:"name" validate:"required"`
+	SpecialUse string `mapstructure:"special_use"`
+	// Subscribe defaults to true; set it to false for a mailbox that
+	// should exist without appearing in every client.
+	Subscribe *bool `mapstructure:"subscribe"`
+}
+
+// Subscribed reports whether a newly created mailbox is subscribed.
+func (f AutocreateFolder) Subscribed() bool { return f.Subscribe == nil || *f.Subscribe }
+
+// defaultAutocreate is what an account gets without a configuration:
+// the five special-use mailboxes every mail client expects, subscribed.
+var defaultAutocreate = autocreateDefaults(
+	"Drafts", `\Drafts`,
+	"Sent", `\Sent`,
+	"Trash", `\Trash`,
+	"Junk", `\Junk`,
+	"Archive", `\Archive`,
+)
+
+// autocreateDefaults builds the default list from name and attribute
+// pairs, in the shape Viper hands to the decoder.
+func autocreateDefaults(pairs ...string) []map[string]any {
+	out := make([]map[string]any, 0, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out = append(out, map[string]any{"name": pairs[i], "special_use": pairs[i+1]})
+	}
+
+	return out
+}
+
 // defaults are the configuration values used when neither the YAML file
 // nor the environment sets a key.
 var defaults = []struct {
@@ -247,6 +288,7 @@ var defaults = []struct {
 	{"server.mbox_shard_size", 100000},
 	{"server.public_prefix", "Public/"},
 	{"server.shared_prefix", "Shared/"},
+	{"server.autocreate", defaultAutocreate},
 	{"server.public_quota_bytes", 0},
 	{"server.public_quota_msgs", 0},
 	{"rook.namespace", "rook-ceph"},
@@ -419,6 +461,10 @@ func (c *Config) checkServer() error {
 		return err
 	}
 
+	if err := c.checkAutocreate(); err != nil {
+		return err
+	}
+
 	cidrs, err := normalizeTrustedCIDRs(c.Server.ProxyProtocolTrustedCidrs)
 	if err != nil {
 		return err
@@ -460,6 +506,71 @@ func (c *Config) checkNamespaces() error {
 	}
 
 	return nil
+}
+
+// checkAutocreate validates the mailboxes every account gets: a usable
+// name, a well-formed special-use attribute, no duplicates, and nothing
+// below a namespace prefix, where no client could open it.
+func (c *Config) checkAutocreate() error {
+	seen := map[string]bool{}
+
+	for _, f := range c.Server.Autocreate {
+		name := strings.Trim(f.Name, " ")
+
+		switch {
+		case name == "" || strings.HasSuffix(name, "/") || strings.Contains(name, "//") || hasControl(name):
+			return fmt.Errorf("server.autocreate: unusable mailbox name %q", f.Name)
+		case seen[name]:
+			return fmt.Errorf("server.autocreate: %q is listed twice", f.Name)
+		case shadowsPrefix(name, c.Server.SharedPrefix, c.Server.PublicPrefix):
+			return fmt.Errorf("server.autocreate: %q lies below a namespace prefix, where no client could open it", f.Name)
+		case f.SpecialUse != "" && !validSpecialUse(f.SpecialUse):
+			return fmt.Errorf("server.autocreate: %q is no special-use attribute (it starts with a backslash)", f.SpecialUse)
+		}
+
+		seen[name] = true
+	}
+
+	return nil
+}
+
+// shadowsPrefix reports whether a name lies below one of the namespace
+// prefixes (empty prefixes are switched off).
+func shadowsPrefix(name string, prefixes ...string) bool {
+	for _, p := range prefixes {
+		if p != "" && strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// validSpecialUse reports whether s is a special-use attribute:
+// a backslash and letters, as RFC 6154 writes them.
+func validSpecialUse(s string) bool {
+	if len(s) < 2 || s[0] != '\\' {
+		return false
+	}
+
+	for _, r := range s[1:] {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+
+	return true
+}
+
+// hasControl reports whether s contains a control character.
+func hasControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+
+	return false
 }
 
 // checkPrefixChars rejects a namespace prefix a client could not read
