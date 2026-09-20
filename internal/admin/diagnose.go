@@ -105,6 +105,9 @@ func (s *Server) openAccount(w http.ResponseWriter, r *http.Request, role, accou
 		return nil, false
 	}
 
+	// The store records its operations below this request's span.
+	model.UseRequest(r.Context(), u)
+
 	return u, true
 }
 

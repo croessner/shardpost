@@ -208,6 +208,9 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 
 	kind := m.kinds[j.Kind]
 
+	// The store records its operations below the job's span.
+	model.UseRequest(ctx, run.User)
+
 	if kind.Exclusive() && !m.lock(run, j, gen, log) {
 		return
 	}

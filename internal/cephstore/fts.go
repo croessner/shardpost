@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/ceph/go-ceph/rados"
+	"go.opentelemetry.io/otel/attribute"
 
 	"shardpost/internal/fts"
 	"shardpost/internal/postings"
@@ -113,7 +114,10 @@ func parallel(groups map[string][]string, fn func(oid string, items []string) er
 
 // ftsIndex adds the message's GUID to the posting list of every term and
 // registers terms that are new for this user in the dictionary.
-func (u *User) ftsIndex(guid string, raw []byte) error {
+func (u *User) ftsIndex(guid string, raw []byte) (err error) {
+	end := u.trace(spanFTSIndex, attrGUID(guid), attrBytes(len(raw)))
+	defer func() { end(err) }()
+
 	if g, err := hex.DecodeString(guid); err != nil || len(g) != guidBytes {
 		return fmt.Errorf("bad guid %q", guid)
 	}
@@ -596,7 +600,10 @@ func (u *User) SearchField(field, query string) (map[string]bool, error) {
 
 // SearchFields is SearchField over several fields (OR between fields, AND
 // between query tokens). Used for TEXT = headers or body.
-func (u *User) SearchFields(fields []string, query string) (map[string]bool, error) {
+func (u *User) SearchFields(fields []string, query string) (hits map[string]bool, err error) {
+	end := u.trace(spanFTSSearch, attribute.StringSlice("store.fields", fields))
+	defer func() { end(err) }()
+
 	toks := fts.Tokenize(query)
 	if len(toks) == 0 {
 		return nil, nil // nothing to constrain on
@@ -933,7 +940,10 @@ func getOmapKeys(ioctx *rados.IOContext, oid string, keys []string) (map[string]
 // casOmap reads keys, lets fn compute changes and writes them back guarded
 // by the object version. A missing object is created exclusively; a
 // concurrent creator or writer triggers a retry.
-func casOmap(u *User, ioctx *rados.IOContext, oid string, keys []string, fn func(cur map[string][]byte) (set map[string][]byte, rm []string)) error {
+func casOmap(u *User, ioctx *rados.IOContext, oid string, keys []string, fn func(cur map[string][]byte) (set map[string][]byte, rm []string)) (err error) {
+	end := u.trace(spanOmapCAS, attrOID(oid), attrCount(len(keys)))
+	defer func() { end(err) }()
+
 	for attempt := 0; attempt < casRetries; attempt++ {
 		cur, ver, err := u.getKeysVer(ioctx, oid, keys)
 		if err != nil {

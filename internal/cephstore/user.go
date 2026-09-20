@@ -1,6 +1,7 @@
 package cephstore
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -144,6 +145,10 @@ type User struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]cachedMailbox
+
+	// traceCtx is the context of the command currently running on this
+	// view (see tracing.go).
+	traceCtx atomic.Pointer[context.Context]
 }
 
 type cachedMailbox struct {
@@ -1689,7 +1694,10 @@ func (u *User) Deliver(name string, raw []byte, flags []string, when time.Time) 
 }
 
 // DeliverGUID is Deliver with a caller-chosen GUID (delivery intents).
-func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when time.Time) (*Meta, error) {
+func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when time.Time) (stored *Meta, err error) {
+	end := u.trace(spanDeliver, attrMailbox(name), attrBytes(len(raw)))
+	defer func() { end(err) }()
+
 	if g, err := hex.DecodeString(guid); err != nil || len(g) != guidBytes {
 		return nil, fmt.Errorf("bad guid %q", guid)
 	}
@@ -1948,7 +1956,10 @@ func (u *User) Read(m *Meta) ([]byte, error) {
 // existence) is taken against the shard's current records, so concurrent
 // STOREs on the same message serialise and an expunged message is never
 // recreated. The commit then records what actually changed.
-func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply func(old []string) []string) (*model.FlagsResult, error) {
+func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply func(old []string) []string) (res *model.FlagsResult, err error) {
+	end := u.trace(spanFlags, attrMailbox(name), attrCount(len(uids)))
+	defer func() { end(err) }()
+
 	return u.setFlags(name, uids, unchangedSince, apply, false, 0)
 }
 
@@ -2277,7 +2288,10 @@ func equalFlags(a, b []string) bool {
 // change and vanished logs and releases the blobs of the entries that
 // were actually removed (a stale snapshot may name UIDs another session
 // already expunged; their references are not released twice).
-func (u *User) Expunge(name string, metas []Meta) error {
+func (u *User) Expunge(name string, metas []Meta) (err error) {
+	end := u.trace(spanExpunge, attrMailbox(name), attrCount(len(metas)))
+	defer func() { end(err) }()
+
 	mb, err := u.Lookup(name)
 	if err != nil {
 		return err
@@ -2457,7 +2471,10 @@ func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[strin
 // blob and the destination index change; no payload is copied. The quota
 // for the whole batch is reserved up front (atomically against other
 // writers); what a failed batch did not use is given back.
-func (u *User) Copy(metas []Meta, dest string) ([]Meta, error) {
+func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
+	end := u.trace(spanCopy, attrMailbox(dest), attrCount(len(metas)))
+	defer func() { end(err) }()
+
 	mb, err := u.Lookup(dest)
 	if err != nil {
 		return nil, err
@@ -2531,7 +2548,10 @@ type moveIntent struct {
 // crash after 1 leaves only the intent; the scrubber checks dest for the
 // GUIDs and finishes either way. A crash between 2's reference and its
 // link is a refcount too high, which the scrubber's refcount check fixes.
-func (u *User) Move(src string, metas []Meta, dest string) ([]Meta, error) {
+func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err error) {
+	end := u.trace(spanMove, attrMailbox(dest), attrCount(len(metas)))
+	defer func() { end(err) }()
+
 	smb, err := u.Lookup(src)
 	if err != nil {
 		return nil, err

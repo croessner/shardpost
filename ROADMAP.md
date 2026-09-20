@@ -173,9 +173,11 @@ Ports 110 with STLS and 995 implicit.
 * **Graceful drain** is in place: readiness turns red, IDLE sessions
   receive `* BYE [UNAVAILABLE]`, `DRAIN_SECONDS` of wait time.
 * **OpenTelemetry** is in place: spans per IMAP/POP3 command and LMTP
-  delivery, OTLP gRPC/HTTP via `OTEL_EXPORTER_OTLP_ENDPOINT`. Spans
-  reaching down to RADOS operations are still missing (context through the
-  store).
+  delivery, OTLP gRPC/HTTP via `OTEL_EXPORTER_OTLP_ENDPOINT`. Since
+  0.24.0 the store reports below them (`store.*`, `rados.omap_cas`): the
+  protocol layer hands the command context to the store view
+  (`model.RequestScoped`), so a trace shows blob access, index reads and
+  full-text writes as children of the command.
 * **Not in the POC:** a custom object class (cls; C++ on every OSD, not a
   candidate for a production cluster), multi-cluster (no second cluster).
 

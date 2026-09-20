@@ -35,6 +35,9 @@ func (u *User) chunkCount(size int64) int {
 
 // writeBlob stores raw under guid and sets refs=1 on chunk 0.
 func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
+	end := u.trace(spanBlobWrite, attrGUID(guid), attrBytes(len(raw)))
+	defer func() { end(err) }()
+
 	chunks = u.chunkCount(int64(len(raw)))
 	errs := make(chan error, chunks)
 	sem := make(chan struct{}, blobParallelism)
@@ -81,7 +84,10 @@ func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
 }
 
 // readBlob reassembles the blob described by m.
-func (u *User) readBlob(m *Meta) ([]byte, error) {
+func (u *User) readBlob(m *Meta) (raw []byte, err error) {
+	end := u.trace(spanBlobRead, attrGUID(m.GUID), attrBytes(int(m.Size)))
+	defer func() { end(err) }()
+
 	buf := make([]byte, m.Size)
 
 	chunks := m.Chunks

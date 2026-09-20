@@ -511,11 +511,15 @@ func (c *conn) handleLine() error {
 	_ = c.nc.SetWriteDeadline(time.Now().Add(c.s.o.WriteTimeout))
 	defer c.releaseCommand()
 
-	_, span := telemetry.Span(context.Background(), "imap."+c.cmdName,
+	ctx, span := telemetry.Span(context.Background(), "imap."+c.cmdName,
 		attribute.String("imap.user", c.name), attribute.String("net.peer", c.nc.RemoteAddr().String()))
 	if c.mbox != nil {
 		span.SetAttributes(attribute.String("imap.mailbox", c.mbox.Name))
 	}
+
+	// The store records its operations below this command's span.
+	model.UseRequest(ctx, c.user)
+	defer model.UseRequest(context.Background(), c.user)
 
 	err = c.dispatch(tag, cmdName, uid)
 	if err != nil {

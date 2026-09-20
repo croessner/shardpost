@@ -46,8 +46,30 @@ quantiles are not meaningful.
 
 ## Traces and access
 
-IMAP/POP3 commands and `lmtp.deliver` are instrumented. The traces
-currently also contain user attributes (`imap.user`, `pop3.user`,
+IMAP/POP3 commands, `lmtp.deliver`, `delivery.deliver`, admin requests
+and maintenance jobs are instrumented, and the store reports its own work
+below them. A trace therefore shows where the time of a command actually
+goes:
+
+```
+imap.FETCH
+├─ store.entries        mailbox, number of entries
+└─ store.blob_read      guid, bytes
+```
+
+Store spans: `store.deliver`, `store.read`, `store.blob_read`,
+`store.blob_write`, `store.fts_index`, `store.fts_search`,
+`store.entries`, `store.flags`, `store.copy`, `store.move`,
+`store.expunge`, plus `rados.omap_cas` for the central compare-and-swap
+loop. A failed operation carries the error and an error status on its
+span.
+
+The protocol layer hands the context of the running command to the store
+(`model.RequestScoped`); a store that does not implement that interface
+simply produces no store spans. Work that runs outside a command, such as
+a background notifier, produces root spans instead.
+
+The traces currently also contain user attributes (`imap.user`, `pop3.user`,
 `lmtp.user`), and for IMAP possibly the mailbox and the peer
 (`imap.mailbox`, `net.peer`). The collector configuration and the access
 rights have to implement the applicable rules for this data. Credentials
