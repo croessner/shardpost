@@ -107,6 +107,8 @@ func (u *User) ImportMailbox(spec model.ImportMailbox) (*model.Mailbox, error) {
 	b, ok := u.boxes[name]
 	if ok && b.UIDValidity == spec.UIDValidity {
 		b.Subscribed, b.SpecialUse = spec.Subscribed, spec.SpecialUse
+		u.notePartial(model.KindMailbox, b, name)
+
 		return &model.Mailbox{Name: name, MailboxRec: b.rec()}, nil
 	}
 
@@ -124,6 +126,7 @@ func (u *User) ImportMailbox(spec model.ImportMailbox) (*model.Mailbox, error) {
 
 	u.boxes[name] = nb
 	delete(u.subMiss, name)
+	u.notePartial(model.KindMailbox, nb, name)
 
 	return &model.Mailbox{Name: name, MailboxRec: nb.rec()}, nil
 }
@@ -250,6 +253,7 @@ func (u *User) ImportMessages(id string, msgs []model.ImportMessage) (*model.Imp
 
 	sort.Slice(b.msgs, func(i, j int) bool { return b.msgs[i].UID < b.msgs[j].UID })
 	b.importHeader(msgs[len(msgs)-1].UID+1, modseq)
+	u.notePartial(model.KindEmail, b, "")
 
 	return res, nil
 }
@@ -385,6 +389,7 @@ func (u *User) ImportChanges(id string, flags []model.ImportFlags, expunge []uin
 	}
 
 	b.importHeader(0, modseq)
+	u.notePartial(model.KindEmail, b, "")
 
 	return nil
 }
@@ -400,6 +405,7 @@ func (u *User) ImportFinalize(id string, uidNext uint32, highestModSeq uint64) (
 	}
 
 	b.importHeader(uidNext, highestModSeq)
+	u.notePartial(model.KindEmail, b, "")
 
 	name := ""
 

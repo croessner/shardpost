@@ -427,13 +427,11 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 	// reference, as Move does); only when every source entry is
 	// confirmed in dest is the source unlinked and its references
 	// released.
-	complete := sr.linkMissing(&dst, srcMetas, inDest)
-
-	if !complete {
+	if !sr.linkMissingLogged(&dst, srcMetas, inDest) {
 		return // intent stays, next run retries
 	}
 
-	removed, err := u.unlink(&src, srcMetas, in.ID)
+	removed, err := sr.unlinkLogged(&src, srcMetas, in.ID)
 	if err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
 		return
@@ -445,6 +443,35 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 	if err := u.moveUsage(&src, &dst, sizeOf(removed)); err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
 	}
+}
+
+// linkMissingLogged is linkMissing bracketed by the account change log.
+func (sr *scrubRun) linkMissingLogged(dst *Mailbox, metas []Meta, inDest map[string]bool) bool {
+	acct, err := sr.u.beginPartial(model.KindEmail, dst.ID, dst.Name)
+	if err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, err.Error())
+		return false
+	}
+
+	complete := sr.linkMissing(dst, metas, inDest)
+
+	acct.partial()
+
+	return complete
+}
+
+// unlinkLogged is unlink bracketed by the account change log.
+func (sr *scrubRun) unlinkLogged(src *Mailbox, metas []Meta, intentID string) ([]Meta, error) {
+	acct, err := sr.u.beginPartial(model.KindEmail, src.ID, src.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	removed, err := sr.u.unlink(src, metas, intentID)
+
+	acct.partial()
+
+	return removed, err
 }
 
 // releaseRemoved drops the blob references of unlinked entries.
@@ -551,7 +578,13 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 		return
 	}
 
-	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+	acct, err := u.beginPartial(model.KindMailbox, mb.ID, mb.Name)
+	if err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("unregister retired %q: %v", mb.Name, err))
+		return
+	}
+
+	err = casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		var rec MailboxRec
 		if v, ok := cur[regKey(mb.Name)]; !ok || json.Unmarshal(v, &rec) != nil || rec.ID != mb.ID {
 			return nil, nil
@@ -559,6 +592,9 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 
 		return nil, []string{regKey(mb.Name)}
 	})
+
+	acct.partial()
+
 	if err != nil {
 		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("unregister retired %q: %v", mb.Name, err))
 		return
@@ -690,9 +726,7 @@ func (sr *scrubRun) scanMessage(mb *Mailbox, m Meta, idx *scrubIndex) {
 		sr.log.Warn("index entry without blob", "mailbox", mb.Name, "uid", m.UID, "guid", m.GUID)
 
 		if sr.o.Allowed(RepairEntries) {
-			if _, err := u.unlink(mb, []Meta{m}, ""); err != nil {
-				rep.Errors = append(rep.Errors, err.Error())
-			}
+			sr.dropEntry(mb, m, rep)
 		}
 
 		return
@@ -836,6 +870,14 @@ func (sr *scrubRun) removeOrphans(refs map[string][]Meta) error {
 	}
 
 	return nil
+}
+
+// dropEntry removes an index entry whose blob is gone, bracketed by the
+// account change log like every other removal.
+func (sr *scrubRun) dropEntry(mb *Mailbox, m Meta, rep *ScrubReport) {
+	if _, err := sr.unlinkLogged(mb, []Meta{m}, ""); err != nil {
+		rep.Errors = append(rep.Errors, err.Error())
+	}
 }
 
 // vanishedCandidates returns the remembered orphan candidates that are

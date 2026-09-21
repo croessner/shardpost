@@ -26,6 +26,26 @@ cd third_party/go-sieve
 SIEVE_CONFORMANCE=1 GOFLAGS=-mod=mod go test ./tests -run TestPigeonholeConformance -v | grep "SIEVE CONFORMANCE\|  FAIL"
 ```
 
+## JMAP: not yet a conformance run
+
+The JMAP front-end is being built in stages (see
+[docs/jmap.md](../docs/jmap.md)). Until the mail data types of RFC 8621
+exist there is nothing a conformance corpus could run against: a suite
+would report "everything unimplemented", which is already in the
+documentation. What can be checked today is Core, by hand against a
+running server:
+
+```bash
+curl -sk -u "$USER:$PASS" https://<host>:8443/.well-known/jmap | jq .
+curl -sk -u "$USER:$PASS" -H 'Content-Type: application/json' \
+  -d '{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["Core/echo",{"hello":1},"c1"]]}' \
+  https://<host>:8443/jmap/api/ | jq .
+```
+
+The planned run, once stage 4 is in: the `jmap-samples`/`jmap-client`
+corpus, the Stalwart JMAP test set, and Thunderbird against the
+Director, with its results recorded here like the IMAP ones.
+
 ## Results 0.11.2 (2026-09-16)
 
 The server binary in 0.11.2 is identical to the fully verified 0.11.1.

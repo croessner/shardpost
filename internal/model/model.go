@@ -319,6 +319,16 @@ type User interface {
 	PublicSubscriptions() (map[string]bool, error)
 	SetPublicSubscribed(mailboxID string, subscribed bool) error
 
+	// Account change log (see account.go). AccountState returns the
+	// account's change counter, the number a client stores as its state
+	// token. AccountChanges returns the entries after since, oldest
+	// first, at most limit of them; a full page means there may be more,
+	// and the caller continues from the Seq of the last entry. ok is
+	// false when the log no longer covers since, and the caller has to
+	// resynchronise instead of applying a delta.
+	AccountState() (uint64, error)
+	AccountChanges(since uint64, limit int) (changes []AccountChange, ok bool, err error)
+
 	// Sieve scripts (ManageSieve, LMTP filtering).
 	ListScripts() (names []string, active string, err error)
 	GetScript(name string) (string, error)

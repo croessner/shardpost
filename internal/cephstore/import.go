@@ -182,17 +182,57 @@ func (u *User) ImportMailbox(spec model.ImportMailbox) (*Mailbox, error) {
 	u.invalidate()
 
 	mb, err := u.Lookup(name)
-
-	switch {
-	case errors.Is(err, ErrNoMailbox):
-		return u.importCreate(name, spec)
-	case err != nil:
+	if err != nil && !errors.Is(err, ErrNoMailbox) {
 		return nil, err
-	case mb.UIDValidity != spec.UIDValidity:
-		return u.importReplace(mb, spec)
 	}
 
-	return u.importAdopt(mb, spec)
+	// A replacement retires the mailbox that was there under a new id,
+	// so the old one is destroyed as far as a client is concerned.
+	replace := err == nil && mb.UIDValidity != spec.UIDValidity
+
+	return u.importMailboxLogged(name, mb, spec, replace, errors.Is(err, ErrNoMailbox))
+}
+
+// importMailboxLogged runs the step the import needs and records it in
+// the account change log. The id of a mailbox that does not exist yet is
+// chosen inside that step, so the announcement carries the name and the
+// record fills the id in; an announcement whose writer dies without an
+// id says only that the mailbox list changed, which is true.
+func (u *User) importMailboxLogged(name string, mb *Mailbox, spec model.ImportMailbox, replace, fresh bool) (*Mailbox, error) {
+	specs := []acctSpec{{kind: model.KindMailbox, name: name}}
+	if replace {
+		specs = append(specs, mailboxSpec(mb.ID, name))
+	}
+
+	acct, err := u.beginAccount(specs...)
+	if err != nil {
+		return nil, err
+	}
+
+	var imported *Mailbox
+
+	switch {
+	case fresh:
+		imported, err = u.importCreate(name, spec)
+	case replace:
+		imported, err = u.importReplace(mb, spec)
+	default:
+		imported, err = u.importAdopt(mb, spec)
+	}
+
+	if err != nil {
+		acct.partial()
+		return nil, err
+	}
+
+	changes := []model.AccountChange{{Op: model.OpUpdated, Mailbox: imported.ID, Name: imported.Name, Partial: true}}
+	if replace {
+		changes = append(changes, model.AccountChange{Op: model.OpDestroyed})
+	}
+
+	acct.commit(changes...)
+
+	return imported, nil
 }
 
 // importRename renames the mailbox with id to name if it exists under
@@ -488,8 +528,17 @@ func (u *User) ImportMessages(id string, msgs []model.ImportMessage) (*model.Imp
 		return nil, err
 	}
 
+	acct, err := u.beginPartial(model.KindEmail, mb.ID, mb.Name)
+	if err != nil {
+		resv.settle(Quota{})
+
+		return nil, err
+	}
+
 	linked, err := u.linkImported(mb, info.ShardSize, prepared, msgs)
 	resv.settle(countLinked(prepared, linked, res))
+
+	acct.partial()
 
 	if err != nil {
 		return nil, err
@@ -935,6 +984,13 @@ func (u *User) ImportChanges(id string, flags []model.ImportFlags, expunge []uin
 	// Flags without a source modseq get one above everything, including
 	// the modseq the expunge below consumes.
 	fresh := info.HighestModSeq + 1
+
+	acct, err := u.beginPartial(model.KindEmail, mb.ID, mb.Name)
+	if err != nil {
+		return err
+	}
+	defer acct.partial()
+
 	if len(expunge) > 0 {
 		fresh++
 	}
@@ -1033,12 +1089,23 @@ func (u *User) ImportFinalize(id string, uidNext uint32, highestModSeq uint64) (
 		return nil, err
 	}
 
+	// One entry for the whole finalised mailbox: a JMAP client that was
+	// connected before the import resynchronises it rather than being
+	// handed a delta of thousands of messages.
+	acct, err := u.beginPartial(model.KindEmail, mb.ID, mb.Name)
+	if err != nil {
+		return nil, err
+	}
+
 	_, _, err = u.casHeader(mb, func(info *MailboxInfo, _ uint64) (*headerChange, error) {
 		set := map[string][]byte{}
 		importHeader(set, info, uidNext, highestModSeq)
 
 		return &headerChange{set: set}, nil
 	})
+
+	acct.partial()
+
 	if err != nil {
 		return nil, err
 	}

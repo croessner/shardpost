@@ -15,6 +15,7 @@ user namespaces.
 | Object/structure | Meaning | Primary source |
 |---|---|---|
 | `mailboxes` | Registry of names and stable mailbox IDs; quota and delivery intents | [user.go](../../internal/cephstore/user.go) |
+| `account` | Account-wide change counter and change log (JMAP state) | [account.go](../../internal/cephstore/account.go) |
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
 | `mbox/<id>/<n>` | Further message entries | [user.go](../../internal/cephstore/user.go) |
 | `msg/<guid>/<n>` | Immutable payload chunks; chunk 0 carries `refs` | [blob.go](../../internal/cephstore/blob.go) |
@@ -45,6 +46,7 @@ registry keys, not reliable physical object paths.
 | UIDVALIDITY + UID | One mailbox | Identity of a message as seen by the IMAP client |
 | GUID | A blob and its index references | Reference to shared message data |
 | MODSEQ | Change history of a mailbox | Ordering value for synchronization and conditional changes |
+| Account sequence | Change history of a whole account | Ordering value across mailboxes; what a JMAP state token names |
 | FTS doc ID | Search index of one account | Compact posting list identity, not an IMAP UID |
 | session_id | One network/backend session | Log correlation, not a persistent mail identity |
 
@@ -103,6 +105,62 @@ before the message is written. Orphaned intents are repaired or rolled back
 after the designated age threshold. Intents do not guarantee
 exactly-once delivery to an external client whose
 success response can be lost on the network.
+
+## The account change log
+
+A MODSEQ counts inside one mailbox and says nothing about the mailbox
+next to it. That is what RFC 7162 specifies and it is all IMAP needs.
+JMAP (RFC 8620) asks a different question — what changed anywhere in
+this account since state token N — and answers it with a single number
+per account and data type. The `account` object holds that number and
+the log behind it:
+
+| omap key | Meaning |
+|---|---|
+| `h:seq` | The account counter; the highest sequence ever allocated |
+| `h:logstart` | The oldest sequence the log still holds |
+| `p:<seq>` | A change that has been announced and not yet recorded |
+| `a:<seq>` | The record of a change: kind, operation, mailbox, messages |
+
+The log is a second record beside the mailbox change log, never a second
+number space. An entry says which object changed and carries the account
+sequence; the mailbox MODSEQ stays exactly what it is, and the mailbox
+log remains authoritative for what happened inside a mailbox.
+
+A mailbox object and the `account` object are two objects, so the
+atomicity boundary applies: they cannot be written together. Every
+change is therefore three steps, the same two-phase shape a higher-shard
+write already uses:
+
+1. the writer announces the change (`p:<seq>`, one CAS on `account`),
+2. the mailbox change happens as before,
+3. the writer records what it did and drops the announcement.
+
+A reader never reads past the lowest announcement that has no record
+yet, so a state token cannot advance over a change that is still being
+written. An announcement whose writer died is turned into a *partial*
+entry after 60 seconds: the mailbox is named, its messages are not, and
+a client resynchronises that one mailbox. The paths that repair or
+import (the scrubber, the account import) write partial entries directly,
+because they run again if they die and no client is waiting on their
+state token.
+
+The direction of the guarantee is the point: the log may report a change
+that did not happen, or report one without its details, but it must
+never stay silent about a change that did. A client acts on a spurious
+report by fetching something unchanged; it acts on a missing report by
+never learning about a message.
+
+The log is bounded like the mailbox change log
+(`server.account_log_retention`, 10000 entries by default). A client
+whose token is older than the oldest entry is told to resynchronise
+instead of being handed a delta with a hole in it.
+
+Two limits are deliberate at this stage. The private `\Seen` marks of a
+public folder are recorded in the log of the public account, not in the
+log of the account the mark belongs to; JMAP sharing (RFC 9670) is where
+that is resolved. And METADATA annotations have no entry at all, because
+RFC 8621 has no object for them.
 
 ## Notifications and search
 

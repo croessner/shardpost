@@ -163,6 +163,8 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},
 		QuotaRules:  quota.NewPolicy(settings.Quota),
 		ShardSize:   uint32(settings.Server.MboxShardSize),
+
+		AccountLogRetention: int(settings.Server.AccountLogRetention),
 	}
 }
 
@@ -310,6 +312,9 @@ type servers struct {
 		Close() error
 	}
 	http *http.Server
+	// jmap serves the JMAP front-end on its own listener (nil: off).
+	jmap    *http.Server
+	jmapTLS *tls.Config
 	// delivery is shared by LMTP and the local delivery API.
 	delivery *delivery.Service
 	admin    *adminServers
@@ -343,17 +348,14 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 		log.Warn("no SMTP_RELAY_ADDR: sieve redirect keeps messages, vacation replies are not sent")
 	}
 
-	srv.http = newHTTPServer(settings, store)
-
-	srv.admin, err = newAdminServers(log, settings, authn, srv.delivery, store)
-	if err != nil {
+	if err := srv.setupHTTP(log, settings, store, authn); err != nil {
 		return err
 	}
 
 	errc := srv.start(settings, tlsCfg)
 
 	log.Info("listening", "imap", settings.Server.ImapAddr, "pop3", settings.Server.Pop3Addr, "managesieve", settings.Sieve.Addr, "lmtp", settings.Server.LmtpAddr, "http", settings.Server.HTTPAddr, "tls", tlsCfg != nil,
-		"admin_socket", settings.Admin.Socket, "admin_addr", settings.Admin.Addr, "version", version.Version)
+		"jmap", settings.JMAP.Addr, "admin_socket", settings.Admin.Socket, "admin_addr", settings.Admin.Addr, "version", version.Version)
 
 	select {
 	case <-ctx.Done():
@@ -438,7 +440,7 @@ func newDeliveryService(log *slog.Logger, settings *config.Config, store *cephst
 // of each is delivered on the returned channel.
 func (srv *servers) start(settings *config.Config, tlsCfg *tls.Config) <-chan error {
 	// One slot per listener goroutine, so none blocks on a full channel.
-	errc := make(chan error, 9)
+	errc := make(chan error, 10)
 
 	serveOn := func(name, addr string, implicitTLS bool, s interface{ Serve(net.Listener) error }) {
 		var cfg *tls.Config
@@ -473,6 +475,18 @@ func (srv *servers) start(settings *config.Config, tlsCfg *tls.Config) <-chan er
 		errc <- fmt.Errorf("lmtp: %w", srv.lmtp.Serve(ln))
 	}()
 	go func() { errc <- fmt.Errorf("http: %w", srv.http.ListenAndServe()) }()
+
+	if srv.jmap != nil {
+		go func() {
+			ln, err := listen(srv.jmap.Addr, srv.jmapTLS, settings)
+			if err != nil {
+				errc <- fmt.Errorf("jmap: %w", err)
+				return
+			}
+
+			errc <- fmt.Errorf("jmap: %w", srv.jmap.Serve(ln))
+		}()
+	}
 
 	srv.admin.start(errc)
 
@@ -516,6 +530,10 @@ func (srv *servers) drain(settings *config.Config) {
 	}
 
 	_ = srv.http.Shutdown(shCtx)
+
+	if srv.jmap != nil {
+		_ = srv.jmap.Shutdown(shCtx)
+	}
 }
 
 // scrub walks all users (or SCRUB_USERS) and repairs what a crash may

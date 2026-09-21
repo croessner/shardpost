@@ -103,6 +103,7 @@ type User struct {
 	limit   model.Quota
 	guidN   int
 	intents int
+	acct    accountLog
 	scripts map[string]string
 	active  string
 	imp     *importLock
@@ -209,6 +210,7 @@ func (u *User) CreateMailbox(name string, use []string) error {
 	}
 
 	u.boxes[name] = b
+	u.mailboxChange(model.OpCreated, b, name)
 
 	return nil
 }
@@ -234,6 +236,8 @@ func (u *User) DeleteMailbox(name string) error {
 	}
 
 	delete(u.boxes, n)
+	u.emailDestroyedPartial(b)
+	u.mailboxChange(model.OpDestroyed, b, n)
 
 	if b.Subscribed { // RFC 3501 6.3.4: the subscription may survive DELETE
 		if u.subMiss == nil {
@@ -304,6 +308,8 @@ func (u *User) RenameMailbox(oldName, newName string) error {
 			delete(u.boxes, n)
 			u.boxes[newName+n[len(oldName):]] = b
 			moves = append(moves, move{copyACL(b.ACL), n, newName + n[len(oldName):]})
+			u.mailboxChange(model.OpUpdated, b, newName+n[len(oldName):])
+
 			found = true
 		}
 	}
@@ -343,7 +349,10 @@ func (u *User) SetSubscribed(name string, sub bool) error {
 		return nil
 	}
 
-	b.Subscribed = sub
+	if b.Subscribed != sub {
+		b.Subscribed = sub
+		u.mailboxChange(model.OpUpdated, b, n)
+	}
 
 	return nil
 }
@@ -512,6 +521,7 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 
 	u.usage.Bytes += m.Size
 	u.usage.Msgs++
+	u.emailChange(model.OpCreated, b, m.ModSeq, []model.Meta{m})
 
 	return &m, nil
 }
@@ -575,6 +585,7 @@ func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply
 		}
 
 		b.changes = append(b.changes, model.Change{ModSeq: b.bump(), UIDs: uids})
+		u.emailChange(model.OpUpdated, b, ms, res.Updated)
 	}
 
 	return res, nil
@@ -604,6 +615,10 @@ func (b *box) addKeywords(flags []string) {
 }
 
 func (u *User) remove(b *box, metas []model.Meta) {
+	if len(metas) == 0 {
+		return
+	}
+
 	gone := map[uint32]bool{}
 
 	var uids []uint32
@@ -625,6 +640,7 @@ func (u *User) remove(b *box, metas []model.Meta) {
 	ms := b.bump()
 	b.vanished[ms] = uids
 	b.changes = append(b.changes, model.Change{ModSeq: ms, UIDs: uids, Expunged: true})
+	u.emailChange(model.OpDestroyed, b, ms, metas)
 }
 
 // Expunge removes the given messages from the mailbox.
@@ -667,6 +683,8 @@ func (u *User) Copy(metas []model.Meta, dest string) ([]model.Meta, error) {
 		b.msgs = append(b.msgs, m)
 		out = append(out, m)
 	}
+
+	u.emailChange(model.OpCreated, b, 0, out)
 
 	return out, nil
 }
@@ -1043,7 +1061,10 @@ func (u *User) SetACL(name, identifier, rights string) error {
 		return err
 	}
 
-	setACLEntry(b, identifier, rights)
+	if setACLEntry(b, identifier, rights) {
+		u.mailboxChange(model.OpUpdated, b, canon)
+	}
+
 	u.mu.Unlock()
 
 	u.syncPointer(canon, identifier, rights)
@@ -1138,6 +1159,10 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 	}
 
 	changed := setACLEntry(b, identifier, rights)
+	if changed {
+		u.mailboxChange(model.OpUpdated, b, canon)
+	}
+
 	gen := b.ACLGen
 	u.mu.Unlock()
 
@@ -1297,6 +1322,8 @@ func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64)
 	u.mu.Unlock()
 
 	if write == nil {
+		u.recordTouched(b, modseq, uids)
+
 		return modseq, nil
 	}
 
@@ -1310,8 +1337,26 @@ func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64)
 	}
 
 	u.commitChange(b, at, model.Change{ModSeq: modseq, UIDs: uids})
+	u.recordTouched(b, modseq, uids)
 
 	return modseq, nil
+}
+
+// recordTouched records a TouchModSeq in the account change log; the
+// account log names messages by GUID, TouchModSeq is given UIDs alone.
+func (u *User) recordTouched(b *box, modseq uint64, uids []uint32) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	metas := make([]model.Meta, 0, len(uids))
+
+	for _, m := range b.msgs {
+		if containsUID(uids, m.UID) {
+			metas = append(metas, m)
+		}
+	}
+
+	u.emailChange(model.OpUpdated, b, modseq, metas)
 }
 
 // commitChange replaces an announced change by what actually happened

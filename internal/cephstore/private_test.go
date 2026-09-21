@@ -53,3 +53,29 @@ func TestStaleMarks(t *testing.T) {
 		t.Errorf("removed %v, want only the older incarnation", rm)
 	}
 }
+
+// TestClampRange: a requested byte range is cut down to what the blob
+// holds; a length below zero means "to the end", and a range beyond the
+// end is empty rather than an error.
+func TestClampRange(t *testing.T) {
+	cases := []struct {
+		size, offset, length int64
+		lo, hi               int64
+	}{
+		{10, 0, -1, 0, 10},
+		{10, 3, -1, 3, 10},
+		{10, 3, 4, 3, 7},
+		{10, 3, 100, 3, 10},
+		{10, 20, 5, 10, 10},
+		{10, -5, 4, 0, 4},
+		{0, 0, -1, 0, 0},
+	}
+
+	for _, c := range cases {
+		lo, hi := clampRange(c.size, c.offset, c.length)
+		if lo != c.lo || hi != c.hi {
+			t.Errorf("clampRange(%d, %d, %d) = %d..%d, want %d..%d",
+				c.size, c.offset, c.length, lo, hi, c.lo, c.hi)
+		}
+	}
+}

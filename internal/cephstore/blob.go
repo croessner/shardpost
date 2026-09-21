@@ -8,6 +8,8 @@ import (
 	"syscall"
 
 	"github.com/ceph/go-ceph/rados"
+
+	"shardpost/internal/model"
 )
 
 // Message blobs are split into fixed size chunks "msg/<guid>/<n>". Chunks
@@ -20,7 +22,11 @@ import (
 const (
 	DefaultChunkSize = 4 << 20
 	xattrRefs        = "refs"
-	blobParallelism  = 8
+	// xattrLen is the total size of the blob, on chunk 0. It lets a
+	// reader that has no index entry (a JMAP blob download) know how
+	// much there is without probing for the last chunk.
+	xattrLen        = "len"
+	blobParallelism = 8
 )
 
 func chunkOID(guid string, n int) string { return fmt.Sprintf("%s%s/%d", msgPrefix, guid, n) }
@@ -64,6 +70,7 @@ func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
 
 			if n == 0 {
 				op.SetXattr(xattrRefs, []byte("1"))
+				op.SetXattr(xattrLen, []byte(strconv.FormatInt(int64(len(raw)), 10)))
 			}
 
 			if err := op.Operate(u.data, chunkOID(guid, n), rados.OperationNoFlag); err != nil {
@@ -215,4 +222,117 @@ func (u *User) releaseBlob(m *Meta) error {
 	u.deleteBlob(m.GUID, m.Chunks)
 
 	return nil
+}
+
+// PutBlob implements model.Blobs: it stores raw under a fresh GUID with
+// one reference, so that nothing collects it while the client is still
+// looking at the response. Nothing points at the blob yet, so the
+// scrubber sees it as an orphan and removes it after the two runs its
+// orphan rule requires — which is what an expiring JMAP upload is.
+func (u *User) PutBlob(raw []byte) (string, error) {
+	guid := newGUID()
+
+	if _, err := u.writeBlob(guid, raw); err != nil {
+		return "", err
+	}
+
+	return guid, nil
+}
+
+// BlobSize implements model.Blobs. A blob written before the length was
+// recorded as an xattr has none, which RADOS reports as ENODATA; its
+// size is then summed from the chunks.
+func (u *User) BlobSize(guid string) (int64, error) {
+	if !model.ValidGUID(guid) {
+		return 0, model.ErrNoBlob
+	}
+
+	val, _, err := u.xattrVer(u.data, chunkOID(guid, 0), xattrLen)
+
+	switch {
+	case errCode(err) == syscall.ENOENT:
+		return 0, model.ErrNoBlob
+	case errCode(err) == syscall.ENODATA:
+		return u.blobSizeByChunks(guid)
+	case err != nil:
+		return 0, fmt.Errorf("size of %s: %w", guid, err)
+	}
+
+	if n, perr := strconv.ParseInt(string(val), 10, 64); perr == nil {
+		return n, nil
+	}
+
+	return u.blobSizeByChunks(guid)
+}
+
+// blobSizeByChunks sums the chunk sizes of a blob written before the
+// length was recorded as an xattr.
+func (u *User) blobSizeByChunks(guid string) (int64, error) {
+	var total int64
+
+	for n := 0; ; n++ {
+		st, err := u.data.Stat(chunkOID(guid, n))
+		if err != nil {
+			if errCode(err) == syscall.ENOENT {
+				if n == 0 {
+					return 0, model.ErrNoBlob
+				}
+
+				return total, nil
+			}
+
+			return 0, fmt.Errorf("stat chunk %d of %s: %w", n, guid, err)
+		}
+
+		total += int64(st.Size)
+
+		if int64(st.Size) < u.chunkSize {
+			return total, nil
+		}
+	}
+}
+
+// ReadBlob implements model.Blobs.
+func (u *User) ReadBlob(guid string, size, offset, length int64) ([]byte, error) {
+	lo, hi := clampRange(size, offset, length)
+	if lo >= hi {
+		return []byte{}, nil
+	}
+
+	buf := make([]byte, hi-lo)
+
+	for pos := lo; pos < hi; {
+		n := int(pos / u.chunkSize)
+		within := pos - int64(n)*u.chunkSize
+		want := min(u.chunkSize-within, hi-pos)
+
+		got, err := u.data.Read(chunkOID(guid, n), buf[pos-lo:pos-lo+want], uint64(within))
+		if err != nil {
+			return nil, fmt.Errorf("read chunk %d of %s: %w", n, guid, err)
+		}
+
+		if got == 0 {
+			return nil, fmt.Errorf("short read chunk %d of %s", n, guid)
+		}
+
+		pos += int64(got)
+	}
+
+	return buf, nil
+}
+
+// clampRange turns a requested range into the part of size it covers; a
+// length below zero means "to the end".
+func clampRange(size, offset, length int64) (lo, hi int64) {
+	lo = max(offset, 0)
+	if lo > size {
+		lo = size
+	}
+
+	hi = size
+	if length >= 0 {
+		hi = min(lo+length, size)
+	}
+
+	return lo, hi
 }

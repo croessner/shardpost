@@ -125,23 +125,24 @@ func HasFlag(flags []string, f string) bool { return model.HasFlag(flags, f) }
 
 // User is a per-user view of the store (namespace-scoped IOContexts).
 type User struct {
-	learningHook func(model.Mailbox, model.Meta) (string, error)
-	name         string
-	store        *Store // to open other namespaces (shared folder pointers)
-	idx          *rados.IOContext
-	data         *rados.IOContext
-	log          *slog.Logger
-	chunkSize    int64
-	ftsShards    int
-	shardSize    uint32
-	limit        QuotaLimit
-	rules        *quota.Policy
-	onQuota      func(account string, before, after, limit Quota)
-	noEnforce    bool           // reservations skip the limit check (still counted)
-	inflight     sync.WaitGroup // background work still using the IOContexts
-	release      func()         // drops the reference on the connection
-	idxPool      *verPool       // private contexts for versioned reads
-	dataPool     *verPool
+	learningHook  func(model.Mailbox, model.Meta) (string, error)
+	name          string
+	store         *Store // to open other namespaces (shared folder pointers)
+	idx           *rados.IOContext
+	data          *rados.IOContext
+	log           *slog.Logger
+	chunkSize     int64
+	ftsShards     int
+	acctRetention int
+	shardSize     uint32
+	limit         QuotaLimit
+	rules         *quota.Policy
+	onQuota       func(account string, before, after, limit Quota)
+	noEnforce     bool           // reservations skip the limit check (still counted)
+	inflight      sync.WaitGroup // background work still using the IOContexts
+	release       func()         // drops the reference on the connection
+	idxPool       *verPool       // private contexts for versioned reads
+	dataPool      *verPool
 
 	cacheMu sync.Mutex
 	cache   map[string]cachedMailbox
@@ -357,49 +358,69 @@ func (u *User) CreateMailbox(name string, specialUse []string) error {
 		}
 	}
 
-	// 1. The index object under its fresh id (nobody can race for it).
-	err := u.createIndexObject(&rec)
+	acct, err := u.beginAccount(mailboxSpec(rec.ID, name))
 	if err != nil {
+		return err
+	}
+
+	// 1. The index object under its fresh id (nobody can race for it).
+	err = u.createIndexObject(&rec)
+	if err != nil {
+		acct.withdraw()
+
 		return fmt.Errorf("create mailbox %q: %w", name, err)
 	}
 
 	// 2. Claim the name in the registry. Concurrent creators on different
 	//    pods race here; exactly one wins, the others see the name taken.
-	exists := false
-	b, _ := json.Marshal(&rec)
+	exists, err := u.claimName(name, &rec)
+	if err != nil || exists {
+		acct.settle(err, false, rec.ID)
+
+		_ = u.idx.Delete(mboxOID(rec.ID))
+
+		if err != nil {
+			return fmt.Errorf("register mailbox %q: %w", name, err)
+		}
+
+		return ErrMailboxExists
+	}
+
+	acct.commit(model.AccountChange{Op: model.OpCreated})
+	u.invalidate()
+
+	return nil
+}
+
+// claimName registers rec under name unless the name is taken; exists
+// reports that it was. A subscription made before the mailbox existed
+// carries over into the record.
+func (u *User) claimName(name string, rec *MailboxRec) (exists bool, err error) {
+	b, _ := json.Marshal(rec)
 
 	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name), regSubMissing + name}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		if _, ok := cur[regKey(name)]; ok {
 			exists = true
+
 			return nil, nil
 		}
 
+		exists = false
 		set := map[string][]byte{regKey(name): b, regLastValidity + name: []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10))}
-		// A subscription made before the mailbox existed carries over.
+
 		var rm []string
 
 		if _, ok := cur[regSubMissing+name]; ok {
 			rec.Subscribed = true
-			b, _ = json.Marshal(&rec)
+			b, _ = json.Marshal(rec)
 			set[regKey(name)] = b
 			rm = []string{regSubMissing + name}
 		}
 
 		return set, rm
 	})
-	if err != nil {
-		_ = u.idx.Delete(mboxOID(rec.ID))
-		return fmt.Errorf("register mailbox %q: %w", name, err)
-	}
 
-	if exists {
-		_ = u.idx.Delete(mboxOID(rec.ID))
-		return ErrMailboxExists
-	}
-
-	u.invalidate()
-
-	return nil
+	return exists, err
 }
 
 // createIndexObject creates the index object (shard 0 with a fresh
@@ -488,7 +509,7 @@ func (u *User) DeleteMailbox(name string) error {
 	// concurrent DELETEs exactly one wins and releases the blobs, and a
 	// mailbox re-created under the name meanwhile is left alone. The
 	// subscription and the ACL come from that winning snapshot.
-	snap, lost, err := u.unregisterMailbox(mb, lease)
+	snap, lost, err := u.unregisterLogged(mb, lease, metas)
 	if err != nil {
 		return fmt.Errorf("unregister mailbox %q: %w", name, err)
 	}
@@ -508,6 +529,35 @@ func (u *User) DeleteMailbox(name string) error {
 	}
 
 	return u.releaseUsage(mb, q)
+}
+
+// unregisterLogged unregisters a mailbox and records both the mailbox
+// and its messages in the account change log. The message list was read
+// before the mailbox was closed for writing, so a delivery may have
+// squeezed in behind it: the message entry says it is not a delta, and
+// a reader resynchronises rather than trusting a list that may be one
+// message short.
+func (u *User) unregisterLogged(mb *Mailbox, lease model.Lease, metas []Meta) (MailboxRec, bool, error) {
+	acct, err := u.beginAccount(emailSpec(mb.ID), mailboxSpec(mb.ID, mb.Name))
+	if err != nil {
+		return MailboxRec{}, false, err
+	}
+
+	snap, lost, err := u.unregisterMailbox(mb, lease)
+
+	switch {
+	case err != nil:
+		acct.partial()
+	case lost:
+		acct.withdraw()
+	default:
+		gone := emailChange(model.OpDestroyed, 0, metas)
+		gone.Partial = true
+
+		acct.commit(gone, model.AccountChange{Op: model.OpDestroyed})
+	}
+
+	return snap, lost, err
 }
 
 // readForDelete reads the header and the index entries of a mailbox that
@@ -615,9 +665,21 @@ func (u *User) RenameMailbox(oldName, newName string) error {
 
 	var conflict error
 
+	acct, err := u.beginAccount(renameSpecs(all, oldName, newName)...)
+	if err != nil {
+		return err
+	}
+
 	err = casOmap(u, u.idx, oidRegistry, keys, u.renameUpdate(oldName, newName, &conflict))
 	if err != nil {
+		acct.partial()
 		return fmt.Errorf("rename %q: %w", oldName, err)
+	}
+
+	if conflict != nil {
+		acct.withdraw()
+	} else {
+		acct.commit()
 	}
 
 	if conflict == nil {
@@ -712,6 +774,25 @@ func renameKeys(all []Mailbox, oldName, newName string) ([]string, bool) {
 	return keys, subtree
 }
 
+// renameSpecs announces one mailbox change per mailbox the rename
+// touches, under the name it will carry afterwards. A rename changes
+// every child of the subtree as well, and a client that tracks mailboxes
+// has to learn about each of them.
+func renameSpecs(all []Mailbox, oldName, newName string) []acctSpec {
+	var specs []acctSpec
+
+	for i := range all {
+		m := &all[i]
+		if m.Name != oldName && !strings.HasPrefix(m.Name, oldName+Delim) {
+			continue
+		}
+
+		specs = append(specs, mailboxSpec(m.ID, newName+m.Name[len(oldName):]))
+	}
+
+	return specs
+}
+
 // renameUpdate returns the registry CAS function of a rename of the
 // oldName subtree to newName. *conflict receives why the rename was not
 // done (nil if it was).
@@ -769,42 +850,22 @@ func (u *User) moveSubtreeSharedRefs(all []Mailbox, oldName, newName string) {
 func (u *User) SetSubscribed(name string, subscribed bool) error {
 	name = canonical(name)
 
-	var missing bool
+	// A subscription to a name without a mailbox is an IMAP-only record
+	// (RFC 5258); there is no object for it in the account log.
+	acct, err := u.beginKnownMailbox(name)
+	if err != nil {
+		return err
+	}
 
-	err := casOmap(u, u.idx, oidRegistry, []string{regKey(name), regSubMissing + name}, func(cur map[string][]byte) (map[string][]byte, []string) {
-		missing = false
+	var missing, changed bool
 
-		v, ok := cur[regKey(name)]
-		if !ok {
-			// RFC 5258: subscriptions may name mailboxes that do not exist.
-			missing = true
+	var id string
 
-			if subscribed {
-				if _, has := cur[regSubMissing+name]; has {
-					return nil, nil
-				}
-
-				return map[string][]byte{regSubMissing + name: []byte("1")}, nil
-			}
-
-			if _, has := cur[regSubMissing+name]; has {
-				return nil, []string{regSubMissing + name}
-			}
-
-			return nil, nil
-		}
-
-		var rec MailboxRec
-		if json.Unmarshal(v, &rec) != nil || rec.Subscribed == subscribed {
-			return nil, nil
-		}
-
-		rec.Subscribed = subscribed
-		b, _ := json.Marshal(&rec)
-
-		return map[string][]byte{regKey(name): b}, nil
-	})
+	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name), regSubMissing + name},
+		subscribeUpdate(name, subscribed, &missing, &changed, &id))
 	u.invalidate()
+
+	acct.settle(err, changed, id)
 
 	if err != nil {
 		return err
@@ -815,6 +876,47 @@ func (u *User) SetSubscribed(name string, subscribed bool) error {
 	}
 
 	return nil
+}
+
+// subscribeUpdate returns the registry CAS function of a subscription
+// change. *missing reports a name without a mailbox, which RFC 5258
+// allows and which is recorded separately; *changed reports that the
+// record was actually rewritten.
+func subscribeUpdate(name string, subscribed bool, missing, changed *bool, id *string) func(map[string][]byte) (map[string][]byte, []string) {
+	return func(cur map[string][]byte) (map[string][]byte, []string) {
+		*missing, *changed = false, false
+
+		v, ok := cur[regKey(name)]
+		if !ok {
+			*missing = true
+			_, has := cur[regSubMissing+name]
+
+			switch {
+			case subscribed && !has:
+				return map[string][]byte{regSubMissing + name: []byte("1")}, nil
+			case !subscribed && has:
+				return nil, []string{regSubMissing + name}
+			}
+
+			return nil, nil
+		}
+
+		var rec MailboxRec
+		if json.Unmarshal(v, &rec) != nil {
+			return nil, nil
+		}
+
+		*id = rec.ID
+		if rec.Subscribed == subscribed {
+			return nil, nil
+		}
+
+		rec.Subscribed = subscribed
+		*changed = true
+		b, _ := json.Marshal(&rec)
+
+		return map[string][]byte{regKey(name): b}, nil
+	}
 }
 
 // QuotaUsage returns the user's current usage.
@@ -1755,7 +1857,7 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 	m := Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks, Flags: flags,
 		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: env, References: refs, Preview: preview}
 
-	meta, err := u.link(mb, m)
+	meta, err := u.linkLogged(mb, m)
 	if err != nil {
 		_ = u.ftsRemove(&m)
 		u.deleteBlob(guid, chunks)
@@ -1765,6 +1867,26 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 	}
 
 	res.settle(size)
+
+	return meta, nil
+}
+
+// linkLogged links an index entry and records it in the account change
+// log, announced before the write and recorded after it.
+func (u *User) linkLogged(mb *Mailbox, m Meta) (*Meta, error) {
+	acct, err := u.beginAccount(emailSpec(mb.ID))
+	if err != nil {
+		return nil, err
+	}
+
+	meta, err := u.link(mb, m)
+	if err != nil {
+		acct.partial()
+
+		return nil, err
+	}
+
+	acct.commit(emailChange(model.OpCreated, meta.ModSeq, []Meta{*meta}))
 
 	return meta, nil
 }
@@ -1973,7 +2095,29 @@ func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply
 	end := u.trace(spanFlags, attrCount(len(uids)))
 	defer func() { end(err) }()
 
-	return u.setFlags(name, uids, unchangedSince, apply, false, 0)
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+
+	acct, err := u.beginAccount(emailSpec(mb.ID))
+	if err != nil {
+		return nil, err
+	}
+
+	res, err = u.setFlags(name, uids, unchangedSince, apply, false, 0)
+	if err != nil {
+		acct.partial()
+		return nil, err
+	}
+
+	if len(res.Updated) == 0 {
+		acct.withdraw()
+	} else {
+		acct.commit(emailChange(model.OpUpdated, 0, res.Updated))
+	}
+
+	return res, nil
 }
 
 // setFlags is SetFlags with restamp: write the record even when the
@@ -2314,9 +2458,21 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 		return nil
 	}
 
-	removed, err := u.unlink(mb, metas, "")
+	acct, err := u.beginAccount(emailSpec(mb.ID))
 	if err != nil {
 		return err
+	}
+
+	removed, err := u.unlink(mb, metas, "")
+	if err != nil {
+		acct.partial()
+		return err
+	}
+
+	if len(removed) == 0 {
+		acct.withdraw()
+	} else {
+		acct.commit(emailChange(model.OpDestroyed, 0, removed))
 	}
 	// Index no longer references the blobs; drop our reference. A failure
 	// here only leaves orphans, never dangling index entries.
@@ -2498,6 +2654,12 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		return nil, err
 	}
 
+	acct, err := u.beginAccount(emailSpec(mb.ID))
+	if err != nil {
+		res.settle(Quota{})
+		return nil, err
+	}
+
 	out := make([]Meta, 0, len(metas))
 
 	var used Quota
@@ -2506,7 +2668,9 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 
 	for _, m := range metas {
 		if _, err := u.blobRef(m.GUID, +1); err != nil {
+			acct.partial()
 			giveBack()
+
 			return nil, err
 		}
 
@@ -2514,6 +2678,7 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		if err != nil {
 			_, _ = u.blobRef(m.GUID, -1)
 
+			acct.partial()
 			giveBack()
 
 			return nil, err
@@ -2524,6 +2689,7 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		used.Msgs++
 	}
 
+	acct.commit(emailChange(model.OpCreated, 0, out))
 	res.settle(used)
 
 	return out, nil
@@ -2586,9 +2752,17 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 	if err != nil {
 		return nil, err
 	}
+	// Both mailboxes are announced together: the log must not end up
+	// holding the removal without the arrival, or the other way round.
+	acct, err := u.beginAccount(emailSpec(dmb.ID), emailSpec(smb.ID))
+	if err != nil {
+		res.settle(Quota{})
+		return nil, err
+	}
 
 	mv, err := u.moveLinks(smb, dmb, metas)
 	if err != nil {
+		acct.partial()
 		// Once the intent is written the scrubber completes the move
 		// into dest, so the reservation stays except for entries that
 		// were expunged meanwhile.
@@ -2601,6 +2775,10 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 		return nil, err
 	}
 
+	acct.commit(
+		emailChange(model.OpCreated, 0, mv.out),
+		emailChange(model.OpDestroyed, 0, mv.removed),
+	)
 	res.settle(sizeOf(mv.out))
 
 	if err := u.moveUsage(smb, dmb, mv.freed); err != nil {
@@ -2616,6 +2794,7 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 // written.
 type moveResult struct {
 	out            []Meta
+	removed        []Meta
 	freed, skipped Quota
 	started        bool
 }
@@ -2674,6 +2853,7 @@ func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
 		}
 	}
 
+	mv.removed = removed
 	mv.freed = sizeOf(removed)
 
 	return mv, nil

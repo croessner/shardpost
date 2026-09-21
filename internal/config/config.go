@@ -39,6 +39,8 @@ type Config struct {
 	Trace Trace `mapstructure:"trace"`
 	// Jobs configures the maintenance jobs.
 	Jobs Jobs `mapstructure:"jobs"`
+	// JMAP configures the JMAP front-end (off without an address).
+	JMAP JMAP `mapstructure:"jmap"`
 }
 
 // Logging configures the log output.
@@ -73,6 +75,10 @@ type Server struct {
 	QuotaBytes    int64  `mapstructure:"quota_bytes" env:"QUOTA_BYTES" validate:"gte=0"`
 	QuotaMsgs     int64  `mapstructure:"quota_msgs" env:"QUOTA_MSGS" validate:"gte=0"`
 	MboxShardSize int64  `mapstructure:"mbox_shard_size" env:"MBOX_SHARD_SIZE" validate:"gte=0"`
+	// AccountLogRetention is how many entries the account change log of
+	// an account keeps. It is what JMAP state tokens point into: a
+	// client whose token is older than the oldest entry resynchronises.
+	AccountLogRetention int64 `mapstructure:"account_log_retention" env:"ACCOUNT_LOG_RETENTION" validate:"gte=0"`
 	// PublicPrefix is the client-visible prefix of the public folders.
 	PublicPrefix string `mapstructure:"public_prefix" env:"PUBLIC_PREFIX" validate:"omitempty,endswith=/"`
 	// SharedPrefix is the client-visible prefix of the mailboxes other
@@ -286,6 +292,17 @@ var defaults = []struct {
 	{"server.quota_bytes", 0},
 	{"server.quota_msgs", 0},
 	{"server.mbox_shard_size", 100000},
+	{"server.account_log_retention", 10000},
+	{"jmap.addr", ""},
+	{"jmap.public_base_url", ""},
+	{"jmap.insecure_auth", false},
+	{"jmap.max_size_upload", 0},
+	{"jmap.max_size_request", 0},
+	{"jmap.max_concurrent_upload", 0},
+	{"jmap.max_concurrent_requests", 0},
+	{"jmap.max_calls_in_request", 0},
+	{"jmap.max_objects_in_get", 0},
+	{"jmap.max_objects_in_set", 0},
 	{"server.public_prefix", "Public/"},
 	{"server.shared_prefix", "Shared/"},
 	{"server.autocreate", defaultAutocreate},
@@ -454,6 +471,10 @@ func (c *Config) checkServer() error {
 	}
 
 	if err := c.Admin.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.JMAP.Validate(c.TLS); err != nil {
 		return err
 	}
 

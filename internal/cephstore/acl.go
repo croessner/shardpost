@@ -68,31 +68,19 @@ func (u *User) SetACL(name, identifier, rights string) error {
 
 	var missing bool
 
-	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
-		missing = false
+	changed := false
 
-		v, ok := cur[regKey(name)]
-		if !ok {
-			missing = true
-			return nil, nil
-		}
+	acct, err := u.beginKnownMailbox(name)
+	if err != nil {
+		return err
+	}
 
-		var rec MailboxRec
-		if json.Unmarshal(v, &rec) != nil {
-			missing = true
-			return nil, nil
-		}
+	var id string
 
-		if !applyACLChange(&rec, identifier, rights) {
-			return nil, nil
-		}
-
-		rec.ACLGen++
-		b, _ := json.Marshal(&rec)
-
-		return map[string][]byte{regKey(name): b}, nil
-	})
+	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, aclUpdate(name, identifier, rights, &missing, &changed, &id))
 	u.invalidate()
+
+	acct.settle(err, changed, id)
 
 	if err != nil {
 		return fmt.Errorf("set acl %q: %w", name, err)
@@ -107,6 +95,36 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	}
 
 	return u.syncSharedRef(name, identifier)
+}
+
+// aclUpdate returns the registry CAS function of a SETACL. *missing
+// reports that there is no such mailbox, *changed that the record was
+// actually rewritten.
+func aclUpdate(name, identifier, rights string, missing, changed *bool, id *string) func(map[string][]byte) (map[string][]byte, []string) {
+	return func(cur map[string][]byte) (map[string][]byte, []string) {
+		*missing, *changed = false, false
+
+		var rec MailboxRec
+
+		v, ok := cur[regKey(name)]
+		if !ok || json.Unmarshal(v, &rec) != nil {
+			*missing = true
+
+			return nil, nil
+		}
+
+		*id = rec.ID
+
+		if !applyACLChange(&rec, identifier, rights) {
+			return nil, nil
+		}
+
+		rec.ACLGen++
+		*changed = true
+		b, _ := json.Marshal(&rec)
+
+		return map[string][]byte{regKey(name): b}, nil
+	}
 }
 
 var _ model.ACLModifier = (*User)(nil)
@@ -124,11 +142,18 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 
 	var out aclOutcome
 
-	err := casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+	acct, err := u.beginKnownMailbox(name)
+	if err != nil {
+		return "", 0, err
+	}
+
+	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		out = aclOutcome{}
 		return out.apply(cur, regKey(name), identifier, expectGen, change)
 	})
 	u.invalidate()
+
+	acct.settle(err, out.changed, out.id)
 
 	switch {
 	case err != nil:
@@ -158,6 +183,7 @@ type aclOutcome struct {
 	missing, conflict, changed bool
 	bad                        error
 	rights                     string
+	id                         string
 	gen                        uint64
 }
 
@@ -168,6 +194,8 @@ func (o *aclOutcome) apply(cur map[string][]byte, key, identifier string, expect
 		o.missing = true
 		return nil, nil
 	}
+
+	o.id = rec.ID
 
 	if expectGen >= 0 && rec.ACLGen != uint64(expectGen) {
 		o.conflict = true
@@ -723,13 +751,20 @@ func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64)
 
 	chg := &changeRec{UIDs: uids, Pending: write != nil}
 
+	acct, err := u.beginAccount(emailSpec(mb.ID))
+	if err != nil {
+		return 0, err
+	}
+
 	if _, modseq, err = u.casHeader(mb, func(_ *MailboxInfo, _ uint64) (*headerChange, error) {
 		return &headerChange{chg: chg}, nil
 	}); err != nil {
+		acct.partial()
 		return 0, err
 	}
 
 	if write == nil {
+		u.recordTouched(acct, mb, modseq, uids)
 		return modseq, nil
 	}
 
@@ -740,12 +775,32 @@ func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64)
 			u.log.Warn("commit of an empty change failed", "mailbox", mb.Name, "modseq", modseq, "err", cerr)
 		}
 
+		acct.withdraw()
+
 		return 0, err
 	}
 
 	if err := u.commitPending(mb, modseq, chg, nil); err != nil {
+		acct.partial()
 		return 0, err
 	}
 
+	u.recordTouched(acct, mb, modseq, uids)
+
 	return modseq, nil
+}
+
+// recordTouched records a TouchModSeq in the account change log. The
+// GUIDs are read back because the account log names messages by the
+// identity a client sees, and TouchModSeq is given UIDs alone.
+func (u *User) recordTouched(acct *acctTxn, mb *Mailbox, modseq uint64, uids []uint32) {
+	metas, err := u.GetMessages(mb.ID, uids)
+	if err != nil {
+		u.log.Warn("account log: touched messages not read back", "mailbox", mb.Name, "err", err)
+		acct.partial()
+
+		return
+	}
+
+	acct.commit(emailChange(model.OpUpdated, modseq, metas))
 }

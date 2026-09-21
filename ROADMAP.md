@@ -267,7 +267,16 @@ delimited exceptions; the full Linux race tests of the server passed.
 The additional HTTP 204 bug found in production in the learning helper is
 fixed in 0.11.2. [Fixes and release evidence](docs/reports/2026-09-16-sieve-conformance-fixes.md).
 
-## Stage 6: JMAP in Full – planned
+## Stage 6: JMAP in Full – in progress
+
+**State 2026-09-21:** the staged build-out follows
+`temp/08-jmap-staged-plan.md`. Stage 0 of that plan (the account change
+log, the account-wide state JMAP needs and IMAP does not have) and stage
+1 (Core, RFC 8620: session resource, API endpoint with batching and
+back-references, authentication, blob upload and download) are
+implemented; see [JMAP](docs/jmap.md) for what exists and what does not.
+The mail data types of RFC 8621 are the stages after them. What follows
+is the full target of the stage, unchanged.
 
 Goal for this server: a complete JMAP server alongside IMAP, not
 a proxy in front of it. Complete means: JMAP Core (RFC 8620), all of JMAP Mail

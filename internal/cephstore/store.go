@@ -60,6 +60,10 @@ type Config struct {
 	OnQuotaChange func(account string, before, after, limit Quota)
 	// ShardSize is the number of UIDs per mailbox index shard.
 	ShardSize uint32
+	// AccountLogRetention is the number of entries the account change
+	// log of an account keeps (0: DefaultAccountLogRetention). A client
+	// that was away for longer than that resynchronises.
+	AccountLogRetention int
 }
 
 // Store owns the librados connection and hands out per-user views. The
@@ -242,5 +246,6 @@ func (s *Store) User(name string) (*User, error) {
 	return &User{name: name, store: s, idx: idx, data: data, log: s.log.With("user", name), release: r.refs.Done,
 		idxPool: newVerPool(open(cfg.IndexPool)), dataPool: newVerPool(open(cfg.DataPool)),
 		chunkSize: cfg.ChunkSize, ftsShards: cfg.FTSShards, shardSize: cfg.ShardSize, limit: limit,
-		rules: cfg.QuotaRules, onQuota: cfg.OnQuotaChange}, nil
+		acctRetention: acctRetention(cfg.AccountLogRetention),
+		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange}, nil
 }
