@@ -640,6 +640,12 @@ func (u *User) remove(b *box, metas []model.Meta) {
 	ms := b.bump()
 	b.vanished[ms] = uids
 	b.changes = append(b.changes, model.Change{ModSeq: ms, UIDs: uids, Expunged: true})
+	// The entry carries the modseq the removal was written at, not the
+	// one the messages last carried, as in the RADOS store.
+	for i := range metas {
+		metas[i].ModSeq = ms
+	}
+
 	u.emailChange(model.OpDestroyed, b, ms, metas)
 }
 

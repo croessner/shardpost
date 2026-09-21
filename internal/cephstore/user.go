@@ -2463,7 +2463,7 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 		return err
 	}
 
-	removed, err := u.unlink(mb, metas, "")
+	removed, modseq, err := u.unlink(mb, metas, "")
 	if err != nil {
 		acct.partial()
 		return err
@@ -2472,7 +2472,7 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 	if len(removed) == 0 {
 		acct.withdraw()
 	} else {
-		acct.commit(emailChange(model.OpDestroyed, 0, removed))
+		acct.commit(emailChange(model.OpDestroyed, modseq, removed))
 	}
 	// Index no longer references the blobs; drop our reference. A failure
 	// here only leaves orphans, never dangling index entries.
@@ -2497,7 +2497,7 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 // if set, is the MOVE intent to drop with the last durable step. Returns
 // the entries that were removed, so callers release exactly those
 // references.
-func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) ([]Meta, error) {
+func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) ([]Meta, uint64, error) {
 	byUID := map[uint32]Meta{}
 	for _, m := range metas {
 		byUID[m.UID] = m
@@ -2512,14 +2512,16 @@ func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) ([]Meta, error
 
 	removed, chg, modseq, err := u.unlinkHeader(mb, metas, extraRm, higher)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if chg == nil || !chg.Pending {
-		return removed, nil
+		return removed, modseq, nil
 	}
 
-	return u.unlinkHigher(mb, byUID, higher, removed, chg, modseq, extraRm)
+	removed, err = u.unlinkHigher(mb, byUID, higher, removed, chg, modseq, extraRm)
+
+	return removed, modseq, err
 }
 
 // unlinkHeader is phase 1 of unlink: the header CAS removes the shard 0
@@ -2777,7 +2779,7 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 
 	acct.commit(
 		emailChange(model.OpCreated, 0, mv.out),
-		emailChange(model.OpDestroyed, 0, mv.removed),
+		emailChange(model.OpDestroyed, mv.modseq, mv.removed),
 	)
 	res.settle(sizeOf(mv.out))
 
@@ -2796,7 +2798,9 @@ type moveResult struct {
 	out            []Meta
 	removed        []Meta
 	freed, skipped Quota
-	started        bool
+	// modseq is the source MODSEQ the removal was written at.
+	modseq  uint64
+	started bool
 }
 
 // moveLinks runs the intent, link, unlink and release steps of Move.
@@ -2842,10 +2846,12 @@ func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
 		mv.out = append(mv.out, *nm)
 	}
 
-	removed, err := u.unlink(smb, metas, intent.ID)
+	removed, modseq, err := u.unlink(smb, metas, intent.ID)
 	if err != nil {
 		return mv, err
 	}
+
+	mv.modseq = modseq
 
 	for i := range removed {
 		if err := u.releaseBlob(&removed[i]); err != nil {

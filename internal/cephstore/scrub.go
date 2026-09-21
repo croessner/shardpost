@@ -406,7 +406,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 		// destination stays until fixQuota recounts.
 		log.Warn("MOVE destination vanished, keeping source", "intent", in.ID)
 
-		if _, err := u.unlink(&src, nil, in.ID); err != nil {
+		if _, _, err := u.unlink(&src, nil, in.ID); err != nil {
 			rep.Errors = append(rep.Errors, err.Error())
 		}
 
@@ -467,7 +467,7 @@ func (sr *scrubRun) unlinkLogged(src *Mailbox, metas []Meta, intentID string) ([
 		return nil, err
 	}
 
-	removed, err := sr.u.unlink(src, metas, intentID)
+	removed, _, err := sr.u.unlink(src, metas, intentID)
 
 	acct.partial()
 

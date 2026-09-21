@@ -404,3 +404,35 @@ func TestAccountLogDeleteIsPartial(t *testing.T) {
 		t.Errorf("the second entry is %+v, want the destroyed mailbox", cs[1])
 	}
 }
+
+// TestAccountLogDestroyedCarriesTheExpungeModSeq: the entry names the
+// mailbox MODSEQ the removal was written at, not the one the messages
+// last carried — a reader that resolves it against the mailbox change
+// log would otherwise look in the wrong place.
+func TestAccountLogDestroyedCarriesTheExpungeModSeq(t *testing.T) {
+	u := openUser(t)
+
+	if err := u.CreateMailbox("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := u.Deliver("INBOX", []byte("Subject: one\r\n\r\nbody\r\n"), nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := state(t, u)
+
+	if err := u.Expunge("INBOX", []model.Meta{*m}); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := changesSince(t, u, before)
+	if len(cs) != 1 {
+		t.Fatalf("the expunge produced %+v, want one entry", cs)
+	}
+
+	if cs[0].ModSeq <= m.ModSeq {
+		t.Errorf("the entry carries modseq %d, want one above the message's %d", cs[0].ModSeq, m.ModSeq)
+	}
+}

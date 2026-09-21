@@ -41,6 +41,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [JMAP Core 0.27.0](reports/2026-09-21-jmap-core-0.27.0.md): account-wide state, JMAP Core, release evidence.
 - [ShardPost 0.13.0](reports/2026-09-18-shardpost-0.13.0.md): lint cleanup, namespace/pool/identity move, current rollout.
 - [ShardPost 0.12.0](reports/2026-09-16-shardpost.md): rename and compatibility.
 - [Logging 0.11.3](reports/2026-09-16-logging.md): logging extension and the protocol evidence of the time.
