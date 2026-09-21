@@ -31,3 +31,25 @@ patches:
                     value: "0.1"
                   - name: MBOX_SHARD_SIZE
                     value: "20"
+  - patch: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephBlockPool
+      metadata:
+        name: shardpost-data
+      spec:
+        # Preserve immutable EC profile; crush_rule selects the 200 GB OSDs.
+        deviceClass: hdd
+        enableCrushUpdates: false
+        parameters:
+          crush_rule: shardpost-data-200gb
+  - patch: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephBlockPool
+      metadata:
+        name: shardpost-index
+      spec:
+        # Existing class of OSD 3/4/5: 200 GB each, one per host.
+        deviceClass: rgw
+        enableCrushUpdates: false
+        parameters:
+          crush_rule: shardpost-index-200gb
