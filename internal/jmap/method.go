@@ -92,6 +92,10 @@ type setError struct {
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
 	NotFound    []string `json:"notFound,omitempty"`
+	// The extras of the EmailSubmission set errors (RFC 8621 7.5).
+	InvalidRecipients []string `json:"invalidRecipients,omitempty"`
+	MaxRecipients     int      `json:"maxRecipients,omitempty"`
+	MaxSize           int64    `json:"maxSize,omitempty"`
 }
 
 // The set error types this server uses (RFC 8620 5.3, RFC 8621 2.5).

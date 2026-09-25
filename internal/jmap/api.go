@@ -91,21 +91,27 @@ var methods = map[string]method{
 	"Identity/get":         {capability: CapSubmission, run: identityGet},
 	"Identity/changes":     {capability: CapSubmission, run: identityChanges},
 	"Identity/set":         {capability: CapSubmission, run: identitySet},
-	"Mailbox/get":          {capability: CapMail, run: mailboxGet},
-	"Mailbox/changes":      {capability: CapMail, run: mailboxChanges},
-	"Mailbox/query":        {capability: CapMail, run: mailboxQuery},
-	"Mailbox/queryChanges": {capability: CapMail, run: mailboxQueryChanges},
-	"Mailbox/set":          {capability: CapMail, run: mailboxSet},
-	"Email/get":            {capability: CapMail, run: emailGet},
-	"Email/changes":        {capability: CapMail, run: emailChanges},
-	"Email/query":          {capability: CapMail, run: emailQueryRun},
-	"Email/queryChanges":   {capability: CapMail, run: emailQueryChanges},
-	"Email/set":            {capability: CapMail, run: emailSet},
-	"Email/copy":           {capability: CapMail, run: emailCopy},
-	"Email/import":         {capability: CapMail, run: emailImport},
-	"Email/parse":          {capability: CapMail, run: emailParse},
-	"Thread/get":           {capability: CapMail, run: threadGet},
-	"Thread/changes":       {capability: CapMail, run: threadChanges},
+
+	"EmailSubmission/get":          {capability: CapSubmission, run: emailSubmissionGet},
+	"EmailSubmission/changes":      {capability: CapSubmission, run: emailSubmissionChanges},
+	"EmailSubmission/query":        {capability: CapSubmission, run: emailSubmissionQuery},
+	"EmailSubmission/queryChanges": {capability: CapSubmission, run: emailSubmissionQueryChanges},
+	"EmailSubmission/set":          {capability: CapSubmission, run: emailSubmissionSet},
+	"Mailbox/get":                  {capability: CapMail, run: mailboxGet},
+	"Mailbox/changes":              {capability: CapMail, run: mailboxChanges},
+	"Mailbox/query":                {capability: CapMail, run: mailboxQuery},
+	"Mailbox/queryChanges":         {capability: CapMail, run: mailboxQueryChanges},
+	"Mailbox/set":                  {capability: CapMail, run: mailboxSet},
+	"Email/get":                    {capability: CapMail, run: emailGet},
+	"Email/changes":                {capability: CapMail, run: emailChanges},
+	"Email/query":                  {capability: CapMail, run: emailQueryRun},
+	"Email/queryChanges":           {capability: CapMail, run: emailQueryChanges},
+	methodEmailSet:                 {capability: CapMail, run: emailSet},
+	"Email/copy":                   {capability: CapMail, run: emailCopy},
+	"Email/import":                 {capability: CapMail, run: emailImport},
+	"Email/parse":                  {capability: CapMail, run: emailParse},
+	"Thread/get":                   {capability: CapMail, run: threadGet},
+	"Thread/changes":               {capability: CapMail, run: threadChanges},
 }
 
 // knownCapabilities are the URNs a request may list in "using".
@@ -234,7 +240,7 @@ func (s *Server) runCalls(ctx context.Context, sess *session, req *apiRequest) [
 	out := make([]invocation, 0, len(req.MethodCalls))
 
 	for _, call := range req.MethodCalls {
-		out = append(out, s.runCall(ctx, sess, using, call, out))
+		out = append(out, s.runCall(ctx, sess, using, call, out)...)
 	}
 
 	return out
@@ -243,23 +249,41 @@ func (s *Server) runCalls(ctx context.Context, sess *session, req *apiRequest) [
 // runCall executes one method call against the responses so far.
 func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bool,
 	call invocation, done []invocation,
-) invocation {
+) []invocation {
 	m, ok := methods[call.Name]
 	if !ok || !using[m.capability] {
-		return errorResponse(call.CallID, errUnknownMethod, "")
+		return []invocation{errorResponse(call.CallID, errUnknownMethod, "")}
 	}
 
 	args, merr := resolveReferences(call.Args, done)
 	if merr != nil {
-		return invocation{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}
+		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
 	}
 
 	res, merr := m.run(ctx, sess, args)
 	if merr != nil {
-		return invocation{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}
+		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
 	}
 
-	return invocation{Name: call.Name, Args: mustRaw(res), CallID: call.CallID}
+	out := []invocation{{Name: call.Name, Args: mustRaw(res), CallID: call.CallID}}
+
+	// A method that makes an implicit call of another (EmailSubmission/set
+	// and its Email/set, RFC 8621 7.5) returns that call's response after
+	// its own, under the same call id.
+	if f, ok := res.(followUp); ok {
+		for _, inv := range f.followUps() {
+			inv.CallID = call.CallID
+			out = append(out, inv)
+		}
+	}
+
+	return out
+}
+
+// followUp is implemented by a method result that carries the responses
+// of implicit calls.
+type followUp interface {
+	followUps() []invocation
 }
 
 // resultReference is a back-reference argument (RFC 8620 3.7).

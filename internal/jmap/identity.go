@@ -8,8 +8,10 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"time"
 
 	"shardpost/internal/auth"
+	"shardpost/internal/model"
 )
 
 // Identity (RFC 8621 6). The addresses an account may send from are the
@@ -31,9 +33,59 @@ const CapSubmission = "urn:ietf:params:jmap:submission"
 // SubmissionOptions configure the submission capability. Without them it
 // is not offered.
 type SubmissionOptions struct {
+	// Relay takes the messages; KV keeps the submission records.
+	Relay Submitter
+	KV    model.AdminKV
 	// AddressAttributes are the attributes of the identity lookup that
 	// carry the addresses the account may send from.
 	AddressAttributes []string
+	// XClient names the user to the relay with XCLIENT; without it the
+	// relay's own credentials are used and CheckSender is all there is.
+	XClient bool
+	// CheckSender refuses an envelope sender or a From that is not one
+	// of the account's addresses, before the relay is asked.
+	CheckSender bool
+	// MaxRecipients bounds the recipients of one submission, MaxSize the
+	// size of the message sent.
+	MaxRecipients int
+	MaxSize       int64
+	// Retention and MaxKept bound the submission records an account keeps.
+	Retention time.Duration
+	MaxKept   int
+}
+
+// DefaultSubmission are the bounds a configuration that says nothing gets.
+var DefaultSubmission = SubmissionOptions{XClient: true, CheckSender: true, MaxRecipients: 100,
+	Retention: 7 * 24 * time.Hour, MaxKept: 500}
+
+// submissionDefaults fills in the bounds left at zero.
+func submissionDefaults(o *SubmissionOptions, uploadMax int64) *SubmissionOptions {
+	if o == nil {
+		return nil
+	}
+
+	c := *o
+	if c.MaxRecipients <= 0 {
+		c.MaxRecipients = DefaultSubmission.MaxRecipients
+	}
+
+	if c.MaxSize <= 0 {
+		c.MaxSize = uploadMax
+	}
+
+	if c.Retention <= 0 {
+		c.Retention = DefaultSubmission.Retention
+	}
+
+	if c.MaxKept <= 0 {
+		c.MaxKept = DefaultSubmission.MaxKept
+	}
+
+	if len(c.AddressAttributes) == 0 {
+		c.AddressAttributes = []string{"mail"}
+	}
+
+	return &c
 }
 
 // identityEntry is the metadata entry the identities a client changed or

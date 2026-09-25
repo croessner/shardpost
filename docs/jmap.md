@@ -17,7 +17,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 2 | `Mailbox/*` | built |
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
-| 5 | Push (EventSource and Web Push), `Identity/*` | built; `EmailSubmission/*` open |
+| 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
 | 6 | `SieveScript/*`, `Quota/*`, `Blob/*`, sharing | planned |
 
 A client that asks for a capability this server does not have is told
@@ -469,8 +469,8 @@ of accounts with push subscriptions, not for millions.
 ## Identities
 
 `Identity/get`, `Identity/changes` and `Identity/set` (RFC 8621 6)
-belong to the submission capability and are offered only together with
-it (see the limits below).
+belong to the submission capability and are offered together with it,
+when `jmap.submission.relay_addr` is set.
 
 The addresses an account may send from come from the authentication
 backend's identity lookup — Nauthilus `LookupIdentity`, without a
@@ -486,6 +486,90 @@ disappears from the backend disappears with it. The state is a hash of
 the list, because part of it lives in the user database;
 `Identity/changes` from an older state is `cannotCalculateChanges`, and
 the client fetches the list again.
+
+## Sending
+
+`EmailSubmission/get`, `/changes`, `/query`, `/queryChanges` and `/set`
+(RFC 8621 7). JMAP has no other way for a client to send mail, which is
+why it is here at all.
+
+**ShardPost sends nothing itself; it is a proxy to the relay.** Every
+request is authenticated first, as every JMAP request is; only a
+message of the authenticated account can be sent, only with one of its
+identities. The message is then handed to the relay configured in
+`jmap.submission` — a Postfix submission service — and the user is named
+to it with Postfix's `XCLIENT LOGIN=<account> ADDR=<client address>`:
+the relay treats the session as if the user had logged in with SASL, so
+its own rules decide what the user may send — `smtpd_sender_login_maps`
+with `reject_sender_login_mismatch`, rate limits, policy services. The
+relay has to allow XCLIENT from the ShardPost hosts
+(`smtpd_authorized_xclient_hosts`); a relay that does not offer it to
+them is not used, and a submission fails rather than going out
+unattributed. With `jmap.submission.xclient: false` the relay is logged
+into with the configured credentials instead, and then ShardPost's own
+check below is the only one — the configuration refuses that
+combination without it.
+
+**What ShardPost checks before the relay is asked:**
+
+- The identity and the email exist in the account (`invalidProperties`
+  otherwise).
+- The message has at most one From and one Sender field, one address
+  in Sender, and a Sender when From has several (`invalidEmail`): a
+  second From is how a sender nobody checked would reach the reader.
+- With `jmap.submission.check_sender` (on by default) the envelope
+  sender and every From and Sender address are among the account's
+  addresses from the identity lookup (`forbiddenMailFrom`,
+  `forbiddenFrom`). The relay checks the envelope only; the header is
+  ShardPost's to check. Switch it off only where the relay allows more
+  — delegations — and checks the header itself.
+- The recipients: at least one (`noRecipients`), at most
+  `max_recipients` (100, `tooManyRecipients`), each an address
+  (`invalidRecipients`). The message is at most `max_size`
+  (`max_size_upload`, `tooLarge`).
+- No SMTP parameters: `submissionExtensions` is empty, so an envelope
+  that carries any is `invalidProperties`.
+
+Without an envelope the server derives one as RFC 8621 7 says: the
+Sender, else the From, else the identity's address, and the recipients
+of To, Cc and Bcc, each once; a recipient field that does not parse is
+`invalidEmail` rather than silently dropped. The Bcc field is removed from the message
+before it goes out. A refusal of the relay comes back as the matching
+error: a refused sender (`Sender address rejected`) as
+`forbiddenMailFrom`, refused recipients as `invalidRecipients` with the
+list, a message too large as `tooLarge`, anything else as
+`forbiddenToSend` with the relay's reply; a temporary refusal or an
+unreachable relay is `serverFail`, and the client may try again. A
+relay that does not offer XCLIENT with LOGIN to this host, or refuses
+it, is a configuration matter: `forbiddenToSend` for the client and an
+error in the log. Each step of the conversation has its own deadline
+(`timeout_seconds`), the upload time for the size of the message, and
+the relay's answer to the message up to ten minutes — a relay runs its
+filters before it answers, and a message it took must not be reported
+as failed, or the client sends it again.
+
+`onSuccessUpdateEmail` and `onSuccessDestroyEmail` are carried out in an
+implicit `Email/set` whose response follows the `EmailSubmission/set`
+response, under the same call id — the usual way a client moves the
+sent draft to *Sent*. A client can create the draft and send it in one
+request, naming it by its creation id.
+
+**Delayed sending is prepared, not offered.** `maxDelayedSend` is 0, a
+`HOLDFOR`/`HOLDUNTIL` parameter is refused, and every submission is
+`final` once the relay has it, so a cancellation is `cannotUnsend`. The
+record already carries `sendAt` and `undoStatus`, so a queue can be
+added without changing what is stored.
+
+**Records.** The submissions of an account are one record in the admin
+store, with a state and a change log of the last 256 changes behind
+`/changes`; `/queryChanges` is `cannotCalculateChanges`. An account keeps
+them for `retention_seconds` (7 days), at most `max_kept` (500) and at
+most a megabyte of records, oldest dropped first; RFC 8621 7 lets a
+server destroy a submission at any time after it was sent.
+`deliveryStatus` says `queued` for each recipient, with the relay's
+answer to the message — its queue id included — as `smtpReply`; DSNs
+are not evaluated, so it never becomes `yes` or `no`, and `dsnBlobIds`
+and `mdnBlobIds` stay empty.
 
 ## Endpoints
 
@@ -569,7 +653,38 @@ jmap:
     poll_seconds: 60
     timeout_seconds: 10
     message_ttl_seconds: 86400
+  submission:
+    relay_addr: relay.example.org:587
+    helo: shardpost.example.org
+    starttls: true
+    xclient: true
+    check_sender: true
+    address_attributes: mail,mailAlternateAddress
+    max_recipients: 100
+    retention_seconds: 604800
+    max_kept: 500
 ```
+
+The relay side, for a Postfix service of its own that takes only
+ShardPost's submissions:
+
+```
+smtpd_authorized_xclient_hosts = <the addresses ShardPost reaches it from>
+smtpd_sasl_auth_enable         = yes   # else XCLIENT LOGIN counts for nothing in permit_sasl_authenticated
+smtpd_sender_login_maps        = <the same directory the identity lookup reads>
+smtpd_sender_restrictions      = reject_sender_login_mismatch
+smtpd_relay_restrictions       = permit_sasl_authenticated, reject
+smtpd_tls_security_level       = encrypt
+```
+
+`reject_sender_login_mismatch` has to come before any
+`permit_mynetworks`; a service that trusts the ShardPost addresses as
+`mynetworks` would relay without looking at the user. XCLIENT is
+trusted by address: whoever can reach the service from an address in
+`smtpd_authorized_xclient_hosts` can name any user, so the path to it
+has to be limited to ShardPost. Postfix limits rates by the client
+address XCLIENT names — the JMAP client's, as the front-end sees it; a
+proxy in front of JMAP makes that the proxy's address for everyone.
 
 `jmap.push` is read by the front-ends (the public VAPID key, the
 subscription limits, the event source poll) and by the push worker (the
@@ -620,9 +735,8 @@ built from the request, which is right for a direct connection only.
   and the other address properties, because the envelope encodes it the
   way it encodes the start of a group. `header:*:asAddresses` parses the
   header itself and has neither deviation.
-- `EmailSubmission/*` is not built, so the submission capability is not
-  advertised and `Identity/*` is not reachable in a deployment yet. A
-  JMAP client cannot send mail through this server.
+- `EmailSubmission` hands messages to the relay and does not evaluate
+  DSNs or MDNs, and delayed sending is not offered (see Sending).
 - Push has no `Identity` or `PushSubscription` type in its
   `StateChange`s: neither is in the account change log.
 - The private `\Seen` marks of a public folder are recorded in the

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
@@ -23,6 +24,8 @@ type session struct {
 	log     *slog.Logger
 	limits  Limits
 	srv     *Server
+	// remote is the client's IP address, for the relay (XCLIENT ADDR).
+	remote string
 }
 
 // ctxKey is the context key of the authenticated session.
@@ -71,7 +74,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		}
 		defer u.Close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits, srv: s,
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
 			log: s.o.Log.With("account", res.Account)})
 		next(w, r.WithContext(ctx))
 	}
@@ -136,6 +139,16 @@ func credentials(r *http.Request) (auth.Request, bool) {
 // remoteAddr is the client address of the request, for the
 // authentication backend's rate limiting and logging.
 func remoteAddr(r *http.Request) *addr { return &addr{s: r.RemoteAddr} }
+
+// clientIP is the IP address of the client, without the port.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+
+	return host
+}
 
 // addr adapts a string address to net.Addr.
 type addr struct{ s string }

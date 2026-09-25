@@ -17,6 +17,7 @@ import (
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
+	"shardpost/internal/outbound"
 	"shardpost/internal/webpush"
 )
 
@@ -62,6 +63,11 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		return err
 	}
 
+	submission, err := srv.jmapSubmission(settings.JMAP.Submission, store)
+	if err != nil {
+		return err
+	}
+
 	front := jmap.New(jmap.Options{
 		Store:         storeAdapter{store},
 		Auth:          authn,
@@ -70,6 +76,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		InsecureAuth:  settings.JMAP.InsecureAuth,
 		Limits:        jmapLimits(settings.JMAP),
 		Push:          push,
+		Submission:    submission,
 	})
 
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
@@ -106,6 +113,45 @@ func (srv *servers) jmapPush(c config.JMAPPush, store *cephstore.Store) (jmap.Pu
 	push.KV, push.VAPIDPublicKey = kv, vapid.PublicKey()
 
 	return push, nil
+}
+
+// jmapSubmission builds the submission settings: the relay, and the
+// admin store the submission records are kept in. Without a relay the
+// capability is not offered.
+func (srv *servers) jmapSubmission(c config.JMAPSubmission, store *cephstore.Store) (*jmap.SubmissionOptions, error) {
+	if !c.Enabled() {
+		return nil, nil
+	}
+
+	if srv.jmapKV == nil {
+		kv, err := store.AdminKV()
+		if err != nil {
+			return nil, fmt.Errorf("jmap submission: admin store: %w", err)
+		}
+
+		srv.jmapKV = kv
+	}
+
+	timeout := sec(c.TimeoutSeconds)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	relay := &outbound.Relay{Addr: c.RelayAddr, HELO: c.Helo, StartTLS: c.Starttls, Implicit: c.TLS,
+		ServerName: c.ServerName, Timeout: timeout}
+
+	switch {
+	case !c.XClient:
+		relay.User, relay.Password = c.User, c.Password
+	case c.User != "":
+		slog.Warn("jmap.submission.user is ignored with xclient on: the relay is told the user, not logged into")
+	}
+
+	return &jmap.SubmissionOptions{
+		Relay: relay, KV: srv.jmapKV, AddressAttributes: c.Attributes(), XClient: c.XClient,
+		CheckSender: c.CheckSender, MaxRecipients: int(c.MaxRecipients), MaxSize: c.MaxSize,
+		Retention: sec(c.RetentionSeconds), MaxKept: int(c.MaxKept),
+	}, nil
 }
 
 // loadVAPID reads the VAPID key.

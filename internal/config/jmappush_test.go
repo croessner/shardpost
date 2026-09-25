@@ -24,3 +24,27 @@ func TestJMAPPushFromEnvironment(t *testing.T) {
 		t.Fatal("bad subject accepted")
 	}
 }
+
+// TestJMAPSubmissionDefaults: XCLIENT and the sender check are on unless
+// switched off, and both off is refused.
+func TestJMAPSubmissionDefaults(t *testing.T) {
+	t.Setenv("JMAP_SUBMISSION_RELAY_ADDR", "relay.example.org:587")
+	t.Setenv("JMAP_SUBMISSION_ADDRESS_ATTRIBUTES", "mail, mailAlternateAddress")
+
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := c.JMAP.Submission
+	if !s.Enabled() || !s.XClient || !s.CheckSender || len(s.Attributes()) != 2 || s.Attributes()[1] != "mailAlternateAddress" {
+		t.Fatalf("%+v %v", s, s.Attributes())
+	}
+
+	t.Setenv("JMAP_SUBMISSION_XCLIENT", "false")
+	t.Setenv("JMAP_SUBMISSION_CHECK_SENDER", "false")
+
+	if _, err := Load(""); err == nil {
+		t.Fatal("a relay without XCLIENT and without the sender check was accepted")
+	}
+}

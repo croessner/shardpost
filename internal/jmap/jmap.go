@@ -171,6 +171,7 @@ func New(o Options) *Server {
 
 	o.Limits = withDefaults(o.Limits)
 	o.Push = pushDefaults(o.Push)
+	o.Submission = submissionDefaults(o.Submission, o.Limits.MaxSizeUpload)
 
 	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
 		inEvents: map[string]int{}, closing: make(chan struct{})}

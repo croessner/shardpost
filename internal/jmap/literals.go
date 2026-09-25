@@ -44,6 +44,7 @@ const (
 // Argument names and descriptions more than one method uses.
 const (
 	schemeHTTPS          = "https"
+	methodEmailSet       = "Email/set"
 	argFilter            = "filter"
 	descFilterObject     = "a filter is an object"
 	descTooManyObjects   = "more objects than maxObjectsInSet"

@@ -28,6 +28,9 @@ type Relay struct {
 	// ServerName overrides the TLS server name (default: host of Addr).
 	ServerName string
 	Timeout    time.Duration
+	// DataTimeout bounds the wait for the relay's answer to a submitted
+	// message (default 10 minutes); see Relay.Submit.
+	DataTimeout time.Duration
 }
 
 // Enabled reports whether a relay is configured.
@@ -40,7 +43,7 @@ func (r *Relay) Send(ctx context.Context, from string, to []string, raw []byte) 
 		return ErrNoRelay
 	}
 
-	c, err := r.connect(ctx)
+	c, _, err := r.connect(ctx)
 	if err != nil {
 		return err
 	}
@@ -58,7 +61,8 @@ func (r *Relay) Send(ctx context.Context, from string, to []string, raw []byte) 
 
 // connect dials the relay and returns a client after EHLO, STARTTLS (when
 // offered or required) and authentication.
-func (r *Relay) connect(ctx context.Context) (*smtp.Client, error) {
+// It also returns the TCP connection, whose deadline governs the session.
+func (r *Relay) connect(ctx context.Context) (*smtp.Client, net.Conn, error) {
 	timeout := r.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
@@ -66,7 +70,7 @@ func (r *Relay) connect(ctx context.Context) (*smtp.Client, error) {
 
 	host, _, err := net.SplitHostPort(r.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("relay address: %w", err)
+		return nil, nil, fmt.Errorf("relay address: %w", err)
 	}
 
 	serverName := r.ServerName
@@ -76,14 +80,16 @@ func (r *Relay) connect(ctx context.Context) (*smtp.Client, error) {
 
 	d := net.Dialer{Timeout: timeout}
 
-	conn, err := d.DialContext(ctx, "tcp", r.Addr)
+	raw, err := d.DialContext(ctx, "tcp", r.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("relay connect: %w", err)
+		return nil, nil, fmt.Errorf("relay connect: %w", err)
 	}
 
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	_ = raw.SetDeadline(time.Now().Add(timeout))
 
+	conn := raw
 	tlsCfg := &tls.Config{ServerName: serverName, MinVersion: tls.VersionTLS12}
+
 	if r.Implicit {
 		conn = tls.Client(conn, tlsCfg)
 	}
@@ -91,25 +97,20 @@ func (r *Relay) connect(ctx context.Context) (*smtp.Client, error) {
 	c, err := smtp.NewClient(conn, host)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("relay greeting: %w", err)
+		return nil, nil, fmt.Errorf("relay greeting: %w", err)
 	}
 
 	if err := r.handshake(c, tlsCfg, host); err != nil {
 		_ = c.Close()
-		return nil, err
+		return nil, nil, err
 	}
 
-	return c, nil
+	return c, raw, nil
 }
 
 // handshake runs EHLO, STARTTLS and AUTH on a fresh client.
 func (r *Relay) handshake(c *smtp.Client, tlsCfg *tls.Config, host string) error {
-	helo := r.HELO
-	if helo == "" {
-		helo = "shardpost"
-	}
-
-	if err := c.Hello(helo); err != nil {
+	if err := c.Hello(r.helo()); err != nil {
 		return fmt.Errorf("relay EHLO: %w", err)
 	}
 

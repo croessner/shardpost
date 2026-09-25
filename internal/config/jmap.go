@@ -38,6 +38,88 @@ type JMAP struct {
 	MaxObjectsInSet       int64 `mapstructure:"max_objects_in_set" env:"JMAP_MAX_OBJECTS_IN_SET" validate:"gte=0"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
+	// Submission configures sending (EmailSubmission) and identities.
+	Submission JMAPSubmission `mapstructure:"submission"`
+}
+
+// JMAPSubmission configures EmailSubmission and Identity (RFC 8621 6 and
+// 7): the relay the messages are handed to, and what ShardPost checks
+// before. Without relay_addr the submission capability is not offered.
+type JMAPSubmission struct {
+	// RelayAddr is the relay's submission port (host:port).
+	RelayAddr string `mapstructure:"relay_addr" env:"JMAP_SUBMISSION_RELAY_ADDR"`
+	Helo      string `mapstructure:"helo" env:"JMAP_SUBMISSION_HELO"`
+	// Starttls requires STARTTLS (on by default: XCLIENT names the user,
+	// and a relay whose STARTTLS a man in the middle strips must not get
+	// that in the clear); TLS is implicit TLS (port 465).
+	Starttls   bool   `mapstructure:"starttls" env:"JMAP_SUBMISSION_STARTTLS"`
+	TLS        bool   `mapstructure:"tls" env:"JMAP_SUBMISSION_TLS"`
+	ServerName string `mapstructure:"server_name" env:"JMAP_SUBMISSION_SERVER_NAME"`
+	// XClient names the user to the relay with XCLIENT LOGIN and ADDR, so
+	// that the relay's rules for that user apply (on by default). Off,
+	// the relay is logged into with User and Password, if set.
+	XClient      bool   `mapstructure:"xclient" env:"JMAP_SUBMISSION_XCLIENT"`
+	User         string `mapstructure:"user" env:"JMAP_SUBMISSION_USER"`
+	Password     string `mapstructure:"password" env:"JMAP_SUBMISSION_PASSWORD" secret:"true"`
+	PasswordFile string `mapstructure:"password_file" env:"JMAP_SUBMISSION_PASSWORD_FILE"`
+	// TimeoutSeconds bounds one conversation with the relay; 0 = 30.
+	TimeoutSeconds int64 `mapstructure:"timeout_seconds" env:"JMAP_SUBMISSION_TIMEOUT_SECONDS" validate:"gte=0"`
+	// CheckSender refuses an envelope sender or From that is not one of
+	// the account's addresses before the relay is asked (on by default).
+	CheckSender bool `mapstructure:"check_sender" env:"JMAP_SUBMISSION_CHECK_SENDER"`
+	// AddressAttributes are the comma-separated attributes of the
+	// identity lookup that carry the addresses an account may send from.
+	AddressAttributes string `mapstructure:"address_attributes" env:"JMAP_SUBMISSION_ADDRESS_ATTRIBUTES"`
+	// MaxRecipients (0 = 100), MaxSize (0 = jmap.max_size_upload), and
+	// how long (0 = 7 days) and how many (0 = 500) submission records an
+	// account keeps.
+	MaxRecipients    int64 `mapstructure:"max_recipients" env:"JMAP_SUBMISSION_MAX_RECIPIENTS" validate:"gte=0"`
+	MaxSize          int64 `mapstructure:"max_size" env:"JMAP_SUBMISSION_MAX_SIZE" validate:"gte=0"`
+	RetentionSeconds int64 `mapstructure:"retention_seconds" env:"JMAP_SUBMISSION_RETENTION_SECONDS" validate:"gte=0"`
+	MaxKept          int64 `mapstructure:"max_kept" env:"JMAP_SUBMISSION_MAX_KEPT" validate:"gte=0"`
+}
+
+// Enabled reports whether submission is configured.
+func (s JMAPSubmission) Enabled() bool { return s.RelayAddr != "" }
+
+// Validate refuses a relay that nobody checks: without XCLIENT the relay
+// sees ShardPost, not the user, and then ShardPost has to check the
+// sender itself.
+func (s JMAPSubmission) Validate() error {
+	if !s.Enabled() {
+		return nil
+	}
+
+	if err := checkListener(s.RelayAddr); err != nil {
+		return fmt.Errorf("jmap.submission.relay_addr: %w", err)
+	}
+
+	if !s.XClient && !s.CheckSender {
+		return fmt.Errorf("jmap.submission: with xclient off, check_sender has to be on")
+	}
+
+	return nil
+}
+
+// defaultAddressAttribute is the attribute that carries an account's
+// addresses when none is configured.
+const defaultAddressAttribute = "mail"
+
+// Attributes are the address attributes as a list; "mail" when none.
+func (s JMAPSubmission) Attributes() []string {
+	var out []string
+
+	for _, a := range strings.Split(s.AddressAttributes, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+
+	if len(out) == 0 {
+		out = []string{defaultAddressAttribute}
+	}
+
+	return out
 }
 
 // JMAPPush configures JMAP push subscriptions (RFC 8620 7.2) and the
@@ -98,6 +180,10 @@ func (j JMAP) Enabled() bool { return j.Addr != "" }
 // global TLS settings, because an empty JMAP pair falls back to them.
 func (j JMAP) Validate(global TLS) error {
 	if err := j.Push.Validate(); err != nil {
+		return err
+	}
+
+	if err := j.Submission.Validate(); err != nil {
 		return err
 	}
 

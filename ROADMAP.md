@@ -276,11 +276,11 @@ log, the account-wide state JMAP needs and IMAP does not have), stage 1
 back-references, authentication, blob upload and download), stage 2
 (`Mailbox/*`), stage 3 (`Email/get`, `Email/changes`, `Thread/*`) and
 stage 4 (`Email/query`, `Email/queryChanges`, `Email/set`,
-`Email/import`, `Email/parse`, `Email/copy`) are implemented, and of
-stage 5 push (event source, push subscriptions with Web Push and a push
-worker) and `Identity/*`; see [JMAP](docs/jmap.md) for what exists and
-what does not. `EmailSubmission/*` waits for a decision on whether
-JMAP clients send through this server. What follows is the full
+`Email/import`, `Email/parse`, `Email/copy`) and stage 5 (push with an
+event source and a Web Push worker, `Identity/*`, `EmailSubmission/*`
+as a proxy to the relay with XCLIENT; delayed sending prepared, not
+offered) are implemented; see [JMAP](docs/jmap.md) for what exists and
+what does not. What follows is the full
 target of the stage, unchanged.
 
 Goal for this server: a complete JMAP server alongside IMAP, not
