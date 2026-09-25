@@ -48,6 +48,12 @@ telemetry:
   sample_ratio: 0.1
 ```
 
+The `rook` section applies only while `ceph.key` is empty: the server then
+reads the key and, if `ceph.mon_host` is empty, the monitor list from the
+Rook-managed secret and ConfigMap through the Kubernetes API and follows key
+rotations. With `ceph.key` set, `rook` is ignored and no Kubernetes access
+happens; see [running without Kubernetes](operations/README.md#running-without-kubernetes).
+
 Unknown keys, mistyped YAML values, invalid env numbers, invalid boolean values, contradictory TLS pairs and explicit secret files that are missing or read as empty cause a startup error. Env numbers are always interpreted as decimal. A secret file takes precedence over the corresponding direct secret value. Error messages never print values.
 
 `config check` validates the configuration structure and reads the referenced secret files. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards. Without a file path, the existing env-based deployments remain usable.

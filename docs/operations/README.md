@@ -8,6 +8,8 @@ The active profile is `deploy/overlays/croessner-nauthilus`; since 0.13.0 the
 namespace and the deployment are named `shardpost` and `shardpost-server`. The profile expects Rook
 pools and cephx access, cert-manager/TLS, Nauthilus backchannel access,
 director backend access and the configured learning and relay services.
+None of this is required by the server itself; see
+[running without Kubernetes](#running-without-kubernetes).
 
 The secrets are provided by the responsible infrastructure procedures.
 The server reads Rook access with restricted RBAC. Renaming the
@@ -105,3 +107,194 @@ The server sets some user/mailbox/peer attributes in spans;
 the documented redaction happens in the external collector. It must not be
 assumed to be automatically given server-side when the telemetry is
 rebuilt. See the [observability contract](../observability.md).
+
+## Running without Kubernetes
+
+ShardPost needs a Ceph cluster, not Kubernetes and not Rook. The server
+binary talks to the Kubernetes API in exactly one place: when `ceph.key`
+is empty, it fetches the cephx key and the monitor list from Rook
+(`internal/rookcreds`). With `ceph.key` set, that path is skipped and the
+`rook` section has no effect. Several servers coordinate through RADOS
+alone (watch/notify for IDLE and NOTIFY, RADOS locks, job leases in the
+pools), so native servers on VMs or hardware can share one pool pair just
+like pods do. `shardpostctl` and `shardpost-load` have no Kubernetes
+dependency either. Only `contrib/ucm-cert-renew` is Kubernetes-specific.
+
+What is Rook-specific is the deployment under `deploy/`: the pools are
+`CephBlockPool` resources, the cephx identity is a `CephClient`, and the
+RBAC, the `ROOK_NAMESPACE` variable and the mounted service account token
+exist only to read the Rook secret. A native installation replaces them
+with the steps below.
+
+### Ceph side
+
+The index pool must be replicated, because the mailbox state lives in
+omap. The data pool holds write-once blobs and can be erasure coded
+without `allow_ec_overwrites`. The equivalent of `deploy/base/ceph/pools.yaml`:
+
+```bash
+ceph osd pool create shardpost-index replicated
+ceph osd pool set shardpost-index size 3
+ceph osd erasure-code-profile set shardpost-ec21 k=2 m=1 crush-failure-domain=host
+ceph osd pool create shardpost-data erasure shardpost-ec21
+ceph osd pool application enable shardpost-index shardpost
+ceph osd pool application enable shardpost-data shardpost
+```
+
+The cephx identity needs the same capabilities as the `CephClient` in
+`deploy/base/ceph/cephclient.yaml`; `x` on the OSDs is required for object
+classes (`cls_lock` for the POP3 maildrop lock):
+
+```bash
+ceph auth get-or-create client.shardpost \
+  mon 'allow r' \
+  osd 'allow rwx pool=shardpost-index, allow rwx pool=shardpost-data'
+```
+
+The printed key is the value for `ceph.key`. Pool names and the user are
+configurable (`ceph.index_pool`, `ceph.data_pool`, `ceph.user`).
+
+### Host side
+
+Each server host needs:
+
+- `librados2` in the version of the cluster. The image builds against
+  Ceph 20 (Tentacle); `aes256k` cephx keys require a Tentacle client. On
+  EL9 the package comes from `centos-release-ceph-tentacle`.
+- Network access to the monitors (3300 for msgr2) and to every OSD. The
+  server reads and writes objects on the OSDs directly.
+- The binaries. Build them on a host with `librados-devel` and `gcc`
+  exactly as the `Dockerfile` does (`CGO_ENABLED=1 go build -tags tentacle
+  ./cmd/shardpost`; `shardpostctl` and `shardpost-load` build without cgo),
+  or copy them out of the release image.
+- The external programs under `/usr/local/lib/shardpost/programs` and
+  their Python venv, but only when `extprograms` refers to them (learning,
+  quota warnings, quota flag). The `Dockerfile` shows the layout.
+
+The server does not read `/etc/ceph/ceph.conf` or a keyring; every
+librados option comes from the ShardPost configuration.
+
+### Configuration
+
+The configuration file is passed with `--config` or `SHARDPOST_CONFIG`.
+The storage part of a native node:
+
+```yaml
+ceph:
+  user: shardpost
+  mon_host: "[v2:192.0.2.11:3300],[v2:192.0.2.12:3300],[v2:192.0.2.13:3300]"
+  index_pool: shardpost-index
+  data_pool: shardpost-data
+  # key: set through CEPH_KEY, see below
+```
+
+`ceph.key` has no `*_file` counterpart. Keep it out of the YAML and pass
+it as `CEPH_KEY` from an environment file readable only by root; systemd
+reads that file before it drops privileges. Environment values override
+the YAML.
+
+Without a key the server tries Rook and fails at startup with
+`fetch ceph credentials: service account token: ...`. That message outside
+Kubernetes means `CEPH_KEY` did not reach the process.
+
+Check the result before the first start. `config check` validates the
+configuration and reads the secret files; it neither connects to Ceph nor
+needs the key:
+
+```bash
+sudo -u shardpost shardpost --config /etc/shardpost/shardpost.yaml config check
+```
+
+### systemd unit
+
+```ini
+# /etc/systemd/system/shardpost.service
+[Unit]
+Description=ShardPost mail server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=shardpost
+Group=shardpost
+EnvironmentFile=/etc/shardpost/ceph.env
+Environment=GOMEMLIMIT=700MiB
+ExecStart=/usr/local/bin/shardpost --config /etc/shardpost/shardpost.yaml
+# SIGTERM starts the drain: readiness turns false, the listeners close
+# and sessions get server.drain_seconds; the shutdown gives up 5 s later.
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=5
+MemoryMax=1G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RuntimeDirectory=shardpost
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/shardpost/ceph.env` holds one line, `CEPH_KEY=...`, with mode 0600
+and owner root. Keep `TimeoutStopSec` above `server.drain_seconds` plus
+5 seconds. The default ports are above 1024; for 143/993 add
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` or leave the public ports to
+the Director. With `admin.socket` under `/run/shardpost`, `shardpostctl`
+must run as the `shardpost` user, since the socket admits only callers
+with the server's own uid.
+
+The memory values follow the pod: librados alone holds about 150 MiB,
+`server.memory_budget_bytes` comes on top.
+
+### Scrub
+
+The Kubernetes CronJob becomes a timer on one node only; the CronJob runs
+with `concurrencyPolicy: Forbid`, and a native setup should not run
+several scrubs at once either.
+
+```ini
+# /etc/systemd/system/shardpost-scrub.service
+[Unit]
+Description=ShardPost scrub
+
+[Service]
+Type=oneshot
+User=shardpost
+Group=shardpost
+EnvironmentFile=/etc/shardpost/ceph.env
+ExecStart=/usr/local/bin/shardpost --config /etc/shardpost/shardpost.yaml scrub
+```
+
+```ini
+# /etc/systemd/system/shardpost-scrub.timer
+[Timer]
+OnCalendar=*-*-* 03:17:00
+
+[Install]
+WantedBy=timers.target
+```
+
+`scrub.grace_seconds` and `scrub.dry_run` apply as described above.
+
+### What Kubernetes did and who does it now
+
+| Kubernetes | Native |
+|---|---|
+| Readiness and liveness probes | The Director or load balancer checks `/readyz` and `/healthz` on `server.http_addr`. `/readyz` checks Ceph, not the auth path. |
+| Service and endpoints | The Director lists the hosts as backends; set `server.proxy_protocol_trusted_cidrs` to the Director addresses when it sends PROXY. |
+| Rolling update | Stop, replace and start one node at a time; wait for `/readyz` before the next. |
+| Rook key rotation without restart | See below. |
+| TLS secret from cert-manager | Certificate files on the host; `tls.cert`/`tls.key` point to them. The admin mTLS files are re-read on change, the listener certificate at startup. |
+| Prometheus scrape annotation | A static scrape target for `/metrics` on `server.http_addr`. |
+
+### Key rotation
+
+The in-process rotation (`server.key_poll_seconds`) is tied to the Rook
+watcher and does not run with a static key. Changing the key of the
+existing identity in place invalidates it for every node at once. The
+interruption-free way is a second identity with the same capabilities:
+create `client.shardpost2`, switch the nodes one by one (`ceph.user` and
+`CEPH_KEY`, then restart), and remove `client.shardpost` once no node
+uses it.
