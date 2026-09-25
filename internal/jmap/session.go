@@ -108,20 +108,18 @@ type mailCapability struct {
 	MayCreateTopLevelMailbox   bool     `json:"mayCreateTopLevelMailbox"`
 }
 
-// collationAlgorithms is the one collation this server sorts with.
+// collationOctet is the one collation this server sorts with.
 const collationOctet = "i;octet"
-
-// oneMailbox is what maxMailboxesPerEmail advertises.
-var oneMailbox uint64 = 1
 
 // mail is the mail capability of this server. The sort options of
 // Email/query are empty because there is no Email/query yet: a client
 // reads the list and asks for nothing this server cannot do.
 func (s *Server) mail() *mailCapability {
 	return &mailCapability{
-		// One: this store puts a message in exactly one mailbox, and a
-		// copy is a second message with its own id.
-		MaxMailboxesPerEmail:       &oneMailbox,
+		// No limit. An IMAP COPY keeps the GUID of the message, which
+		// is its JMAP id, so one message can already sit in any number
+		// of mailboxes; a limit here would be a claim the store breaks.
+		MaxMailboxesPerEmail:       nil,
 		MaxMailboxDepth:            nil,
 		MaxSizeMailboxName:         maxMailboxNameBytes,
 		MaxSizeAttachmentsPerEmail: s.o.Limits.MaxSizeUpload,

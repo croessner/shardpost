@@ -534,9 +534,12 @@ func (u *User) DeleteMailbox(name string) error {
 // unregisterLogged unregisters a mailbox and records both the mailbox
 // and its messages in the account change log. The message list was read
 // before the mailbox was closed for writing, so a delivery may have
-// squeezed in behind it: the message entry says it is not a delta, and
-// a reader resynchronises rather than trusting a list that may be one
-// message short.
+// squeezed in behind it. The entry is a delta nonetheless: a message that
+// arrived after the list was read has an entry of its own that says it
+// was created there, and a reader that finds the mailbox gone counts it
+// as having come and gone. Marking the entry Partial instead would make
+// every reader resynchronise after the deletion of a mailbox, which is
+// an ordinary thing for a client to do — most often of an empty one.
 func (u *User) unregisterLogged(mb *Mailbox, lease model.Lease, metas []Meta) (MailboxRec, bool, error) {
 	acct, err := u.beginAccount(emailSpec(mb.ID), mailboxSpec(mb.ID, mb.Name))
 	if err != nil {
@@ -551,10 +554,7 @@ func (u *User) unregisterLogged(mb *Mailbox, lease model.Lease, metas []Meta) (M
 	case lost:
 		acct.withdraw()
 	default:
-		gone := emailChange(model.OpDestroyed, 0, metas)
-		gone.Partial = true
-
-		acct.commit(gone, model.AccountChange{Op: model.OpDestroyed})
+		acct.commit(emailChange(model.OpDestroyed, 0, metas), model.AccountChange{Op: model.OpDestroyed})
 	}
 
 	return snap, lost, err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -19,6 +20,7 @@ type session struct {
 	account string
 	user    model.User
 	created map[string]string
+	log     *slog.Logger
 	limits  Limits
 }
 
@@ -68,7 +70,8 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		}
 		defer u.Close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits})
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits,
+			log: s.o.Log.With("account", res.Account)})
 		next(w, r.WithContext(ctx))
 	}
 }

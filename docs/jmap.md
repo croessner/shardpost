@@ -15,7 +15,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 0 | The account change log: one state per account, and the changes behind it | built |
 | 1 | Core (RFC 8620): session resource, API endpoint, authentication, blobs | built |
 | 2 | `Mailbox/*` | built |
-| 3 | `Email/get`, `Email/changes`, `Thread/*` | planned |
+| 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
 | 4 | `Email/query`, `queryChanges`, `Email/set` | planned |
 | 5 | Push (EventSource and Web Push), `EmailSubmission/*`, `Identity/*` | planned |
 | 6 | `SieveScript/*`, `Quota/*`, `Blob/*`, sharing | planned |
@@ -27,8 +27,8 @@ A client that asks for a capability this server does not have is told
 The session advertises `urn:ietf:params:jmap:mail` from stage 2 on,
 because a method is only reachable through the capability it belongs to
 and `Mailbox/*` would otherwise be unusable. The capability is therefore
-ahead of what is behind it: a client that asks for `Email/query` today
-is told `unknownMethod`. That is what keeps `jmap.addr` unset until
+ahead of what is behind it: a client that asks for `Email/query` or
+`Email/set` today is told `unknownMethod`. That is what keeps `jmap.addr` unset until
 stage 4 — the capability gate makes the methods testable, the
 deployment gate keeps real clients away.
 
@@ -120,6 +120,104 @@ comparator that asks for another one is `unsupportedSort`.
 query result is not a list this server keeps, so a client re-runs the
 query instead of being handed a delta computed from a guess.
 
+## Messages
+
+`Email/get`, `Email/changes`, `Thread/get` and `Thread/changes` (RFC
+8621 3 and 4).
+
+**The id of a message is its GUID** — the identity IMAP reports as
+`EMAILID` (RFC 8474). It does not change when a message moves, which is
+what lets a client move a message by changing its `mailboxIds`; an id
+made of mailbox and UID would turn every move into a deletion and a new
+message. It also means that an IMAP `COPY`, which keeps the GUID, puts
+one message into a second mailbox rather than making a second message:
+`mailboxIds` then holds both, and `maxMailboxesPerEmail` has no limit.
+A message copied twice into the *same* mailbox is one message in it —
+JMAP cannot say "twice here", and the second copy is not a message of its
+own.
+
+**Where a message is.** The store keys its entries by mailbox and UID and
+has no way back from a GUID. The JMAP front-end keeps a *locator* for
+that: a derived index GUID → places, in 32 shard objects per account
+(`ix/jmaploc/<nn>`, see [RADOS storage](architecture/storage.md)). It is
+built from the account change log, which already records every placement
+with its mailbox, UID and GUID, so **nothing on the IMAP write path
+writes to it** — the JMAP front-end folds the log into it before it
+reads. The first JMAP request of an account builds it from a scan of all
+mailboxes, and so does a request after the log has been trimmed past the
+point the locator had reached (a JMAP client that was away for more than
+`server.account_log_retention` changes). That scan reads every index
+entry once; after it, each request folds only what changed. Every place
+the locator names is checked against the mailbox before it is used — by
+`Email/get`, `Email/changes`, `Thread/get` and `Thread/changes` alike —
+and a place that no longer holds its message is dropped, so a stale
+entry costs a lookup and never a wrong answer.
+
+The locator keeps a small record (about a hundred bytes) for every
+message it has ever seen, including the ones that are gone:
+`Thread/changes` needs the thread of a destroyed message, and the record
+is where it is. Thread records only grow, for the same reason a removal
+could race an addition. An account therefore accumulates records at the
+rate it receives mail, spread over 32 objects; at a million messages over
+its lifetime that is about thirty thousand keys per object, well below
+Ceph's large-omap threshold. An account far beyond that can have its
+locator dropped (`ix/jmaploc/*`) while no JMAP client is connected; the
+next request rebuilds it from what exists.
+
+**Keywords** are IMAP flags under their JMAP names (RFC 8621 4.1.1):
+`\Seen`, `\Flagged`, `\Answered` and `\Draft` become `$seen`, `$flagged`,
+`$answered` and `$draft`; `\Recent` and `\Deleted` are not exposed; every
+other flag is an IMAP keyword already and keeps its name in lower case.
+A message whose IMAP copies carry different flags has the union of them
+— read in one folder is read — and a keyword write in stage 4 sets every
+copy alike.
+
+**What is read.** The properties of a list view come from the index
+record without touching the message: `subject`, `from`, `to`, `cc`,
+`bcc`, `sentAt`, `receivedAt`, `messageId`, `inReplyTo`, `preview`,
+`keywords`, `size`, `threadId`, `mailboxIds`. Three header properties
+read the header block of the message, because the IMAP envelope in the
+index gets them wrong for JMAP: it fills an absent `Sender` and
+`Reply-To` from `From`, where JMAP says null, and it merges `References`
+with `In-Reply-To` for threading. `header:*` and `headers` read the
+header block as well. The body properties — `bodyStructure`,
+`textBody`, `htmlBody`, `attachments`, `bodyValues`, `hasAttachment` —
+read and parse the whole message, which is what an IMAP `BODYSTRUCTURE`
+costs too. A list view that asks for `hasAttachment` therefore reads
+every message it shows.
+
+**Bodies.** `textBody`, `htmlBody` and `attachments` come from the
+algorithm RFC 8621 4.1.4 gives, ported as written. A body value is
+decoded from its transfer encoding and converted from its charset by
+this server, which sets `isEncodingProblem` when either step fails, and
+`maxBodyValueBytes` cuts on a character boundary. A body part's blob is
+its bytes with the transfer encoding undone and the charset left alone —
+what a client saves as the file — and its id is the message GUID with the
+section number (`<guid>_2-1`). The download endpoint serves it by parsing
+the message; a part is not stored on its own.
+
+**Threads** are the messages that share a conversation root: the first
+`References` entry, or the message's own `Message-ID`, or the message
+itself. That is the same function IMAP uses for `THREADID`
+(`mailmeta.ThreadID`), so the two protocols cannot disagree. It depends
+only on fields that never change, so a message's `threadId` never
+changes either; changing the function would change every thread id and
+is therefore a breaking change. A thread's `emailIds` are sorted by
+arrival.
+
+**Changes.** `Email/changes` counts placements rather than trusting the
+operation of a log entry: a new placement of a message that already
+existed — an IMAP `COPY`, or the arrival half of a `MOVE` — is an update
+of the message, not a creation. The number of places now (from the
+locator, checked) less what the window added gives the number before;
+a message is created when it had none, destroyed when it has none left.
+A window cut short by `maxChanges` is counted against the places of now,
+which can mislabel inside that window — never a message reported
+destroyed that exists — and the pages that follow bring the client to
+the right end state. `Thread/changes` reports the threads a message
+joined or left; a message whose keywords or mailboxes change stays in
+its thread.
+
 ## Endpoints
 
 | Path | Method | Contents |
@@ -203,11 +301,25 @@ built from the request, which is right for a direct connection only.
 
 ## Limits of this stage
 
-- `Email/*`, `Thread/*` and everything else of RFC 8621 are not here,
-  although the mail capability is advertised (see above). Its
-  `emailQuerySortOptions` is therefore an empty list, and
-  `maxMailboxesPerEmail` is 1: this store puts a message in exactly one
-  mailbox, and a copy is a second message with its own id.
+- `Email/query`, `Email/set`, `Email/copy`, `Email/import`,
+  `SearchSnippet/get` and the rest of RFC 8621 beyond reading are not
+  here, although the mail capability is advertised (see above). Its
+  `emailQuerySortOptions` is therefore an empty list.
+- `Email/get` needs ids: asking for every message of an account is
+  answered with `requestTooLarge`.
+- `hasAttachment` reads the whole message (see above). Caching it in the
+  index record at delivery would make list views cheaper; it is not done
+  yet.
+- A message beyond the limits of the MIME walk (more than 1000 parts, or
+  nested deeper than 32 levels) is described as one opaque part a client
+  can download, and a message whose data cannot be read has no body
+  properties; neither holds back the other messages of the call.
+- Two small deviations that come from answering from the IMAP envelope:
+  a present but empty `Subject` reads as null rather than `""`, and an
+  address without a domain (`<postmaster>`) is left out of `from`, `to`
+  and the other address properties, because the envelope encodes it the
+  way it encodes the start of a group. `header:*:asAddresses` parses the
+  header itself and has neither deviation.
 - Push is not here: the session advertises an `eventSourceUrl`, and
   stage 5 makes it answer.
 - The private `\Seen` marks of a public folder are recorded in the

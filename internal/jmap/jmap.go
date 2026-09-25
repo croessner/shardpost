@@ -97,6 +97,7 @@ type Server struct {
 	mu      sync.Mutex
 	inFlong map[string]int // API requests in flight, per account
 	inFlup  map[string]int // uploads in flight, per account
+	inDown  map[string]int // downloads in flight, per account
 }
 
 // New builds the server and its routes.
@@ -107,7 +108,7 @@ func New(o Options) *Server {
 
 	o.Limits = withDefaults(o.Limits)
 
-	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}}
+	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{}}
 
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.

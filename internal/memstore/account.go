@@ -1,6 +1,8 @@
 package memstore
 
 import (
+	"hash/fnv"
+
 	"shardpost/internal/model"
 )
 
@@ -62,12 +64,10 @@ func (u *User) emailChange(op model.AccountOp, b *box, modseq uint64, metas []mo
 	u.acct.record(c)
 }
 
-// emailDestroyedPartial records that every message of a mailbox is gone
-// without standing behind the list: the RADOS store reads the list
-// before the mailbox is closed for writing, so a delivery can slip in
-// after it, and the two stores must say the same thing.
-func (u *User) emailDestroyedPartial(b *box) {
-	c := model.AccountChange{Kind: model.KindEmail, Op: model.OpDestroyed, Mailbox: b.ID, Partial: true,
+// emailDestroyedAll records that every message of a deleted mailbox is
+// gone, the way the RADOS store does: as an ordinary entry listing them.
+func (u *User) emailDestroyedAll(b *box) {
+	c := model.AccountChange{Kind: model.KindEmail, Op: model.OpDestroyed, Mailbox: b.ID,
 		Msgs: make([]model.EmailRef, 0, len(b.msgs))}
 
 	for _, m := range b.msgs {
@@ -169,4 +169,111 @@ func (u *User) ReadBlob(guid string, _, offset, length int64) ([]byte, error) {
 	}
 
 	return append([]byte(nil), raw[lo:hi]...), nil
+}
+
+// IndexGet implements model.Index.
+func (u *User) IndexGet(space string, keys []string) (map[string][]byte, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	out := map[string][]byte{}
+
+	for _, k := range keys {
+		if v, ok := u.indexes[space][k]; ok {
+			out[k] = append([]byte(nil), v...)
+		}
+	}
+
+	return out, nil
+}
+
+// indexShards is the shard count of the RADOS store's indexes. The
+// in-memory index hands its function one shard at a time as well, so that
+// a caller that writes outside the keys it was handed fails here, in a
+// test, and not only against a cluster.
+const indexShards = 32
+
+// indexShard is the shard a key lives in, by the same hash the RADOS
+// store uses.
+func indexShard(key string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+
+	return h.Sum32() % indexShards
+}
+
+// IndexApply implements model.Index: under one mutex, but one shard at a
+// time, as the RADOS store does it.
+func (u *User) IndexApply(space string, keys []string, fn model.IndexFunc) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if u.indexes == nil {
+		u.indexes = map[string]map[string][]byte{}
+	}
+
+	if u.indexes[space] == nil {
+		u.indexes[space] = map[string][]byte{}
+	}
+
+	groups := map[uint32][]string{}
+	for _, k := range keys {
+		groups[indexShard(k)] = append(groups[indexShard(k)], k)
+	}
+
+	for _, ks := range groups {
+		if err := u.applyShard(space, ks, fn); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// applyShard runs an index function over the keys of one shard.
+func (u *User) applyShard(space string, keys []string, fn model.IndexFunc) error {
+	allowed := map[string]bool{}
+	cur := map[string][]byte{}
+
+	for _, k := range keys {
+		allowed[k] = true
+
+		if v, ok := u.indexes[space][k]; ok {
+			cur[k] = append([]byte(nil), v...)
+		}
+	}
+
+	set, rm := fn(keys, cur)
+
+	for k := range set {
+		if !allowed[k] {
+			return model.ErrIndexKey
+		}
+	}
+
+	for _, k := range rm {
+		if !allowed[k] {
+			return model.ErrIndexKey
+		}
+	}
+
+	for k, v := range set {
+		u.indexes[space][k] = append([]byte(nil), v...)
+	}
+
+	for _, k := range rm {
+		delete(u.indexes[space], k)
+	}
+
+	return nil
+}
+
+// IndexReset implements model.Index.
+func (u *User) IndexReset(space string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	delete(u.indexes, space)
+
+	return nil
 }

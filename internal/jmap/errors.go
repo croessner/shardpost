@@ -38,6 +38,15 @@ const (
 // kwError is the method name of an error response.
 const kwError = "error"
 
+// The descriptions of the two ways a /changes cannot compute a delta.
+const (
+	descUnknownState = "unknown state token"
+	descLogTrimmed   = "the change log no longer covers that state"
+)
+
+// argProperties is the argument name an invalid property list blames.
+const argProperties = "properties"
+
 // problem is the RFC 7807 document a request-level error is reported as.
 type problem struct {
 	Type   string `json:"type"`

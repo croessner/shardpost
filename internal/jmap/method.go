@@ -33,19 +33,19 @@ type changesRequest struct {
 	SinceState string  `json:"sinceState"`
 }
 
-// changesResponse is what a /changes answers. UpdatedProperties says
-// that the updated objects changed only in the properties it names; the
-// data types that have no such shortcut leave it nil, which RFC 8620 5.2
-// reads as "the server cannot tell".
+// changesResponse is what a /changes answers. UpdatedProperties exists
+// for Mailbox/changes alone (RFC 8621 2.2), where it is required and may
+// be null: a pointer to a nil list renders as null there, and a nil
+// pointer leaves the property out of every other /changes.
 type changesResponse struct {
-	UpdatedProperties []string `json:"updatedProperties"`
-	AccountID         string   `json:"accountId"`
-	OldState          string   `json:"oldState"`
-	NewState          string   `json:"newState"`
-	Created           []string `json:"created"`
-	Updated           []string `json:"updated"`
-	Destroyed         []string `json:"destroyed"`
-	HasMoreChanges    bool     `json:"hasMoreChanges"`
+	UpdatedProperties *[]string `json:"updatedProperties,omitempty"`
+	AccountID         string    `json:"accountId"`
+	OldState          string    `json:"oldState"`
+	NewState          string    `json:"newState"`
+	Created           []string  `json:"created"`
+	Updated           []string  `json:"updated"`
+	Destroyed         []string  `json:"destroyed"`
+	HasMoreChanges    bool      `json:"hasMoreChanges"`
 }
 
 // setRequest is the argument shape of a /set (RFC 8620 5.3).
@@ -181,7 +181,7 @@ func checkRequested(properties *[]string, known map[string]bool) *methodError {
 
 	for _, p := range *properties {
 		if !known[p] {
-			return &methodError{Type: errInvalidArguments, Arguments: []string{"properties"},
+			return &methodError{Type: errInvalidArguments, Arguments: []string{argProperties},
 				Description: "no such property: " + p}
 		}
 	}

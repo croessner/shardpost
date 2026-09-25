@@ -23,7 +23,7 @@ var roleOfUse = map[string]string{
 	`\Sent`:      "sent",
 	`\Trash`:     "trash",
 	`\All`:       "all",
-	`\Flagged`:   "flagged",
+	imapFlagged:  "flagged",
 	`\Important`: "important",
 }
 
@@ -403,7 +403,7 @@ func mailboxChanges(_ context.Context, sess *session, args json.RawMessage) (any
 
 	since, ok := parseState(req.SinceState)
 	if !ok {
-		return nil, &methodError{Type: errCannotCalculateChanges, Description: "unknown state token"}
+		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
 	}
 
 	limit, merr := changeLimit(req.MaxChanges)
@@ -417,7 +417,7 @@ func mailboxChanges(_ context.Context, sess *session, args json.RawMessage) (any
 	}
 
 	if !ok {
-		return nil, &methodError{Type: errCannotCalculateChanges, Description: "the change log no longer covers that state"}
+		return nil, &methodError{Type: errCannotCalculateChanges, Description: descLogTrimmed}
 	}
 
 	t, terr := newTree(sess.user)
@@ -485,7 +485,8 @@ func collectMailboxChanges(sess *session, sinceState string, since uint64,
 	}
 
 	out.NewState = stateString(last)
-	out.UpdatedProperties = set.updatedProperties()
+	props := set.updatedProperties()
+	out.UpdatedProperties = &props
 	fill(out, set.kind, t)
 
 	return out, nil

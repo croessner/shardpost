@@ -104,6 +104,7 @@ type User struct {
 	guidN   int
 	intents int
 	acct    accountLog
+	indexes map[string]map[string][]byte // front-end indexes, by space
 	scripts map[string]string
 	active  string
 	imp     *importLock
@@ -236,7 +237,7 @@ func (u *User) DeleteMailbox(name string) error {
 	}
 
 	delete(u.boxes, n)
-	u.emailDestroyedPartial(b)
+	u.emailDestroyedAll(b)
 	u.mailboxChange(model.OpDestroyed, b, n)
 
 	if b.Subscribed { // RFC 3501 6.3.4: the subscription may survive DELETE

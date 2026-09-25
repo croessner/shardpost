@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -95,7 +96,26 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A download can read and parse a whole message, so it counts against
+	// the same per-account limit as an API request, on a counter of its
+	// own: a client streaming an attachment must not lock itself out of
+	// the API.
+	sess := sessionOf(r)
+	if !s.enter(s.inDown, sess.account, s.o.Limits.MaxConcurrentRequests) {
+		writeProblem(w, http.StatusTooManyRequests, errURNLimit,
+			"too many downloads in flight for this account", "maxConcurrentRequests")
+
+		return
+	}
+	defer s.leave(s.inDown, sess.account)
+
 	blobID := r.PathValue("blobId")
+
+	if guid, path, ok := parsePartBlob(blobID); ok {
+		s.servePart(w, r, blobs, guid, path)
+
+		return
+	}
 
 	size, err := blobs.BlobSize(blobID)
 	if err != nil {
@@ -104,6 +124,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	downloadHeaders(w, r)
+	http.ServeContent(w, r, "", time.Time{}, &blobReader{blobs: blobs, guid: blobID, size: size})
+}
+
+// downloadHeaders are the headers every download carries.
+func downloadHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", blobType(r.URL.Query().Get("accept")))
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+urlEscape(r.PathValue("name")))
 	// The media type is whatever the client asked for, so a blob must
@@ -114,8 +140,45 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// A blob is written once and never changes, so a client that has it
 	// once never has to ask again.
 	w.Header().Set("Cache-Control", "private, immutable, max-age=31536000")
+}
 
-	http.ServeContent(w, r, "", time.Time{}, &blobReader{blobs: blobs, guid: blobID, size: size})
+// servePart serves one body part of a message: its bytes with the
+// transfer encoding undone and the charset left as it is, which is what
+// RFC 8621 4.1.4 says a part's blob is. The message is parsed to find it;
+// a part is not stored on its own.
+func (s *Server) servePart(w http.ResponseWriter, r *http.Request, blobs model.Blobs, guid, path string) {
+	size, err := blobs.BlobSize(guid)
+	if err != nil {
+		s.blobFailed(w, r, guid, err)
+
+		return
+	}
+
+	raw, err := blobs.ReadBlob(guid, size, 0, -1)
+	if err != nil {
+		s.blobFailed(w, r, guid, err)
+
+		return
+	}
+
+	root, err := parseMessage(raw)
+	if err != nil {
+		s.blobFailed(w, r, guid, err)
+
+		return
+	}
+
+	part := root.find(path)
+	if part == nil {
+		writeProblem(w, http.StatusNotFound, errURNNotRequest, "no such body part", "")
+
+		return
+	}
+
+	body, _ := part.decodedBody()
+
+	downloadHeaders(w, r)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
 }
 
 // withinQuota reports whether the account has room for another upload.

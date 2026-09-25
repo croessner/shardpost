@@ -372,36 +372,43 @@ func TestAccountLogACLChange(t *testing.T) {
 	}
 }
 
-// TestAccountLogDeleteIsPartial: the message list of a deleted mailbox
-// is a snapshot, so the entry says it is not to be trusted as a delta.
-func TestAccountLogDeleteIsPartial(t *testing.T) {
+// TestAccountLogDeleteListsTheMessages: deleting a mailbox records its
+// messages as destroyed in an ordinary entry. A message that slipped in
+// after the list was read has its own entry, so the list is a delta; a
+// Partial entry would make every reader resynchronise after an ordinary
+// deletion, most often of an empty mailbox.
+func TestAccountLogDeleteListsTheMessages(t *testing.T) {
 	u := openUser(t)
 
-	if err := u.CreateMailbox("Scratch", nil); err != nil {
-		t.Fatal(err)
+	for _, n := range []string{"Scratch", "Empty"} {
+		if err := u.CreateMailbox(n, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if _, err := u.Deliver("Scratch", []byte("Subject: one\r\n\r\nbody\r\n"), nil, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
-	before := state(t, u)
+	for name, want := range map[string]int{"Scratch": 1, "Empty": 0} {
+		before := state(t, u)
 
-	if err := u.DeleteMailbox("Scratch"); err != nil {
-		t.Fatal(err)
-	}
+		if err := u.DeleteMailbox(name); err != nil {
+			t.Fatal(err)
+		}
 
-	cs := changesSince(t, u, before)
-	if len(cs) != 2 {
-		t.Fatalf("DELETE produced %+v, want the messages and the mailbox", cs)
-	}
+		cs := changesSince(t, u, before)
+		if len(cs) != 2 {
+			t.Fatalf("DELETE %s produced %+v, want the messages and the mailbox", name, cs)
+		}
 
-	if cs[0].Kind != model.KindEmail || !cs[0].Partial {
-		t.Errorf("the message entry of a DELETE is %+v, want a partial email entry", cs[0])
-	}
+		if cs[0].Kind != model.KindEmail || cs[0].Partial || len(cs[0].Msgs) != want {
+			t.Errorf("the message entry of DELETE %s is %+v, want an ordinary one listing %d", name, cs[0], want)
+		}
 
-	if cs[1].Kind != model.KindMailbox || cs[1].Op != model.OpDestroyed {
-		t.Errorf("the second entry is %+v, want the destroyed mailbox", cs[1])
+		if cs[1].Kind != model.KindMailbox || cs[1].Op != model.OpDestroyed {
+			t.Errorf("the second entry is %+v, want the destroyed mailbox", cs[1])
+		}
 	}
 }
 

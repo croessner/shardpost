@@ -91,6 +91,10 @@ var methods = map[string]method{
 	"Mailbox/query":        {capability: CapMail, run: mailboxQuery},
 	"Mailbox/queryChanges": {capability: CapMail, run: mailboxQueryChanges},
 	"Mailbox/set":          {capability: CapMail, run: mailboxSet},
+	"Email/get":            {capability: CapMail, run: emailGet},
+	"Email/changes":        {capability: CapMail, run: emailChanges},
+	"Thread/get":           {capability: CapMail, run: threadGet},
+	"Thread/changes":       {capability: CapMail, run: threadChanges},
 }
 
 // knownCapabilities are the URNs a request may list in "using".

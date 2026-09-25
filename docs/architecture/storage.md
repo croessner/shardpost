@@ -16,6 +16,7 @@ user namespaces.
 |---|---|---|
 | `mailboxes` | Registry of names and stable mailbox IDs; quota and delivery intents | [user.go](../../internal/cephstore/user.go) |
 | `account` | Account-wide change counter and change log (JMAP state) | [account.go](../../internal/cephstore/account.go) |
+| `ix/<space>/<nn>` | Front-end indexes derived from the rest (JMAP locator), 32 shards | [index.go](../../internal/cephstore/index.go) |
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
 | `mbox/<id>/<n>` | Further message entries | [user.go](../../internal/cephstore/user.go) |
 | `msg/<guid>/<n>` | Immutable payload chunks; chunk 0 carries `refs` | [blob.go](../../internal/cephstore/blob.go) |
@@ -161,6 +162,22 @@ public folder are recorded in the log of the public account, not in the
 log of the account the mark belongs to; JMAP sharing (RFC 9670) is where
 that is resolved. And METADATA annotations have no entry at all, because
 RFC 8621 has no object for them.
+
+## Front-end indexes
+
+A front-end may keep an index of its own in the store: data it derives
+from the rest and can always rebuild from it. The JMAP locator (GUID →
+mailbox and UID) is the one that exists. Such an index carries no
+consistency obligation towards the rest of the store — a lost write costs
+a rebuild, never a message — and nothing on the IMAP write path writes to
+it. It lives in `ix/<space>/<nn>`, spread over 32 shards by a hash of the
+key, so that an account with a million messages keeps each object at
+about thirty thousand keys, below the size at which Ceph warns about
+large omap objects. The shard count is fixed for good: changing it would
+move every key.
+
+The scrubber leaves these objects alone, and an account purge removes
+them with the rest of the namespace.
 
 ## Notifications and search
 
