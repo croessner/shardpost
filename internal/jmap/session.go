@@ -61,9 +61,12 @@ func (s *Server) session(account, base string) *Session {
 	id := accountID(account)
 
 	out := &Session{
-		Capabilities:    map[string]json.RawMessage{CapCore: mustRaw(s.core())},
+		Capabilities: map[string]json.RawMessage{
+			CapCore: mustRaw(s.core()),
+			CapMail: mustRaw(s.mail()),
+		},
 		Accounts:        map[string]Account{id: s.account(account)},
-		PrimaryAccounts: map[string]string{},
+		PrimaryAccounts: map[string]string{CapMail: id},
 		Username:        account,
 		APIURL:          base + PathAPI,
 		DownloadURL:     base + PathDownload + "{accountId}/{blobId}/{name}?accept={type}",
@@ -88,7 +91,42 @@ func (s *Server) core() *coreCapability {
 		MaxCallsInRequest:     l.MaxCallsInRequest,
 		MaxObjectsInGet:       l.MaxObjectsInGet,
 		MaxObjectsInSet:       l.MaxObjectsInSet,
-		CollationAlgorithms:   []string{"i;ascii-numeric", "i;ascii-casemap", "i;octet"},
+		// Only the one the sorts actually use: comparing the bytes.
+		// Advertising more would be a promise this server does not keep.
+		CollationAlgorithms: []string{collationOctet},
+	}
+}
+
+// mailCapability is the value of the mail capability in the session
+// resource (RFC 8621 1.4).
+type mailCapability struct {
+	MaxMailboxesPerEmail       *uint64  `json:"maxMailboxesPerEmail"`
+	MaxMailboxDepth            *uint64  `json:"maxMailboxDepth"`
+	EmailQuerySortOptions      []string `json:"emailQuerySortOptions"`
+	MaxSizeMailboxName         uint64   `json:"maxSizeMailboxName"`
+	MaxSizeAttachmentsPerEmail int64    `json:"maxSizeAttachmentsPerEmail"`
+	MayCreateTopLevelMailbox   bool     `json:"mayCreateTopLevelMailbox"`
+}
+
+// collationAlgorithms is the one collation this server sorts with.
+const collationOctet = "i;octet"
+
+// oneMailbox is what maxMailboxesPerEmail advertises.
+var oneMailbox uint64 = 1
+
+// mail is the mail capability of this server. The sort options of
+// Email/query are empty because there is no Email/query yet: a client
+// reads the list and asks for nothing this server cannot do.
+func (s *Server) mail() *mailCapability {
+	return &mailCapability{
+		// One: this store puts a message in exactly one mailbox, and a
+		// copy is a second message with its own id.
+		MaxMailboxesPerEmail:       &oneMailbox,
+		MaxMailboxDepth:            nil,
+		MaxSizeMailboxName:         maxMailboxNameBytes,
+		MaxSizeAttachmentsPerEmail: s.o.Limits.MaxSizeUpload,
+		EmailQuerySortOptions:      []string{},
+		MayCreateTopLevelMailbox:   true,
 	}
 }
 
@@ -98,10 +136,13 @@ func (s *Server) core() *coreCapability {
 // built yet, and listing them empty would be a lie about what works.
 func (s *Server) account(name string) Account {
 	return Account{
-		Name:                name,
-		IsPersonal:          true,
-		IsReadOnly:          false,
-		AccountCapabilities: map[string]json.RawMessage{CapCore: json.RawMessage(`{}`)},
+		Name:       name,
+		IsPersonal: true,
+		IsReadOnly: false,
+		AccountCapabilities: map[string]json.RawMessage{
+			CapCore: json.RawMessage(`{}`),
+			CapMail: mustRaw(s.mail()),
+		},
 	}
 }
 

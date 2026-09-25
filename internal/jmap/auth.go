@@ -11,11 +11,15 @@ import (
 	"shardpost/internal/model"
 )
 
-// session is what an authenticated request carries: who is asking and
-// the store view opened for them.
+// session is what an authenticated request carries: who is asking, the
+// store view opened for them, and the creation ids of the API request
+// it belongs to. One request is served by one goroutine, so the map
+// needs no lock; a session that serves no API request leaves it nil.
 type session struct {
 	account string
 	user    model.User
+	created map[string]string
+	limits  Limits
 }
 
 // ctxKey is the context key of the authenticated session.
@@ -64,7 +68,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		}
 		defer u.Close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u})
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits})
 		next(w, r.WithContext(ctx))
 	}
 }

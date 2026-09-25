@@ -31,6 +31,8 @@ const (
 	errFromAccountNotFound     = "fromAccountNotFound"
 	errStateMismatch           = "stateMismatch"
 	errCannotCalculateSnapshot = "cannotCalculateSnapshot"
+	errUnsupportedSort         = "unsupportedSort"
+	errAnchorNotFound          = "anchorNotFound"
 )
 
 // kwError is the method name of an error response.

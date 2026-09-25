@@ -878,6 +878,66 @@ func (u *User) SetSubscribed(name string, subscribed bool) error {
 	return nil
 }
 
+// SetSortOrder changes where a client sorts the mailbox among its
+// siblings. Like a subscription it is a registry record change, and the
+// account log records it as a change to the mailbox.
+func (u *User) SetSortOrder(name string, order uint32) error {
+	name = canonical(name)
+
+	acct, err := u.beginKnownMailbox(name)
+	if err != nil {
+		return err
+	}
+
+	var missing, changed bool
+
+	var id string
+
+	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, sortOrderUpdate(name, order, &missing, &changed, &id))
+	u.invalidate()
+
+	acct.settle(err, changed, id)
+
+	if err != nil {
+		return fmt.Errorf("set sort order %q: %w", name, err)
+	}
+
+	if missing {
+		return ErrNoMailbox
+	}
+
+	return nil
+}
+
+// sortOrderUpdate returns the registry CAS function of a sort order
+// change. *missing reports that there is no such mailbox, *changed that
+// the record was actually rewritten.
+func sortOrderUpdate(name string, order uint32, missing, changed *bool, id *string) func(map[string][]byte) (map[string][]byte, []string) {
+	return func(cur map[string][]byte) (map[string][]byte, []string) {
+		*missing, *changed = false, false
+
+		var rec MailboxRec
+
+		v, ok := cur[regKey(name)]
+		if !ok || json.Unmarshal(v, &rec) != nil {
+			*missing = true
+
+			return nil, nil
+		}
+
+		*id = rec.ID
+		if rec.SortOrder == order {
+			return nil, nil
+		}
+
+		rec.SortOrder = order
+		*changed = true
+		b, _ := json.Marshal(&rec)
+
+		return map[string][]byte{regKey(name): b}, nil
+	}
+}
+
 // subscribeUpdate returns the registry CAS function of a subscription
 // change. *missing reports a name without a mailbox, which RFC 5258
 // allows and which is recorded separately; *changed reports that the

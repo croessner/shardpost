@@ -7,6 +7,8 @@ package mailmeta
 import (
 	"bufio"
 	"bytes"
+	"fmt"
+	"hash/fnv"
 	"strings"
 	"unicode"
 
@@ -15,7 +17,35 @@ import (
 	"github.com/emersion/go-message/textproto"
 
 	"shardpost/internal/fts"
+	"shardpost/internal/model"
 )
+
+// ThreadID is the conversation a message belongs to: the root of its
+// References chain, or its own Message-ID, or — for a message with
+// neither — itself. It is what IMAP reports as THREADID and what JMAP
+// calls the Email's threadId, and both have to be the same string, so
+// there is one implementation of it.
+func ThreadID(m *model.Meta) string {
+	root := ""
+
+	switch {
+	case len(m.References) > 0:
+		root = m.References[0]
+	case m.Envelope != nil:
+		if ids := MessageIDs(m.Envelope.MessageID); len(ids) > 0 {
+			root = ids[0]
+		}
+	}
+
+	if root == "" {
+		root = m.GUID
+	}
+
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(root))
+
+	return fmt.Sprintf("T%016x", h.Sum64())
+}
 
 // PreviewLen is the length of the cached preview in runes.
 const PreviewLen = 200

@@ -14,7 +14,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 |---|---|---|
 | 0 | The account change log: one state per account, and the changes behind it | built |
 | 1 | Core (RFC 8620): session resource, API endpoint, authentication, blobs | built |
-| 2 | `Mailbox/*` | planned |
+| 2 | `Mailbox/*` | built |
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | planned |
 | 4 | `Email/query`, `queryChanges`, `Email/set` | planned |
 | 5 | Push (EventSource and Web Push), `EmailSubmission/*`, `Identity/*` | planned |
@@ -23,6 +23,14 @@ behind it is `temp/08-jmap-staged-plan.md`.
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
 `unknownMethod`. Nothing is served half-correct.
+
+The session advertises `urn:ietf:params:jmap:mail` from stage 2 on,
+because a method is only reachable through the capability it belongs to
+and `Mailbox/*` would otherwise be unusable. The capability is therefore
+ahead of what is behind it: a client that asks for `Email/query` today
+is told `unknownMethod`. That is what keeps `jmap.addr` unset until
+stage 4 — the capability gate makes the methods testable, the
+deployment gate keeps real clients away.
 
 ## The account state
 
@@ -37,6 +45,80 @@ consequences matter outside the store:
   whether or not the account has a JMAP client.
 - The log is bounded (`server.account_log_retention`, 10000 entries).
   A client whose state token is older resynchronises.
+
+## Mailboxes
+
+`Mailbox/get`, `/changes`, `/query`, `/queryChanges` and `/set` (RFC
+8621 2). Everything they report comes from what IMAP already keeps:
+`role` from the RFC 6154 special-use attribute (and from the name, for
+INBOX), `isSubscribed` from the subscription, `myRights` from the fact
+that every mailbox in the session belongs to the account itself.
+`sortOrder` is the one property with no IMAP counterpart; it is a field
+of the registry record that nothing else reads.
+
+**Names and the tree.** IMAP names a mailbox by its path, JMAP by a leaf
+plus a pointer to its parent. IMAP also allows a path whose intermediate
+levels have no mailbox of their own, and JMAP has no object for such a
+level, so those levels stay in the name: `Work/Bills` without a `Work`
+is a mailbox named `Work/Bills` at the top level. The invariant either
+way is that the path is the parent's path, the delimiter and the name. A
+`Mailbox/set` refuses a name that carries the delimiter, so a client
+cannot create that shape itself.
+
+**Counts.** `totalEmails`, `unreadEmails`, `totalThreads` and
+`unreadThreads` cost a scan of the mailbox index — the same scan an IMAP
+`STATUS` costs, and Thunderbird does one of those per mailbox per poll.
+They are computed only for the properties a request actually names, so a
+client that lists its mailboxes without the counts pays nothing. A draft
+does not count as unread, as RFC 8621 2 defines it. `maxObjectsInGet`
+bounds how many mailboxes one `Mailbox/get` may render, and
+`maxObjectsInSet` how many objects one `/set` may touch.
+
+**Changes.** `Mailbox/changes` reads the account change log; the state
+token is the account counter. Three things land in `updated`:
+
+- a mailbox that was written (renamed, subscribed, its rights or its
+  sort order changed),
+- a mailbox whose messages changed, because the counts are properties of
+  it — `updatedProperties` then names the four count properties, and a
+  client refetches nothing else,
+- a mailbox whose *neighbours* changed. A JMAP name and parent are read
+  off the tree around a mailbox, so a level that appears or disappears
+  renames everything under it without any of them being written. Those
+  children are reported too, and `updatedProperties` is then null.
+
+An entry that records a change without naming its mailbox — which
+happens only after a process died mid-write, or during an account
+import — makes the call answer `cannotCalculateChanges`, and the client
+re-reads the list. The alternative, diffing the client's list against
+the current one, is possible with a few dozen mailboxes and is not built
+until it is needed.
+
+**What `Mailbox/set` will not do.** The role of a mailbox is fixed when
+it is created: the store has no way to change a special-use attribute
+afterwards, and inventing one for JMAP alone would put IMAP and JMAP at
+odds. An account has at most one mailbox per role, which IMAP does not
+enforce and JMAP requires, so a second one is refused here. INBOX can be
+neither renamed nor deleted (RFC 9051 6.3.4, 6.3.6), and `myRights` says
+so before a client tries. A mailbox with children is `mailboxHasChild`,
+and one with messages is `mailboxHasEmail` unless the client passes
+`onDestroyRemoveEmails`.
+
+An update is applied in one piece or not at all: everything a client
+sent is decoded and checked before the first write, so a rename that
+fails cannot leave a sort order behind. A creation may name its parent
+by the creation id of another creation in the same call, in whatever
+order the JSON object is read; the ids they receive go back in
+`createdIds`.
+
+**Sorting** compares bytes, and the session advertises `i;octet` alone
+rather than the collations this server does not actually apply. A
+comparator that asks for another one is `unsupportedSort`.
+
+**`Mailbox/queryChanges`** answers `cannotCalculateChanges`, and
+`Mailbox/query` says so up front with `canCalculateChanges: false`: the
+query result is not a list this server keeps, so a client re-runs the
+query instead of being handed a delta computed from a guess.
 
 ## Endpoints
 
@@ -121,7 +203,11 @@ built from the request, which is right for a direct connection only.
 
 ## Limits of this stage
 
-- `Email/*`, `Mailbox/*` and everything else of RFC 8621 are not here.
+- `Email/*`, `Thread/*` and everything else of RFC 8621 are not here,
+  although the mail capability is advertised (see above). Its
+  `emailQuerySortOptions` is therefore an empty list, and
+  `maxMailboxesPerEmail` is 1: this store puts a message in exactly one
+  mailbox, and a copy is a second message with its own id.
 - Push is not here: the session advertises an `eventSourceUrl`, and
   stage 5 makes it answer.
 - The private `\Seen` marks of a public folder are recorded in the

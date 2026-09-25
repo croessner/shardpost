@@ -48,6 +48,11 @@ type MailboxRec struct {
 	// generation they were derived from, so a late pointer write from
 	// an older SETACL/DELETEACL cannot undo a newer one.
 	ACLGen uint64 `json:"aclgen,omitempty"`
+	// SortOrder is where a client puts the mailbox in a list of its
+	// siblings, lowest first (JMAP Mailbox.sortOrder, RFC 8621 2). IMAP
+	// has no such thing and never reads it; it is stored here because
+	// it belongs to the mailbox, not to a session.
+	SortOrder uint32 `json:"sortorder,omitempty"`
 }
 
 // SharedRef is a pointer in a user's registry to a mailbox of another
@@ -209,6 +214,10 @@ type User interface {
 	DeleteMailbox(name string) error
 	RenameMailbox(oldName, newName string) error
 	SetSubscribed(name string, subscribed bool) error
+	// SetSortOrder records where a client sorts the mailbox among its
+	// siblings. It is a JMAP property with no IMAP counterpart, so
+	// nothing else in the server reads it.
+	SetSortOrder(name string, order uint32) error
 	Info(name string) (*MailboxInfo, error)
 
 	ListMessages(id string) ([]Meta, error)

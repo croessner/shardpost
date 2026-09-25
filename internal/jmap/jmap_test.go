@@ -207,7 +207,9 @@ func TestCoreEcho(t *testing.T) {
 }
 
 // TestBatchingKeepsGoing: a failing call does not stop the ones after
-// it; that is what makes a batch worth sending.
+// it; that is what makes a batch worth sending. The failing one here is
+// a method the server has but the request did not ask for the
+// capability of, which RFC 8620 3.2 says is unknownMethod.
 func TestBatchingKeepsGoing(t *testing.T) {
 	s := newTestServer(t)
 
@@ -301,7 +303,7 @@ func TestRequestLevelErrors(t *testing.T) {
 	}{
 		{`not json`, errURNNotJSON, http.StatusBadRequest},
 		{`{"methodCalls":[]}`, errURNNotRequest, http.StatusBadRequest},
-		{`{"using":["urn:ietf:params:jmap:mail"],"methodCalls":[]}`, errURNUnknownCapability, http.StatusBadRequest},
+		{`{"using":["urn:ietf:params:jmap:calendars"],"methodCalls":[]}`, errURNUnknownCapability, http.StatusBadRequest},
 		{`{"using":["urn:ietf:params:jmap:core"],"methodCalls":[
 			["Core/echo",{},"a"],["Core/echo",{},"b"],["Core/echo",{},"c"]]}`, errURNLimit, http.StatusBadRequest},
 	}

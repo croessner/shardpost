@@ -357,6 +357,24 @@ func (u *User) SetSubscribed(name string, sub bool) error {
 	return nil
 }
 
+// SetSortOrder implements model.User.
+func (u *User) SetSortOrder(name string, order uint32) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	b, n, err := u.lookup(name)
+	if err != nil {
+		return err
+	}
+
+	if b.SortOrder != order {
+		b.SortOrder = order
+		u.mailboxChange(model.OpUpdated, b, n)
+	}
+
+	return nil
+}
+
 // ListSubscribedMissing returns the subscribed names without a mailbox.
 func (u *User) ListSubscribedMissing() ([]string, error) {
 	u.mu.Lock()

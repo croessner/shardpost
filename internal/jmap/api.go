@@ -85,8 +85,16 @@ type method struct {
 // data types on top; until they are here, a client that asks for them is
 // told unknownMethod rather than being served an empty result.
 var methods = map[string]method{
-	"Core/echo": {capability: CapCore, run: coreEcho},
+	"Core/echo":            {capability: CapCore, run: coreEcho},
+	"Mailbox/get":          {capability: CapMail, run: mailboxGet},
+	"Mailbox/changes":      {capability: CapMail, run: mailboxChanges},
+	"Mailbox/query":        {capability: CapMail, run: mailboxQuery},
+	"Mailbox/queryChanges": {capability: CapMail, run: mailboxQueryChanges},
+	"Mailbox/set":          {capability: CapMail, run: mailboxSet},
 }
+
+// knownCapabilities are the URNs a request may list in "using".
+var knownCapabilities = map[string]bool{CapCore: true, CapMail: true}
 
 // coreEcho returns its arguments unchanged (RFC 8620 4).
 func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *methodError) {
@@ -112,13 +120,21 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The creation ids a client sends can be referenced by the calls of
+	// this request, and the ones those calls hand out go back with the
+	// response (RFC 8620 3.3).
+	sess.created = req.CreatedIDs
+	if sess.created == nil {
+		sess.created = map[string]string{}
+	}
+
 	out := apiResponse{
 		MethodResponses: s.runCalls(r.Context(), sess, req),
 		SessionState:    s.session(sess.account, s.baseURL(r)).State,
 	}
 
-	if req.CreatedIDs != nil {
-		out.CreatedIDs = &req.CreatedIDs
+	if req.CreatedIDs != nil || len(sess.created) > 0 {
+		out.CreatedIDs = &sess.created
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -173,7 +189,7 @@ func (s *Server) validate(w http.ResponseWriter, req *apiRequest) bool {
 	}
 
 	for _, urn := range req.Using {
-		if urn != CapCore {
+		if !knownCapabilities[urn] {
 			writeProblem(w, http.StatusBadRequest, errURNUnknownCapability,
 				"this server does not support "+urn, "")
 

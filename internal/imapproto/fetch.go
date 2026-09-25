@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"math"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 
+	"shardpost/internal/mailmeta"
 	"shardpost/internal/membudget"
 	"shardpost/internal/model"
 )
@@ -777,21 +777,7 @@ func literalString(b []byte) string {
 
 // threadID derives a stable thread identifier from the root of the
 // References chain (or the message's own Message-ID).
-func threadID(m *model.Meta) string {
-	root := ""
-	if len(m.References) > 0 {
-		root = m.References[0]
-	} else if ids := envMessageID(m); ids != "" {
-		root = ids
-	} else {
-		root = m.GUID
-	}
-
-	h := fnv.New64a()
-	h.Write([]byte(root))
-
-	return fmt.Sprintf("T%016x", h.Sum64())
-}
+func threadID(m *model.Meta) string { return mailmeta.ThreadID(m) }
 
 func envelopeOf(raw []byte) *imap.Envelope {
 	env, _, _ := extractMeta(raw)
