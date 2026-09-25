@@ -1,14 +1,23 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"shardpost/internal/auth"
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
+	"shardpost/internal/webpush"
 )
 
 // setupHTTP builds the health and metrics listener, the JMAP front-end
@@ -48,6 +57,11 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		srv.jmapTLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
 	}
 
+	push, err := srv.jmapPush(settings.JMAP.Push, store)
+	if err != nil {
+		return err
+	}
+
 	front := jmap.New(jmap.Options{
 		Store:         storeAdapter{store},
 		Auth:          authn,
@@ -55,11 +69,110 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		PublicBaseURL: settings.JMAP.PublicBaseURL,
 		InsecureAuth:  settings.JMAP.InsecureAuth,
 		Limits:        jmapLimits(settings.JMAP),
+		Push:          push,
 	})
 
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
 
 	return nil
+}
+
+// jmapPush builds the push settings of the front-end. With a VAPID key,
+// push subscriptions are offered and kept in the admin store, where the
+// push worker reads them.
+func (srv *servers) jmapPush(c config.JMAPPush, store *cephstore.Store) (jmap.PushOptions, error) {
+	push := jmap.PushOptions{
+		MaxSubscriptions:  int(c.MaxSubscriptions),
+		MaxExpiry:         sec(c.MaxExpirySeconds),
+		EventPoll:         sec(c.EventPollSeconds),
+		AllowInternalURLs: c.AllowInternalEndpoints,
+	}
+
+	if !c.Enabled() {
+		return push, nil
+	}
+
+	vapid, err := loadVAPID(c)
+	if err != nil {
+		return push, err
+	}
+
+	kv, err := store.AdminKV()
+	if err != nil {
+		return push, fmt.Errorf("jmap push: admin store: %w", err)
+	}
+
+	srv.jmapKV = kv
+	push.KV, push.VAPIDPublicKey = kv, vapid.PublicKey()
+
+	return push, nil
+}
+
+// loadVAPID reads the VAPID key.
+func loadVAPID(c config.JMAPPush) (*webpush.VAPID, error) {
+	raw, err := os.ReadFile(c.VAPIDKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("jmap push: %w", err)
+	}
+
+	return webpush.LoadVAPID(raw, c.VAPIDSubject)
+}
+
+// runPush runs the push worker ("shardpost push") until ctx ends, with the
+// health and metrics listener beside it for the probes.
+func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store) error {
+	c := settings.JMAP.Push
+	if !c.Enabled() {
+		return fmt.Errorf("shardpost push needs jmap.push.vapid_key_file")
+	}
+
+	vapid, err := loadVAPID(c)
+	if err != nil {
+		return err
+	}
+
+	kv, err := store.AdminKV()
+	if err != nil {
+		return fmt.Errorf("push worker: admin store: %w", err)
+	}
+	defer kv.Close()
+
+	var authn auth.Authenticator
+
+	if c.CheckAccounts && !strings.EqualFold(settings.Server.AuthBackend, "nauthilus") {
+		return fmt.Errorf("jmap.push.check_accounts needs server.auth_backend nauthilus: " +
+			"another backend would deny every account and the worker would destroy every subscription")
+	}
+
+	if c.CheckAccounts {
+		if authn, err = buildAuth(log, settings); err != nil {
+			return err
+		}
+	}
+
+	health := newHTTPServer(settings, store)
+
+	go func() {
+		if err := health.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("push worker: http listener", "err", err)
+		}
+	}()
+
+	defer func() { _ = health.Close() }()
+
+	host, _ := os.Hostname()
+
+	return jmap.RunPushWorker(ctx, jmap.WorkerOptions{
+		Store:          storeAdapter{store},
+		KV:             kv,
+		Sender:         pushSender(c, vapid),
+		Instance:       host + "-" + randomSuffix(),
+		Auth:           authn,
+		Log:            log.With("component", "push"),
+		VAPIDPublicKey: vapid.PublicKey(),
+		Scan:           sec(c.ScanSeconds),
+		Poll:           sec(c.PollSeconds),
+	})
 }
 
 // jmapLimits maps the configured limits; a zero keeps the default.
@@ -74,3 +187,29 @@ func jmapLimits(c config.JMAP) jmap.Limits {
 		MaxObjectsInSet:       int(c.MaxObjectsInSet),
 	}
 }
+
+// pushSender is the Web Push sender of the worker.
+func pushSender(c config.JMAPPush, vapid *webpush.VAPID) *webpush.Sender {
+	timeout := sec(c.TimeoutSeconds)
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	ttl := sec(c.MessageTTLSeconds)
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+
+	return &webpush.Sender{Client: webpush.NewClient(timeout, c.AllowInternalEndpoints), VAPID: vapid, TTL: ttl}
+}
+
+// randomSuffix makes a worker's name unique even on one host.
+func randomSuffix() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+
+	return hex.EncodeToString(b)
+}
+
+// sec is a number of seconds from the configuration as a duration.
+func sec(n int64) time.Duration { return time.Duration(n) * time.Second }

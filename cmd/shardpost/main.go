@@ -97,6 +97,7 @@ const (
 	commandServe = "serve"
 	commandScrub = "scrub"
 	commandCheck = "check"
+	commandPush  = "push"
 )
 
 // capabilityEnabled is the ManageSieve capability value for enabled features.
@@ -117,7 +118,7 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	// Quota warnings and the over-flag check run only while serving;
 	// the scrubber's recount reports nothing.
 	var quotaSvc *quota.Service
-	if command != commandScrub {
+	if command == commandServe {
 		quotaSvc = quota.NewService(settings.Quota, programs, log.With("component", "quota"))
 		if quotaSvc != nil {
 			cfg.OnQuotaChange = quotaSvc.Changed
@@ -144,6 +145,11 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	// "shardpost scrub" runs the scrubber over all users and exits.
 	if command == commandScrub {
 		return scrub(store, log, settings)
+	}
+
+	// "shardpost push" runs the JMAP push worker.
+	if command == commandPush {
+		return runPush(ctx, log, settings, store)
 	}
 
 	return serve(ctx, log, settings, store, programs, quotaSvc)
@@ -315,6 +321,8 @@ type servers struct {
 	// jmap serves the JMAP front-end on its own listener (nil: off).
 	jmap    *http.Server
 	jmapTLS *tls.Config
+	// jmapKV is the admin store the JMAP push subscriptions are kept in.
+	jmapKV *cephstore.AdminKV
 	// delivery is shared by LMTP and the local delivery API.
 	delivery *delivery.Service
 	admin    *adminServers
@@ -533,6 +541,10 @@ func (srv *servers) drain(settings *config.Config) {
 
 	if srv.jmap != nil {
 		_ = srv.jmap.Shutdown(shCtx)
+	}
+
+	if srv.jmapKV != nil {
+		srv.jmapKV.Close()
 	}
 }
 

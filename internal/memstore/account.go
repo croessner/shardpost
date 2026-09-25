@@ -26,14 +26,54 @@ type accountLog struct {
 	entries  []model.AccountChange
 	seq      uint64
 	logStart uint64 // sequence of the oldest entry still kept
+	watchers map[*acctWatch]bool
 }
 
-// record appends one entry under the next sequence. The caller holds the
-// user's mutex.
+// acctWatch is a watch on the account log.
+type acctWatch struct {
+	u  *User
+	ch chan struct{}
+}
+
+func (w *acctWatch) Events() <-chan struct{} { return w.ch }
+func (w *acctWatch) Errors() <-chan error    { return nil }
+
+// Close removes the watch.
+func (w *acctWatch) Close() {
+	w.u.mu.Lock()
+	defer w.u.mu.Unlock()
+
+	delete(w.u.acct.watchers, w)
+}
+
+// WatchAccount returns a watch that fires on every account change.
+func (u *User) WatchAccount() (model.Watch, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if u.acct.watchers == nil {
+		u.acct.watchers = map[*acctWatch]bool{}
+	}
+
+	w := &acctWatch{u: u, ch: make(chan struct{}, 1)}
+	u.acct.watchers[w] = true
+
+	return w, nil
+}
+
+// record appends one entry under the next sequence and wakes the account
+// watchers. The caller holds the user's mutex.
 func (l *accountLog) record(c model.AccountChange) {
 	l.seq++
 	c.Seq = l.seq
 	l.entries = append(l.entries, c)
+
+	for w := range l.watchers {
+		select {
+		case w.ch <- struct{}{}:
+		default:
+		}
+	}
 
 	if len(l.entries) > accountLogRetention {
 		l.entries = l.entries[len(l.entries)-accountLogRetention:]

@@ -31,6 +31,9 @@ type Result struct {
 	// Attributes are the backend's attributes (LDAP fields such as the
 	// quota), when the backend returns any.
 	Attributes map[string][]string
+	// DisplayName is the account holder's name, when the backend names
+	// the attribute that carries it (Nauthilus display_name_field).
+	DisplayName string
 }
 
 var (

@@ -661,14 +661,3 @@ func TestDownloadHeaders(t *testing.T) {
 		t.Errorf("Content-Disposition does not carry the escaped name: %q", cd)
 	}
 }
-
-// TestEventSourceSaysItIsNotThere: the session has to advertise the URL,
-// so the URL answers in JMAP terms instead of a bare 404.
-func TestEventSourceSaysItIsNotThere(t *testing.T) {
-	s := newTestServer(t)
-
-	w := do(t, s, http.MethodGet, PathEvents, "")
-	if w.Code != http.StatusNotImplemented {
-		t.Errorf("the event source answered %d, want 501", w.Code)
-	}
-}

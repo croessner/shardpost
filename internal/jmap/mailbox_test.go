@@ -34,7 +34,16 @@ func mailServer(t *testing.T, prepare func(model.User)) *Server {
 func mailCall(t *testing.T, s *Server, name, args string) map[string]any {
 	t.Helper()
 
-	out := call(t, s, `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],
+	return callWith(t, s, CapMail, name, args)
+}
+
+// callWith sends one method call with the core capability and another
+// one, and returns the arguments of its response, failing the test on
+// an error response.
+func callWith(t *testing.T, s *Server, capability, name, args string) map[string]any {
+	t.Helper()
+
+	out := call(t, s, `{"using":["urn:ietf:params:jmap:core","`+capability+`"],
 		"methodCalls":[["`+name+`",`+args+`,"c1"]]}`)
 
 	got, _ := responses(t, out)[0].([]any)

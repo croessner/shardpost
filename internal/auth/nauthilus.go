@@ -78,6 +78,7 @@ type nauthilusRequest struct {
 type nauthilusResponse struct {
 	OK           bool             `json:"ok"`
 	AccountField string           `json:"account_field"`
+	DisplayField string           `json:"display_name_field"`
 	Attributes   map[string][]any `json:"attributes"`
 	Error        string           `json:"error"`
 	Session      string           `json:"-"`
@@ -219,6 +220,7 @@ type outcome struct {
 	account      string
 	wait         time.Duration
 	accountField string
+	displayField string
 	attributes   map[string][]string
 }
 
@@ -265,7 +267,12 @@ func (n *Nauthilus) call(ctx context.Context, mode string, body nauthilusRequest
 		return nil, fmt.Errorf("%w: nauthilus returned no account", ErrTemporary)
 	}
 
-	return &Result{Account: strings.ToLower(strings.TrimSpace(account)), Attributes: o.attributes}, nil
+	res := &Result{Account: strings.ToLower(strings.TrimSpace(account)), Attributes: o.attributes}
+	if vals := o.attributes[o.displayField]; o.displayField != "" && len(vals) > 0 {
+		res.DisplayName = strings.TrimSpace(vals[0])
+	}
+
+	return res, nil
 }
 
 // httpTransport talks to POST /api/v1/auth/json.
@@ -299,7 +306,7 @@ func (h httpTransport) call(ctx context.Context, mode string, body nauthilusRequ
 		return o, nil
 	}
 
-	o.ok, o.accountField = out.OK, out.AccountField
+	o.ok, o.accountField, o.displayField = out.OK, out.AccountField, out.DisplayField
 	if !out.OK && out.Error != "" {
 		o.temp, o.message = true, out.Error
 		return o, nil

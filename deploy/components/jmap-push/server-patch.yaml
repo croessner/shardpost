@@ -1,0 +1,25 @@
+# The front-ends read the public half of the VAPID key: with it they offer
+# PushSubscription/* and advertise urn:ietf:params:jmap:webpush-vapid.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: JMAP_PUSH_VAPID_KEY_FILE
+              value: /secrets/jmap-vapid/vapid.pem
+            - name: JMAP_PUSH_VAPID_SUBJECT
+              value: mailto:postmaster@roessner-net.de
+          volumeMounts:
+            - name: jmap-vapid
+              mountPath: /secrets/jmap-vapid
+              readOnly: true
+      volumes:
+        - name: jmap-vapid
+          secret:
+            secretName: shardpost-jmap-vapid
+            defaultMode: 0440

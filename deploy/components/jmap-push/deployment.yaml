@@ -1,0 +1,97 @@
+# The JMAP push worker: one replica. A second one would wait for the
+# lease in the admin store, so a rollout never pushes twice.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-push
+  labels:
+    app.kubernetes.io/name: shardpost-push
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-push
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shardpost-push
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: shardpost-server
+      automountServiceAccountToken: true # needed to fetch the cephx key from Rook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 167
+        runAsGroup: 167
+        fsGroup: 167
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: push
+          image: docker.io/chrroessner/shardpost:0.26.0
+          imagePullPolicy: IfNotPresent
+          args: ["push"]
+          env:
+            - name: CEPH_USER
+              value: shardpost
+            - name: CEPH_INDEX_POOL
+              value: shardpost-index
+            - name: CEPH_DATA_POOL
+              value: shardpost-data
+            - name: ROOK_NAMESPACE
+              value: rook-ceph
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: KEY_POLL_SECONDS
+              value: "60"
+            - name: JMAP_PUSH_VAPID_KEY_FILE
+              value: /secrets/jmap-vapid/vapid.pem
+            - name: JMAP_PUSH_VAPID_SUBJECT
+              value: mailto:postmaster@roessner-net.de
+            - name: GOMEMLIMIT
+              value: "400MiB"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 20m
+              memory: 192Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: jmap-vapid
+              mountPath: /secrets/jmap-vapid
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: jmap-vapid
+          secret:
+            secretName: shardpost-jmap-vapid
+            defaultMode: 0440

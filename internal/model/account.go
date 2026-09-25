@@ -125,5 +125,14 @@ type Blobs interface {
 	ReadBlob(guid string, size, offset, length int64) ([]byte, error)
 }
 
+// AccountWatcher is implemented by stores that can tell a front-end,
+// wherever in the cluster it runs, that the account change log has grown.
+// It is what JMAP push waits on. The events are hints: one may be lost
+// or coalesced with the next, so a watcher compares AccountState with
+// what it last saw rather than counting events.
+type AccountWatcher interface {
+	WatchAccount() (Watch, error)
+}
+
 // ErrNoBlob is returned for a GUID no blob is stored under.
 var ErrNoBlob = errors.New("no such blob")

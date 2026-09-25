@@ -74,6 +74,15 @@ func (s *Server) session(account, base string) *Session {
 		EventSourceURL:  base + PathEvents + "?types={types}&closeafter={closeafter}&ping={ping}",
 	}
 
+	if s.o.Submission != nil {
+		out.Capabilities[CapSubmission] = mustRaw(submissionCapability())
+		out.PrimaryAccounts[CapSubmission] = id
+	}
+
+	if s.o.Push.KV != nil && s.o.Push.VAPIDPublicKey != "" {
+		out.Capabilities[CapWebPushVAPID] = mustRaw(map[string]string{"applicationServerKey": s.o.Push.VAPIDPublicKey})
+	}
+
 	out.State = sessionState(out)
 
 	return out
@@ -160,7 +169,7 @@ func (s *Server) mail() *mailCapability {
 // mailboxes, the public namespace) belong to JMAP Sharing, which is not
 // built yet, and listing them empty would be a lie about what works.
 func (s *Server) account(name string) Account {
-	return Account{
+	a := Account{
 		Name:       name,
 		IsPersonal: true,
 		IsReadOnly: false,
@@ -169,6 +178,18 @@ func (s *Server) account(name string) Account {
 			CapMail: mustRaw(s.mail()),
 		},
 	}
+
+	if s.o.Submission != nil {
+		a.AccountCapabilities[CapSubmission] = mustRaw(submissionCapability())
+	}
+
+	return a
+}
+
+// submissionCapability is the value of the submission capability (RFC
+// 8621 1.3.2). Delayed sending is not offered.
+func submissionCapability() map[string]any {
+	return map[string]any{"maxDelayedSend": 0, "submissionExtensions": map[string][]string{}}
 }
 
 // accountID is the id an account is addressed by in URLs and arguments.
@@ -201,7 +222,7 @@ func (s *Server) baseURL(r *http.Request) string {
 
 	scheme := "http"
 	if r.TLS != nil {
-		scheme = "https"
+		scheme = schemeHTTPS
 	}
 
 	return scheme + "://" + r.Host

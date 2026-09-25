@@ -289,7 +289,7 @@ func mailboxGet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 	}
 
 	if req.IDs != nil && len(*req.IDs) > sess.limits.MaxObjectsInGet {
-		return nil, &methodError{Type: errRequestTooLarge, Description: "more ids than maxObjectsInGet"}
+		return nil, &methodError{Type: errRequestTooLarge, Description: descTooManyIDs}
 	}
 
 	state, t, merr := mailboxState(sess)

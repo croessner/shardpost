@@ -17,7 +17,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 2 | `Mailbox/*` | built |
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
-| 5 | Push (EventSource and Web Push), `EmailSubmission/*`, `Identity/*` | planned |
+| 5 | Push (EventSource and Web Push), `Identity/*` | built; `EmailSubmission/*` open |
 | 6 | `SieveScript/*`, `Quota/*`, `Blob/*`, sharing | planned |
 
 A client that asks for a capability this server does not have is told
@@ -375,6 +375,118 @@ server report properties it changed beyond the request): keywords and
 keeps the old state. A client that adopts the new state therefore ends
 up at least as far as the state says, never behind it.
 
+## Push
+
+Push (RFC 8620 7) tells a client that something changed, never what:
+a `StateChange` naming the data types whose state moved. Both ways of
+telling it compute that from the account change log.
+
+**Which types.** Every type's state is the account counter, so the
+value is the same for all of them; the types that appear say what kind
+of change it was. A mailbox change is `Mailbox`; a change to a message is
+`Email`, `Thread` and `Mailbox` (the counts of its mailbox moved); a new
+message is also `EmailDelivery`. The log does not know how a message
+arrived, so an IMAP `APPEND` — a sent copy, a draft — is a delivery as
+well. A Partial entry, or a log that no longer reaches back, names every
+type.
+
+**The event source** (`/jmap/eventsource/`, RFC 8620 7.3) is a
+`text/event-stream` held open by the front-end. It learns of a change
+from a watch on the account object — the store notifies it after every
+record of the account change log, cluster-wide, the way IMAP IDLE learns
+of a delivery on another pod — and checks the state on its own every
+`jmap.push.event_poll_seconds` (30) in case a notification was lost.
+Each `state` event carries the state as its event id; a client that
+reconnects with `Last-Event-ID` is sent what it missed at once.
+`closeafter=state` ends the stream after one event; `ping` is clamped to
+15–900 seconds. An account may hold `maxConcurrentRequests` event
+sources open, counted apart from API requests, and shutting the server
+down ends them.
+
+**Push subscriptions** (RFC 8620 7.2) are for clients that cannot keep a
+connection open. A front-end takes them and keeps them in the shared
+admin store — all subscriptions of an account in one record, and new
+ones in a queue of verifications to send; a separate process, the
+**push worker** (`shardpost push`, one replica, component
+`deploy/components/jmap-push`), serves them. It sends the
+`PushVerification` of a new subscription, and once the client has sent
+the code back it watches that account and posts a `StateChange` when it
+changes, gathering changes for a second so a burst becomes one push.
+The worker that works holds a lease in the admin store, renewed on a
+clock of its own, and another waits for it to lapse; a store it cannot
+reach for a moment does not end its work while its lease is valid. The
+state last pushed is kept per account, so a worker that takes over, or
+restarts, pushes what happened in between rather than starting from
+now. The account watches are kept up: a watch the store reports broken
+(an OSD restart drops RADOS watches) is set up again, and the poll
+covers the gap.
+
+Every request to a push service is encrypted for the device when the
+subscription has keys (RFC 8291, aes128gcm) and signed with the
+server's VAPID key (RFC 8292); the front-ends advertise its public half
+as `urn:ietf:params:jmap:webpush-vapid` (RFC 9749), which is what a
+browser client hands its push service. The key is
+`jmap.push.vapid_key_file`, and it is also the switch: without it,
+`PushSubscription/*` is not offered. A subscription made under another
+key is destroyed when the key changes.
+
+What the worker does with an answer: 404 and 410 destroy the
+subscription; 429, 5xx and an unreachable push service hold its pushes
+back — at least one scan, or as long as `Retry-After` says — and the
+types it missed are kept and sent in one push afterwards; any other
+refusal is logged and not repeated. A verification that is refused is
+not sent again (RFC 9749 6); one that did not get through is tried up
+to three times. Push URLs are capabilities and do not appear in the
+logs.
+
+A push URL is a client's to choose, and the worker posts to it, so it is
+treated as an attack vector: it has to be `https`, a front-end refuses
+one that names an internal address, and the worker refuses to connect to
+any loopback, private, link-local or shared address after name
+resolution, and follows no redirects. An in-house push service needs
+`jmap.push.allow_internal_endpoints` on both sides.
+
+A subscription belongs to the account, not to the credentials that made
+it (RFC 8620 7.2 ties it to them): changing the password does not end
+it. It expires after at most `jmap.push.max_expiry_seconds` (7 days;
+never less than the 48 hours the RFC asks for), and a client extends it
+by updating `expires`. With `jmap.push.check_accounts` the worker looks
+the accounts with subscriptions up in the authentication backend (each
+at most hourly, twenty per scan) and destroys the subscriptions of an
+account the backend has denied three times in a row. It refuses to
+start with it unless `server.auth_backend` is `nauthilus` — the worker
+needs the same backend settings as the server — and when most of the
+accounts asked in one scan are denied it suspects the backend, logs an
+error and drops nothing. An account may hold
+`jmap.push.max_subscriptions` (16) subscriptions of at most 32 types
+each.
+
+The worker lists the account records once per scan and reads the
+verification queue every two seconds; each watched account costs it an
+open store view, a RADOS watch and a poll. That is sized for thousands
+of accounts with push subscriptions, not for millions.
+
+## Identities
+
+`Identity/get`, `Identity/changes` and `Identity/set` (RFC 8621 6)
+belong to the submission capability and are offered only together with
+it (see the limits below).
+
+The addresses an account may send from come from the authentication
+backend's identity lookup — Nauthilus `LookupIdentity`, without a
+password — so it works whatever the backend behind Nauthilus is. The
+configured attributes of the answer carry the addresses; each address
+is one identity that cannot be deleted, named after the backend's
+display name (`display_name_field`). A client may change the name,
+`replyTo`, `bcc` and the signatures, and may add further identities for
+the same addresses (`forbiddenFrom` for any other); what it changed is
+kept in the account's own metadata (the server entry
+`/private/vendor/shardpost/jmap/identities`). An identity whose address
+disappears from the backend disappears with it. The state is a hash of
+the list, because part of it lives in the user database;
+`Identity/changes` from an older state is `cannotCalculateChanges`, and
+the client fetches the list again.
+
 ## Endpoints
 
 | Path | Method | Contents |
@@ -383,6 +495,7 @@ up at least as far as the state says, never behind it.
 | `/jmap/api/` | POST | Method calls, batched, with back-references |
 | `/jmap/upload/{accountId}/` | POST | Blob upload |
 | `/jmap/download/{accountId}/{blobId}/{name}` | GET | Blob download, with HTTP ranges |
+| `/jmap/eventsource/?types=…&closeafter=…&ping=…` | GET | Event source (see Push) |
 | `/jmap/healthz` | GET | Backend check: no login, no side effects |
 
 The account id is the canonical account name. It is already stable,
@@ -443,6 +556,32 @@ jmap:
   max_calls_in_request: 16
   max_objects_in_get: 500
   max_objects_in_set: 500
+  push:
+    vapid_key_file: /secrets/jmap-vapid/vapid.pem
+    vapid_subject: mailto:postmaster@example.org
+    max_subscriptions: 16
+    max_expiry_seconds: 604800
+    event_poll_seconds: 30
+    allow_internal_endpoints: false
+    check_accounts: false
+    # the worker (shardpost push)
+    scan_seconds: 30
+    poll_seconds: 60
+    timeout_seconds: 10
+    message_ttl_seconds: 86400
+```
+
+`jmap.push` is read by the front-ends (the public VAPID key, the
+subscription limits, the event source poll) and by the push worker (the
+private key and its intervals). The worker runs from the same image and
+configuration as the server, as `shardpost push`; it needs the Ceph
+settings and the VAPID key, and the backend settings only with
+`check_accounts`. It serves `/healthz`, `/readyz` and `/metrics` on
+`server.http_addr` for the probes. A VAPID key is a P-256 private key in
+PEM:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt
 ```
 
 `tls_cert`/`tls_key` fall back to `tls.cert`/`tls.key` when they are
@@ -481,8 +620,11 @@ built from the request, which is right for a direct connection only.
   and the other address properties, because the envelope encodes it the
   way it encodes the start of a group. `header:*:asAddresses` parses the
   header itself and has neither deviation.
-- Push is not here: the session advertises an `eventSourceUrl`, and
-  stage 5 makes it answer.
+- `EmailSubmission/*` is not built, so the submission capability is not
+  advertised and `Identity/*` is not reachable in a deployment yet. A
+  JMAP client cannot send mail through this server.
+- Push has no `Identity` or `PushSubscription` type in its
+  `StateChange`s: neither is in the account change log.
 - The private `\Seen` marks of a public folder are recorded in the
   account log of the public account, not of the account the mark belongs
   to. JMAP Sharing (RFC 9670) is where that is resolved.

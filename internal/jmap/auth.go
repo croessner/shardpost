@@ -22,6 +22,7 @@ type session struct {
 	created map[string]string
 	log     *slog.Logger
 	limits  Limits
+	srv     *Server
 }
 
 // ctxKey is the context key of the authenticated session.
@@ -70,7 +71,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		}
 		defer u.Close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits,
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits, srv: s,
 			log: s.o.Log.With("account", res.Account)})
 		next(w, r.WithContext(ctx))
 	}

@@ -238,6 +238,8 @@ func (t *acctTxn) write(set map[string][]byte, rm []string) {
 		return
 	}
 
+	t.u.notifyAccount()
+
 	if (t.base+uint64(len(t.specs)))/256 != (t.base-1)/256 {
 		t.u.background(func() { t.u.trimAccountLog() })
 	}
@@ -320,7 +322,11 @@ func (u *User) noteAccountChange(kind model.AccountChangeKind, mailboxID, name s
 	})
 	if err != nil {
 		u.log.Warn("account change not recorded", "mailbox", mailboxID, "err", err)
+
+		return
 	}
+
+	u.notifyAccount()
 }
 
 // emailChange is the record of a change to the given messages at modseq.

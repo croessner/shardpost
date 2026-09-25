@@ -86,6 +86,11 @@ type method struct {
 // told unknownMethod rather than being served an empty result.
 var methods = map[string]method{
 	"Core/echo":            {capability: CapCore, run: coreEcho},
+	"PushSubscription/get": {capability: CapCore, run: pushSubscriptionGet},
+	"PushSubscription/set": {capability: CapCore, run: pushSubscriptionSet},
+	"Identity/get":         {capability: CapSubmission, run: identityGet},
+	"Identity/changes":     {capability: CapSubmission, run: identityChanges},
+	"Identity/set":         {capability: CapSubmission, run: identitySet},
 	"Mailbox/get":          {capability: CapMail, run: mailboxGet},
 	"Mailbox/changes":      {capability: CapMail, run: mailboxChanges},
 	"Mailbox/query":        {capability: CapMail, run: mailboxQuery},
@@ -104,7 +109,7 @@ var methods = map[string]method{
 }
 
 // knownCapabilities are the URNs a request may list in "using".
-var knownCapabilities = map[string]bool{CapCore: true, CapMail: true}
+var knownCapabilities = map[string]bool{CapCore: true, CapMail: true, CapWebPushVAPID: true, CapSubmission: true}
 
 // coreEcho returns its arguments unchanged (RFC 8620 4).
 func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *methodError) {

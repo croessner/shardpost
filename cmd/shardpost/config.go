@@ -24,8 +24,8 @@ func loadConfig(args []string) (*config.Config, string, error) {
 			}
 
 			path = args[i]
-		case commandScrub:
-			command = commandScrub
+		case commandScrub, commandPush:
+			command = args[i]
 		case "config":
 			if i+1 >= len(args) || args[i+1] != commandCheck {
 				return nil, "", fmt.Errorf("expected config check")

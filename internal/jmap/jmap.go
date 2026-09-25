@@ -24,6 +24,10 @@ import (
 // CapCore is the URN of the JMAP Core capability.
 const CapCore = "urn:ietf:params:jmap:core"
 
+// CapWebPushVAPID is the capability that carries the VAPID public key a
+// client hands its push service (RFC 9749).
+const CapWebPushVAPID = "urn:ietf:params:jmap:webpush-vapid"
+
 // Paths served by the JMAP front-end. The well-known location is fixed
 // by RFC 8620 2.2; the rest sits under one prefix so that a reverse
 // proxy in front of the server can route by path.
@@ -88,6 +92,59 @@ type Options struct {
 	// exists for tests and for a listener that terminates TLS in front.
 	InsecureAuth bool
 	Limits       Limits
+	Push         PushOptions
+	// Submission, when set, offers urn:ietf:params:jmap:submission.
+	Submission *SubmissionOptions
+}
+
+// PushOptions configure push (RFC 8620 7). The event source works with
+// the zero value; push subscriptions need the shared store they are kept
+// in, and Web Push the VAPID key of the worker that sends them.
+type PushOptions struct {
+	// KV keeps the push subscriptions, where the push worker finds them.
+	// Without it PushSubscription/* is not offered.
+	KV model.AdminKV
+	// VAPIDPublicKey is the public half of the worker's VAPID key
+	// (base64url), advertised as urn:ietf:params:jmap:webpush-vapid.
+	VAPIDPublicKey string
+	// MaxSubscriptions bounds the push subscriptions of one account.
+	MaxSubscriptions int
+	// MaxExpiry bounds how far ahead a subscription may expire; RFC 8620
+	// 7.2 asks for at least 48 hours and recommends 7 days.
+	MaxExpiry time.Duration
+	// EventPoll is how often an open event source checks the account
+	// state on its own, in case a change notification was lost.
+	EventPoll time.Duration
+	// AllowInternalURLs accepts push URLs that point into the server's
+	// own network — a push service run in-house. The worker needs the
+	// same setting to reach them.
+	AllowInternalURLs bool
+}
+
+// DefaultPush are the push settings a configuration that says nothing
+// gets.
+var DefaultPush = PushOptions{MaxSubscriptions: 16, MaxExpiry: 7 * 24 * time.Hour, EventPoll: 30 * time.Second}
+
+// minPushExpiry is the shortest maximum expiry RFC 8620 7.2 allows.
+const minPushExpiry = 48 * time.Hour
+
+// pushDefaults fills in the push settings left at zero.
+func pushDefaults(p PushOptions) PushOptions {
+	if p.MaxSubscriptions <= 0 {
+		p.MaxSubscriptions = DefaultPush.MaxSubscriptions
+	}
+
+	if p.MaxExpiry <= 0 {
+		p.MaxExpiry = DefaultPush.MaxExpiry
+	}
+
+	p.MaxExpiry = max(p.MaxExpiry, minPushExpiry)
+
+	if p.EventPoll <= 0 {
+		p.EventPoll = DefaultPush.EventPoll
+	}
+
+	return p
 }
 
 // Server is the JMAP front-end.
@@ -98,6 +155,12 @@ type Server struct {
 	inFlong map[string]int // API requests in flight, per account
 	inFlup  map[string]int // uploads in flight, per account
 	inDown  map[string]int // downloads in flight, per account
+	// inEvents counts the open event sources per account.
+	inEvents map[string]int
+	// closing is closed when the server shuts down; open event sources
+	// end on it, since http.Server.Shutdown waits for them otherwise.
+	closing   chan struct{}
+	closeOnce sync.Once
 }
 
 // New builds the server and its routes.
@@ -107,8 +170,10 @@ func New(o Options) *Server {
 	}
 
 	o.Limits = withDefaults(o.Limits)
+	o.Push = pushDefaults(o.Push)
 
-	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{}}
+	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
+		inEvents: map[string]int{}, closing: make(chan struct{})}
 
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.
@@ -121,12 +186,7 @@ func New(o Options) *Server {
 	s.mux.HandleFunc("POST "+PathAPI, s.authenticated(s.handleAPI))
 	s.mux.HandleFunc("POST "+PathUpload+"{accountId}/", s.authenticated(s.handleUpload))
 	s.mux.HandleFunc("GET "+PathDownload+"{accountId}/{blobId}/{name}", s.authenticated(s.handleDownload))
-	// The session resource has to advertise an eventSourceUrl, so the
-	// URL exists and says what it is: push is a later stage, and a
-	// client learns that from a JMAP answer rather than a bare 404.
-	s.mux.HandleFunc("GET "+PathEvents, s.authenticated(func(w http.ResponseWriter, _ *http.Request) {
-		writeProblem(w, http.StatusNotImplemented, errURNNotRequest, "this server does not push yet", "")
-	}))
+	s.mux.HandleFunc("GET "+PathEvents, s.authenticated(s.handleEvents))
 
 	return s
 }
@@ -170,16 +230,24 @@ func withDefaults(l Limits) Limits {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 // HTTPServer wraps the front-end in a server with the timeouts a
-// public listener needs. A read timeout is deliberately absent: an
-// EventSource connection (stage 5) stays open for hours.
+// public listener needs. A read or write timeout is deliberately absent:
+// an event source stays open for hours. Shutting the server down ends
+// the open event sources.
 func (s *Server) HTTPServer(addr string) *http.Server {
-	return &http.Server{
+	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+
+	srv.RegisterOnShutdown(s.Close)
+
+	return srv
 }
+
+// Close ends the open event sources.
+func (s *Server) Close() { s.closeOnce.Do(func() { close(s.closing) }) }
 
 // enter takes a slot of the given per-account counter; it reports false
 // when the account is already at its limit.

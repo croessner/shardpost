@@ -15,7 +15,7 @@ user namespaces.
 | Object/structure | Meaning | Primary source |
 |---|---|---|
 | `mailboxes` | Registry of names and stable mailbox IDs; quota and delivery intents | [user.go](../../internal/cephstore/user.go) |
-| `account` | Account-wide change counter and change log (JMAP state) | [account.go](../../internal/cephstore/account.go) |
+| `account` | Account-wide change counter and change log (JMAP state); watched by JMAP push | [account.go](../../internal/cephstore/account.go), [watch.go](../../internal/cephstore/watch.go) |
 | `ix/<space>/<nn>` | Front-end indexes derived from the rest (JMAP locator), 32 shards | [index.go](../../internal/cephstore/index.go) |
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
 | `mbox/<id>/<n>` | Further message entries | [user.go](../../internal/cephstore/user.go) |

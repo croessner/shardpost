@@ -35,11 +35,31 @@ func (u *User) notify(id string) {
 	}()
 }
 
+// notifyAccount wakes all watchers of the account object: the account
+// change log has a new record. Like notify, it is best effort.
+func (u *User) notifyAccount() {
+	u.inflight.Add(1)
+	go func() {
+		defer u.inflight.Done()
+
+		if _, _, err := u.idx.NotifyWithTimeout(oidAccount, nil, notifyTimeout); err != nil {
+			u.log.Debug("account notify failed", "err", err)
+		}
+	}()
+}
+
 // Watch registers a watch on the mailbox object. Notifies are acknowledged
 // internally; Close must be called when done. The IOContext stays alive
 // until the watch is closed.
-func (u *User) Watch(id string) (model.Watch, error) {
-	rw, err := u.idx.Watch(mboxOID(id))
+func (u *User) Watch(id string) (model.Watch, error) { return u.watchObject(mboxOID(id)) }
+
+// WatchAccount registers a watch on the account object, which is notified
+// whenever the account change log records a change.
+func (u *User) WatchAccount() (model.Watch, error) { return u.watchObject(oidAccount) }
+
+// watchObject registers a watch on one object of the index pool.
+func (u *User) watchObject(oid string) (model.Watch, error) {
+	rw, err := u.idx.Watch(oid)
 	if err != nil {
 		return nil, err
 	}

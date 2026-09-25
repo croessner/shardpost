@@ -43,10 +43,12 @@ const (
 
 // Argument names and descriptions more than one method uses.
 const (
+	schemeHTTPS          = "https"
 	argFilter            = "filter"
 	descFilterObject     = "a filter is an object"
 	descTooManyObjects   = "more objects than maxObjectsInSet"
 	descTooLarge         = "the message is larger than maxSizeAttachmentsPerEmail"
+	descTooManyIDs       = "more ids than maxObjectsInGet"
 	descPartialNoMsgs    = "a change was recorded without its messages"
 	propAllInThreadHave  = "allInThreadHaveKeyword"
 	propSomeInThreadHave = "someInThreadHaveKeyword"

@@ -192,7 +192,8 @@ func grpcErrorOutcome(err error) *outcome {
 
 // grpcResponseOutcome maps an AuthResponse onto an outcome.
 func grpcResponseOutcome(resp *authv1.AuthResponse) *outcome {
-	o := &outcome{message: resp.GetStatusMessage(), accountField: resp.GetAccountField(), attributes: map[string][]string{}}
+	o := &outcome{message: resp.GetStatusMessage(), accountField: resp.GetAccountField(),
+		displayField: resp.GetDisplayNameField(), attributes: map[string][]string{}}
 	for k, v := range resp.GetAttributes() {
 		o.attributes[k] = append([]string{}, v.GetValues()...)
 	}
