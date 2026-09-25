@@ -33,6 +33,7 @@ const (
 	errCannotCalculateSnapshot = "cannotCalculateSnapshot"
 	errUnsupportedSort         = "unsupportedSort"
 	errAnchorNotFound          = "anchorNotFound"
+	errTooManyChanges          = "tooManyChanges"
 )
 
 // kwError is the method name of an error response.
@@ -58,7 +59,7 @@ type problem struct {
 
 // writeProblem answers with a request-level error.
 func writeProblem(w http.ResponseWriter, status int, urn, detail, limit string) {
-	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set(fieldContentType, "application/problem+json")
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(&problem{Type: urn, Status: status, Detail: detail, Limit: limit})

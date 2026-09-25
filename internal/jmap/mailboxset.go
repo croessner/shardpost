@@ -51,7 +51,7 @@ func mailboxSet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 	}
 
 	if n := len(req.Create) + len(req.Update) + len(req.Destroy); n > sess.limits.MaxObjectsInSet {
-		return nil, &methodError{Type: errRequestTooLarge, Description: "more objects than maxObjectsInSet"}
+		return nil, &methodError{Type: errRequestTooLarge, Description: descTooManyObjects}
 	}
 
 	state, _, merr := mailboxState(sess)

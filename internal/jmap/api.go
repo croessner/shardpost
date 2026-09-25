@@ -93,6 +93,12 @@ var methods = map[string]method{
 	"Mailbox/set":          {capability: CapMail, run: mailboxSet},
 	"Email/get":            {capability: CapMail, run: emailGet},
 	"Email/changes":        {capability: CapMail, run: emailChanges},
+	"Email/query":          {capability: CapMail, run: emailQueryRun},
+	"Email/queryChanges":   {capability: CapMail, run: emailQueryChanges},
+	"Email/set":            {capability: CapMail, run: emailSet},
+	"Email/copy":           {capability: CapMail, run: emailCopy},
+	"Email/import":         {capability: CapMail, run: emailImport},
+	"Email/parse":          {capability: CapMail, run: emailParse},
 	"Thread/get":           {capability: CapMail, run: threadGet},
 	"Thread/changes":       {capability: CapMail, run: threadChanges},
 }
@@ -141,7 +147,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		out.CreatedIDs = &sess.created
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(fieldContentType, "application/json; charset=utf-8")
 
 	if err := json.NewEncoder(w).Encode(&out); err != nil {
 		s.o.Log.Warn("jmap: api response not written", "err", err)

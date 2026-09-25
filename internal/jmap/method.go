@@ -91,6 +91,7 @@ type setError struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
+	NotFound    []string `json:"notFound,omitempty"`
 }
 
 // The set error types this server uses (RFC 8620 5.3, RFC 8621 2.5).
@@ -131,27 +132,17 @@ func forAccount(sess *session, args json.RawMessage, into any) *methodError {
 		return &methodError{Type: errInvalidArguments, Description: err.Error()}
 	}
 
-	if id := accountOf(into); id != "" && id != accountID(sess.account) {
+	var named struct {
+		AccountID string `json:"accountId"`
+	}
+
+	_ = json.Unmarshal(args, &named)
+
+	if id := named.AccountID; id != "" && id != accountID(sess.account) {
 		return &methodError{Type: errAccountNotFound}
 	}
 
 	return nil
-}
-
-// accountOf reads the accountId out of a decoded argument struct.
-func accountOf(v any) string {
-	switch a := v.(type) {
-	case *getRequest:
-		return a.AccountID
-	case *changesRequest:
-		return a.AccountID
-	case *setRequest:
-		return a.AccountID
-	case *queryRequest:
-		return a.AccountID
-	}
-
-	return ""
 }
 
 // selected reports whether a property is one the client asked for. A

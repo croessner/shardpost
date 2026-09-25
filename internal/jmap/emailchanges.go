@@ -39,7 +39,7 @@ func emailWindow(entries []model.AccountChange) (map[string]*emailFate, *methodE
 
 		if e.Partial && len(e.Msgs) == 0 {
 			return nil, &methodError{Type: errCannotCalculateChanges,
-				Description: "a change was recorded without its messages"}
+				Description: descPartialNoMsgs}
 		}
 
 		for _, m := range e.Msgs {

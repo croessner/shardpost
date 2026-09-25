@@ -9,16 +9,21 @@ import (
 	"shardpost/internal/model"
 )
 
-// queryRequest is the argument shape of a /query (RFC 8620 5.5).
+// paging is the window a /query asks for (RFC 8620 5.5).
+type paging struct {
+	Anchor         *string `json:"anchor"`
+	Limit          *uint64 `json:"limit"`
+	Position       int64   `json:"position"`
+	AnchorOffset   int64   `json:"anchorOffset"`
+	CalculateTotal bool    `json:"calculateTotal"`
+}
+
+// queryRequest is the argument shape of a Mailbox/query (RFC 8620 5.5).
 type queryRequest struct {
-	Filter         json.RawMessage `json:"filter"`
-	Anchor         *string         `json:"anchor"`
-	Limit          *uint64         `json:"limit"`
-	AccountID      string          `json:"accountId"`
-	Sort           []comparator    `json:"sort"`
-	Position       int64           `json:"position"`
-	AnchorOffset   int64           `json:"anchorOffset"`
-	CalculateTotal bool            `json:"calculateTotal"`
+	paging
+	Filter    json.RawMessage `json:"filter"`
+	AccountID string          `json:"accountId"`
+	Sort      []comparator    `json:"sort"`
 }
 
 // comparator is one sort key of a /query.
@@ -117,7 +122,7 @@ func mailboxQuery(_ context.Context, sess *session, args json.RawMessage) (any, 
 		return nil, merr
 	}
 
-	return page(accountID(sess.account), state, ids(matched), &req)
+	return page(accountID(sess.account), state, ids(matched), &req.paging)
 }
 
 // readFilter decodes and checks the filter of a query. A filter that is
@@ -129,8 +134,8 @@ func readFilter(raw json.RawMessage) (*mailboxFilter, *methodError) {
 	}
 
 	if raw[0] != '{' {
-		return nil, &methodError{Type: errInvalidArguments, Arguments: []string{"filter"},
-			Description: "a filter is an object"}
+		return nil, &methodError{Type: errInvalidArguments, Arguments: []string{argFilter},
+			Description: descFilterObject}
 	}
 
 	filter := &mailboxFilter{}
@@ -243,11 +248,11 @@ func matchesOperator(t *tree, mb *model.Mailbox, f *mailboxFilter) (bool, *metho
 	}
 
 	switch f.Operator {
-	case "AND":
+	case opAND:
 		return !slicesContains(results, false), nil
-	case "OR":
+	case opOR:
 		return slicesContains(results, true), nil
-	case "NOT":
+	case opNOT:
 		return !slicesContains(results, true), nil
 	}
 
@@ -289,17 +294,25 @@ func sortMailboxes(t *tree, list []model.Mailbox, by []comparator) *methodError 
 			return &methodError{Type: errUnsupportedSort, Description: "cannot sort by " + c.Property}
 		}
 
-		if c.Collation != "" && c.Collation != collationOctet {
+		if !validCollation(c.Collation) {
 			return &methodError{Type: errUnsupportedSort, Description: "cannot sort with " + c.Collation}
 		}
 
-		sort.SliceStable(list, func(a, b int) bool {
-			less := sortKey(t, &list[a], c.Property) < sortKey(t, &list[b], c.Property)
-			if !c.ascending() {
-				return sortKey(t, &list[b], c.Property) < sortKey(t, &list[a], c.Property)
+		key := func(i int) string {
+			k := sortKey(t, &list[i], c.Property)
+			if c.Property == propName {
+				k = collate(c.Collation, k)
 			}
 
-			return less
+			return k
+		}
+
+		sort.SliceStable(list, func(a, b int) bool {
+			if !c.ascending() {
+				return key(b) < key(a)
+			}
+
+			return key(a) < key(b)
 		})
 	}
 
@@ -348,7 +361,7 @@ func ids(list []model.Mailbox) []string {
 
 // page cuts the window the client asked for out of a result: a position,
 // or an anchor with an offset, plus a limit (RFC 8620 5.5).
-func page(account, state string, all []string, req *queryRequest) (*queryResponse, *methodError) {
+func page(account, state string, all []string, req *paging) (*queryResponse, *methodError) {
 	from, merr := startOf(all, req)
 	if merr != nil {
 		return nil, merr
@@ -388,7 +401,7 @@ func page(account, state string, all []string, req *queryRequest) (*queryRespons
 }
 
 // startOf resolves the position or the anchor of a query window.
-func startOf(all []string, req *queryRequest) (int, *methodError) {
+func startOf(all []string, req *paging) (int, *methodError) {
 	if req.Anchor == nil {
 		pos := req.Position
 		if pos < 0 {

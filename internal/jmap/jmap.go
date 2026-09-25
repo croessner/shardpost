@@ -113,7 +113,7 @@ func New(o Options) *Server {
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.
 	s.mux.HandleFunc("GET "+PathHealth, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set(fieldContentType, "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
 

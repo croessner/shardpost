@@ -75,11 +75,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	out := uploadResponse{
 		AccountID: accountID(sess.account),
 		BlobID:    guid,
-		Type:      blobType(r.Header.Get("Content-Type")),
+		Type:      blobType(r.Header.Get(fieldContentType)),
 		Size:      int64(len(raw)),
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(fieldContentType, "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
 
 	if err := json.NewEncoder(w).Encode(&out); err != nil {
@@ -130,8 +130,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // downloadHeaders are the headers every download carries.
 func downloadHeaders(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", blobType(r.URL.Query().Get("accept")))
-	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+urlEscape(r.PathValue("name")))
+	w.Header().Set(fieldContentType, blobType(r.URL.Query().Get("accept")))
+	w.Header().Set(fieldDisposition, "attachment; filename*=UTF-8''"+urlEscape(r.PathValue(partName)))
 	// The media type is whatever the client asked for, so a blob must
 	// never be interpreted as a document of this origin: no sniffing,
 	// and a sandbox for the types a browser would render anyway.
@@ -147,35 +147,18 @@ func downloadHeaders(w http.ResponseWriter, r *http.Request) {
 // RFC 8621 4.1.4 says a part's blob is. The message is parsed to find it;
 // a part is not stored on its own.
 func (s *Server) servePart(w http.ResponseWriter, r *http.Request, blobs model.Blobs, guid, path string) {
-	size, err := blobs.BlobSize(guid)
+	body, found, err := readPart(blobs, guid, path, 0)
 	if err != nil {
 		s.blobFailed(w, r, guid, err)
 
 		return
 	}
 
-	raw, err := blobs.ReadBlob(guid, size, 0, -1)
-	if err != nil {
-		s.blobFailed(w, r, guid, err)
-
-		return
-	}
-
-	root, err := parseMessage(raw)
-	if err != nil {
-		s.blobFailed(w, r, guid, err)
-
-		return
-	}
-
-	part := root.find(path)
-	if part == nil {
+	if !found {
 		writeProblem(w, http.StatusNotFound, errURNNotRequest, "no such body part", "")
 
 		return
 	}
-
-	body, _ := part.decodedBody()
 
 	downloadHeaders(w, r)
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))

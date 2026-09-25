@@ -86,7 +86,7 @@ type rendering struct {
 // bodyProperties fills in the properties that need the message itself.
 // The message is read and parsed only when one of them was asked for,
 // because that is the one expensive step of an Email/get.
-func bodyProperties(sess *session, m *model.Meta, props []string, req *emailGetRequest, out map[string]any) *methodError {
+func bodyProperties(sess *session, m *model.Meta, raw []byte, props []string, req *emailGetRequest, out map[string]any) *methodError {
 	need := false
 
 	for _, p := range props {
@@ -97,7 +97,7 @@ func bodyProperties(sess *session, m *model.Meta, props []string, req *emailGetR
 		return nil
 	}
 
-	raw, err := sess.user.Read(m)
+	raw, err := messageBytes(sess, m, raw)
 	if err != nil {
 		// A message whose data cannot be read has no body to describe.
 		// Its other properties stand, and so do the other messages of the
@@ -124,6 +124,16 @@ func bodyProperties(sess *session, m *model.Meta, props []string, req *emailGetR
 	}
 
 	return nil
+}
+
+// messageBytes is the message a rendering works on: the one given, or
+// the stored one.
+func messageBytes(sess *session, m *model.Meta, raw []byte) ([]byte, error) {
+	if raw != nil {
+		return raw, nil
+	}
+
+	return sess.user.Read(m)
 }
 
 // property renders one content property.
@@ -263,7 +273,7 @@ func partFileName(p *mimePart) string {
 	}
 
 	if name == "" {
-		name = p.params["name"]
+		name = p.params[partName]
 	}
 
 	if dec, err := wordDecoder.DecodeHeader(name); err == nil {
@@ -285,7 +295,7 @@ func dispositionOf(p *mimePart) string {
 
 // parseDisposition parses a part's Content-Disposition.
 func parseDisposition(p *mimePart) (string, map[string]string, error) {
-	v := p.header.Get("Content-Disposition")
+	v := p.header.Get(fieldDisposition)
 	if v == "" {
 		return "", map[string]string{}, nil
 	}
@@ -300,14 +310,14 @@ func parseDisposition(p *mimePart) (string, map[string]string, error) {
 // a part without Content-Type, and null for anything else.
 func partCharsetOf(p *mimePart) any {
 	if !strings.HasPrefix(p.mediaType, "text/") {
-		if p.header.Get("Content-Type") == "" {
+		if p.header.Get(fieldContentType) == "" {
 			return charsetASCII
 		}
 
 		return nil
 	}
 
-	if cs := p.params["charset"]; cs != "" {
+	if cs := p.params[partCharset]; cs != "" {
 		return cs
 	}
 
@@ -336,7 +346,7 @@ func languagesOf(p *mimePart) any {
 // not marked inline is one a client should offer for download.
 func hasAttachment(attached []*mimePart) bool {
 	for _, p := range attached {
-		if dispositionOf(p) != "inline" {
+		if dispositionOf(p) != dispInline {
 			return true
 		}
 	}
@@ -384,7 +394,7 @@ func (r *rendering) values(req *emailGetRequest) map[string]bodyValue {
 // size, on a character boundary.
 func (r *rendering) value(p *mimePart, limit uint64) bodyValue {
 	raw, decodedOK := p.decodedBody()
-	text, charsetOK := toUTF8(raw, p.params["charset"])
+	text, charsetOK := toUTF8(raw, p.params[partCharset])
 
 	v := bodyValue{Value: text, IsEncodingProblem: !decodedOK || !charsetOK}
 
@@ -405,7 +415,7 @@ func (r *rendering) value(p *mimePart, limit uint64) bodyValue {
 // then the best reading there is, with U+FFFD where it had to guess.
 func toUTF8(b []byte, charset string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(charset)) {
-	case "", "utf-8", "utf8", "us-ascii", "ascii":
+	case "", charsetUTF8, "utf8", "us-ascii", "ascii":
 		if utf8.Valid(b) {
 			return string(b), true
 		}
@@ -442,12 +452,15 @@ func leaves(p *mimePart) []*mimePart {
 
 // partBlob is the blob id of a body part: the message's GUID and the
 // section number, with the dots of the number replaced, because a JMAP
-// id is limited to letters, digits, "-" and "_" (RFC 8620 1.2).
+// id is limited to letters, digits, "-" and "_" (RFC 8620 1.2). A part of
+// a message that is itself a part (message/rfc822, parsed by Email/parse)
+// adds its section number after another "_".
 func partBlob(guid, path string) string {
 	return guid + "_" + strings.ReplaceAll(path, ".", "-")
 }
 
-// parsePartBlob reads a body part blob id back.
+// parsePartBlob reads a body part blob id back. The path keeps the "_"
+// between the levels of nesting.
 func parsePartBlob(id string) (guid, path string, ok bool) {
 	guid, rest, found := strings.Cut(id, "_")
 	if !found || !model.ValidGUID(guid) || rest == "" {
@@ -523,7 +536,7 @@ func placeInline(part *mimePart, inAlternative bool, htmlBody, textBody, attachm
 // isInlinePart is the isInline test of the reference algorithm: a body
 // part rather than an attachment.
 func isInlinePart(part *mimePart, i int, multipartType string) bool {
-	if dispositionOf(part) == "attachment" {
+	if dispositionOf(part) == dispAttachment {
 		return false
 	}
 

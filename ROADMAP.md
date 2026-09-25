@@ -269,14 +269,17 @@ fixed in 0.11.2. [Fixes and release evidence](docs/reports/2026-09-16-sieve-conf
 
 ## Stage 6: JMAP in Full – in progress
 
-**State 2026-09-21:** the staged build-out follows
+**State 2026-09-25:** the staged build-out follows
 `temp/08-jmap-staged-plan.md`. Stage 0 of that plan (the account change
-log, the account-wide state JMAP needs and IMAP does not have) and stage
-1 (Core, RFC 8620: session resource, API endpoint with batching and
-back-references, authentication, blob upload and download) are
-implemented; see [JMAP](docs/jmap.md) for what exists and what does not.
-The mail data types of RFC 8621 are the stages after them. What follows
-is the full target of the stage, unchanged.
+log, the account-wide state JMAP needs and IMAP does not have), stage 1
+(Core, RFC 8620: session resource, API endpoint with batching and
+back-references, authentication, blob upload and download), stage 2
+(`Mailbox/*`), stage 3 (`Email/get`, `Email/changes`, `Thread/*`) and
+stage 4 (`Email/query`, `Email/queryChanges`, `Email/set`,
+`Email/import`, `Email/parse`, `Email/copy`) are implemented; see
+[JMAP](docs/jmap.md) for what exists and what does not. Push,
+submission and identities are the next stage. What follows is the full
+target of the stage, unchanged.
 
 Goal for this server: a complete JMAP server alongside IMAP, not
 a proxy in front of it. Complete means: JMAP Core (RFC 8620), all of JMAP Mail

@@ -532,7 +532,11 @@ func (l *locator) writeScanned(guids []string, recs map[string]*emailRec, state 
 // found is what the locator knows of one message after checking every
 // place it had for it against the mailboxes.
 type found struct {
-	metas []model.Meta // one per place that still holds the message
+	metas  []model.Meta // one per place that still holds the message
+	places []place      // where each of metas lives, in the same order
+	// raw is the message itself for one that is not stored — a blob
+	// Email/parse was asked about — and nil for every stored one.
+	raw   []byte
 	boxes map[string]bool
 }
 
@@ -609,6 +613,7 @@ func (l *locator) check(wanted map[string]map[uint32]string) (map[string]*found,
 			}
 
 			f.metas = append(f.metas, m)
+			f.places = append(f.places, place{Mailbox: mailbox, UID: uid})
 			f.boxes[mailbox] = true
 		}
 	}

@@ -48,7 +48,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	out := s.session(sess.account, s.baseURL(r))
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(fieldContentType, "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 
 	if err := json.NewEncoder(w).Encode(out); err != nil {
@@ -93,7 +93,7 @@ func (s *Server) core() *coreCapability {
 		MaxObjectsInSet:       l.MaxObjectsInSet,
 		// Only the one the sorts actually use: comparing the bytes.
 		// Advertising more would be a promise this server does not keep.
-		CollationAlgorithms: []string{collationOctet},
+		CollationAlgorithms: []string{collationCasemap, collationOctet},
 	}
 }
 
@@ -108,8 +108,35 @@ type mailCapability struct {
 	MayCreateTopLevelMailbox   bool     `json:"mayCreateTopLevelMailbox"`
 }
 
-// collationOctet is the one collation this server sorts with.
-const collationOctet = "i;octet"
+// The collations this server sorts text with (RFC 4790): ASCII letters
+// without regard to case, the default, and octet by octet.
+const (
+	collationCasemap = "i;ascii-casemap"
+	collationOctet   = "i;octet"
+)
+
+// validCollation reports whether a comparator's collation is one this
+// server has; none means the default.
+func validCollation(c string) bool {
+	return c == "" || c == collationCasemap || c == collationOctet
+}
+
+// collate is a text as a collation compares it: i;ascii-casemap folds the
+// ASCII letters to lower case and leaves every other byte alone.
+func collate(collation, s string) string {
+	if collation == collationOctet {
+		return s
+	}
+
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+
+	return string(b)
+}
 
 // mail is the mail capability of this server. The sort options of
 // Email/query are empty because there is no Email/query yet: a client
@@ -123,7 +150,7 @@ func (s *Server) mail() *mailCapability {
 		MaxMailboxDepth:            nil,
 		MaxSizeMailboxName:         maxMailboxNameBytes,
 		MaxSizeAttachmentsPerEmail: s.o.Limits.MaxSizeUpload,
-		EmailQuerySortOptions:      []string{},
+		EmailQuerySortOptions:      emailSortOptions,
 		MayCreateTopLevelMailbox:   true,
 	}
 }

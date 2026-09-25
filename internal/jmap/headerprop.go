@@ -38,16 +38,16 @@ const (
 // that is not in the table allows every form: the server cannot know
 // what it holds, and the client asked for a form, so it gets one.
 var knownHeaderForms = map[string][]string{
-	"Subject": {formText}, "Comments": {formText}, "Keywords": {formText}, "List-Id": {formText},
-	"From": {formAddresses, formGrouped}, "Sender": {formAddresses, formGrouped},
-	"Reply-To": {formAddresses, formGrouped}, "To": {formAddresses, formGrouped},
-	"Cc": {formAddresses, formGrouped}, "Bcc": {formAddresses, formGrouped},
+	fieldSubject: {formText}, "Comments": {formText}, "Keywords": {formText}, "List-Id": {formText},
+	fieldFrom: {formAddresses, formGrouped}, fieldSender: {formAddresses, formGrouped},
+	fieldReplyTo: {formAddresses, formGrouped}, fieldTo: {formAddresses, formGrouped},
+	fieldCc: {formAddresses, formGrouped}, fieldBcc: {formAddresses, formGrouped},
 	"Resent-From": {formAddresses, formGrouped}, "Resent-Sender": {formAddresses, formGrouped},
 	"Resent-Reply-To": {formAddresses, formGrouped}, "Resent-To": {formAddresses, formGrouped},
 	"Resent-Cc": {formAddresses, formGrouped}, "Resent-Bcc": {formAddresses, formGrouped},
-	"Message-Id": {formMsgIDs}, "In-Reply-To": {formMsgIDs}, "References": {formMsgIDs},
+	fieldMessageID: {formMsgIDs}, fieldInReplyTo: {formMsgIDs}, fieldReferences: {formMsgIDs},
 	"Resent-Message-Id": {formMsgIDs},
-	"Date":              {formDate}, "Resent-Date": {formDate},
+	fieldDate:           {formDate}, "Resent-Date": {formDate},
 	"List-Help": {formURLs}, "List-Unsubscribe": {formURLs}, "List-Subscribe": {formURLs},
 	"List-Post": {formURLs}, "List-Owner": {formURLs}, "List-Archive": {formURLs},
 	"Return-Path": {}, "Received": {},
@@ -81,13 +81,31 @@ func parseHeaderProperty(p string) (headerProp, bool) {
 		rest, hp.form = rest[:i], rest[i+len(":as"):]
 	}
 
-	if rest == "" || strings.Contains(rest, ":") {
+	if !validFieldName(rest) {
 		return headerProp{}, false
 	}
 
 	hp.name = nettextproto.CanonicalMIMEHeaderKey(rest)
 
 	return hp, formAllowed(hp.name, hp.form)
+}
+
+// validFieldName reports whether s can be a header field name: one or
+// more printable ASCII characters other than the colon (RFC 5322 3.6.8).
+// CanonicalMIMEHeaderKey returns anything else unchanged, so a name with
+// a line break in it would otherwise reach a message being written.
+func validFieldName(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	for i := 0; i < len(s); i++ {
+		if s[i] < '!' || s[i] > '~' || s[i] == ':' {
+			return false
+		}
+	}
+
+	return true
 }
 
 // formAllowed reports whether a field may be read in a form.

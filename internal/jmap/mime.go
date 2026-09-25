@@ -167,7 +167,7 @@ func splitHeader(raw []byte) (textproto.Header, []byte) {
 // its type, and its parameters are recovered one by one, because losing
 // the boundary turns a message with attachments into one text part.
 func contentType(hdr textproto.Header, defaultType string) (string, map[string]string) {
-	v := hdr.Get("Content-Type")
+	v := hdr.Get(fieldContentType)
 	if v == "" {
 		return defaultType, map[string]string{}
 	}
@@ -297,14 +297,14 @@ func trimBreak(b []byte) []byte {
 // decode; the bytes returned are then as much as could be recovered, or
 // the raw body.
 func (p *mimePart) decodedBody() ([]byte, bool) {
-	enc := strings.ToLower(strings.TrimSpace(p.header.Get("Content-Transfer-Encoding")))
+	enc := strings.ToLower(strings.TrimSpace(p.header.Get(fieldCTE)))
 
 	switch enc {
-	case "", "7bit", "8bit", "binary":
+	case "", enc7bit, enc8bit, "binary":
 		return p.body, true
-	case "base64":
+	case encBase64:
 		return decodeBase64(p.body)
-	case "quoted-printable":
+	case encQP:
 		out, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(p.body)))
 
 		return out, err == nil

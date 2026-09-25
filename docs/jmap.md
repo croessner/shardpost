@@ -16,7 +16,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 1 | Core (RFC 8620): session resource, API endpoint, authentication, blobs | built |
 | 2 | `Mailbox/*` | built |
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
-| 4 | `Email/query`, `queryChanges`, `Email/set` | planned |
+| 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
 | 5 | Push (EventSource and Web Push), `EmailSubmission/*`, `Identity/*` | planned |
 | 6 | `SieveScript/*`, `Quota/*`, `Blob/*`, sharing | planned |
 
@@ -25,12 +25,12 @@ A client that asks for a capability this server does not have is told
 `unknownMethod`. Nothing is served half-correct.
 
 The session advertises `urn:ietf:params:jmap:mail` from stage 2 on,
-because a method is only reachable through the capability it belongs to
-and `Mailbox/*` would otherwise be unusable. The capability is therefore
-ahead of what is behind it: a client that asks for `Email/query` or
-`Email/set` today is told `unknownMethod`. That is what keeps `jmap.addr` unset until
-stage 4 — the capability gate makes the methods testable, the
-deployment gate keeps real clients away.
+because a method is only reachable through the capability it belongs to.
+With stage 4 the capability is complete for reading and writing mail;
+`SearchSnippet/get` is the one method of RFC 8621 5 that is still
+missing (see the limits below). Whether `jmap.addr` is set, and real
+clients reach the front-end, is an operator decision from here on, not
+a gap in the code.
 
 ## The account state
 
@@ -169,8 +169,8 @@ next request rebuilds it from what exists.
 `$answered` and `$draft`; `\Recent` and `\Deleted` are not exposed; every
 other flag is an IMAP keyword already and keeps its name in lower case.
 A message whose IMAP copies carry different flags has the union of them
-— read in one folder is read — and a keyword write in stage 4 sets every
-copy alike.
+— read in one folder is read — and a keyword write through `Email/set` sets
+every copy alike.
 
 **What is read.** The properties of a list view come from the index
 record without touching the message: `subject`, `from`, `to`, `cc`,
@@ -217,6 +217,163 @@ destroyed that exists — and the pages that follow bring the client to
 the right end state. `Thread/changes` reports the threads a message
 joined or left; a message whose keywords or mailboxes change stays in
 its thread.
+
+## Queries
+
+`Email/query` and `Email/queryChanges` (RFC 8621 4.4 and 4.5).
+
+A query is over messages, not over placements: a message in two
+mailboxes is one result, and its keywords and mailboxes are those of all
+its copies, as `Email/get` reports them. **Where the candidates come
+from decides the cost.** A filter limited to one mailbox at the top
+(`inMailbox`, alone or in a top-level `AND`) reads that mailbox's index
+and looks up only the messages the locator knows to have copies
+elsewhere. A filter whose top level holds a `text`, `subject` or `body`
+condition takes its candidates from the full-text index, which is kept
+per account and per GUID, and finds them through the locator. Anything
+else — no filter, `inMailboxOtherThan`, a keyword or date condition on
+its own, an `OR` at the top — reads the index of every mailbox of the
+account. That is the price of having no materialised per-account
+message list, and it is the same read `Email/changes` avoids by using
+the log.
+
+The conditions:
+
+| Condition | How it is answered |
+|---|---|
+| `inMailbox`, `inMailboxOtherThan` | The mailboxes of the message's copies |
+| `before`, `after`, `minSize`, `maxSize` | The index record (`receivedAt`, `size`) |
+| `hasKeyword`, `notKeyword` | The keywords across the copies |
+| `allInThreadHaveKeyword`, `someInThreadHaveKeyword`, `noneInThreadHaveKeyword` | The keywords of every message of the thread, through the locator, once per thread and query |
+| `text`, `subject`, `body` | The full-text index, with the word semantics IMAP `SEARCH` has here |
+| `from`, `to`, `cc`, `bcc` | The full-text index narrows by the words of the value (`to`, `cc` and `bcc` share an index field); the envelope decides: every word has to occur, without regard to case, in `name <address>` of one address |
+| `header` | The full-text index narrows a value; the header block of each candidate decides. A name alone, or a value without an indexable word, reads the header of every candidate |
+| `hasAttachment` | Refused with `unsupportedFilter`: it would mean parsing every candidate |
+
+An unknown condition or operator, and a node that is both an operator
+and a condition, is `unsupportedFilter`, never silently ignored — an
+ignored condition would match everything. A `text`, `subject` or `body`
+value without a word the index can look for (`"!!!"`) matches every
+message, as an empty IMAP `SEARCH TEXT` does.
+
+The sort properties are the ones `emailQuerySortOptions` lists:
+`receivedAt`, `size`, `from`, `to`, `subject`, `sentAt`, `hasKeyword`,
+`allInThreadHaveKeyword` and `someInThreadHaveKeyword`. Text keys are
+compared with `i;ascii-casemap` unless a comparator asks for `i;octet`;
+the session lists both in `collationAlgorithms`, and `Mailbox/query`
+sorts names the same way. `subject` sorts by the base subject IMAP
+`SORT` uses (`mailmeta.BaseSubject`), `from` and `to` by the name of the
+first address, or its email when it has none. Equal
+keys fall back to arrival, newest first, and then to the id, so a query
+answers in the same order every time. `collapseThreads` keeps the first
+message of each thread in that order.
+
+**`Email/queryChanges` answers for the default order only** — arrival,
+newest first, without `collapseThreads` and without a thread keyword
+condition — as decided when the plan was agreed. In that order a
+message's position depends only on its arrival, which never changes,
+and on which other messages match, which changes only for the messages
+the log names. The query is run again as it stands; every message the
+log records a change of since the client's state is reported in
+`removed`, and those that match now are in `added` at their position.
+RFC 8620 5.6 allows `removed` to name ids that were not in the old
+result, and this is where it does. Any other order, a collapsed one, a
+thread condition (whose match can change with another message of the
+thread), a state the log no longer covers, a change recorded without its
+messages, or a change that is announced and not yet recorded is
+`cannotCalculateChanges`, and the client runs the query again.
+`Email/query` says as much in `canCalculateChanges`. `upToId` is
+accepted and not used: the delta is computed over the whole result.
+Carrying a
+materialised index per sort key would lift the restriction, at a write
+on every delivery; it is not done.
+
+## Writing messages
+
+`Email/set`, `Email/import`, `Email/parse` and `Email/copy` (RFC 8621
+4.6 to 4.9).
+
+**An update changes where a message is and which keywords it has**;
+every other property of an Email is immutable and an update of it is
+`invalidProperties`. Both are carried out with the IMAP operations the
+store already has, so an IMAP client sees a JMAP change as it would see
+another IMAP client's:
+
+- A keyword change is a `STORE` on every copy. The flags that are not
+  keywords (`\Deleted`, `\Recent`) stay, and a keyword a copy keeps
+  keeps its spelling.
+- A change that adds exactly one mailbox and removes others is a `MOVE`
+  (from the first removed mailbox in id order). Any other change of
+  `mailboxIds` copies first and expunges afterwards, so a failure
+  half-way leaves the message in too many mailboxes, never in none.
+- When copies go and the update does not set keywords, the copies that
+  stay are given the keywords the message had: under the union rule,
+  removing the one copy that was `\Seen` would otherwise make the
+  message unread.
+- A destruction expunges every copy.
+
+Both the whole property and paths into it (`keywords/$seen`,
+`mailboxIds/<id>`) are accepted; giving both for one property is
+`invalidPatch`. A mailbox id may be the creation id of a mailbox made
+earlier in the same request.
+
+**A creation is written by the server.** The client describes the
+message with the header properties (`from`, `subject`, …, and
+`header:*` in any form the field allows) and either a `bodyStructure`
+or `textBody`, `htmlBody` and `attachments`, with the content in
+`bodyValues` or in blobs — uploads, stored messages, or body parts of
+them. From the three lists the server builds the usual tree: text and
+HTML as `multipart/alternative`, inline parts with a `cid` related to
+the HTML, attachments mixed in after. It adds `Date`, `Message-ID` (on
+the sender's domain) and `MIME-Version`, encodes non-ASCII header text
+in RFC 2047 words and non-ASCII file names by RFC 2231, and picks the
+transfer encoding itself: text that is ASCII in lines of legal length
+as it is, other text quoted-printable, everything else base64. The
+message is stored in the first of its mailboxes and copied to the
+others, with the keywords as flags and `receivedAt` as the arrival
+(default: now); when a copy fails, what was stored is expunged again, so
+a creation is all or nothing. The constraints of RFC 8621 4.6 are
+enforced rather than repaired — a field given twice (also once on the
+Email and once on the root body part), a `Content-*` field on the Email,
+a `Content-Transfer-Encoding` or `MIME-Version` anywhere, a `charset`
+next to a `partId`, a `header:*` name that is not a field name, a word
+too long to fold — and a missing blob is `blobNotFound` with every
+missing id. Content is counted as the parts are read: a creation whose
+bodies add up to more than `maxSizeAttachmentsPerEmail` (which is
+`max_size_upload`) is `tooLarge` before anything is put together, and a
+blob referenced several times is read once. There is no limit on the
+number of keywords or mailboxes, so `tooManyKeywords` and
+`tooManyMailboxes` do not occur.
+
+**`Email/import`** stores an uploaded message byte for byte, in the
+mailboxes and with the keywords given — line endings and anything else
+are not normalised, as they are not for an LMTP delivery; `receivedAt`
+defaults to the date of the topmost `Received` field, else to now. A
+blob without a header is `invalidEmail`. Duplicates are allowed:
+importing the same blob twice makes two messages with ids of their own.
+
+**`Email/parse`** renders a blob as the Email it would be, without
+storing it: `id`, `mailboxIds`, `keywords` and `receivedAt` are null,
+and `threadId` is the thread it would join when it has a `Message-ID` or
+`References`, null otherwise. A body part of type `message/rfc822` can
+be parsed in turn by its blob id, and the parts of that message get blob
+ids with one more level (`<guid>_2_1-2`) that the download endpoint
+serves.
+
+**`Email/copy`** copies between accounts, and a session here has one:
+another account is `fromAccountNotFound`, the same account on both sides
+`invalidArguments` (RFC 8620 5.4). Within an account, a copy is an
+update of `mailboxIds`.
+
+**The new state** of a write advances over the log entries that name
+only the call's own messages. Such an entry can still be another
+session's — an IMAP `STORE` on the message the call just moved — so the
+messages are read back afterwards, and whatever differs from what the
+call meant is reported in `created` or `updated` (RFC 8620 5.3 lets the
+server report properties it changed beyond the request): keywords and
+`mailboxIds` as they are now. A destroyed message that is still there
+keeps the old state. A client that adopts the new state therefore ends
+up at least as far as the state says, never behind it.
 
 ## Endpoints
 
@@ -301,10 +458,14 @@ built from the request, which is right for a direct connection only.
 
 ## Limits of this stage
 
-- `Email/query`, `Email/set`, `Email/copy`, `Email/import`,
-  `SearchSnippet/get` and the rest of RFC 8621 beyond reading are not
-  here, although the mail capability is advertised (see above). Its
-  `emailQuerySortOptions` is therefore an empty list.
+- `SearchSnippet/get` (RFC 8621 5) is not here: highlighting needs the
+  matched text, which the full-text index does not keep.
+- `hasAttachment` is refused as a query condition, and a `header`
+  condition without an indexable value reads the header of every
+  candidate (see above).
+- `Email/queryChanges` answers for the default order only and ignores
+  `upToId` (see above). Over a public folder it shares the limitation
+  of the private `\Seen` marks below.
 - `Email/get` needs ids: asking for every message of an account is
   answered with `requestTooLarge`.
 - `hasAttachment` reads the whole message (see above). Caching it in the
@@ -325,6 +486,3 @@ built from the request, which is right for a direct connection only.
 - The private `\Seen` marks of a public folder are recorded in the
   account log of the public account, not of the account the mark belongs
   to. JMAP Sharing (RFC 9670) is where that is resolved.
-- `Email/queryChanges` is decided, not built: it will answer only for
-  the default sort and return `cannotCalculateChanges` otherwise, rather
-  than carrying a materialised index per sort key.

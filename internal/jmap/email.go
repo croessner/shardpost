@@ -189,7 +189,12 @@ func emailObject(sess *session, id string, f *found, props []string, req *emailG
 	)
 
 	header := func() (textproto.Header, bool) {
-		if !hdrOK && hdrErr == nil {
+		switch {
+		case hdrOK || hdrErr != nil:
+		case f.raw != nil:
+			hdr, _ = splitHeader(f.raw)
+			hdrOK = true
+		default:
 			hdr, hdrErr = readMessageHeader(sess, m)
 			hdrOK = hdrErr == nil
 		}
@@ -223,7 +228,7 @@ func emailObject(sess *session, id string, f *found, props []string, req *emailG
 		}
 	}
 
-	if merr := bodyProperties(sess, m, props, req, out); merr != nil {
+	if merr := bodyProperties(sess, m, f.raw, props, req, out); merr != nil {
 		return nil, merr
 	}
 
@@ -308,15 +313,15 @@ func headerProperty(p string, h textproto.Header, ok bool) any {
 
 	switch p {
 	case propSender:
-		return addressHeader(h, "Sender")
+		return addressHeader(h, fieldSender)
 	case propReplyTo:
-		return addressHeader(h, "Reply-To")
+		return addressHeader(h, fieldReplyTo)
 	case propReferences:
-		if !h.Has("References") {
+		if !h.Has(fieldReferences) {
 			return nil
 		}
 
-		return messageIDs(h.Get("References"))
+		return messageIDs(h.Get(fieldReferences))
 	}
 
 	return nil
