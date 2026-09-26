@@ -37,7 +37,7 @@ func TestJMAPSubmissionDefaults(t *testing.T) {
 	}
 
 	s := c.JMAP.Submission
-	if !s.Enabled() || !s.XClient || !s.CheckSender || len(s.Attributes()) != 2 || s.Attributes()[1] != "mailAlternateAddress" {
+	if !s.Enabled() || !s.XClient || !s.XClientAddr || !s.CheckSender || len(s.Attributes()) != 2 || s.Attributes()[1] != "mailAlternateAddress" {
 		t.Fatalf("%+v %v", s, s.Attributes())
 	}
 

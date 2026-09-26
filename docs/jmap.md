@@ -658,6 +658,7 @@ jmap:
     helo: shardpost.example.org
     starttls: true
     xclient: true
+    xclient_addr: true
     check_sender: true
     address_attributes: mail,mailAlternateAddress
     max_recipients: 100
@@ -665,50 +666,45 @@ jmap:
     max_kept: 500
 ```
 
-The relay side, for a Postfix service of its own that takes only
-ShardPost's submissions:
+The relay side: a Postfix listener of its own that relays only for
+sessions XCLIENT has named a user in. Everything else it refuses, so a
+host that may reach it gains nothing without XCLIENT:
 
 ```
-smtpd_authorized_xclient_hosts = <the addresses ShardPost reaches it from>
-smtpd_sasl_auth_enable         = yes   # else XCLIENT LOGIN counts for nothing in permit_sasl_authenticated
-smtpd_sender_login_maps        = <the same directory the identity lookup reads>
-smtpd_sender_restrictions      = reject_sender_login_mismatch
-smtpd_relay_restrictions       = permit_sasl_authenticated, reject
-smtpd_tls_security_level       = encrypt
+# master.cf, a listener behind the proxy that passes the client address
+<address>:<port> inet n - n - - smtpd
+  -o syslog_name=postfix/jmap-submission
+  -o smtpd_upstream_proxy_protocol=haproxy
+  -o smtpd_tls_security_level=encrypt
+  -o mynetworks=
+  -o smtpd_authorized_xclient_hosts=<the addresses ShardPost reaches it from>
+  -o smtpd_sasl_auth_enable=yes           # else XCLIENT LOGIN counts for nothing in permit_sasl_authenticated
+  -o smtpd_sasl_type=dovecot
+  -o smtpd_sasl_path=<the SASL service the submission listener uses>
+  -o smtpd_sender_login_maps=<the same source the submission listener uses>
+  -o smtpd_sender_restrictions=reject_authenticated_sender_login_mismatch
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
 ```
 
-`reject_sender_login_mismatch` has to come before any
-`permit_mynetworks`; a service that trusts the ShardPost addresses as
-`mynetworks` would relay without looking at the user. XCLIENT is
-trusted by address: whoever can reach the service from an address in
-`smtpd_authorized_xclient_hosts` can name any user, so the path to it
-has to be limited to ShardPost. Postfix limits rates by the client
-address XCLIENT names — the JMAP client's, as the front-end sees it; a
-proxy in front of JMAP makes that the proxy's address for everyone.
+Add whatever the ordinary submission listener checks for a logged-in
+user — account status, quota flag, policy service — so that mail sent
+through JMAP meets the same rules. `reject_authenticated_sender_login_mismatch`
+applies to logged-in sessions only, which is what makes the listener
+usable for nothing else. XCLIENT is trusted by address: whoever can
+reach the listener from an address in `smtpd_authorized_xclient_hosts`
+can name any user, so that list is as narrow as the path to it allows.
 
-`jmap.push` is read by the front-ends (the public VAPID key, the
-subscription limits, the event source poll) and by the push worker (the
-private key and its intervals). The worker runs from the same image and
-configuration as the server, as `shardpost push`; it needs the Ceph
-settings and the VAPID key, and the backend settings only with
-`check_accounts`. It serves `/healthz`, `/readyz` and `/metrics` on
-`server.http_addr` for the probes. A VAPID key is a P-256 private key in
-PEM:
+`jmap.submission.xclient_addr` (on by default) passes the JMAP client's
+address as `ADDR`, so rate limits and policies see the client rather
+than ShardPost. Turn it off only for a relay that relays by ShardPost's
+own address (`mynetworks`): with `ADDR` the session would no longer come
+from there.
 
-```sh
-openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt
-```
-
-`tls_cert`/`tls_key` fall back to `tls.cert`/`tls.key` when they are
-empty. A limit left at zero takes the built-in default; the session
-resource advertises whatever is in force, so a client adapts rather than
-guessing.
-
-`public_base_url` is the address clients reach. Behind the Director that
-is the Director's address and not this pod's: its default mode
-(`backend_advertised`) rewrites nothing, so the session resource has to
-advertise URLs that work from outside. Without the setting the URLs are
-built from the request, which is right for a direct connection only.
+How the JMAP client logged in does not reach the relay: ShardPost
+checks Basic credentials and Bearer tokens alike against the
+authentication backend, and the relay learns the account from
+`XCLIENT LOGIN`, never a password or a token.
 
 ## Limits of this stage
 

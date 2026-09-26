@@ -58,7 +58,12 @@ type JMAPSubmission struct {
 	// XClient names the user to the relay with XCLIENT LOGIN and ADDR, so
 	// that the relay's rules for that user apply (on by default). Off,
 	// the relay is logged into with User and Password, if set.
-	XClient      bool   `mapstructure:"xclient" env:"JMAP_SUBMISSION_XCLIENT"`
+	XClient bool `mapstructure:"xclient" env:"JMAP_SUBMISSION_XCLIENT"`
+	// XClientAddr passes the JMAP client's address with XCLIENT (ADDR, on
+	// by default), so the relay's policies and rate limits see it. Turn it
+	// off for a relay that relays by ShardPost's own address (mynetworks):
+	// with ADDR the session would no longer come from there.
+	XClientAddr  bool   `mapstructure:"xclient_addr" env:"JMAP_SUBMISSION_XCLIENT_ADDR"`
 	User         string `mapstructure:"user" env:"JMAP_SUBMISSION_USER"`
 	Password     string `mapstructure:"password" env:"JMAP_SUBMISSION_PASSWORD" secret:"true"`
 	PasswordFile string `mapstructure:"password_file" env:"JMAP_SUBMISSION_PASSWORD_FILE"`

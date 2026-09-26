@@ -148,7 +148,7 @@ func (srv *servers) jmapSubmission(c config.JMAPSubmission, store *cephstore.Sto
 	}
 
 	return &jmap.SubmissionOptions{
-		Relay: relay, KV: srv.jmapKV, AddressAttributes: c.Attributes(), XClient: c.XClient,
+		Relay: relay, KV: srv.jmapKV, AddressAttributes: c.Attributes(), XClient: c.XClient, XClientAddr: c.XClientAddr,
 		CheckSender: c.CheckSender, MaxRecipients: int(c.MaxRecipients), MaxSize: c.MaxSize,
 		Retention: sec(c.RetentionSeconds), MaxKept: int(c.MaxKept),
 	}, nil

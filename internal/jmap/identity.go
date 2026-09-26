@@ -42,6 +42,10 @@ type SubmissionOptions struct {
 	// XClient names the user to the relay with XCLIENT; without it the
 	// relay's own credentials are used and CheckSender is all there is.
 	XClient bool
+	// XClientAddr passes the client's address with XCLIENT (ADDR), so the
+	// relay's policies see the JMAP client rather than ShardPost. Off
+	// suits a relay that decides by ShardPost's own address (mynetworks).
+	XClientAddr bool
 	// CheckSender refuses an envelope sender or a From that is not one
 	// of the account's addresses, before the relay is asked.
 	CheckSender bool

@@ -316,6 +316,7 @@ var defaults = []struct {
 	{"jmap.submission.tls", false},
 	{"jmap.submission.server_name", ""},
 	{"jmap.submission.xclient", true},
+	{"jmap.submission.xclient_addr", true},
 	{"jmap.submission.user", ""},
 	{"jmap.submission.password", ""},
 	{"jmap.submission.password_file", ""},

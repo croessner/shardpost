@@ -475,7 +475,10 @@ func (r *submissionRun) relay(ctx context.Context, env *envelope, msg []byte) (*
 
 	var as *outbound.XClient
 	if r.opts.XClient {
-		as = &outbound.XClient{Login: r.sess.account, Addr: r.sess.remote}
+		as = &outbound.XClient{Login: r.sess.account}
+		if r.opts.XClientAddr {
+			as.Addr = r.sess.remote
+		}
 	}
 
 	rep, err := r.opts.Relay.Submit(ctx, as, env.MailFrom.Email, to, msg)

@@ -64,7 +64,7 @@ func submissionServer(t *testing.T) (*Server, model.User, *fakeRelay) {
 		o.Store = store
 		o.Auth = identityAuth{Static: auth.Static{"test": "secret"},
 			attrs: map[string][]string{"mail": {"test@example.org"}}}
-		o.Submission = &SubmissionOptions{Relay: relay, KV: memstore.NewAdminKV(), XClient: true, CheckSender: true,
+		o.Submission = &SubmissionOptions{Relay: relay, KV: memstore.NewAdminKV(), XClient: true, XClientAddr: true, CheckSender: true,
 			MaxRecipients: 4}
 	})
 
@@ -126,7 +126,7 @@ func TestEmailSubmission(t *testing.T) {
 func checkRelayCall(t *testing.T, relay *fakeRelay) {
 	t.Helper()
 
-	if relay.as == nil || relay.as.Login != "test" || relay.from != "test@example.org" ||
+	if relay.as == nil || relay.as.Login != "test" || relay.as.Addr != "192.0.2.1" || relay.from != "test@example.org" ||
 		strings.Join(relay.to, ",") != "bob@example.net,carol@example.net,dave@example.net,eve@example.net" {
 		t.Errorf("relay got as=%+v from=%q to=%v", relay.as, relay.from, relay.to)
 	}
