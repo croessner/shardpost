@@ -475,8 +475,9 @@ when `jmap.submission.relay_addr` is set.
 The addresses an account may send from come from the authentication
 backend's identity lookup — Nauthilus `LookupIdentity`, without a
 password — so it works whatever the backend behind Nauthilus is. The
-configured attributes of the answer carry the addresses; each address
-is one identity that cannot be deleted, named after the backend's
+configured attributes of the answer carry the addresses (values without
+a local part, such as a catch-all `@example.org`, are not addresses and
+are skipped); each address is one identity that cannot be deleted, named after the backend's
 display name (`display_name_field`). A client may change the name,
 `replyTo`, `bcc` and the signatures, and may add further identities for
 the same addresses (`forbiddenFrom` for any other); what it changed is

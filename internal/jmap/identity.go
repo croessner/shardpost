@@ -204,7 +204,7 @@ func addressesOf(res *auth.Result, attrs []string) []string {
 
 		for _, v := range vals {
 			v = strings.TrimSpace(v)
-			if !strings.Contains(v, "@") || seen[strings.ToLower(v)] {
+			if !mailboxAddress(v) || seen[strings.ToLower(v)] {
 				continue
 			}
 
@@ -214,6 +214,15 @@ func addressesOf(res *auth.Result, attrs []string) []string {
 	}
 
 	return out
+}
+
+// mailboxAddress reports whether v names one mailbox: a local part and a
+// domain. A directory also keeps catch-all entries such as "@example.org"
+// among the addresses, and those are not an address to send from.
+func mailboxAddress(v string) bool {
+	local, domain, ok := strings.Cut(v, "@")
+
+	return ok && local != "" && domain != "" && !strings.Contains(domain, "@")
 }
 
 // readStored applies the stored identities: changes to the ones the

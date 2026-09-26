@@ -29,7 +29,7 @@ func identityServer(t *testing.T) *Server {
 	return newTestServer(t, func(o *Options) {
 		o.Store = store
 		o.Auth = identityAuth{Static: auth.Static{"test": "secret"},
-			attrs: map[string][]string{"mail": {"test@example.org"}, "alias": {"t@example.org", "no-address", "TEST@example.org"}}}
+			attrs: map[string][]string{"mail": {"test@example.org"}, "alias": {"t@example.org", "no-address", "TEST@example.org", "@example.org", "a@b@example.org"}}}
 		o.Submission = &SubmissionOptions{AddressAttributes: []string{"mail", "alias"}}
 	})
 }
