@@ -621,9 +621,21 @@ SMTP — has to know `jmap` and treat it as mailbox access; an unknown
 protocol may pass without that check. Sending is checked again by the
 relay, for the account XCLIENT names (see Sending).
 
-A Bearer token needs `nauthilus.bearer_mode: introspect`: the token has
-to yield the account, and the `password` mode has no user name to go
-with it. Authentication on a plaintext connection is refused unless
+A Bearer token comes without a user name, so the token itself has to
+say whose it is: ShardPost asks the OIDC introspection endpoint
+(RFC 7662, `nauthilus.introspect_url`) and takes the account from the
+claims (`nauthilus.account_claims`), then looks it up in Nauthilus
+without a password. It does that in either `nauthilus.bearer_mode`: in
+`password` mode only for a token without a user name — a JMAP Bearer —
+while an IMAP XOAUTH2 or OAUTHBEARER token, which carries one, still
+goes to Nauthilus as before; in `introspect` mode for every token.
+Without `introspect_url` a Bearer login is refused. The introspection
+endpoint is asked with `nauthilus.introspect_client_id` and
+`introspect_client_secret` (or `_file`), falling back to
+`oidc_client_id`/`oidc_client_secret`: a client that may introspect the
+tokens other clients were issued, which a service client usually may
+not. `nauthilus.oidc_audience` and `oidc_scope`, when set, are required
+of the token. Authentication on a plaintext connection is refused unless
 `jmap.insecure_auth` is set.
 
 ## Configuration

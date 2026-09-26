@@ -123,6 +123,7 @@ func TestNauthilus(t *testing.T) {
 	testNauthilusPassword(t, f)
 	testNauthilusFailures(t, f)
 	testNauthilusBearer(t, f)
+	testNauthilusBareBearer(t, f)
 	testNauthilusLookup(t, f)
 	testNauthilusMasterUser(t, f)
 }
@@ -253,5 +254,30 @@ func TestSASLParsers(t *testing.T) {
 	u, tok, err = ParseOAuthBearer("bixhPWFsaWNlLAFhdXRoPUJlYXJlciB0b2sBAQ==") // n,a=alice,^Aauth=Bearer tok^A^A
 	if err != nil || u != "alice" || tok != "tok" {
 		t.Fatal(u, tok, err)
+	}
+}
+
+// testNauthilusBareBearer: in password mode a token with a user name goes
+// to Nauthilus, one without (JMAP) is introspected, and without
+// introspection it is refused.
+func testNauthilusBareBearer(t *testing.T, f *nauthilusFixture) {
+	t.Helper()
+
+	ctx := f.ctx
+
+	n3 := &Nauthilus{URL: f.srv.URL + "/api/v1/auth/json", User: "svc", Password: "secret", BearerMode: "password",
+		Introspect: &Introspection{URL: f.srv.URL + "/oidc/introspect", ClientID: "svc", ClientSecret: "secret", Audience: "mail", Scope: "mail:imap"}}
+
+	if res, err := n3.Authenticate(ctx, Request{Token: "good-token", Mechanism: "OAUTHBEARER"}); err != nil || res.Account != "alice@example.org" {
+		t.Fatalf("password mode without a user name: %v %v", res, err)
+	}
+
+	if last := f.last(); last["_mode"] != "no-auth" {
+		t.Fatalf("password mode without a user name did not introspect: %v", last)
+	}
+
+	n3.Introspect = nil
+	if _, err := n3.Authenticate(ctx, Request{Token: "good-token", Mechanism: "OAUTHBEARER"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a bare token without introspection gave %v", err)
 	}
 }

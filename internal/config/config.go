@@ -158,32 +158,40 @@ type Scrub struct {
 
 // Nauthilus configures the Nauthilus authentication backend.
 type Nauthilus struct {
-	URL                  string `mapstructure:"url" env:"NAUTHILUS_URL"`
-	User                 string `mapstructure:"user" env:"NAUTHILUS_USER"`
-	Password             string `mapstructure:"password" env:"NAUTHILUS_PASSWORD" secret:"true"`
-	Token                string `mapstructure:"token" env:"NAUTHILUS_TOKEN" secret:"true"`
-	BearerMode           string `mapstructure:"bearer_mode" env:"NAUTHILUS_BEARER_MODE" validate:"oneof=password introspect"`
-	MaxWait              int64  `mapstructure:"max_wait" env:"NAUTHILUS_MAX_WAIT" validate:"gte=0,lte=86400"`
-	IntrospectURL        string `mapstructure:"introspect_url" env:"NAUTHILUS_INTROSPECT_URL"`
-	OidcClientID         string `mapstructure:"oidc_client_id" env:"NAUTHILUS_OIDC_CLIENT_ID"`
-	OidcClientSecret     string `mapstructure:"oidc_client_secret" env:"NAUTHILUS_OIDC_CLIENT_SECRET" secret:"true"`
-	OidcAudience         string `mapstructure:"oidc_audience" env:"NAUTHILUS_OIDC_AUDIENCE"`
-	OidcScope            string `mapstructure:"oidc_scope" env:"NAUTHILUS_OIDC_SCOPE"`
-	AccountClaims        string `mapstructure:"account_claims" env:"NAUTHILUS_ACCOUNT_CLAIMS"`
-	OidcTokenURL         string `mapstructure:"oidc_token_url" env:"NAUTHILUS_OIDC_TOKEN_URL"`
-	OidcScopes           string `mapstructure:"oidc_scopes" env:"NAUTHILUS_OIDC_SCOPES"`
-	OidcTokenAudience    string `mapstructure:"oidc_token_audience" env:"NAUTHILUS_OIDC_TOKEN_AUDIENCE"`
-	OidcAuthMethod       string `mapstructure:"oidc_auth_method" env:"NAUTHILUS_OIDC_AUTH_METHOD" validate:"oneof=client_secret_post client_secret_basic"`
-	Transport            string `mapstructure:"transport" env:"NAUTHILUS_TRANSPORT" validate:"oneof=grpc http"`
-	GrpcAddr             string `mapstructure:"grpc_addr" env:"NAUTHILUS_GRPC_ADDR"`
-	GrpcInsecure         bool   `mapstructure:"grpc_insecure" env:"NAUTHILUS_GRPC_INSECURE"`
-	GrpcCa               string `mapstructure:"grpc_ca" env:"NAUTHILUS_GRPC_CA"`
-	GrpcServerName       string `mapstructure:"grpc_server_name" env:"NAUTHILUS_GRPC_SERVER_NAME"`
-	GrpcClientCert       string `mapstructure:"grpc_client_cert" env:"NAUTHILUS_GRPC_CLIENT_CERT"`
-	GrpcClientKey        string `mapstructure:"grpc_client_key" env:"NAUTHILUS_GRPC_CLIENT_KEY"`
-	PasswordFile         string `mapstructure:"password_file" env:"NAUTHILUS_PASSWORD_FILE"`
-	TokenFile            string `mapstructure:"token_file" env:"NAUTHILUS_TOKEN_FILE"`
-	OidcClientSecretFile string `mapstructure:"oidc_client_secret_file" env:"NAUTHILUS_OIDC_CLIENT_SECRET_FILE"`
+	URL              string `mapstructure:"url" env:"NAUTHILUS_URL"`
+	User             string `mapstructure:"user" env:"NAUTHILUS_USER"`
+	Password         string `mapstructure:"password" env:"NAUTHILUS_PASSWORD" secret:"true"`
+	Token            string `mapstructure:"token" env:"NAUTHILUS_TOKEN" secret:"true"`
+	BearerMode       string `mapstructure:"bearer_mode" env:"NAUTHILUS_BEARER_MODE" validate:"oneof=password introspect"`
+	MaxWait          int64  `mapstructure:"max_wait" env:"NAUTHILUS_MAX_WAIT" validate:"gte=0,lte=86400"`
+	IntrospectURL    string `mapstructure:"introspect_url" env:"NAUTHILUS_INTROSPECT_URL"`
+	OidcClientID     string `mapstructure:"oidc_client_id" env:"NAUTHILUS_OIDC_CLIENT_ID"`
+	OidcClientSecret string `mapstructure:"oidc_client_secret" env:"NAUTHILUS_OIDC_CLIENT_SECRET" secret:"true"`
+	OidcAudience     string `mapstructure:"oidc_audience" env:"NAUTHILUS_OIDC_AUDIENCE"`
+	OidcScope        string `mapstructure:"oidc_scope" env:"NAUTHILUS_OIDC_SCOPE"`
+	AccountClaims    string `mapstructure:"account_claims" env:"NAUTHILUS_ACCOUNT_CLAIMS"`
+	// IntrospectClientID and IntrospectClientSecret are the client the
+	// introspection endpoint is asked with. Empty falls back to
+	// oidc_client_id and oidc_client_secret; a separate client is what a
+	// server needs whose service client may not introspect the tokens of
+	// other clients.
+	IntrospectClientID         string `mapstructure:"introspect_client_id" env:"NAUTHILUS_INTROSPECT_CLIENT_ID"`
+	IntrospectClientSecret     string `mapstructure:"introspect_client_secret" env:"NAUTHILUS_INTROSPECT_CLIENT_SECRET" secret:"true"`
+	IntrospectClientSecretFile string `mapstructure:"introspect_client_secret_file" env:"NAUTHILUS_INTROSPECT_CLIENT_SECRET_FILE"`
+	OidcTokenURL               string `mapstructure:"oidc_token_url" env:"NAUTHILUS_OIDC_TOKEN_URL"`
+	OidcScopes                 string `mapstructure:"oidc_scopes" env:"NAUTHILUS_OIDC_SCOPES"`
+	OidcTokenAudience          string `mapstructure:"oidc_token_audience" env:"NAUTHILUS_OIDC_TOKEN_AUDIENCE"`
+	OidcAuthMethod             string `mapstructure:"oidc_auth_method" env:"NAUTHILUS_OIDC_AUTH_METHOD" validate:"oneof=client_secret_post client_secret_basic"`
+	Transport                  string `mapstructure:"transport" env:"NAUTHILUS_TRANSPORT" validate:"oneof=grpc http"`
+	GrpcAddr                   string `mapstructure:"grpc_addr" env:"NAUTHILUS_GRPC_ADDR"`
+	GrpcInsecure               bool   `mapstructure:"grpc_insecure" env:"NAUTHILUS_GRPC_INSECURE"`
+	GrpcCa                     string `mapstructure:"grpc_ca" env:"NAUTHILUS_GRPC_CA"`
+	GrpcServerName             string `mapstructure:"grpc_server_name" env:"NAUTHILUS_GRPC_SERVER_NAME"`
+	GrpcClientCert             string `mapstructure:"grpc_client_cert" env:"NAUTHILUS_GRPC_CLIENT_CERT"`
+	GrpcClientKey              string `mapstructure:"grpc_client_key" env:"NAUTHILUS_GRPC_CLIENT_KEY"`
+	PasswordFile               string `mapstructure:"password_file" env:"NAUTHILUS_PASSWORD_FILE"`
+	TokenFile                  string `mapstructure:"token_file" env:"NAUTHILUS_TOKEN_FILE"`
+	OidcClientSecretFile       string `mapstructure:"oidc_client_secret_file" env:"NAUTHILUS_OIDC_CLIENT_SECRET_FILE"`
 }
 
 // Default protocols of the OTLP exporter and the Nauthilus client.
@@ -382,6 +390,9 @@ var defaults = []struct {
 	{"nauthilus.oidc_audience", ""},
 	{"nauthilus.oidc_scope", ""},
 	{"nauthilus.account_claims", ""},
+	{"nauthilus.introspect_client_id", ""},
+	{"nauthilus.introspect_client_secret", ""},
+	{"nauthilus.introspect_client_secret_file", ""},
 	{"nauthilus.oidc_token_url", ""},
 	{"nauthilus.oidc_scopes", "nauthilus:authenticate nauthilus:lookup_identity"},
 	{"nauthilus.oidc_token_audience", ""},

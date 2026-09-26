@@ -19,7 +19,8 @@ import (
 //	  http: NAUTHILUS_URL (…/api/v1/auth/json)
 //	  both: NAUTHILUS_USER/NAUTHILUS_PASSWORD (backchannel basic) or
 //	        NAUTHILUS_TOKEN (bearer), NAUTHILUS_BEARER_MODE=password|introspect,
-//	        NAUTHILUS_INTROSPECT_URL, NAUTHILUS_OIDC_CLIENT_ID/SECRET,
+//	        NAUTHILUS_INTROSPECT_URL, NAUTHILUS_INTROSPECT_CLIENT_ID/SECRET
+//	        (falling back to NAUTHILUS_OIDC_CLIENT_ID/SECRET),
 //	        NAUTHILUS_OIDC_AUDIENCE, NAUTHILUS_OIDC_SCOPE, NAUTHILUS_MAX_WAIT
 //	MASTER_USER / MASTER_PASSWORD / MASTER_USER_SEPARATOR   (director master_user mode)
 //
@@ -66,7 +67,12 @@ func buildNauthilus(log *slog.Logger, settings *config.Config) (*auth.Nauthilus,
 		MaxWait: time.Duration(settings.Nauthilus.MaxWait) * time.Second,
 	}
 	if u := settings.Nauthilus.IntrospectURL; u != "" {
-		n.Introspect = &auth.Introspection{URL: u, ClientID: settings.Nauthilus.OidcClientID, ClientSecret: settings.Nauthilus.OidcClientSecret,
+		id, secret := settings.Nauthilus.IntrospectClientID, settings.Nauthilus.IntrospectClientSecret
+		if id == "" {
+			id, secret = settings.Nauthilus.OidcClientID, settings.Nauthilus.OidcClientSecret
+		}
+
+		n.Introspect = &auth.Introspection{URL: u, ClientID: id, ClientSecret: secret,
 			Audience: settings.Nauthilus.OidcAudience, Scope: settings.Nauthilus.OidcScope}
 	}
 

@@ -153,10 +153,15 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 	mode := ""
 
 	if r.Token != "" {
-		switch strings.ToLower(n.BearerMode) {
-		case "", "password":
+		bearer, err := n.bearerMode(r)
+		if err != nil {
+			return nil, err
+		}
+
+		switch bearer {
+		case bearerPassword:
 			req.Password = r.Token
-		case "introspect":
+		case bearerIntrospect:
 			account, err := n.introspect(ctx, r.Token)
 			if err != nil {
 				return nil, err
@@ -168,8 +173,6 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 
 			req.Username, req.Password = account, ""
 			mode = modeNoAuth
-		default:
-			return nil, fmt.Errorf("nauthilus: unknown bearer mode %q", n.BearerMode)
 		}
 	}
 
@@ -201,6 +204,40 @@ func (n *Nauthilus) Lookup(ctx context.Context, address, protocol string, client
 	req.ClientIP, req.ClientPort = hostPort(client)
 
 	return n.call(ctx, modeNoAuth, req)
+}
+
+// The two ways a bearer token is checked.
+const (
+	bearerPassword   = "password"
+	bearerIntrospect = "introspect"
+)
+
+// errBearerNoUser is what a token without a user name gets when it cannot
+// be introspected.
+var errBearerNoUser = fmt.Errorf("%w: a bearer token without a user name needs token introspection", ErrInvalid)
+
+// bearerMode is how a token is checked. In "password" mode the token goes
+// to Nauthilus with the user name the client gave, which SASL XOAUTH2 and
+// OAUTHBEARER carry. A JMAP client sends a bare "Authorization: Bearer"
+// without one; such a token is introspected, which needs the
+// introspection endpoint configured.
+func (n *Nauthilus) bearerMode(r Request) (string, error) {
+	switch mode := strings.ToLower(n.BearerMode); mode {
+	case "", bearerPassword:
+		if r.Username != "" {
+			return bearerPassword, nil
+		}
+
+		if n.Introspect == nil || n.Introspect.URL == "" {
+			return "", errBearerNoUser
+		}
+
+		return bearerIntrospect, nil
+	case bearerIntrospect:
+		return bearerIntrospect, nil
+	default:
+		return "", fmt.Errorf("nauthilus: unknown bearer mode %q", n.BearerMode)
+	}
 }
 
 func sslFlag(on bool) string {
