@@ -614,6 +614,13 @@ other front-ends use (`internal/auth`). The server verifies every
 request itself even when a Director in front has already done so, so
 that it is correct without a Director as well.
 
+The backend sees `protocol=jmap` for a login and for the identity
+lookup (`method=recipient_lookup`). A backend that decides per protocol
+whether an account is enabled — mailbox access for IMAP, sending for
+SMTP — has to know `jmap` and treat it as mailbox access; an unknown
+protocol may pass without that check. Sending is checked again by the
+relay, for the account XCLIENT names (see Sending).
+
 A Bearer token needs `nauthilus.bearer_mode: introspect`: the token has
 to yield the account, and the `password` mode has no user name to go
 with it. Authentication on a plaintext connection is refused unless
