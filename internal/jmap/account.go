@@ -181,6 +181,24 @@ func (a *account) may(mailboxID string, right byte) bool {
 	return model.HasRight(a.rights(mailboxID), right)
 }
 
+// readable are the mailboxes whose messages the user may read (rights l
+// and r); nil means all of them, for the personal account.
+func (a *account) readable() map[string]bool {
+	if a.personal {
+		return nil
+	}
+
+	out := make(map[string]bool, len(a.boxes))
+
+	for id, b := range a.boxes {
+		if model.HasRight(b.rights, 'r') {
+			out[id] = true
+		}
+	}
+
+	return out
+}
+
 // tree reads the mailbox tree of the account: every mailbox of the
 // personal account, the visible ones of a shared account. A visible
 // mailbox below one the user cannot see keeps the invisible levels in its
@@ -359,6 +377,29 @@ func (a *account) overlayAll(mailboxID string, metas []model.Meta) error {
 	return nil
 }
 
+// overlay is overlayAll for some messages of a folder, which reads only
+// their marks.
+func (a *account) overlay(mailboxID string, metas []model.Meta) error {
+	b := a.publicBox(mailboxID)
+	if b == nil || len(metas) == 0 {
+		return nil
+	}
+
+	uids := make([]uint32, len(metas))
+	for i := range metas {
+		uids[i] = metas[i].UID
+	}
+
+	marks, err := a.own.PrivateSeenOf(mailboxID, b.mb.UIDValidity, uids)
+	if err != nil {
+		return err
+	}
+
+	applyMarks(metas, marks)
+
+	return nil
+}
+
 // publicBox is the public folder of that id, or nil for anything else.
 func (a *account) publicBox(mailboxID string) *sharedBox {
 	if !a.public {
@@ -381,6 +422,90 @@ func applyMarks(metas []model.Meta, marks map[uint32]model.PrivateMark) {
 		metas[i].Flags = withSeen(metas[i].Flags, mark.Seen)
 		metas[i].ModSeq = max(metas[i].ModSeq, mark.ModSeq)
 	}
+}
+
+// boxNamed is the visible mailbox of that name, or nil.
+func (a *account) boxNamed(name string) *sharedBox {
+	for _, b := range a.boxes {
+		if b.mb.Name == name {
+			return b
+		}
+	}
+
+	return nil
+}
+
+// setPrivateSeen writes the user's own \Seen marks on messages of a
+// public folder, as an IMAP STORE does (see imapproto/private.go): the
+// next MODSEQ of the folder is allocated first and the marks are written
+// under it while the change is still pending, so every session learns of
+// them through the folder's change log, and the account log of the
+// public namespace records the messages as updated.
+func (a *account) setPrivateSeen(name string, uids []uint32, seen bool) error {
+	b := a.boxNamed(name)
+	if b == nil || !a.public {
+		return model.ErrNoMailbox
+	}
+
+	_, err := a.user.TouchModSeq(name, uids, func(modseq uint64) error {
+		return a.own.SetPrivateSeen(b.mb.ID, b.mb.UIDValidity, uids, seen, modseq)
+	})
+
+	return err
+}
+
+// keywordSeen is the keyword of \Seen, which a public folder keeps per
+// reader.
+const keywordSeen = "$seen"
+
+// keywordRight is the right a keyword needs in a mailbox (RFC 4314 4):
+// $seen needs s, every other keyword w.
+func keywordRight(k string) byte {
+	if k == keywordSeen {
+		return 's'
+	}
+
+	return 'w'
+}
+
+// missingKeywordRight is the first keyword of the set the rights do not
+// let the user write, or "" when they all may be written.
+func missingKeywordRight(rights string, keywords map[string]bool) string {
+	for _, k := range sortedKeys(keywords) {
+		if !model.HasRight(rights, keywordRight(k)) {
+			return k
+		}
+	}
+
+	return ""
+}
+
+// allowedFlags keeps the flags the rights let the user set on a new
+// copy, as IMAP COPY does (RFC 4314 4): \Seen needs s, \Deleted t,
+// everything else w.
+func allowedFlags(rights string, flags []string) []string {
+	if rights == model.AllRights {
+		return flags
+	}
+
+	out := flags[:0:0]
+
+	for _, f := range flags {
+		need := byte('w')
+
+		switch strings.ToLower(f) {
+		case `\seen`:
+			need = 's'
+		case `\deleted`:
+			need = 't'
+		}
+
+		if model.HasRight(rights, need) {
+			out = append(out, f)
+		}
+	}
+
+	return out
 }
 
 // flagSeen is the IMAP flag behind $seen.

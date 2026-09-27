@@ -47,7 +47,7 @@ func emailSet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 		return nil, &methodError{Type: errStateMismatch}
 	}
 
-	out := newSetResponse(accountID(sess.account), state)
+	out := newSetResponse(sess.accountID(), state)
 	expect := map[string]expectation{}
 
 	emailCreates(sess, req.Create, out, expect)
@@ -207,7 +207,7 @@ func sameSet(a, b map[string]bool) bool {
 // ownState reads the log from before and returns the state after the
 // longest run of entries that touch only the given messages.
 func ownState(sess *session, before string, mine map[string]bool) string {
-	since, ok := parseState(before)
+	since, ok := seqOf(before)
 	if !ok || len(mine) == 0 {
 		return before
 	}
@@ -227,14 +227,24 @@ func ownState(sess *session, before string, mine map[string]bool) string {
 
 		for _, m := range e.Msgs {
 			if !mine[m.GUID] {
-				return stateString(last)
+				return stateAt(sess, before, since, last)
 			}
 		}
 
 		last = e.Seq
 	}
 
-	return stateString(last)
+	return stateAt(sess, before, since, last)
+}
+
+// stateAt is the token of the account at a log sequence; the one the
+// call started from when it got no further.
+func stateAt(sess *session, before string, since, last uint64) string {
+	if last == since {
+		return before
+	}
+
+	return sess.current().state(stateEmails, last)
 }
 
 // emailPatch is a validated update: the keywords and the mailboxes the
@@ -294,7 +304,7 @@ func emailUpdates(sess *session, loc *locator, update map[string]map[string]json
 // keywords the message had: under the union rule, dropping the one copy
 // that was \Seen would otherwise make the message unread.
 func updateEmail(sess *session, f *found, raw map[string]json.RawMessage) (expectation, *setError) {
-	t, err := readTree(sess.user)
+	t, err := sess.current().tree()
 	if err != nil {
 		return expectation{}, &setError{Type: setServerFail, Description: err.Error()}
 	}
@@ -311,6 +321,10 @@ func updateEmail(sess *session, f *found, raw map[string]json.RawMessage) (expec
 
 	if exp.boxes == nil {
 		exp.boxes = f.boxes
+	}
+
+	if serr := mayUpdateEmail(sess.current(), t, f, p, exp.keywords); serr != nil {
+		return expectation{}, serr
 	}
 
 	copies, serr := applyBoxes(sess, t, f, p.boxes)
@@ -588,7 +602,12 @@ func applyBoxes(sess *session, t *tree, f *found, target map[string]bool) ([]pla
 	if len(add) == 1 && len(rm) > 0 {
 		src := byBox[rm[0]]
 
-		moved, err := sess.user.Move(src[0].mailbox, metasOf(src), t.byID[add[0]].Name)
+		metas := metasOf(src)
+		for i := range metas {
+			metas[i].Flags = allowedFlags(sess.current().rights(add[0]), metas[i].Flags)
+		}
+
+		moved, err := sess.user.Move(src[0].mailbox, metas, t.byID[add[0]].Name)
 		if err != nil {
 			return nil, storeFailed(err)
 		}
@@ -599,7 +618,13 @@ func applyBoxes(sess *session, t *tree, f *found, target map[string]bool) ([]pla
 	}
 
 	for _, id := range add {
-		copied, err := sess.user.Copy([]model.Meta{f.metas[0]}, t.byID[id].Name)
+		// The copy takes the flags the user may set there, as IMAP COPY
+		// does; the keywords are written afterwards, and the rights for
+		// them were checked before anything was written.
+		src := f.metas[0]
+		src.Flags = allowedFlags(sess.current().rights(id), src.Flags)
+
+		copied, err := sess.user.Copy([]model.Meta{src}, t.byID[id].Name)
 		if err != nil {
 			return nil, storeFailed(err)
 		}
@@ -641,14 +666,13 @@ func boxDiff(byBox map[string][]placement, target map[string]bool) (add, rm []st
 // applyKeywords gives every copy of a message the keyword set. Flags that
 // are not keywords — \Deleted, \Recent, an atom JMAP cannot spell — are
 // left as they are, and a keyword the copy keeps keeps its spelling.
+//
+// In a public folder $seen is the reader's own (see the private \Seen
+// marks in docs/development/public-folders.md): the shared record keeps
+// its \Seen, and the reader's mark is written instead.
 func applyKeywords(sess *session, copies []placement, want map[string]bool) *setError {
-	byName := map[string][]uint32{}
-
-	for _, c := range copies {
-		if !sameSet(keywordsOf(c.meta.Flags), want) {
-			byName[c.mailbox] = append(byName[c.mailbox], c.meta.UID)
-		}
-	}
+	a := sess.current()
+	byName, marks := keywordWrites(a, copies, want)
 
 	apply := func(old []string) []string {
 		out := make([]string, 0, len(old)+len(want))
@@ -671,9 +695,179 @@ func applyKeywords(sess *session, copies []placement, want map[string]bool) *set
 		return out
 	}
 
+	if a.public {
+		apply = keepSeen(apply)
+	}
+
 	for name, uids := range byName {
 		if _, err := sess.user.SetFlags(name, uids, 0, apply); err != nil {
 			return storeFailed(err)
+		}
+	}
+
+	for name, uids := range marks {
+		if err := a.setPrivateSeen(name, uids, want[keywordSeen]); err != nil {
+			return storeFailed(err)
+		}
+	}
+
+	return nil
+}
+
+// keywordWrites sorts the copies whose keywords differ from want into
+// those whose shared flags change and, in a public folder, those whose
+// reader's mark changes, by mailbox.
+func keywordWrites(a *account, copies []placement, want map[string]bool) (flags, marks map[string][]uint32) {
+	flags, marks = map[string][]uint32{}, map[string][]uint32{}
+
+	for _, c := range copies {
+		have := keywordsOf(c.meta.Flags)
+
+		switch {
+		case !a.public:
+			if !sameSet(have, want) {
+				flags[c.mailbox] = append(flags[c.mailbox], c.meta.UID)
+			}
+		default:
+			if have[keywordSeen] != want[keywordSeen] {
+				marks[c.mailbox] = append(marks[c.mailbox], c.meta.UID)
+			}
+
+			if !sameSetExcept(have, want, keywordSeen) {
+				flags[c.mailbox] = append(flags[c.mailbox], c.meta.UID)
+			}
+		}
+	}
+
+	return flags, marks
+}
+
+// sameSetExcept reports whether two sets have the same members apart
+// from one.
+func sameSetExcept(a, b map[string]bool, except string) bool {
+	for k := range a {
+		if k != except && !b[k] {
+			return false
+		}
+	}
+
+	for k := range b {
+		if k != except && !a[k] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// keepSeen leaves the shared \Seen of a public folder as it is: the
+// reader's own mark carries its $seen.
+func keepSeen(apply func([]string) []string) func([]string) []string {
+	return func(old []string) []string {
+		return withSeen(apply(old), model.HasFlag(old, flagSeen))
+	}
+}
+
+// mayUpdateEmail checks, before anything is written, every right an
+// update of a message in a shared account needs, as IMAP checks them:
+// a mailbox the message goes into needs i, one it leaves t and e (a
+// MOVE, or a \Deleted and an EXPUNGE), and every keyword that changes on
+// a copy — or that a new copy carries — the right for it ($seen s, every
+// other keyword w). A right that is missing refuses the whole update
+// with forbidden; nothing is dropped silently.
+func mayUpdateEmail(a *account, t *tree, f *found, p *emailPatch, want map[string]bool) *setError {
+	if a.personal {
+		return nil
+	}
+
+	byBox := placementsOf(t, f)
+
+	if p.boxes != nil {
+		add, rm := boxDiff(byBox, p.boxes)
+
+		if serr := mayStore(a, setOf(add), want); serr != nil {
+			return serr
+		}
+
+		for _, id := range rm {
+			if !a.may(id, 't') || !a.may(id, 'e') {
+				return &setError{Type: setForbidden, Properties: []string{propMailboxIDs},
+					Description: "no right to remove messages from " + id}
+			}
+		}
+	}
+
+	if p.keywords == nil && p.boxes == nil {
+		return nil
+	}
+
+	return mayRewrite(a, byBox, p.boxes, want)
+}
+
+// setOf is a list as a set.
+func setOf(list []string) map[string]bool {
+	out := make(map[string]bool, len(list))
+	for _, s := range list {
+		out[s] = true
+	}
+
+	return out
+}
+
+// mayRewrite checks the keyword rights of the copies that stay, whose
+// keywords an update writes to want.
+func mayRewrite(a *account, byBox map[string][]placement, target, want map[string]bool) *setError {
+	for id, list := range byBox {
+		if target != nil && !target[id] {
+			continue
+		}
+
+		for _, c := range list {
+			if k := missingKeywordRight(a.rights(id), changedKeywords(keywordsOf(c.meta.Flags), want)); k != "" {
+				return &setError{Type: setForbidden, Properties: []string{propKeywords},
+					Description: "no right to change " + k + " in " + id}
+			}
+		}
+	}
+
+	return nil
+}
+
+// changedKeywords are the keywords one set has and the other has not.
+func changedKeywords(a, b map[string]bool) map[string]bool {
+	out := map[string]bool{}
+
+	for k := range a {
+		if !b[k] {
+			out[k] = true
+		}
+	}
+
+	for k := range b {
+		if !a[k] {
+			out[k] = true
+		}
+	}
+
+	return out
+}
+
+// mayStore checks the rights a new message in a shared account needs in
+// each of its mailboxes: i, and the rights for its keywords.
+func mayStore(a *account, boxes, keywords map[string]bool) *setError {
+	if a.personal {
+		return nil
+	}
+
+	for _, id := range sortedKeys(boxes) {
+		if !a.may(id, 'i') {
+			return &setError{Type: setForbidden, Properties: []string{propMailboxIDs},
+				Description: "no right to add messages to " + id}
+		}
+
+		if k := missingKeywordRight(a.rights(id), keywords); k != "" {
+			return &setError{Type: setForbidden, Properties: []string{propKeywords},
+				Description: "no right to set " + k + " in " + id}
 		}
 	}
 
@@ -726,7 +920,7 @@ func emailDestroys(sess *session, loc *locator, destroy []string, out *setRespon
 		return
 	}
 
-	t, err := readTree(sess.user)
+	t, err := sess.current().tree()
 	if err != nil {
 		for _, ref := range destroy {
 			out.NotDestroyed[ref] = &setError{Type: setServerFail, Description: err.Error()}
@@ -759,9 +953,21 @@ func emailDestroys(sess *session, loc *locator, destroy []string, out *setRespon
 	}
 }
 
-// destroyEmail expunges every copy of a message.
+// destroyEmail expunges every copy of a message the user can see. In a
+// shared account that needs t and e in each of those mailboxes, checked
+// for all of them before the first is expunged; a copy in a mailbox the
+// user may not read is not part of the message there and stays.
 func destroyEmail(sess *session, t *tree, f *found) *setError {
-	for _, list := range placementsOf(t, f) {
+	a := sess.current()
+	byBox := placementsOf(t, f)
+
+	for id := range byBox {
+		if !a.may(id, 't') || !a.may(id, 'e') {
+			return &setError{Type: setForbidden, Description: "no right to remove messages from " + id}
+		}
+	}
+
+	for _, list := range byBox {
 		if err := sess.user.Expunge(list[0].mailbox, metasOf(list)); err != nil {
 			return storeFailed(err)
 		}

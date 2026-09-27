@@ -59,7 +59,7 @@ func emailImport(_ context.Context, sess *session, args json.RawMessage) (any, *
 		return nil, &methodError{Type: errStateMismatch}
 	}
 
-	out := &importResponse{AccountID: accountID(sess.account), OldState: state, NewState: state,
+	out := &importResponse{AccountID: sess.accountID(), OldState: state, NewState: state,
 		Created: map[string]map[string]any{}, NotCreated: map[string]*setError{}}
 
 	mine := map[string]bool{}
@@ -112,7 +112,7 @@ func importDraft(sess *session, raw json.RawMessage) (map[string]any, *draft, *s
 		return nil, nil, invalidProperty(propBlobID, "an EmailImport names a blob")
 	}
 
-	t, err := readTree(sess.user)
+	t, err := sess.current().tree()
 	if err != nil {
 		return nil, nil, &setError{Type: setServerFail, Description: err.Error()}
 	}
@@ -241,7 +241,7 @@ func emailParse(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, &methodError{Type: errRequestTooLarge, Description: "more blobs than maxObjectsInGet"}
 	}
 
-	out := &parseResponse{AccountID: accountID(sess.account), Parsed: map[string]map[string]any{},
+	out := &parseResponse{AccountID: sess.accountID(), Parsed: map[string]map[string]any{},
 		NotParsable: []string{}, NotFound: []string{}}
 
 	for _, id := range req.BlobIDs {

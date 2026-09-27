@@ -68,6 +68,16 @@ var errNoIndex = errors.New("this store keeps no index for JMAP")
 type locator struct {
 	u  model.User
 	ix model.Index
+	// allow limits what a lookup finds to the mailboxes the user may
+	// read; nil allows every mailbox, which is the personal account. The
+	// index itself is built and folded over the whole namespace — it is
+	// derived data of the store, not an answer — and only what it hands
+	// out is filtered: a message is found where the user may read it,
+	// and only there.
+	allow map[string]bool
+	// overlay adjusts the records of one mailbox to what the user sees
+	// (the private \Seen of a public folder); nil changes nothing.
+	overlay func(mailbox string, metas []model.Meta) error
 }
 
 // newLocator opens the locator of the session's account.
@@ -584,13 +594,13 @@ func (l *locator) check(wanted map[string]map[uint32]string) (map[string]*found,
 	stale := map[string][]place{}
 
 	for mailbox, uids := range wanted {
-		list := make([]uint32, 0, len(uids))
-		for uid := range uids {
-			list = append(list, uid)
+		if l.allow != nil && !l.allow[mailbox] {
+			// Not stale: the message is there, the user may not read it.
+			continue
 		}
 
-		metas, err := l.u.GetMessages(mailbox, list)
-		if err != nil && !errors.Is(err, model.ErrNoMailbox) {
+		metas, err := l.read(mailbox, uids)
+		if err != nil {
 			return nil, nil, err
 		}
 
@@ -619,6 +629,28 @@ func (l *locator) check(wanted map[string]map[uint32]string) (map[string]*found,
 	}
 
 	return out, stale, nil
+}
+
+// read reads the records of the given UIDs of one mailbox, as the user
+// sees them; a mailbox that is gone has none.
+func (l *locator) read(mailbox string, uids map[uint32]string) ([]model.Meta, error) {
+	list := make([]uint32, 0, len(uids))
+	for uid := range uids {
+		list = append(list, uid)
+	}
+
+	metas, err := l.u.GetMessages(mailbox, list)
+	if err != nil && !errors.Is(err, model.ErrNoMailbox) {
+		return nil, err
+	}
+
+	if l.overlay != nil {
+		if err := l.overlay(mailbox, metas); err != nil {
+			return nil, err
+		}
+	}
+
+	return metas, nil
 }
 
 // heal drops places that turned out not to hold their message. It is a

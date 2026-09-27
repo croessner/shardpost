@@ -138,7 +138,7 @@ func emailQueryRun(_ context.Context, sess *session, args json.RawMessage) (any,
 		return nil, merr
 	}
 
-	out, merr := page(accountID(sess.account), state, ids, &req.paging)
+	out, merr := page(sess.accountID(), state, ids, &req.paging)
 	if merr != nil {
 		return nil, merr
 	}
@@ -275,9 +275,10 @@ func (q *emailQuery) candidates() ([]*emailItem, error) {
 }
 
 // mailboxItems reads one mailbox and completes the messages that have
-// copies elsewhere, when the query needs to know about them.
+// copies elsewhere, when the query needs to know about them. A mailbox
+// the user may not read has no messages, as one that does not exist.
 func (q *emailQuery) mailboxItems(mailbox string) ([]*emailItem, error) {
-	metas, err := q.sess.user.ListMessages(mailbox)
+	metas, err := q.sess.current().listMessages(mailbox)
 	if err != nil && err != model.ErrNoMailbox {
 		return nil, err
 	}
@@ -369,9 +370,11 @@ func (q *emailQuery) guidItems(guids map[string]bool) ([]*emailItem, error) {
 	return out, nil
 }
 
-// accountItems reads every mailbox of the account.
+// accountItems reads every mailbox of the account the user may read.
 func (q *emailQuery) accountItems() ([]*emailItem, error) {
-	boxes, err := q.sess.user.ListMailboxes()
+	a := q.sess.current()
+
+	t, err := a.tree()
 	if err != nil {
 		return nil, err
 	}
@@ -379,8 +382,12 @@ func (q *emailQuery) accountItems() ([]*emailItem, error) {
 	byGUID := map[string]*emailItem{}
 	order := []*emailItem{}
 
-	for _, mb := range boxes {
-		metas, err := q.sess.user.ListMessages(mb.ID)
+	for _, mb := range t.all {
+		if !a.personal && !a.may(mb.ID, 'r') {
+			continue
+		}
+
+		metas, err := a.listMessages(mb.ID)
 		if err != nil && err != model.ErrNoMailbox {
 			return nil, err
 		}
@@ -593,7 +600,10 @@ func parseUTCDate(s string) (time.Time, bool) {
 	return t, err == nil
 }
 
-// ftsSearch runs one full-text query.
+// ftsSearch runs one full-text query. The index is the namespace's, so
+// in a shared account it finds messages the user may not read; every hit
+// is resolved through the locator, which finds a message only where the
+// user may read it, so such a hit never becomes a result.
 func (q *emailQuery) ftsSearch(fields []string, value string) (map[string]bool, error) {
 	return q.sess.user.SearchFields(fields, value)
 }
@@ -651,17 +661,19 @@ func emailQueryChanges(_ context.Context, sess *session, args json.RawMessage) (
 			Description: "query deltas are computed for the default order only; run the query again"}
 	}
 
-	since, ok := parseState(req.SinceQueryState)
-	if !ok {
-		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
-	}
-
 	state, q, merr := prepareQuery(sess, req.Filter, req.Sort)
 	if merr != nil {
 		return nil, merr
 	}
 
-	if now, _ := parseState(state); since > now {
+	// Checked after the query read the rights: a shared account's token
+	// has to name what the user may read now.
+	since, ok := sess.current().parseState(stateEmails, req.SinceQueryState)
+	if !ok {
+		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
+	}
+
+	if now, _ := seqOf(state); since > now {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
 	}
 
@@ -692,7 +704,7 @@ func emailQueryChanges(_ context.Context, sess *session, args json.RawMessage) (
 func queryDelta(sess *session, req *emailQueryChangesRequest, state string,
 	changed map[string]bool, ids []string,
 ) (any, *methodError) {
-	out := &queryChangesResponse{AccountID: accountID(sess.account), OldQueryState: req.SinceQueryState,
+	out := &queryChangesResponse{AccountID: sess.accountID(), OldQueryState: req.SinceQueryState,
 		NewQueryState: state, Removed: []string{}, Added: []addedItem{}}
 
 	for g := range changed {
@@ -746,7 +758,7 @@ func changedEmails(sess *session, since uint64) (map[string]bool, *methodError) 
 				Description: "a change is being made; run the query again"}
 		}
 
-		if merr := collectChanged(entries, out); merr != nil {
+		if merr := collectChanged(sess.current(), entries, out); merr != nil {
 			return nil, merr
 		}
 
@@ -756,11 +768,12 @@ func changedEmails(sess *session, since uint64) (map[string]bool, *methodError) 
 	return out, nil
 }
 
-// collectChanged adds the messages of a page of log entries.
-func collectChanged(entries []model.AccountChange, out map[string]bool) *methodError {
+// collectChanged adds the messages of a page of log entries; in a shared
+// account only those in mailboxes the user may read.
+func collectChanged(a *account, entries []model.AccountChange, out map[string]bool) *methodError {
 	for i := range entries {
 		e := &entries[i]
-		if e.Kind != model.KindEmail {
+		if e.Kind != model.KindEmail || hidden(a, e) {
 			continue
 		}
 

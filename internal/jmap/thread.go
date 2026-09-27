@@ -37,7 +37,7 @@ func threadGet(_ context.Context, sess *session, args json.RawMessage) (any, *me
 		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	out := &getResponse{AccountID: accountID(sess.account), State: state, List: []map[string]any{}, NotFound: []string{}}
+	out := &getResponse{AccountID: sess.accountID(), State: state, List: []map[string]any{}, NotFound: []string{}}
 
 	for _, id := range *req.IDs {
 		list := members[id]

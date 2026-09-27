@@ -78,7 +78,7 @@ type draft struct {
 
 // createEmail validates one creation, writes the message and stores it.
 func createEmail(sess *session, raw json.RawMessage) (map[string]any, expectation, *setError) {
-	t, err := readTree(sess.user)
+	t, err := sess.current().tree()
 	if err != nil {
 		return nil, expectation{}, &setError{Type: setServerFail, Description: err.Error()}
 	}
@@ -222,7 +222,7 @@ func readPlacement(sess *session, t *tree, given map[string]json.RawMessage, d *
 		d.receivedAt = when
 	}
 
-	return nil
+	return mayStore(sess.current(), d.boxes, d.keywords)
 }
 
 // readTopFields reads the header fields of the message itself: the

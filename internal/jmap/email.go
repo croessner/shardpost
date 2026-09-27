@@ -114,7 +114,7 @@ func emailGet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	out := &getResponse{AccountID: accountID(sess.account), State: state, List: []map[string]any{}, NotFound: []string{}}
+	out := &getResponse{AccountID: sess.accountID(), State: state, List: []map[string]any{}, NotFound: []string{}}
 
 	for _, id := range *req.IDs {
 		f, ok := hits[id]
@@ -136,9 +136,18 @@ func emailGet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 
 // emailState reads the account state and brings the locator up to it,
 // in that order: the locator then covers at least what the state claims.
+//
+// In a shared account the rights are read afresh after the state, and
+// the locator finds messages only in the mailboxes the user may read,
+// with its own \Seen in a public folder.
 func emailState(sess *session) (string, *locator, *methodError) {
 	seq, err := sess.user.AccountState()
 	if err != nil {
+		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
+	}
+
+	a := sess.current()
+	if err := a.load(); err != nil {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
@@ -147,11 +156,16 @@ func emailState(sess *session) (string, *locator, *methodError) {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
+	loc.allow = a.readable()
+	if a.public {
+		loc.overlay = a.overlay
+	}
+
 	if err := loc.catchUp(seq); err != nil {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	return stateString(seq), loc, nil
+	return a.state(stateEmails, seq), loc, nil
 }
 
 // emailPropertyList checks the properties a client asked for and fills

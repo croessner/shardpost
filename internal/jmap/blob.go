@@ -28,9 +28,7 @@ const defaultBlobType = "application/octet-stream"
 // yet: until something does, the store's garbage collection removes it,
 // which is the expiry RFC 8620 6.1 allows a server.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	sess := sessionOf(r)
-
-	blobs, ok := s.blobsOf(w, r)
+	sess, blobs, ok := s.blobsOf(w, r, false)
 	if !ok {
 		return
 	}
@@ -73,7 +71,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := uploadResponse{
-		AccountID: accountID(sess.account),
+		AccountID: sess.accountID(),
 		BlobID:    guid,
 		Type:      blobType(r.Header.Get(fieldContentType)),
 		Size:      int64(len(raw)),
@@ -91,7 +89,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 // the client asks for: the server stores bytes, not types, and a client
 // that downloads an attachment knows from the message what it is.
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	blobs, ok := s.blobsOf(w, r)
+	sess, blobs, ok := s.blobsOf(w, r, true)
 	if !ok {
 		return
 	}
@@ -100,7 +98,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// the same per-account limit as an API request, on a counter of its
 	// own: a client streaming an attachment must not lock itself out of
 	// the API.
-	sess := sessionOf(r)
 	if !s.enter(s.inDown, sess.account, s.o.Limits.MaxConcurrentRequests) {
 		writeProblem(w, http.StatusTooManyRequests, errURNLimit,
 			"too many downloads in flight for this account", "maxConcurrentRequests")
@@ -110,6 +107,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	defer s.leave(s.inDown, sess.account)
 
 	blobID := r.PathValue("blobId")
+
+	if err := mayReadBlob(sess, blobID); err != nil {
+		s.blobFailed(w, r, blobID, err)
+
+		return
+	}
 
 	if guid, path, ok := parsePartBlob(blobID); ok {
 		s.servePart(w, r, blobs, guid, path)
@@ -216,26 +219,39 @@ func (s *Server) blobFailed(w http.ResponseWriter, r *http.Request, blobID strin
 	writeProblem(w, http.StatusServiceUnavailable, errURNNotRequest, "the blob could not be read", "")
 }
 
-// blobsOf returns the blob store of the session, after checking that the
-// account in the path is the one the request authenticated as. Other
-// accounts belong to JMAP Sharing, which is not built yet.
-func (s *Server) blobsOf(w http.ResponseWriter, r *http.Request) (model.Blobs, bool) {
+// blobsOf returns the session of the account in the path and its blob
+// store. Uploads go to the personal account only: a blob uploaded into a
+// shared account could not be told apart from the owner's blobs, which
+// the user may not read. A download may name a shared account (shared is
+// true), and then serves only what blobReadable allows. An account the
+// user has no access to is not found, as one that does not exist.
+func (s *Server) blobsOf(w http.ResponseWriter, r *http.Request, shared bool) (*session, model.Blobs, bool) {
 	sess := sessionOf(r)
+	id := r.PathValue("accountId")
 
-	if id := r.PathValue("accountId"); id != accountID(sess.account) {
-		writeProblem(w, http.StatusNotFound, errURNNotRequest, "no account "+id, "")
+	if id != accountID(sess.account) {
+		var a *account
+		if shared {
+			a, _ = s.resolveAccount(sess, id)
+		}
 
-		return nil, false
+		if a == nil {
+			writeProblem(w, http.StatusNotFound, errURNNotRequest, "no account "+id, "")
+
+			return nil, nil, false
+		}
+
+		sess = sess.with(a)
 	}
 
 	blobs, ok := sess.user.(model.Blobs)
 	if !ok {
 		writeProblem(w, http.StatusNotImplemented, errURNNotRequest, "this store does not serve blobs", "")
 
-		return nil, false
+		return nil, nil, false
 	}
 
-	return blobs, true
+	return sess, blobs, true
 }
 
 // blobType is the media type of a blob: what the client asked for, or

@@ -18,7 +18,11 @@ type emailFate struct {
 // emailWindow folds a page of log entries into what happened to each
 // message. A change the log records without listing its messages cannot
 // be turned into a delta and is reported as such.
-func emailWindow(entries []model.AccountChange) (map[string]*emailFate, *methodError) {
+//
+// In a shared account the entries of mailboxes the user may not read are
+// left out: a message is an Email of the account only where the user can
+// read it, so its placements elsewhere are not placements here.
+func emailWindow(a *account, entries []model.AccountChange) (map[string]*emailFate, *methodError) {
 	fates := map[string]*emailFate{}
 
 	fate := func(guid string) *emailFate {
@@ -33,7 +37,7 @@ func emailWindow(entries []model.AccountChange) (map[string]*emailFate, *methodE
 
 	for i := range entries {
 		e := &entries[i]
-		if e.Kind != model.KindEmail {
+		if e.Kind != model.KindEmail || hidden(a, e) {
 			continue
 		}
 
@@ -157,8 +161,11 @@ type window struct {
 	fates      map[string]*emailFate
 	classes    map[string]emailClass
 	sinceState string
-	last       uint64
-	full       bool
+	// fingerprint is what the user could read when the window was read,
+	// which the new state token of a shared account carries.
+	fingerprint string
+	last        uint64
+	full        bool
 }
 
 // readWindow reads the page a /changes asks for and classifies what it
@@ -169,7 +176,14 @@ func readWindow(sess *session, args json.RawMessage) (*window, *methodError) {
 		return nil, merr
 	}
 
-	since, ok := parseState(req.SinceState)
+	// The rights are read first: the state token of a shared account is
+	// checked against what the user may read now.
+	a := sess.current()
+	if err := a.load(); err != nil {
+		return nil, &methodError{Type: errServerFail, Description: err.Error()}
+	}
+
+	since, ok := a.parseState(stateEmails, req.SinceState)
 	if !ok {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
 	}
@@ -188,12 +202,12 @@ func readWindow(sess *session, args json.RawMessage) (*window, *methodError) {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descLogTrimmed}
 	}
 
-	w := &window{sinceState: req.SinceState, last: since, full: len(entries) == limit}
+	w := &window{sinceState: req.SinceState, last: since, full: len(entries) == limit, fingerprint: a.fingerprint(stateEmails)}
 	if len(entries) > 0 {
 		w.last = entries[len(entries)-1].Seq
 	}
 
-	if w.fates, merr = emailWindow(entries); merr != nil {
+	if w.fates, merr = emailWindow(a, entries); merr != nil {
 		return nil, merr
 	}
 
@@ -215,8 +229,13 @@ type changeLists struct{ *changesResponse }
 
 // response starts the response of a window.
 func (w *window) response(sess *session) changeLists {
+	newState := stateString(w.last)
+	if a := sess.current(); !a.personal {
+		newState += stateSep + w.fingerprint
+	}
+
 	return changeLists{&changesResponse{
-		AccountID: accountID(sess.account), OldState: w.sinceState, NewState: stateString(w.last),
+		AccountID: sess.accountID(), OldState: w.sinceState, NewState: newState,
 		HasMoreChanges: w.full,
 		Created:        []string{}, Updated: []string{}, Destroyed: []string{},
 	}}

@@ -303,6 +303,46 @@ func sortedRawKeys(m map[string]json.RawMessage) []string {
 	return out
 }
 
+// blobReadable reports whether a blob id names something the user may
+// read in the call's account: anything in the personal account, and in a
+// shared account a message the user can read (right r where it is) or a
+// part of one. Everything else in the owner's blob store is not found.
+func blobReadable(sess *session, id string) (bool, error) {
+	if sess.current().personal {
+		return true, nil
+	}
+
+	guid := id
+	if g, _, ok := parsePartBlob(id); ok {
+		guid = g
+	} else if !model.ValidGUID(id) {
+		return false, nil
+	}
+
+	_, loc, merr := emailState(sess)
+	if merr != nil {
+		return false, errors.New(merr.Description)
+	}
+
+	hits, err := loc.resolve([]string{guid})
+	if err != nil {
+		return false, err
+	}
+
+	return hits[guid] != nil, nil
+}
+
+// mayReadBlob is blobReadable as an error: ErrNoBlob for a blob the user
+// may not read.
+func mayReadBlob(sess *session, id string) error {
+	readable, err := blobReadable(sess, id)
+	if err == nil && !readable {
+		err = model.ErrNoBlob
+	}
+
+	return err
+}
+
 // errBlobTooLarge is what blobContent answers for a blob beyond the
 // bound it was given.
 var errBlobTooLarge = errors.New("the blob is larger than allowed here")
@@ -320,6 +360,14 @@ func blobContent(sess *session, ref string, limit int64) ([]byte, error) {
 	id, pending := resolveCreationID(sess, ref)
 	if pending {
 		return nil, model.ErrNoBlob
+	}
+
+	// In a shared account the blob store is the owner's, and it holds
+	// more than the user may read: messages in mailboxes without r,
+	// uploads, the owner's scripts. Only a message the user can read
+	// there, or a part of one, is a blob of the account.
+	if err := mayReadBlob(sess, id); err != nil {
+		return nil, err
 	}
 
 	if isScriptBlob(id) {
