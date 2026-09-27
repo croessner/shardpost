@@ -65,6 +65,13 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 			return
 		}
 
+		if !s.o.Shard.serves(res) {
+			s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", res.Attributes[s.o.Shard.Attribute])
+			writeProblem(w, http.StatusForbidden, errURNNotRequest, "this account is not served here", "")
+
+			return
+		}
+
 		u, err := s.o.Store.User(res.Account)
 		if err != nil {
 			s.o.Log.Error("jmap: open account", "account", res.Account, "err", err)

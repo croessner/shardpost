@@ -648,6 +648,26 @@ of the token. Authentication on a plaintext connection is refused unless
 
 ## Configuration
 
+**One shard behind a proxy.** A proxy that does not route JMAP per
+account — a load balancer in front of one ShardPost shard — lets every
+account of the deployment reach this server. An account whose mail
+lives on another shard would find nothing here, and its first request
+would create its mailboxes (`server.autocreate`). With
+`jmap.shard_attribute` and `jmap.shard` set, JMAP serves only the
+accounts whose authentication result carries this shard in that
+attribute (Nauthilus with the Director returns `mailShard`); any other
+account, and one without the attribute, is answered 403 before its
+store is opened — not 401, so a client does not ask for the password
+again. Both empty serve every authenticated account.
+
+**Behind a TLS-terminating proxy.** The listener takes the PROXY
+protocol (v1, v2) from the peers in `server.proxy_protocol_trusted_cidrs`,
+like the other front-ends, so the client address — for rate limits,
+logs and `XCLIENT ADDR` — is the client's and not the proxy's. A proxy
+that re-encrypts towards ShardPost sends the header before TLS
+(`send-proxy-v2` in HAProxy). The certificate files are reloaded when
+they change (`tls.reload_seconds`).
+
 JMAP listens on an address of its own rather than sharing
 `server.http_addr`: that one serves metrics and the health probes and is
 cluster-internal, while JMAP is customer traffic with its own
@@ -660,6 +680,8 @@ jmap:
   tls_cert: /tls/jmap/tls.crt
   tls_key: /tls/jmap/tls.key
   public_base_url: https://jmap.example.org
+  shard_attribute: mailShard
+  shard: shardpost
   max_size_upload: 52428800
   max_size_request: 10485760
   max_concurrent_upload: 4

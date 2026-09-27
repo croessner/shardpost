@@ -45,6 +45,7 @@ func TestRejectInvalid(t *testing.T) {
 		})
 	}
 }
+
 // TestIntrospectionNeedsItsClient: a bearer mode that introspects needs
 // the endpoint, and an introspection client needs its secret; either gap
 // would otherwise surface as every bearer login failing at runtime.
@@ -70,6 +71,21 @@ func TestIntrospectionNeedsItsClient(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestJMAPShardSetTogether: a shard gate needs both the attribute and the
+// value; one without the other would serve nobody or everybody silently.
+func TestJMAPShardSetTogether(t *testing.T) {
+	for _, body := range []string{"jmap:\n  shard: shardpost", "jmap:\n  shard_attribute: mailShard"} {
+		if _, err := Load(configFile(t, body)); err == nil {
+			t.Fatalf("accepted %q", body)
+		}
+	}
+
+	c, err := Load(configFile(t, "jmap:\n  shard_attribute: mailShard\n  shard: shardpost"))
+	if err != nil || c.JMAP.Shard != "shardpost" || c.TLS.ReloadSeconds != 60 {
+		t.Fatalf("shard gate config: %v %+v", err, c)
 	}
 }
 

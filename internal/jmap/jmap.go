@@ -14,6 +14,7 @@ package jmap
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,37 @@ type Options struct {
 	Push         PushOptions
 	// Submission, when set, offers urn:ietf:params:jmap:submission.
 	Submission *SubmissionOptions
+	// Shard, when set, restricts the front-end to the accounts the
+	// authentication backend assigns to this shard.
+	Shard ShardGate
+}
+
+// ShardGate names the backend attribute that carries an account's shard
+// and the shard this server holds. Behind a proxy that does not route
+// JMAP per account, every account of a deployment can reach this
+// front-end; one that lives on another shard has no mail here, and
+// serving it would create empty mailboxes for it. The zero value serves
+// every authenticated account.
+type ShardGate struct {
+	Attribute string
+	Value     string
+}
+
+// serves reports whether the account of an authentication result belongs
+// here: always without a gate, otherwise only when one of the attribute's
+// values is this shard. A missing attribute is not this shard.
+func (g ShardGate) serves(res *auth.Result) bool {
+	if g.Value == "" {
+		return true
+	}
+
+	for _, v := range res.Attributes[g.Attribute] {
+		if strings.EqualFold(strings.TrimSpace(v), g.Value) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // PushOptions configure push (RFC 8620 7). The event source works with

@@ -23,6 +23,7 @@ import (
 
 	"shardpost/internal/auth"
 	"shardpost/internal/cephstore"
+	"shardpost/internal/certfile"
 	"shardpost/internal/delivery"
 	"shardpost/internal/extprograms"
 	"shardpost/internal/imapproto"
@@ -215,18 +216,25 @@ func rookCredentials(ctx context.Context, log *slog.Logger, settings *config.Con
 
 // loadTLS loads the optional certificate: STARTTLS on the plain ports,
 // implicit TLS on IMAPS_ADDR. It returns nil when no certificate is set.
-func loadTLS(settings *config.Config) (*tls.Config, error) {
+func loadTLS(log *slog.Logger, settings *config.Config) (*tls.Config, error) {
 	cert, key := settings.TLS.Cert, settings.TLS.Key
 	if cert == "" || key == "" {
 		return nil, nil
 	}
 
-	c, err := tls.LoadX509KeyPair(cert, key)
+	return certConfig(log, cert, key, settings)
+}
+
+// certConfig is a server tls.Config for a certificate pair that picks up a
+// renewed pair every tls.reload_seconds, so a certificate cert-manager
+// renews reaches the listener without a restart.
+func certConfig(log *slog.Logger, cert, key string, settings *config.Config) (*tls.Config, error) {
+	src, err := certfile.New(cert, key, time.Duration(settings.TLS.ReloadSeconds)*time.Second, log)
 	if err != nil {
-		return nil, fmt.Errorf("load tls keypair: %w", err)
+		return nil, err
 	}
 
-	return &tls.Config{Certificates: []tls.Certificate{c}, MinVersion: tls.VersionTLS12}, nil
+	return src.Config(), nil
 }
 
 // newIMAPSieve builds the IMAPSieve engine and, when enabled, starts the
@@ -338,7 +346,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 		return err
 	}
 
-	tlsCfg, err := loadTLS(settings)
+	tlsCfg, err := loadTLS(log, settings)
 	if err != nil {
 		return err
 	}

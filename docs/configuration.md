@@ -56,7 +56,9 @@ happens; see [running without Kubernetes](operations/README.md#running-without-k
 
 Unknown keys, mistyped YAML values, invalid env numbers, invalid boolean values, contradictory TLS pairs and explicit secret files that are missing or read as empty cause a startup error. Env numbers are always interpreted as decimal. A secret file takes precedence over the corresponding direct secret value. Error messages never print values.
 
-`config check` validates the configuration structure and reads the referenced secret files. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards. Without a file path, the existing env-based deployments remain usable.
+`config check` validates the configuration structure and reads the referenced secret files. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards.
+
+A running server looks every `tls.reload_seconds` (default 60; `0` loads once) whether the files of `tls.cert`/`tls.key` and `jmap.tls_cert`/`jmap.tls_key` changed and loads the renewed pair, so a certificate that cert-manager renews in a mounted Secret reaches the listeners without a restart. A renewed pair that does not load is logged and the previous certificate stays in use. Without a file path, the existing env-based deployments remain usable.
 
 ## Client IP behind the Director
 

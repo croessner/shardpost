@@ -36,6 +36,14 @@ type JMAP struct {
 	MaxCallsInRequest     int64 `mapstructure:"max_calls_in_request" env:"JMAP_MAX_CALLS_IN_REQUEST" validate:"gte=0"`
 	MaxObjectsInGet       int64 `mapstructure:"max_objects_in_get" env:"JMAP_MAX_OBJECTS_IN_GET" validate:"gte=0"`
 	MaxObjectsInSet       int64 `mapstructure:"max_objects_in_set" env:"JMAP_MAX_OBJECTS_IN_SET" validate:"gte=0"`
+	// ShardAttribute and Shard restrict JMAP to the accounts the
+	// authentication backend assigns to this shard (for Nauthilus with the
+	// Director, mailShard). A proxy in front that does not route JMAP per
+	// account lets every account of the deployment reach this server, and
+	// one whose mail lives elsewhere would get empty mailboxes here. Both
+	// empty serve every authenticated account.
+	ShardAttribute string `mapstructure:"shard_attribute" env:"JMAP_SHARD_ATTRIBUTE"`
+	Shard          string `mapstructure:"shard" env:"JMAP_SHARD"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
 	// Submission configures sending (EmailSubmission) and identities.
@@ -190,6 +198,10 @@ func (j JMAP) Validate(global TLS) error {
 
 	if err := j.Submission.Validate(); err != nil {
 		return err
+	}
+
+	if (strings.TrimSpace(j.ShardAttribute) == "") != (strings.TrimSpace(j.Shard) == "") {
+		return fmt.Errorf("jmap.shard_attribute and jmap.shard must be set together")
 	}
 
 	if !j.Enabled() {

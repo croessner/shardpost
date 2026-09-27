@@ -128,6 +128,9 @@ type Rook struct {
 type TLS struct {
 	Cert string `mapstructure:"cert" env:"TLS_CERT"`
 	Key  string `mapstructure:"key" env:"TLS_KEY"`
+	// ReloadSeconds is how often the listeners look whether their
+	// certificate files changed and load a renewed pair; 0 loads once.
+	ReloadSeconds int64 `mapstructure:"reload_seconds" env:"TLS_RELOAD_SECONDS" validate:"gte=0,lte=86400"`
 }
 
 // Sieve configures Sieve settings, global scripts and ManageSieve.
@@ -302,6 +305,8 @@ var defaults = []struct {
 	{"server.mbox_shard_size", 100000},
 	{"server.account_log_retention", 10000},
 	{"jmap.addr", ""},
+	{"jmap.shard_attribute", ""},
+	{"jmap.shard", ""},
 	{"jmap.public_base_url", ""},
 	{"jmap.insecure_auth", false},
 	{"jmap.max_size_upload", 0},
@@ -350,6 +355,7 @@ var defaults = []struct {
 	{"server.memory_budget_bytes", 256 << 20},
 	{"tls.cert", ""},
 	{"tls.key", ""},
+	{"tls.reload_seconds", 60},
 	{"server.insecure_auth", true},
 	{"server.max_conns_per_ip", 0},
 	{"server.max_conns_per_user", 0},

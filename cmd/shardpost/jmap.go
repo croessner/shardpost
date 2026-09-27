@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -50,12 +49,12 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 	cert, key := settings.JMAP.Certificate(settings.TLS)
 
 	if cert != "" {
-		pair, err := tls.LoadX509KeyPair(cert, key)
+		cfg, err := certConfig(log, cert, key, settings)
 		if err != nil {
 			return fmt.Errorf("jmap tls: %w", err)
 		}
 
-		srv.jmapTLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+		srv.jmapTLS = cfg
 	}
 
 	push, err := srv.jmapPush(settings.JMAP.Push, store)
@@ -77,6 +76,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		Limits:        jmapLimits(settings.JMAP),
 		Push:          push,
 		Submission:    submission,
+		Shard:         jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
 	})
 
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
