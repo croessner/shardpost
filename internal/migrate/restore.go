@@ -309,7 +309,9 @@ func (x *restore) sieve(ctx context.Context, active string) error {
 		return nil
 	}
 
-	if !x.o.ActivateSieve {
+	// An archive from before the reserved name could name the JMAP
+	// vacation copy as active; it is never restored, so nothing is.
+	if !x.o.ActivateSieve || model.ReservedScript(active) {
 		active = ""
 	}
 

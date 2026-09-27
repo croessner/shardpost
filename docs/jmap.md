@@ -657,7 +657,7 @@ with the same setting does not, within the seven days.
 **A copy for display.** Every change also stores the script under the
 name `jmap-vacation` in the account's script store while the vacation
 is enabled, and removes it when it is not, so that a ManageSieve client
-such as Roundcube can show the setting. Delivery never reads that copy.
+such as Roundcube can show the setting. Delivery never reads that copy, and a user script cannot `include` it (an include of the reserved name finds no script).
 ManageSieve and the admin API show it but refuse to store, rename,
 delete or activate it; an import of scripts that names it is refused,
 and an export, a restore or a migration leaves it out.

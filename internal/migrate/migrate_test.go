@@ -543,3 +543,33 @@ func TestRestoreSkipsTheJMAPVacationScript(t *testing.T) {
 		t.Errorf("scripts %+v", x.scripts)
 	}
 }
+
+// sieveTarget records the scripts and the active name a restore stores.
+type sieveTarget struct {
+	Target
+	active string
+	calls  int
+}
+
+func (s *sieveTarget) PutSieve(_ context.Context, _ []adminapi.ImportSieveScript, active string) error {
+	s.active, s.calls = active, s.calls+1
+
+	return nil
+}
+
+// TestRestoreNeverActivatesTheJMAPVacationScript: an archive from before
+// the reserved name may name the JMAP vacation copy as active; the copy is
+// not restored, so nothing is activated rather than the restore failing.
+func TestRestoreNeverActivatesTheJMAPVacationScript(t *testing.T) {
+	tgt := &sieveTarget{}
+	x := &restore{tgt: tgt, o: RestoreOptions{ActivateSieve: true}, rep: &RestoreReport{},
+		scripts: []adminapi.ImportSieveScript{{Name: "main", Script: "keep;"}}}
+
+	if err := x.sieve(context.Background(), model.JMAPVacationScript); err != nil {
+		t.Fatal(err)
+	}
+
+	if tgt.calls != 1 || tgt.active != "" || x.rep.SieveActivated {
+		t.Fatalf("active %q, activated %v", tgt.active, x.rep.SieveActivated)
+	}
+}

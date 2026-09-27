@@ -31,7 +31,10 @@ func IncludeLoader(u model.User, globalDir string) func(name string, global bool
 			return b, err == nil, err
 		}
 
-		if u == nil {
+		// The JMAP vacation script is a display copy for ManageSieve
+		// clients; delivery builds the vacation from the account metadata,
+		// so a user script must not run a copy that may be stale.
+		if u == nil || model.ReservedScript(name) {
 			return nil, false, nil
 		}
 

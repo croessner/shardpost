@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"shardpost/internal/memstore"
+	"shardpost/internal/model"
 )
 
 // vacationMessage is the message the generated scripts run over.
@@ -218,5 +221,28 @@ func checkVacationScript(t *testing.T, v VacationSettings) {
 
 	if d.Vacation.Subject != v.Subject || d.Vacation.Reason != strings.ReplaceAll(normalizeNewlines(v.TextBody), "\n", "\r\n") {
 		t.Errorf("%+v came back as %q / %q", v, d.Vacation.Subject, d.Vacation.Reason)
+	}
+}
+
+// TestIncludeDoesNotLoadTheJMAPVacationCopy: a user script cannot include
+// the display copy of the JMAP vacation, which may be stale; delivery takes
+// the vacation from the account metadata.
+func TestIncludeDoesNotLoadTheJMAPVacationCopy(t *testing.T) {
+	u, err := memstore.New().User("a@example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := u.PutScript(model.JMAPVacationScript, `require "vacation"; vacation "stale";`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := IncludeLoader(u, "")(model.JMAPVacationScript, false); ok || err != nil {
+		t.Fatalf("the copy was loaded: ok %v, err %v", ok, err)
+	}
+
+	if err := CompileWith(`require "include"; include :personal "`+model.JMAPVacationScript+`";`,
+		Hooks{Include: IncludeLoader(u, "")}); err == nil {
+		t.Fatal("including the copy compiled")
 	}
 }
