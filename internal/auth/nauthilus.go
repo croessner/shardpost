@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -150,7 +151,7 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 		req.Method = "userpass"
 	}
 
-	mode := ""
+	mode, introspected := "", false
 
 	if r.Token != "" {
 		bearer, err := n.bearerMode(r)
@@ -167,12 +168,8 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 				return nil, err
 			}
 
-			if r.Username != "" && !strings.EqualFold(r.Username, account) {
-				return nil, ErrInvalid
-			}
-
 			req.Username, req.Password = account, ""
-			mode = modeNoAuth
+			mode, introspected = modeNoAuth, true
 		}
 	}
 
@@ -181,9 +178,40 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 		return nil, err
 	}
 
+	if introspected {
+		if err := n.sameAccount(ctx, r, req.Username, res); err != nil {
+			return nil, err
+		}
+	}
+
 	n.attempt(r.Client, true)
 
 	return res, nil
+}
+
+// sameAccount checks the user name a client sent along with an
+// introspected token (SASL XOAUTH2 and OAUTHBEARER carry one). It is an
+// alias or an address as often as the canonical account, so it counts when
+// it names the token's account (the claim or its canonical form) or
+// resolves to it; a name that resolves to another account, or to none, is
+// refused.
+func (n *Nauthilus) sameAccount(ctx context.Context, r Request, claim string, res *Result) error {
+	if r.Username == "" || strings.EqualFold(r.Username, claim) || strings.EqualFold(r.Username, res.Account) {
+		return nil
+	}
+
+	named, err := n.Lookup(ctx, r.Username, r.Protocol, r.Client)
+
+	switch {
+	case errors.Is(err, ErrTemporary):
+		return err
+	case err != nil:
+		return ErrInvalid
+	case !strings.EqualFold(named.Account, res.Account):
+		return ErrInvalid
+	}
+
+	return nil
 }
 
 // Lookup implements Authenticator: identity resolution without a

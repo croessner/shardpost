@@ -722,6 +722,34 @@ func (c *Config) checkAuth() error {
 		return fmt.Errorf("HTTP authentication requires nauthilus.url")
 	}
 
+	return c.Nauthilus.checkIntrospection()
+}
+
+// checkIntrospection refuses introspection settings that could only fail at
+// runtime: a bearer mode that introspects without an endpoint, and an
+// endpoint without a client that has its secret (its own, or the service
+// client it falls back to).
+func (n Nauthilus) checkIntrospection() error {
+	if strings.EqualFold(n.BearerMode, "introspect") && n.IntrospectURL == "" {
+		return fmt.Errorf("nauthilus.bearer_mode introspect requires nauthilus.introspect_url")
+	}
+
+	if n.IntrospectURL == "" {
+		return nil
+	}
+
+	if n.IntrospectClientID != "" {
+		if n.IntrospectClientSecret == "" {
+			return fmt.Errorf("nauthilus.introspect_client_id requires nauthilus.introspect_client_secret or its file")
+		}
+
+		return nil
+	}
+
+	if n.OidcClientID == "" || n.OidcClientSecret == "" {
+		return fmt.Errorf("nauthilus.introspect_url requires an introspection client or the OIDC service client")
+	}
+
 	return nil
 }
 

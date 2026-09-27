@@ -516,3 +516,20 @@ func TestPushWorkerKeepsWhatItCouldNotSend(t *testing.T) {
 		return len(got) > n && strings.Contains(got[len(got)-1], "EmailDelivery")
 	})
 }
+
+// TestPushWorkerPrunes: the worker forgets the backoff of subscriptions and
+// the checks of accounts a scan no longer finds.
+func TestPushWorkerPrunes(t *testing.T) {
+	w := &worker{backoff: map[string]time.Time{"kept": {}, "gone": {}},
+		checked: map[string]*accountCheck{"kept@example.org": {}, "gone@example.org": {}}}
+
+	w.prune(map[string]bool{"kept": true}, map[string][]*pushRecord{"kept@example.org": nil})
+
+	if _, ok := w.backoff["gone"]; ok || len(w.backoff) != 1 {
+		t.Fatalf("backoff after prune: %v", w.backoff)
+	}
+
+	if _, ok := w.checked["gone@example.org"]; ok || len(w.checked) != 1 {
+		t.Fatalf("checks after prune: %v", w.checked)
+	}
+}

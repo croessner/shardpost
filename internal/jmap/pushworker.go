@@ -271,11 +271,16 @@ func (w *worker) scan(ctx context.Context) {
 	}
 
 	byAccount := map[string][]*pushRecord{}
+	ids := map[string]bool{}
 
 	for _, e := range entries {
 		pa := &pushAccount{}
 		if json.Unmarshal(e.Value, pa) != nil || pa.Account == "" {
 			continue
+		}
+
+		for _, rec := range pa.Subs {
+			ids[rec.ID] = true
 		}
 
 		if verified := w.sortOut(pa); len(verified) > 0 {
@@ -289,6 +294,26 @@ func (w *worker) scan(ctx context.Context) {
 	}
 
 	w.reconcileWatchers(ctx, byAccount)
+	w.prune(ids, byAccount)
+}
+
+// prune forgets the backoff of subscriptions and the checks of accounts a
+// scan no longer finds, so the long-running worker does not keep them
+// after the subscription or the account is gone.
+func (w *worker) prune(ids map[string]bool, byAccount map[string][]*pushRecord) {
+	w.mu.Lock()
+	for id := range w.backoff {
+		if !ids[id] {
+			delete(w.backoff, id)
+		}
+	}
+	w.mu.Unlock()
+
+	for account := range w.checked {
+		if _, ok := byAccount[account]; !ok {
+			delete(w.checked, account)
+		}
+	}
 }
 
 // sortOut drops the expired subscriptions of an account and those made

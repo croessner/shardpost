@@ -185,6 +185,7 @@ func TestEmailSubmissionRefuses(t *testing.T) {
 		{`{"identityId":"` + ident + `","emailId":"` + lonely.GUID + `"}`, setNoRecipients},
 		{`{"identityId":"` + ident + `","emailId":"` + crowded.GUID + `"}`, setTooManyRecipients},
 		{`{"identityId":"` + ident + `","emailId":"` + good.GUID + `","envelope":{"mailFrom":{"email":"boss@example.org"},"rcptTo":[{"email":"a@example.net"}]}}`, setForbiddenMailFrom},
+		{`{"identityId":"` + ident + `","emailId":"` + good.GUID + `","envelope":{"mailFrom":{"email":"Test <test@example.org>"},"rcptTo":[{"email":"a@example.net"}]}}`, setForbiddenMailFrom},
 		{`{"identityId":"` + ident + `","emailId":"` + good.GUID + `","envelope":{"mailFrom":{"email":"test@example.org","parameters":{"HOLDFOR":"60"}},"rcptTo":[{"email":"a@example.net"}]}}`, setInvalidProperties},
 		{`{"identityId":"` + ident + `","emailId":"` + good.GUID + `","envelope":{"mailFrom":{"email":"test@example.org"},"rcptTo":[{"email":"not an address"}]}}`, setInvalidRecipients},
 		{`{"identityId":"` + ident + `","emailId":"` + good.GUID + `","sendAt":"2030-01-01T00:00:00Z"}`, setInvalidProperties},

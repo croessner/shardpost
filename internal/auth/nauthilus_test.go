@@ -33,25 +33,40 @@ func fakeIntrospect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// fakeLookup answers a lookup without a password (mode=no-auth): every
+// alias resolves to alice, bob is an account of his own, temp fails.
+func fakeLookup(w http.ResponseWriter, user string) {
+	switch {
+	case user == "bob@example.org":
+		w.Header().Set("Auth-User", "bob@example.org")
+		writeJSON(w, map[string]any{"ok": true, "account_field": "account", "attributes": map[string]any{"account": []string{"bob@example.org"}}})
+	case user == "temp@example.org":
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":"Temporary server problem, try again later"}`))
+	case strings.HasPrefix(strings.ToLower(user), "alias") || user == "alice@example.org":
+		w.Header().Set("Auth-User", "alice@example.org")
+		writeJSON(w, map[string]any{"ok": true, "account_field": "account", "attributes": map[string]any{"account": []string{"alice@example.org"}}})
+	default:
+		w.Header().Set("Auth-Status", "Invalid login or password")
+		w.WriteHeader(403)
+		_, _ = w.Write([]byte("null"))
+	}
+}
+
 // fakeAuthJSON answers POST /api/v1/auth/json for the decoded request.
 func fakeAuthJSON(w http.ResponseWriter, r *http.Request, req map[string]any) {
 	w.Header().Set("X-Nauthilus-Session", "sess-1")
 
 	user, _ := req["username"].(string)
 
+	if r.URL.Query().Get("mode") == "no-auth" {
+		fakeLookup(w, user)
+
+		return
+	}
+
 	pw, _ := req["password"].(string)
 	switch {
-	case r.URL.Query().Get("mode") == "no-auth":
-		if strings.HasPrefix(strings.ToLower(user), "alias") || user == "alice@example.org" {
-			w.Header().Set("Auth-User", "alice@example.org")
-			writeJSON(w, map[string]any{"ok": true, "account_field": "account", "attributes": map[string]any{"account": []string{"alice@example.org"}}})
-
-			return
-		}
-
-		w.Header().Set("Auth-Status", "Invalid login or password")
-		w.WriteHeader(403)
-		_, _ = w.Write([]byte("null"))
 	case user == "alice" && pw == "secret", user == "alice" && pw == "tok-123" && req["method"] == "xoauth2":
 		writeJSON(w, map[string]any{"ok": true, "account_field": "account", "backend": 2, "attributes": map[string]any{"account": []string{"Alice@Example.org"}, "mailShard": []string{"a"}}})
 	case user == "temp":
@@ -199,6 +214,34 @@ func testNauthilusBearer(t *testing.T, f *nauthilusFixture) {
 
 	if _, err = n2.Authenticate(ctx, Request{Token: "bad", Mechanism: "OAUTHBEARER"}); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
+	}
+
+	testNauthilusIntrospectedUserName(t, n2)
+}
+
+// testNauthilusIntrospectedUserName: a user name sent with an introspected
+// token (IMAP XOAUTH2, OAUTHBEARER) is an alias or address as often as the
+// canonical account; it counts when it resolves to the token's account.
+func testNauthilusIntrospectedUserName(t *testing.T, n *Nauthilus) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	for _, user := range []string{"alice@example.org", "ALICE@example.org", "alias1@example.org", "Alias2@Example.ORG"} {
+		res, err := n.Authenticate(ctx, Request{Username: user, Token: "good-token", Mechanism: "XOAUTH2", Protocol: "imap"})
+		if err != nil || res.Account != "alice@example.org" {
+			t.Fatalf("user name %q with alice's token: %v %v", user, res, err)
+		}
+	}
+
+	for _, user := range []string{"bob@example.org", "nobody@example.org"} {
+		if _, err := n.Authenticate(ctx, Request{Username: user, Token: "good-token", Mechanism: "XOAUTH2", Protocol: "imap"}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("user name %q with alice's token: %v", user, err)
+		}
+	}
+
+	if _, err := n.Authenticate(ctx, Request{Username: "temp@example.org", Token: "good-token", Mechanism: "XOAUTH2", Protocol: "imap"}); !errors.Is(err, ErrTemporary) {
+		t.Fatalf("user name lookup failing temporarily: %v", err)
 	}
 }
 

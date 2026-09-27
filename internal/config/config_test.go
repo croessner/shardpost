@@ -45,6 +45,34 @@ func TestRejectInvalid(t *testing.T) {
 		})
 	}
 }
+// TestIntrospectionNeedsItsClient: a bearer mode that introspects needs
+// the endpoint, and an introspection client needs its secret; either gap
+// would otherwise surface as every bearer login failing at runtime.
+func TestIntrospectionNeedsItsClient(t *testing.T) {
+	for name, body := range map[string]string{
+		"introspect without url": "nauthilus:\n  bearer_mode: introspect",
+		"client without secret":  "nauthilus:\n  introspect_url: https://idp.example.org/oidc/introspect\n  introspect_client_id: mail",
+		"no client at all":       "nauthilus:\n  introspect_url: https://idp.example.org/oidc/introspect",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(configFile(t, body)); err == nil {
+				t.Fatal("accepted incomplete introspection settings")
+			}
+		})
+	}
+
+	for name, body := range map[string]string{
+		"own client":     "nauthilus:\n  bearer_mode: introspect\n  introspect_url: https://idp.example.org/oidc/introspect\n  introspect_client_id: mail\n  introspect_client_secret: s",
+		"service client": "nauthilus:\n  introspect_url: https://idp.example.org/oidc/introspect\n  oidc_client_id: svc\n  oidc_client_secret: s",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(configFile(t, body)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestInvalidEnv(t *testing.T) {
 	for key, value := range map[string]string{"MAX_CONNS_PER_IP": "wrong", "INSECURE_AUTH": "yes", "MBOX_SHARD_SIZE": "4294967296"} {
 		t.Run(key, func(t *testing.T) {

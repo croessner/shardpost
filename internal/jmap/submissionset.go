@@ -308,7 +308,9 @@ func (r *submissionRun) envelopeOf(given *envelope, hdr textproto.Header, ident 
 		return nil, serr
 	}
 
-	if _, err := mail.ParseAddress(env.MailFrom.Email); err != nil {
+	// A bare addr-spec only, as for the recipients: a display name or
+	// comment would otherwise reach MAIL FROM verbatim.
+	if a, err := mail.ParseAddress(env.MailFrom.Email); err != nil || a.Address != env.MailFrom.Email {
 		return nil, &setError{Type: setForbiddenMailFrom, Description: "not an address: " + env.MailFrom.Email}
 	}
 

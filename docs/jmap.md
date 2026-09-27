@@ -630,7 +630,14 @@ without a password. It does that in either `nauthilus.bearer_mode`: in
 `password` mode only for a token without a user name — a JMAP Bearer —
 while an IMAP XOAUTH2 or OAUTHBEARER token, which carries one, still
 goes to Nauthilus as before; in `introspect` mode for every token.
-Without `introspect_url` a Bearer login is refused. The introspection
+A user name that comes with an introspected token — SASL XOAUTH2 and
+OAUTHBEARER carry one, often an alias or an address rather than the
+canonical account — counts when it names the token's account or
+resolves to it in a lookup without a password; a name that resolves to
+another account, or to none, is refused. `introspect` mode without
+`introspect_url`, and an introspection client without its secret, are
+refused at startup; in `password` mode without `introspect_url` a
+Bearer login without a user name is refused. The introspection
 endpoint is asked with `nauthilus.introspect_client_id` and
 `introspect_client_secret` (or `_file`), falling back to
 `oidc_client_id`/`oidc_client_secret`: a client that may introspect the
