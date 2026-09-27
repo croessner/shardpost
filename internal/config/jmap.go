@@ -57,6 +57,11 @@ type JMAP struct {
 	// more. Shared accounts follow server.shared_prefix and
 	// server.public_prefix: an empty prefix switches that namespace off.
 	MaxSharedAccounts int64 `mapstructure:"max_shared_accounts" env:"JMAP_MAX_SHARED_ACCOUNTS" validate:"gte=0"`
+	// MaxSharedMailboxes bounds the mailboxes one shared account examines
+	// (the user's pointers to one owner, or the visible public folders)
+	// and the pointers the session resource examines in all; 0 takes the
+	// built-in default. What lies beyond is left out and logged.
+	MaxSharedMailboxes int64 `mapstructure:"max_shared_mailboxes" env:"JMAP_MAX_SHARED_MAILBOXES" validate:"gte=0"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
 	// Submission configures sending (EmailSubmission) and identities.

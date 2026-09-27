@@ -1092,17 +1092,20 @@ func (u *User) SetACL(name, identifier, rights string) error {
 		u.mailboxChange(model.OpUpdated, b, canon)
 	}
 
+	gen := b.ACLGen
 	u.mu.Unlock()
 
-	u.syncPointer(canon, identifier, rights)
+	u.syncPointer(canon, identifier, rights, gen)
 
 	return nil
 }
 
 // syncPointer writes or removes the grantee's shared pointer ("anyone"
 // has none, and public folders have none at all: they are found through
-// their namespace).
-func (u *User) syncPointer(canon, identifier, rights string) {
+// their namespace). The pointer carries the ACL generation it was
+// written for, as in the RADOS store: every change of the grantee's
+// rights rewrites it.
+func (u *User) syncPointer(canon, identifier, rights string, gen uint64) {
 	if identifier == identAnyone || model.IsPublic(u.name) {
 		return
 	}
@@ -1112,10 +1115,14 @@ func (u *User) syncPointer(canon, identifier, rights string) {
 	defer g.mu.Unlock()
 
 	key := u.name + "/" + canon
-	if rights == "" {
+
+	switch cur, ok := g.shared[key]; {
+	case rights == "":
 		delete(g.shared, key)
-	} else if _, ok := g.shared[key]; !ok {
-		g.shared[key] = &model.SharedRef{Owner: u.name, Mailbox: canon}
+	case !ok:
+		g.shared[key] = &model.SharedRef{Owner: u.name, Mailbox: canon, Gen: gen}
+	case cur.Gen < gen:
+		cur.Gen = gen
 	}
 }
 
@@ -1194,7 +1201,7 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 	u.mu.Unlock()
 
 	if changed || rights != "" {
-		u.syncPointer(canon, identifier, rights)
+		u.syncPointer(canon, identifier, rights, gen)
 	}
 
 	return rights, gen, nil

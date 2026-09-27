@@ -137,9 +137,10 @@ func emailGet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 // emailState reads the account state and brings the locator up to it,
 // in that order: the locator then covers at least what the state claims.
 //
-// In a shared account the rights are read afresh after the state, and
-// the locator finds messages only in the mailboxes the user may read,
-// with its own \Seen in a public folder.
+// In a shared account the locator finds messages only in the mailboxes
+// the user may read — as the call read them when it opened the account —
+// with its own \Seen in a public folder. The locator is kept with the
+// account for the rest of the call (see blobReadable).
 func emailState(sess *session) (string, *locator, *methodError) {
 	seq, err := sess.user.AccountState()
 	if err != nil {
@@ -147,9 +148,6 @@ func emailState(sess *session) (string, *locator, *methodError) {
 	}
 
 	a := sess.current()
-	if err := a.load(); err != nil {
-		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
-	}
 
 	loc, err := newLocator(sess.user)
 	if err != nil {
@@ -164,6 +162,8 @@ func emailState(sess *session) (string, *locator, *methodError) {
 	if err := loc.catchUp(seq); err != nil {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
+
+	a.loc = loc
 
 	return a.state(stateEmails, seq), loc, nil
 }

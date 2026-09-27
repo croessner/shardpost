@@ -171,7 +171,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	out := apiResponse{
 		MethodResponses: s.runCalls(r.Context(), sess, req),
-		SessionState:    s.session(sess, s.baseURL(r)).State,
+		SessionState:    s.session(sess, s.baseURL(r), false).State,
 	}
 
 	if req.CreatedIDs != nil || len(sess.created) > 0 {

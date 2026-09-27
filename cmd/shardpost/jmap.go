@@ -89,6 +89,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 			SharedPrefix: settings.Server.SharedPrefix,
 			PublicPrefix: settings.Server.PublicPrefix,
 			MaxAccounts:  int(settings.JMAP.MaxSharedAccounts),
+			MaxMailboxes: int(settings.JMAP.MaxSharedMailboxes),
 		},
 	})
 

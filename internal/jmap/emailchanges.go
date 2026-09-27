@@ -176,12 +176,9 @@ func readWindow(sess *session, args json.RawMessage) (*window, *methodError) {
 		return nil, merr
 	}
 
-	// The rights are read first: the state token of a shared account is
-	// checked against what the user may read now.
+	// The state token of a shared account is checked against what the
+	// user may read now, as the call read it when it opened the account.
 	a := sess.current()
-	if err := a.load(); err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
-	}
 
 	since, ok := a.parseState(stateEmails, req.SinceState)
 	if !ok {

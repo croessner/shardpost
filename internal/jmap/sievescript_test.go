@@ -540,7 +540,7 @@ func TestSieveScriptStateAndLookup(t *testing.T) {
 func TestSieveScriptCapability(t *testing.T) {
 	s, _ := sieveServer(t)
 
-	got := s.session(&session{account: "test"}, "https://mail.example.org")
+	got := s.session(&session{account: "test"}, "https://mail.example.org", true)
 	if !strings.HasPrefix(string(got.Capabilities[CapSieve]), `{"implementation":"ShardPost`) || got.PrimaryAccounts[CapSieve] != "test" {
 		t.Errorf("the session lists %s", got.Capabilities[CapSieve])
 	}
@@ -565,7 +565,7 @@ func TestSieveScriptCapability(t *testing.T) {
 // in the session and the methods are unknown.
 func TestSieveScriptNotOffered(t *testing.T) {
 	off := newTestServer(t)
-	if _, ok := off.session(&session{account: "test"}, "https://mail.example.org").Capabilities[CapSieve]; ok {
+	if _, ok := off.session(&session{account: "test"}, "https://mail.example.org", true).Capabilities[CapSieve]; ok {
 		t.Error("the capability is offered without the options")
 	}
 

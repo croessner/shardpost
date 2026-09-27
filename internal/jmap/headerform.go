@@ -319,17 +319,32 @@ func blobReadable(sess *session, id string) (bool, error) {
 		return false, nil
 	}
 
-	_, loc, merr := emailState(sess)
-	if merr != nil {
-		return false, errors.New(merr.Description)
+	a := sess.current()
+	if a.loc == nil {
+		if _, _, merr := emailState(sess); merr != nil {
+			return false, errors.New(merr.Description)
+		}
 	}
 
-	hits, err := loc.resolve([]string{guid})
+	hits, err := a.loc.resolve([]string{guid})
+	if err != nil || hits[guid] != nil {
+		return hits[guid] != nil, err
+	}
+
+	// A message this call stored after the locator was read is not in
+	// it yet: bring it up to now, once, and look again.
+	seq, err := sess.user.AccountState()
 	if err != nil {
 		return false, err
 	}
 
-	return hits[guid] != nil, nil
+	if err := a.loc.catchUp(seq); err != nil {
+		return false, err
+	}
+
+	hits, err = a.loc.resolve([]string{guid})
+
+	return hits[guid] != nil, err
 }
 
 // mayReadBlob is blobReadable as an error: ErrNoBlob for a blob the user

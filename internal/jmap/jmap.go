@@ -239,6 +239,9 @@ type Server struct {
 	closeOnce sync.Once
 	// noShardAttr logs a shard gate without its attribute once.
 	noShardAttr sync.Once
+	// capLogged remembers the shared accounts already logged as cut at
+	// jmap.max_shared_mailboxes.
+	capLogged sync.Map
 }
 
 // New builds the server and its routes.

@@ -119,10 +119,8 @@ func stateAfter(sess *session, before string, out *setResponse) string {
 	// this call's own writes may have changed (a subscription, a
 	// destroyed mailbox); the client applied them already.
 	a := sess.current()
-	if !a.personal {
-		if _, err := a.tree(); err != nil {
-			return before
-		}
+	if err := a.load(); err != nil {
+		return before
 	}
 
 	return a.state(stateMailboxes, last)
@@ -461,6 +459,8 @@ func mailboxUpdates(sess *session, req *mailboxSetRequest, out *setResponse) {
 		}
 
 		out.Updated[id] = nil
+
+		reloadAfterWrite(sess)
 	}
 }
 
@@ -502,6 +502,21 @@ func updateMailbox(sess *session, t *tree, mb *model.Mailbox, raw map[string]jso
 	}
 
 	return nil
+}
+
+// reloadAfterWrite reads a shared account's mailboxes again after a
+// write of this call changed them — a rename moves names, a destruction
+// takes a mailbox away, a subscription changes the user's view — so the
+// next object of the same call sees the account as it is now. Once per
+// write, not per object: an object that fails reads nothing again. A
+// failed read keeps the view the call had; the next write or call reads
+// it again.
+func reloadAfterWrite(sess *session) {
+	if a := sess.current(); !a.personal {
+		if err := a.load(); err != nil {
+			sess.log.Warn("jmap: shared account not read again after a write", "err", err)
+		}
+	}
 }
 
 // mayUpdate checks the rights an update of a shared mailbox needs before
@@ -718,6 +733,8 @@ func mailboxDestroys(sess *session, req *mailboxSetRequest, out *setResponse) {
 		}
 
 		out.Destroyed = append(out.Destroyed, id)
+
+		reloadAfterWrite(sess)
 	}
 }
 

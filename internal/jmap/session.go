@@ -49,7 +49,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	sess := sessionOf(r)
 	s.provision(sess)
 
-	out := s.session(sess, s.baseURL(r))
+	out := s.session(sess, s.baseURL(r), true)
 
 	w.Header().Set(fieldContentType, "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -60,8 +60,13 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // session builds the session resource of an account: the personal
-// account, and the accounts other namespaces share with it.
-func (s *Server) session(sess *session, base string) *Session {
+// account, and with shared the accounts other namespaces share with it.
+// Every API response carries the state of the resource, and building the
+// shared accounts opens other namespaces, so the state does not hash
+// them: it hashes the personal part and a fingerprint of the sharing
+// (sharingFingerprint), which is cheap to read and changes whenever the
+// shared accounts can.
+func (s *Server) session(sess *session, base string, shared bool) *Session {
 	account := sess.account
 	id := accountID(account)
 
@@ -104,14 +109,13 @@ func (s *Server) session(sess *session, base string) *Session {
 		out.Capabilities[CapWebPushVAPID] = mustRaw(map[string]string{"applicationServerKey": s.o.Push.VAPIDPublicKey})
 	}
 
-	// The state is a hash of the object, so an account that appears or
-	// goes, or one that becomes read-only, changes it, and a client
-	// fetches the session again (RFC 8620 2).
-	for _, a := range s.sharedAccounts(sess) {
-		out.Accounts[a.id] = s.sharedAccountObject(a)
-	}
+	out.State = sessionState(out, s.sharingFingerprint(sess))
 
-	out.State = sessionState(out)
+	if shared {
+		for _, a := range s.sharedAccounts(sess) {
+			out.Accounts[a.id] = s.sharedAccountObject(a)
+		}
+	}
 
 	return out
 }
@@ -238,11 +242,11 @@ func accountID(account string) string { return account }
 // which is what RFC 8620 2 asks of it. It is a hash of the object rather
 // than a counter: there is no state to keep, and two servers of the same
 // deployment compute the same value for the same account.
-func sessionState(s *Session) string {
+func sessionState(s *Session, sharing string) string {
 	cp := *s
 	cp.State = ""
 
-	sum := sha256.Sum256(mustRaw(&cp))
+	sum := sha256.Sum256(append(mustRaw(&cp), sharing...))
 
 	return hex.EncodeToString(sum[:8])
 }
