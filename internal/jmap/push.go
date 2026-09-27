@@ -29,6 +29,9 @@ const (
 // pushTypes are the types this server pushes changes of.
 var pushTypes = []string{typeMailbox, typeEmail, typeThread, typeEmailDelivery}
 
+// typeStateChange is the @type of a StateChange.
+const typeStateChange = "StateChange"
+
 // stateChange is the StateChange object (RFC 8620 7.1).
 type stateChange struct {
 	Type    string                       `json:"@type"`
@@ -116,16 +119,6 @@ func filterTypes(types, want map[string]bool) map[string]bool {
 	}
 
 	return out
-}
-
-// newStateChange builds the StateChange of one account.
-func newStateChange(account string, types map[string]bool, seq uint64) *stateChange {
-	ts := map[string]string{}
-	for t := range types {
-		ts[t] = stateString(seq)
-	}
-
-	return &stateChange{Type: "StateChange", Changed: map[string]map[string]string{accountID(account): ts}}
 }
 
 // parseTypes reads a list of type names ("*" or empty: all).
@@ -224,16 +217,29 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if id, perr := strconv.ParseUint(r.Header.Get("Last-Event-ID"), 10, 64); perr == nil && id <= last {
-		last = id
+	lastID, digest, known := parsePushState(r.Header.Get("Last-Event-ID"))
+	if known && lastID <= last {
+		last = lastID
+	} else {
+		known = false
 	}
+
+	// The shared accounts and the share notifications as they are now;
+	// a client that reconnects with an event id whose digest of them is
+	// another one is sent all of their states at once.
+	shared := newSharedPush(s, sess, s.watches, s.o.Push.MaxSharedWatches)
+	defer shared.close()
 
 	w.Header().Set(fieldContentType, "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	stream := &eventStream{w: w, rc: http.NewResponseController(w), sess: sess, p: p, last: last}
+	stream := &eventStream{w: w, rc: http.NewResponseController(w), sess: sess, p: p, last: last, shared: shared}
+	if known && digest != shared.digest() {
+		stream.missed = shared.all()
+	}
+
 	stream.flush()
 
 	s.runEvents(r, stream)
@@ -247,6 +253,10 @@ type eventStream struct {
 	p    *eventParams
 	ping *pingTimer
 	last uint64
+	// shared follows the shared accounts and the share notifications;
+	// missed are their states a reconnecting client is sent first.
+	shared *sharedPush
+	missed map[string]map[string]string
 }
 
 // pingTimer fires when the ping interval has passed since the last event.
@@ -305,26 +315,41 @@ func (s *Server) runEvents(r *http.Request, st *eventStream) {
 	defer st.ping.stop()
 
 	// Whatever happened between Last-Event-ID and now is sent first.
-	if done, ok := st.check(); !ok || done {
+	if done, ok := st.check(false); !ok || done {
 		return
 	}
 
 	for {
-		select {
-		case <-r.Context().Done():
+		full, ok := st.wait(r, s.closing, feed, poll)
+		if !ok {
 			return
-		case <-s.closing:
-			return
-		case <-st.ping.c():
-			if !st.write("ping", "", fmt.Sprintf(`{"interval":%d}`, st.p.ping)) {
-				return
-			}
-		case <-feed.Events():
-		case <-poll.C:
 		}
 
-		if done, ok := st.check(); !ok || done {
+		if done, ok := st.check(full); !ok || done {
 			return
+		}
+	}
+}
+
+// wait sends pings until something may have changed. full reports the
+// poll, which checks everything; ok is false when the stream is to end.
+func (st *eventStream) wait(r *http.Request, closing <-chan struct{}, feed *accountFeed, poll *time.Ticker) (full, ok bool) {
+	for {
+		select {
+		case <-r.Context().Done():
+			return false, false
+		case <-closing:
+			return false, false
+		case <-st.ping.c():
+			if !st.write("ping", "", fmt.Sprintf(`{"interval":%d}`, st.p.ping)) {
+				return false, false
+			}
+		case <-feed.Events():
+			return false, true
+		case <-st.shared.Wake():
+			return false, true
+		case <-poll.C:
+			return true, true
 		}
 	}
 }
@@ -338,6 +363,9 @@ type accountFeed struct {
 	events chan struct{}
 	stop   chan struct{}
 	done   chan struct{}
+	// notify, when set, is called for a change instead of the channel
+	// firing; it must not block (see watchHub).
+	notify func()
 }
 
 // rewatchDelay is how long the feed waits before it sets a broken watch
@@ -346,8 +374,12 @@ const rewatchDelay = time.Second
 
 // newAccountFeed starts the feed of an account. A store without account
 // watches gives a feed that never fires; the poll covers that.
-func newAccountFeed(u model.User) *accountFeed {
-	f := &accountFeed{events: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
+func newAccountFeed(u model.User) *accountFeed { return newNotifyingFeed(u, nil) }
+
+// newNotifyingFeed is newAccountFeed that calls notify for a change
+// (nil: the Events channel fires).
+func newNotifyingFeed(u model.User, notify func()) *accountFeed {
+	f := &accountFeed{events: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}), notify: notify}
 
 	aw, ok := u.(model.AccountWatcher)
 	if !ok {
@@ -403,6 +435,12 @@ func (f *accountFeed) follow(watch model.Watch) bool {
 
 // fire signals a change, coalescing with one not yet taken.
 func (f *accountFeed) fire() {
+	if f.notify != nil {
+		f.notify()
+
+		return
+	}
+
 	select {
 	case f.events <- struct{}{}:
 	default:
@@ -423,37 +461,104 @@ func (f *accountFeed) Close() {
 	<-f.done
 }
 
-// check sends a state event when the account has changed. done reports
-// that the stream is to end after it (closeafter=state); ok is false when
-// the client is gone.
-func (st *eventStream) check() (done, ok bool) {
+// check sends a state event when something the user sees has changed:
+// the personal account, a shared account (the watched ones that fired,
+// and every one when full, on the poll), or the share notifications
+// (when full). done reports that the stream is to end after it
+// (closeafter=state); ok is false when the client is gone.
+func (st *eventStream) check(full bool) (done, ok bool) {
+	changed := map[string]map[string]string{}
+
+	for id, ts := range st.missed {
+		changed[id] = ts
+	}
+
+	st.missed = nil
+
+	own := accountID(st.sess.account)
+
 	for {
-		types, seq, err := changedTypes(st.sess.user, st.last, st.p.types)
+		types, seq, err := changedTypes(st.sess.user, st.last, nil)
 		if err != nil {
 			st.sess.log.Warn("jmap: event source", "err", err)
 
-			return false, true
+			break
 		}
 
 		if seq == st.last {
-			return false, true
+			break
 		}
 
 		st.last = seq
 
-		if len(types) == 0 {
-			continue
-		}
+		for t := range types {
+			if changed[own] == nil {
+				changed[own] = map[string]string{}
+			}
 
-		data, _ := json.Marshal(newStateChange(st.sess.account, types, seq))
-		if !st.write("state", stateString(seq), string(data)) {
-			return false, false
-		}
-
-		if st.p.closeAfter {
-			return true, true
+			changed[own][t] = ""
 		}
 	}
+
+	for t := range changed[own] {
+		if t != typeShareNotification {
+			changed[own][t] = stateString(st.last)
+		}
+	}
+
+	mergeChanges(changed, st.shared.check(full))
+
+	sc := filterChange(changed, st.p.types)
+	if sc == nil {
+		return false, true
+	}
+
+	data, _ := json.Marshal(sc)
+	if !st.write("state", pushState(st.last, st.shared.digest()), string(data)) {
+		return false, false
+	}
+
+	return st.p.closeAfter, true
+}
+
+// mergeChanges adds the entries of more to changed; a later state of a
+// type replaces an earlier one.
+func mergeChanges(changed, more map[string]map[string]string) {
+	for id, ts := range more {
+		if changed[id] == nil {
+			changed[id] = map[string]string{}
+		}
+
+		for t, s := range ts {
+			changed[id][t] = s
+		}
+	}
+}
+
+// filterChange builds the StateChange of the types a listener asked for
+// (nil: all), or nil when none of them changed.
+func filterChange(changed map[string]map[string]string, want map[string]bool) *stateChange {
+	sc := &stateChange{Type: typeStateChange, Changed: map[string]map[string]string{}}
+
+	for id, ts := range changed {
+		for t, s := range ts {
+			if s == "" || (want != nil && !want[t]) {
+				continue
+			}
+
+			if sc.Changed[id] == nil {
+				sc.Changed[id] = map[string]string{}
+			}
+
+			sc.Changed[id][t] = s
+		}
+	}
+
+	if len(sc.Changed) == 0 {
+		return nil
+	}
+
+	return sc
 }
 
 // write sends one event and flushes it.

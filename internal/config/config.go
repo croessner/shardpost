@@ -340,6 +340,8 @@ var defaults = []struct {
 	{"jmap.push.event_poll_seconds", 0},
 	{"jmap.push.allow_internal_endpoints", false},
 	{"jmap.push.check_accounts", false},
+	{"jmap.push.max_shared_watches", 0},
+	{"jmap.push.worker_max_watches", 0},
 	{"jmap.submission.relay_addr", ""},
 	{"jmap.submission.helo", ""},
 	{"jmap.submission.starttls", true},

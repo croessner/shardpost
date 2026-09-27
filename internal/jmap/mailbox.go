@@ -407,12 +407,12 @@ func missingIDs(t *tree, ids *[]string) []string {
 // /changes. The other order would claim a state that does not cover
 // what the result already shows.
 func mailboxState(sess *session) (string, *tree, *methodError) {
-	seq, err := sess.user.AccountState()
+	a := sess.current()
+
+	seq, _, err := a.visibleSeq()
 	if err != nil {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
-
-	a := sess.current()
 
 	t, err := a.tree()
 	if err != nil {
@@ -522,12 +522,9 @@ func collectMailboxChanges(sess *session, sinceState string, since uint64,
 	}
 
 	set := &changeSet{kind: map[string]string{}, counts: map[string]bool{}}
-	last := since
 
 	for i := range entries {
 		e := &entries[i]
-		last = e.Seq
-
 		if hidden(a, e) {
 			continue
 		}
@@ -535,6 +532,11 @@ func collectMailboxChanges(sess *session, sinceState string, since uint64,
 		if merr := set.add(e, t); merr != nil {
 			return nil, merr
 		}
+	}
+
+	last, err := a.changesSeq(since, entries, full)
+	if err != nil {
+		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
 	out.NewState = a.state(stateMailboxes, last)

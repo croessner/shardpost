@@ -199,9 +199,10 @@ func readWindow(sess *session, args json.RawMessage) (*window, *methodError) {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descLogTrimmed}
 	}
 
-	w := &window{sinceState: req.SinceState, last: since, full: len(entries) == limit, fingerprint: a.fingerprint(stateEmails)}
-	if len(entries) > 0 {
-		w.last = entries[len(entries)-1].Seq
+	w := &window{sinceState: req.SinceState, full: len(entries) == limit, fingerprint: a.fingerprint(stateEmails)}
+
+	if w.last, err = a.changesSeq(since, entries, w.full); err != nil {
+		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
 	if w.fates, merr = emailWindow(a, entries); merr != nil {

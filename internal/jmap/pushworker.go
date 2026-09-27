@@ -45,6 +45,15 @@ type WorkerOptions struct {
 	// VAPIDPublicKey is the key the worker signs with; a subscription made
 	// under another key is destroyed (RFC 9749 5).
 	VAPIDPublicKey string
+	// Sharing are the shared accounts the front-ends offer, with their
+	// bounds; the worker pushes the changes of the ones an account has
+	// access to. Both prefixes empty: none.
+	Sharing SharingOptions
+	// MaxSharedWatches bounds the shared accounts one account's watcher
+	// watches (the others are checked on its poll), and MaxWatches the
+	// namespaces the worker watches for shared accounts in all, however
+	// many accounts share them (0: DefaultWorker's).
+	MaxSharedWatches, MaxWatches int
 	// Scan is how often the subscriptions are read again, Verify how often
 	// the verification queue is read, Poll how often a watched account is
 	// checked without a notification, Coalesce how long changes are
@@ -57,6 +66,7 @@ type WorkerOptions struct {
 var DefaultWorker = WorkerOptions{
 	Scan: 30 * time.Second, Verify: 2 * time.Second, Poll: time.Minute, Coalesce: time.Second,
 	LeaseTTL: 90 * time.Second, AccountCheck: time.Hour,
+	MaxSharedWatches: DefaultPush.MaxSharedWatches, MaxWatches: 1000,
 }
 
 // Bounds of the account check: accounts looked up per scan, denials in a
@@ -82,9 +92,19 @@ func workerDefaults(o WorkerOptions) WorkerOptions {
 		}
 	}
 
+	if o.MaxSharedWatches <= 0 {
+		o.MaxSharedWatches = d.MaxSharedWatches
+	}
+
+	if o.MaxWatches <= 0 {
+		o.MaxWatches = d.MaxWatches
+	}
+
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
+
+	o.Sharing = sharingDefaults(o.Sharing)
 
 	return o
 }
@@ -127,6 +147,11 @@ type worker struct {
 	checked    map[string]*accountCheck
 	leaseUntil time.Time
 	wg         sync.WaitGroup
+	// srv carries the sharing settings the shared accounts are built
+	// with, the way a front-end builds them; watches are the watches on
+	// the namespaces of shared accounts, one each for all accounts.
+	srv     *Server
+	watches *watchHub
 }
 
 // RunPushWorker runs the push worker until ctx ends.
@@ -137,7 +162,9 @@ func RunPushWorker(ctx context.Context, o WorkerOptions) error {
 	}
 
 	w := &worker{o: o, subs: map[string][]*pushRecord{}, watching: map[string]*watcher{},
-		backoff: map[string]time.Time{}, checked: map[string]*accountCheck{}}
+		backoff: map[string]time.Time{}, checked: map[string]*accountCheck{},
+		srv:     &Server{o: Options{Store: o.Store, Log: o.Log, Sharing: o.Sharing}},
+		watches: newWatchHub(o.Store, o.MaxWatches, o.Log)}
 
 	renew := time.NewTicker(o.LeaseTTL / 3)
 	defer renew.Stop()
@@ -608,8 +635,10 @@ func sanitize(err error) error {
 	return err
 }
 
-// watchAccount follows one account and pushes its changes. A watcher that
-// cannot start takes itself out, and the next scan starts it again.
+// watchAccount follows one account and pushes its changes: those of its
+// own account, and those of the shared accounts it has access to. A
+// watcher that cannot start takes itself out, and the next scan starts
+// it again.
 func (w *worker) watchAccount(ctx context.Context, account string, self *watcher) {
 	defer w.wg.Done()
 	defer w.forget(account, self)
@@ -622,12 +651,15 @@ func (w *worker) watchAccount(ctx context.Context, account string, self *watcher
 	}
 	defer u.Close()
 
-	last, err := w.startState(u, account)
+	f, err := w.startFollow(u, account)
 	if err != nil {
 		w.o.Log.Warn("push worker: account state", "account", account, "err", err)
 
 		return
 	}
+	defer f.close()
+
+	shared := f.shared
 
 	feed := newAccountFeed(u)
 	defer feed.Close()
@@ -636,18 +668,23 @@ func (w *worker) watchAccount(ctx context.Context, account string, self *watcher
 	poll := time.NewTicker(w.o.Poll + rand.N(w.o.Poll/4+1))
 	defer poll.Stop()
 
-	pending := map[string]map[string]bool{} // subscription id -> types not yet pushed
+	pending := map[string]map[string]map[string]string{} // subscription id -> account -> type -> state
 
 	trigger := make(chan struct{}, 1)
 	trigger <- struct{}{} // what happened while no worker watched
 
 	for {
+		full := false
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-feed.Events():
+		case <-shared.Wake():
 		case <-poll.C:
+			full = true
 		case <-trigger:
+			full = true
 		}
 
 		// Changes that come in a burst — a COPY of many messages, a
@@ -658,11 +695,79 @@ func (w *worker) watchAccount(ctx context.Context, account string, self *watcher
 		case <-time.After(w.o.Coalesce):
 		}
 
-		if next := w.pushChanges(ctx, u, account, last, pending); next != last {
-			last = next
-			w.saveState(account, last)
+		if w.pushChanges(ctx, u, account, f, full, pending) {
+			w.saveState(account, f)
 		}
 	}
+}
+
+// startFollow reads where a watcher starts: the state last pushed, and
+// the shared accounts as the session resource of the account lists
+// them, read with the views a request would open.
+func (w *worker) startFollow(u model.User, account string) (*follow, error) {
+	seen, err := w.startState(u, account)
+	if err != nil {
+		return nil, err
+	}
+
+	sess := &session{account: account, user: u, own: u, srv: w.srv, views: &views{store: w.o.Store},
+		log: w.o.Log.With("account", account)}
+
+	f := &follow{last: seen.Seq, digest: seen.Digest, views: sess.views,
+		shared: newSharedPush(w.srv, sess, w.watches, w.o.MaxSharedWatches)}
+
+	if seen.Shared != nil {
+		// What changed in the shared accounts while no worker watched.
+		f.missed = diffStates(seen.Shared, f.shared.all())
+	}
+
+	return f, nil
+}
+
+// close gives the watches and the views of a follow back.
+func (f *follow) close() {
+	f.shared.close()
+	f.views.close()
+}
+
+// follow is where one account's watcher stands: the personal state last
+// read, the shared accounts it follows, the digest of their states as
+// last saved, and the states of theirs a new watcher found changed.
+type follow struct {
+	last   uint64
+	shared *sharedPush
+	digest string
+	missed map[string]map[string]string
+	views  *views
+}
+
+// diffStates are the entries of a StateChange from the states saved to
+// the states now: the types whose state differs, every type of an
+// account that is new, and an account that is gone as revoked.
+func diffStates(was, now map[string]map[string]string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+
+	for id, ts := range now {
+		for t, s := range ts {
+			if was[id][t] != s {
+				if out[id] == nil {
+					out[id] = map[string]string{}
+				}
+
+				out[id][t] = s
+			}
+		}
+	}
+
+	for id := range was {
+		if _, ok := now[id]; !ok && id != "" {
+			if _, own := was[id][typeShareNotification]; !own {
+				out[id] = revokedStates()
+			}
+		}
+	}
+
+	return out
 }
 
 // forget takes an account watcher out of the table, if it is still the
@@ -676,44 +781,69 @@ func (w *worker) forget(account string, self *watcher) {
 	}
 }
 
+// pushSeen is what the worker keeps per account of what it last pushed:
+// the personal state, and the states of the shared accounts and the
+// share notifications with their digest. An older worker kept the
+// personal state alone, as a bare number; Shared is nil then.
+type pushSeen struct {
+	Seq    uint64                       `json:"seq"`
+	Digest string                       `json:"digest,omitempty"`
+	Shared map[string]map[string]string `json:"shared,omitempty"`
+}
+
 // startState is where a watcher starts: the state last pushed for the
 // account, unless it is gone from the log or ahead of the account.
-func (w *worker) startState(u model.User, account string) (uint64, error) {
+func (w *worker) startState(u model.User, account string) (pushSeen, error) {
 	now, err := u.AccountState()
 	if err != nil {
-		return 0, err
+		return pushSeen{}, err
 	}
 
 	raw, err := w.o.KV.Get(pushSeenKey(account))
 	if err != nil {
-		return now, nil
+		return pushSeen{Seq: now}, nil
 	}
 
-	seen, err := strconv.ParseUint(string(raw), 10, 64)
-	if err != nil || seen > now || now-seen > maxPushStateLag {
-		return now, nil
+	var seen pushSeen
+	if n, perr := strconv.ParseUint(string(raw), 10, 64); perr == nil {
+		seen.Seq = n
+	} else if json.Unmarshal(raw, &seen) != nil {
+		return pushSeen{Seq: now}, nil
+	}
+
+	if seen.Seq > now || now-seen.Seq > maxPushStateLag {
+		seen.Seq = now
 	}
 
 	return seen, nil
 }
 
-// saveState records the state last pushed for an account.
-func (w *worker) saveState(account string, seq uint64) {
-	_ = w.o.KV.Update(pushSeenKey(account), func([]byte) ([]byte, error) {
-		return []byte(strconv.FormatUint(seq, 10)), nil
-	})
+// saveState records what was last pushed for an account.
+func (w *worker) saveState(account string, f *follow) {
+	seen := pushSeen{Seq: f.last, Digest: f.digest, Shared: f.shared.all()}
+	if seen.Shared == nil {
+		seen.Shared = map[string]map[string]string{}
+	}
+
+	b, _ := json.Marshal(seen)
+
+	_ = w.o.KV.Update(pushSeenKey(account), func([]byte) ([]byte, error) { return b, nil })
 }
 
-// pushChanges reads what changed since last, adds it to what each
-// verified subscription of the account has not been sent yet, and pushes
-// that to every subscription the push service does not ask to wait for.
-// What could not be delivered stays for the next round. It returns the
-// new state.
-func (w *worker) pushChanges(ctx context.Context, u model.User, account string, last uint64,
-	pending map[string]map[string]bool,
-) uint64 {
+// pushChanges reads what changed — the account's own log from f.last,
+// the shared accounts that fired (all of them and the share
+// notifications when full) — adds it to what each verified subscription
+// of the account has not been sent yet, and pushes that to every
+// subscription the push service does not ask to wait for. What could not
+// be delivered stays for the next round. It reports whether the state
+// moved, which is then saved.
+func (w *worker) pushChanges(ctx context.Context, u model.User, account string, f *follow, full bool,
+	pending map[string]map[string]map[string]string,
+) bool {
 	subs := w.subsOf(account)
-	seq := w.collect(u, account, last, subs, pending)
+	before := f.last
+
+	queueChanges(subs, w.collect(u, account, f, full), pending)
 
 	live := map[string]bool{}
 	now := time.Now()
@@ -725,7 +855,7 @@ func (w *worker) pushChanges(ctx context.Context, u model.User, account string, 
 			continue
 		}
 
-		payload, _ := json.Marshal(newStateChange(account, pending[rec.ID], seq))
+		payload, _ := json.Marshal(&stateChange{Type: typeStateChange, Changed: pending[rec.ID]})
 		if out := w.send(ctx, rec, payload); out == webpush.Delivered || out == webpush.Gone || out == webpush.Refused {
 			delete(pending, rec.ID)
 		}
@@ -737,40 +867,69 @@ func (w *worker) pushChanges(ctx context.Context, u model.User, account string, 
 		}
 	}
 
-	return seq
+	digest := f.shared.digest()
+	moved := f.last != before || digest != f.digest
+	f.digest = digest
+
+	return moved
 }
 
-// collect reads the log from last and adds what changed to what each
-// subscription has not been sent yet; it returns the state reached.
-func (w *worker) collect(u model.User, account string, last uint64, subs []*pushRecord,
-	pending map[string]map[string]bool,
-) uint64 {
-	seq := last
+// queueChanges adds what changed to what each subscription has not been
+// sent yet, as far as its types ask for it.
+func queueChanges(subs []*pushRecord, changed map[string]map[string]string, pending map[string]map[string]map[string]string) {
+	for _, rec := range subs {
+		sc := filterChange(changed, rec.wants())
+		if sc == nil {
+			continue
+		}
+
+		if pending[rec.ID] == nil {
+			pending[rec.ID] = map[string]map[string]string{}
+		}
+
+		mergeChanges(pending[rec.ID], sc.Changed)
+	}
+}
+
+// collect reads what changed since the watcher last looked and returns
+// the StateChange entries of it.
+func (w *worker) collect(u model.User, account string, f *follow, full bool) map[string]map[string]string {
+	changed := map[string]map[string]string{}
+	own := accountID(account)
 
 	for {
-		types, next, err := changedTypes(u, seq, nil)
+		types, next, err := changedTypes(u, f.last, nil)
 		if err != nil {
 			w.o.Log.Warn("push worker: read changes", "account", account, "err", err)
 
-			return seq
+			break
 		}
 
-		if next == seq {
-			return seq
+		if next == f.last {
+			break
 		}
 
-		seq = next
+		f.last = next
 
-		for _, rec := range subs {
-			if pending[rec.ID] == nil {
-				pending[rec.ID] = map[string]bool{}
+		for t := range types {
+			if changed[own] == nil {
+				changed[own] = map[string]string{}
 			}
 
-			for t := range filterTypes(types, rec.wants()) {
-				pending[rec.ID][t] = true
-			}
+			changed[own][t] = ""
 		}
 	}
+
+	for t := range changed[own] {
+		changed[own][t] = stateString(f.last)
+	}
+
+	mergeChanges(changed, f.missed)
+	f.missed = nil
+
+	mergeChanges(changed, f.shared.check(full))
+
+	return changed
 }
 
 // subsOf are the verified subscriptions of an account.

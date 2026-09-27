@@ -341,6 +341,18 @@ func Load(u model.User, account string, lim Limits, now time.Time) (*Log, error)
 	return stored, nil
 }
 
+// State reads the state of an account's notices as it is stored, without
+// pruning: push compares it to see whether anything changed, and leaves
+// the pruning to the reads that apply the account's bounds.
+func State(u model.User, account string) (uint64, error) {
+	l, _, err := read(u, account)
+	if err != nil {
+		return 0, err
+	}
+
+	return l.Seq, nil
+}
+
 // Destroy removes the notices of the given ids and returns the ones it
 // removed; an id that is not there is left out of it.
 func Destroy(u model.User, account string, ids []string, lim Limits, now time.Time) (*Log, []string, error) {

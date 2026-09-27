@@ -106,19 +106,26 @@ func stateAfter(sess *session, before string, out *setResponse) string {
 
 	mine := touchedIDs(out)
 	last := since
+	a := sess.current()
 
 	for i := range entries {
-		if !mine[entries[i].Mailbox] {
+		switch {
+		case mine[entries[i].Mailbox]:
+			last = entries[i].Seq
+		case hidden(a, &entries[i]):
+			// Not in a shared account's state (sharedstate.go).
+		default:
 			return before
 		}
+	}
 
-		last = entries[i].Seq
+	if last == since {
+		return before
 	}
 
 	// A shared account's token carries what the user sees now, which
 	// this call's own writes may have changed (a subscription, a
 	// destroyed mailbox); the client applied them already.
-	a := sess.current()
 	if err := a.load(); err != nil {
 		return before
 	}

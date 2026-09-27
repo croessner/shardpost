@@ -22,7 +22,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 6 | `Blob/*`, `SieveScript/*` | built |
 | 6c-1 | Sharing of mail: shared mailboxes and public folders as accounts, `Email/copy` between them | built |
 | 6c-2 | `Principal/*`, `shareWith`, `ShareNotification` (RFC 9670) | built |
-| 6c-3 | Push for shared accounts | planned |
+| 6c-3 | Push for shared accounts and share notifications; shared states that move with visible changes only | built |
 
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
@@ -570,11 +570,39 @@ carries `$seen` as the shared default, as an IMAP `APPEND` or `COPY`
 does, which needs `s`. The marks of messages that are gone are cleaned
 up by the next IMAP `SELECT` of the folder, not by JMAP.
 
-**State and changes.** A shared account's state is the owner's account
-log (or the public namespace's), followed by a fingerprint of what the
-user sees: for `Mailbox` the visible mailboxes with the user's rights
-and subscriptions, for `Email` and `Thread` the readable mailboxes. The
-log records what happens to the owner's mailboxes, not what the user may
+**State and changes.** A shared account's state is a position in the
+owner's account log (or the public namespace's), followed by a
+fingerprint of what the user sees: for `Mailbox` the visible mailboxes
+with the user's rights and subscriptions, for `Email` and `Thread` the
+readable mailboxes. The position is the *visible watermark*: the newest
+log entry the user can see — about a visible mailbox, or about the
+messages of a readable one — not the head of the log. What the owner
+does in mailboxes the user cannot see therefore leaves the state where
+it is: a client is never told, through a state or a push, when or how
+much the owner works elsewhere. A `/changes` from the watermark reads
+the entries after it and leaves out the invisible ones, as before, and
+its `newState` is the watermark it reaches, the same token a `/get`
+answers.
+
+Finding the watermark means reading back to the last visible entry, so
+a cursor per user and namespace records how far the log has been read:
+the watermark, the entry read up to, and the visible set both belong
+to. It is a private server METADATA entry
+(`/private/vendor/shardpost/jmap/sharedcursor`) of the user in the
+*owner's* namespace — the entry read up to is the owner's counter, which
+the user must not read, and the user's own METADATA is readable over
+IMAP. Every request and every push follower advances it from where it
+stands and writes it back when the watermark moved, when it read 256
+entries or more, or when it started again, so the log is read once
+rather than once per request. The cursor starts
+again at the head — the one case where the state moves without a
+visible change — when the visible set changes (the state changes then
+anyway), when the log no longer reaches back to the cursor
+(`server.account_log_retention`, 10000 entries), and when more than
+16000 entries lie between the cursor and the head. Two requests that
+start it again at once agree on the one that was stored first.
+
+The log records what happens to the owner's mailboxes, not what the user may
 see of them — a grant, a revocation, a pointer that appears or goes and
 the user's own subscriptions change the answer without a log entry the
 user's view could be read from. So a `/changes` against a token whose
@@ -611,10 +639,8 @@ does not drop what a client did not ask to drop. `onSuccessDestroyOriginal` runs
 implicit `Email/set` on the source, which needs `t` and `e` there; its
 response follows the copy's under the same call id.
 
-**Not in this stage.** Push is stage 6c-3: the event source and Web
-Push report the personal account only, and a client polls a shared
-account with `/changes`. `Quota/*` is not offered for the public
-account.
+**Push** reports the shared accounts as well (stage 6c-3, see
+[Push](#push)). `Quota/*` is not offered for the public account.
 
 **Deviation from RFC 9670 1.4.** The RFC lists a shared account in the
 session only when the user subscribes to at least one of its mailboxes.
@@ -824,15 +850,19 @@ else with `forbidden`. The state counts every creation and destruction;
 `share_notifications_max` far back — an older state is
 `cannotCalculateChanges`. `/queryChanges` is `cannotCalculateChanges`.
 
-Neither principals nor notifications are pushed: a notification is not
-in the account change log, and a client that shows them fetches them
-with the session, or polls `/changes`.
+Notifications are pushed as the type `ShareNotification` of the
+personal account (see [Push](#push)); principals are not: their state is
+a hash of every principal the user can see, which costs as much to
+compute as `Principal/get`. A client that shows principals fetches them
+with the session, or asks `Principal/get` again.
 
 ## Push
 
 Push (RFC 8620 7) tells a client that something changed, never what:
-a `StateChange` naming the data types whose state moved. Both ways of
-telling it compute that from the account change log.
+a `StateChange` naming, per account, the data types whose state moved.
+Both ways of telling it compute that from the account change logs: the
+personal account's, and those of the shared accounts (see
+[Shared accounts](#shared-accounts-in-push) below).
 
 **Which types.** Every type's state is the account counter, so the
 value is the same for all of them; the types that appear say what kind
@@ -849,8 +879,14 @@ from a watch on the account object — the store notifies it after every
 record of the account change log, cluster-wide, the way IMAP IDLE learns
 of a delivery on another pod — and checks the state on its own every
 `jmap.push.event_poll_seconds` (30) in case a notification was lost.
-Each `state` event carries the state as its event id; a client that
-reconnects with `Last-Event-ID` is sent what it missed at once.
+Each `state` event carries, as its event id, the state of everything
+the user sees (RFC 8620 7.3): the personal account's state, and — when
+the user has shared accounts or share notifications — a digest of their
+states after a dot (`4711.3f9a0c21d4e8`). A client that reconnects with
+`Last-Event-ID` is sent what it missed of the personal account at once,
+and the current states of all shared accounts and of the notifications
+when the digest is no longer the current one; it compares them with its
+own and asks for the changes where they differ.
 `closeafter=state` ends the stream after one event; `ping` is clamped to
 15–900 seconds. An account may hold `maxConcurrentRequests` event
 sources open, counted apart from API requests, and shutting the server
@@ -926,6 +962,75 @@ The worker lists the account records once per scan and reads the
 verification queue every two seconds; each watched account costs it an
 open store view, a RADOS watch and a poll. That is sized for thousands
 of accounts with push subscriptions, not for millions.
+
+### Shared accounts in push
+
+Stage 6c-3. A `StateChange` names the shared accounts of the user (see
+[Sharing](#sharing)) as well, keyed by their account ids, with the same
+types as the personal account (`Mailbox`, `Email`, `Thread`,
+`EmailDelivery`) and the states a `/get` in that account answers — the
+visible watermark and the fingerprint, from the same cursor. A change in
+a mailbox the user cannot see (no `l`, or for its messages no `r`)
+wakes the follower, which reads the log, finds nothing it may report,
+and sends nothing: the state has not moved. The types are those the
+visible entries changed, as for the personal account, and those whose
+fingerprint changed: a grant or a revocation that changes the visible
+set, or a subscription the user changed from another client, is a
+`Mailbox` change (and `Email` and `Thread` when the readable set
+changed).
+
+**Which accounts.** A follower — an event source, or the push worker
+for one account with subscriptions — reads the shared accounts as the
+session resource lists them, with the same bounds
+(`jmap.max_shared_accounts`, `jmap.max_session_pointers`,
+`jmap.max_shared_mailboxes`), and reads them again when what they are
+made of changes: the fingerprint of the session state (the user's
+pointers and the public folders it sees) and the user's subscriptions,
+checked on every poll. An account that appears is named with all its
+types; the client does not know its id, and fetches the session
+resource (RFC 8620 2). An account the user lost — its last visible
+mailbox revoked, deleted, or hidden by a change of `anyone` — is named
+once with the state `revoked` for every type: no `/get` answers that
+state, so a client asks for the changes, is answered `accountNotFound`,
+and fetches the session resource. RFC 8620 has no push of the session
+state itself (a `state` event carries a `StateChange` only), so this is
+how a client that only listens learns that its accounts changed; the
+next API response's `sessionState` says it as well. A grant takes up to
+one poll to be seen: it rewrites the user's pointer, which no watch
+reports.
+
+**Share notifications** are the type `ShareNotification` of the
+personal account; their state is read on every poll (the notices live
+in METADATA, which no watch reports), so a grant's notification comes
+with the same poll that finds the grant. The state is read as stored;
+notices that expired are pruned by the next `ShareNotification/*` call,
+whose state may then be newer than the pushed one.
+
+**Watches.** A follower watches the account object of each shared
+account's namespace, as the personal one, through a hub that holds one
+watch per namespace for every follower of the process — a thousand
+users following the public folders cost one watch. A follower holds at
+most `jmap.push.max_shared_watches` (8) watches; the accounts beyond
+them, and any whose watch cannot be set up, are read on its poll
+(`jmap.push.event_poll_seconds`, 30, for an event source;
+`jmap.push.poll_seconds`, 60, for the worker). The worker watches at
+most `jmap.push.worker_max_watches` (1000) namespaces for shared
+accounts in all; beyond that, accounts are polled. A watch the store
+reports broken is set up again, and the poll covers the gap, as for the
+personal account. The watches are given back when the event source
+closes or the worker stops following the account.
+
+**Cost.** Opening an event source, or starting to follow an account in
+the worker, builds the shared accounts as fetching the session resource
+does. Afterwards a follower reads, per poll, the user's pointers, its
+public subscriptions and its notices, and per shared account due the
+cursor and the log entries since; it loads an account's mailboxes again
+only when the log shows a change of a mailbox itself. The worker keeps
+the shared states it last pushed with the personal one
+(`jmap/push/seen/<account>` in the admin store), so a worker that takes
+over pushes what changed in between; a record written before this stage
+holds the personal state alone, and the shared accounts start from
+"now".
 
 ## Identities
 
@@ -1602,8 +1707,9 @@ authentication backend, and the relay learns the account from
   is sent once the message is stored, and here nothing is. This is how
   every Sieve vacation of this server behaves.
 - Push has no `Identity`, `PushSubscription`, `Quota`,
-  `VacationResponse` or `SieveScript` type in its `StateChange`s: none of
-  them is in the account change log. A client
+  `VacationResponse`, `SieveScript` or `Principal` type in its
+  `StateChange`s: none of them is in the account change log (and a
+  principal state costs a `Principal/get`). A client
   that shows the quota fetches it again, for example when a push names
   `Email`.
 - `SieveScript`: there is no `SieveScript/changes`, a script that does
@@ -1620,8 +1726,18 @@ authentication backend, and the relay learns the account from
   account log of the public namespace, not of the account the mark
   belongs to: every reader's `Email/changes` in the public account names
   the message as updated, although only one reader's `$seen` changed.
-- Sharing (see [Sharing](#sharing)): no push for shared accounts,
-  principals or share notifications yet (stage 6c-3); the session lists
+- Push of shared accounts (see
+  [Shared accounts in push](#shared-accounts-in-push)): a new shared
+  account is seen on the next poll, not at once; the visible watermark
+  starts again at the head — a state change without a visible change —
+  when the owner's log no longer reaches back to the user's cursor or
+  more than 16000 entries lie beyond it, so an owner who works that much
+  where the user cannot see, while nobody reads the account, moves the
+  state once; a cursor stays in the owner's namespace after the user
+  loses access or is deleted (a few bytes, not cleaned up); the push
+  worker keeps the shared states it pushed in one admin record per
+  account.
+- Sharing (see [Sharing](#sharing)): the session lists
   shared accounts without regard to subscriptions (RFC 9670 1.4, see
   above); `Principal/changes` and the `/queryChanges` of principals and
   notifications answer `cannotCalculateChanges`; principals are found

@@ -192,6 +192,14 @@ type JMAPPush struct {
 	// AllowInternalEndpoints accepts push URLs inside the server's own
 	// network (an in-house push service). Off, they are refused.
 	AllowInternalEndpoints bool `mapstructure:"allow_internal_endpoints" env:"JMAP_PUSH_ALLOW_INTERNAL_ENDPOINTS"`
+	// MaxSharedWatches bounds the shared accounts one event source, and
+	// the worker for one account, watch; the others are checked on the
+	// poll. 0 = 8.
+	MaxSharedWatches int64 `mapstructure:"max_shared_watches" env:"JMAP_PUSH_MAX_SHARED_WATCHES" validate:"gte=0"`
+	// WorkerMaxWatches bounds the namespaces the worker watches for
+	// shared accounts in all; one watch serves every account that shares
+	// it. 0 = 1000.
+	WorkerMaxWatches int64 `mapstructure:"worker_max_watches" env:"JMAP_PUSH_WORKER_MAX_WATCHES" validate:"gte=0"`
 	// CheckAccounts has the worker look every account with subscriptions
 	// up in the authentication backend (hourly) and destroy the
 	// subscriptions of one it no longer knows. It needs the same backend

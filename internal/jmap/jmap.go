@@ -198,11 +198,17 @@ type PushOptions struct {
 	// own network — a push service run in-house. The worker needs the
 	// same setting to reach them.
 	AllowInternalURLs bool
+	// MaxSharedWatches bounds the shared accounts one event source (and
+	// the push worker, per account) watches; the others are checked when
+	// it polls. The watches on one namespace are shared by every event
+	// source of the process.
+	MaxSharedWatches int
 }
 
 // DefaultPush are the push settings a configuration that says nothing
 // gets.
-var DefaultPush = PushOptions{MaxSubscriptions: 16, MaxExpiry: 7 * 24 * time.Hour, EventPoll: 30 * time.Second}
+var DefaultPush = PushOptions{MaxSubscriptions: 16, MaxExpiry: 7 * 24 * time.Hour, EventPoll: 30 * time.Second,
+	MaxSharedWatches: 8}
 
 // minPushExpiry is the shortest maximum expiry RFC 8620 7.2 allows.
 const minPushExpiry = 48 * time.Hour
@@ -221,6 +227,10 @@ func pushDefaults(p PushOptions) PushOptions {
 
 	if p.EventPoll <= 0 {
 		p.EventPoll = DefaultPush.EventPoll
+	}
+
+	if p.MaxSharedWatches <= 0 {
+		p.MaxSharedWatches = DefaultPush.MaxSharedWatches
 	}
 
 	return p
@@ -247,6 +257,9 @@ type Server struct {
 	// capLogged remembers the shared accounts already logged as cut at
 	// jmap.max_shared_mailboxes.
 	capLogged sync.Map
+	// watches are the watches on the account objects of shared accounts
+	// the event sources follow, one per namespace.
+	watches *watchHub
 }
 
 // New builds the server and its routes.
@@ -270,6 +283,7 @@ func New(o Options) *Server {
 
 	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
 		inEvents: map[string]int{}, closing: make(chan struct{}), misses: newMissBudget(o.Principals.MissPerMinute)}
+	s.watches = newWatchHub(o.Store, 0, o.Log)
 
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.

@@ -285,7 +285,9 @@ and the first part of sharing (6c-1: shared mailboxes and public folders
 as accounts of the session, with the RFC 4314 rights enforced as IMAP
 enforces them, and `Email/copy` between accounts) and its second part
 (6c-2: `Principal/*`, `Mailbox.shareWith` and `ShareNotification`, RFC
-9670); push for shared accounts (6c-3) is next. See
+9670) and its third (6c-3: push for shared accounts and share
+notifications, with state tokens of shared accounts that move only with
+what the user can see). See
 [JMAP](docs/jmap.md) for what exists and what does not. What follows is the full
 target of the stage, unchanged.
 

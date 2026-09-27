@@ -218,9 +218,18 @@ func ownState(sess *session, before string, mine map[string]bool) string {
 	}
 
 	last := since
+	a := sess.current()
 
 	for i := range entries {
 		e := &entries[i]
+
+		// What a shared account's user cannot see is not in its state
+		// (sharedstate.go), so it does not stand between this call's
+		// entries.
+		if hidden(a, e) {
+			continue
+		}
+
 		if e.Kind != model.KindEmail || e.Partial || len(e.Msgs) == 0 {
 			break
 		}

@@ -86,14 +86,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		Sieve: &jmap.SieveOptions{Config: srv.sieveConfig, GlobalScripts: settings.Sieve.GlobalDir},
 		// The accounts other namespaces share, switched like the IMAP
 		// namespaces of the same name.
-		Sharing: jmap.SharingOptions{
-			SharedPrefix: settings.Server.SharedPrefix,
-			PublicPrefix: settings.Server.PublicPrefix,
-			MaxAccounts:  int(settings.JMAP.MaxSharedAccounts),
-			MaxMailboxes: int(settings.JMAP.MaxSharedMailboxes),
-			// 0 takes eight times MaxMailboxes.
-			MaxSessionPointers: int(settings.JMAP.MaxSessionPointers),
-		},
+		Sharing:    jmapSharing(settings),
 		Principals: jmapPrincipals(settings.JMAP, srv.notices),
 	})
 
@@ -105,6 +98,20 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
 
 	return nil
+}
+
+// jmapSharing maps the settings of the shared accounts, which the
+// front-end and the push worker build alike: switched like the IMAP
+// namespaces of the same name.
+func jmapSharing(settings *config.Config) jmap.SharingOptions {
+	return jmap.SharingOptions{
+		SharedPrefix: settings.Server.SharedPrefix,
+		PublicPrefix: settings.Server.PublicPrefix,
+		MaxAccounts:  int(settings.JMAP.MaxSharedAccounts),
+		MaxMailboxes: int(settings.JMAP.MaxSharedMailboxes),
+		// 0 takes eight times MaxMailboxes.
+		MaxSessionPointers: int(settings.JMAP.MaxSessionPointers),
+	}
 }
 
 // jmapPrincipals maps the principal bounds; the notices are the ones IMAP
@@ -123,6 +130,7 @@ func (srv *servers) jmapPush(c config.JMAPPush, store *cephstore.Store) (jmap.Pu
 		MaxExpiry:         sec(c.MaxExpirySeconds),
 		EventPoll:         sec(c.EventPollSeconds),
 		AllowInternalURLs: c.AllowInternalEndpoints,
+		MaxSharedWatches:  int(c.MaxSharedWatches),
 	}
 
 	if !c.Enabled() {
@@ -248,6 +256,10 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 		VAPIDPublicKey: vapid.PublicKey(),
 		Scan:           sec(c.ScanSeconds),
 		Poll:           sec(c.PollSeconds),
+		// The shared accounts, built as the front-ends build them.
+		Sharing:          jmapSharing(settings),
+		MaxSharedWatches: int(c.MaxSharedWatches),
+		MaxWatches:       int(c.WorkerMaxWatches),
 	})
 }
 

@@ -142,12 +142,14 @@ func emailGet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 // with its own \Seen in a public folder. The locator is kept with the
 // account for the rest of the call (see blobReadable).
 func emailState(sess *session) (string, *locator, *methodError) {
-	seq, err := sess.user.AccountState()
+	a := sess.current()
+
+	// A shared account's token names the visible watermark; the locator
+	// is brought up to where the log was read, which covers it.
+	lv, seq, err := a.visibleSeq()
 	if err != nil {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
-
-	a := sess.current()
 
 	loc, err := newLocator(sess.user)
 	if err != nil {
@@ -165,7 +167,7 @@ func emailState(sess *session) (string, *locator, *methodError) {
 
 	a.loc = loc
 
-	return a.state(stateEmails, seq), loc, nil
+	return a.state(stateEmails, lv), loc, nil
 }
 
 // emailPropertyList checks the properties a client asked for and fills
