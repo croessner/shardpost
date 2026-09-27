@@ -126,3 +126,35 @@ func TestCapabilityMatchesTheInterpreter(t *testing.T) {
 		t.Errorf("the interpreter allows %d redirects", opts.Interp.MaxRedirects)
 	}
 }
+
+// TestLongScriptNames: a name of 512 bytes — 128 characters of four
+// bytes each, what RFC 5804 allows — is stored and activated; one byte
+// more is refused.
+func TestLongScriptNames(t *testing.T) {
+	store := memstore.New()
+	user, _ := store.User("test")
+	long := strings.Repeat("\U0001F600", 128)
+
+	var out bytes.Buffer
+
+	c := &conn{s: New(Options{}), user: user, bw: bufio.NewWriter(&out)}
+
+	for _, step := range [][2]string{
+		{`PUTSCRIPT "` + long + `" "keep;"`, "OK "},
+		{`SETACTIVE "` + long + `"`, "OK "},
+		{`PUTSCRIPT "` + long + `x" "keep;"`, "NO "},
+	} {
+		line, want := step[0], step[1]
+
+		out.Reset()
+		handleLine(t, c, line)
+
+		if !strings.HasPrefix(out.String(), want) {
+			t.Errorf("%.40s… answered %s", line, out.String())
+		}
+	}
+
+	if _, active, _ := user.ListScripts(); active != long {
+		t.Errorf("the active script is %q", active)
+	}
+}

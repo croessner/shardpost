@@ -29,7 +29,7 @@ const (
 	maxImportMeta   = 64 << 10 // X-Import-Meta header of one part
 	maxImportJSON   = 16 << 20 // JSON bodies (changes, ACL, Sieve)
 	maxSieveScript  = 1 << 20
-	maxSieveName    = 255
+	maxSieveName    = model.MaxScriptName
 	maxIdentifier   = 320
 	defaultPageSize = 5000
 )

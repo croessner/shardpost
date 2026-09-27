@@ -25,6 +25,7 @@ const (
 	errAccountNotFound         = "accountNotFound"
 	errAccountNotSupported     = "accountNotSupportedByMethod"
 	errServerFail              = "serverFail"
+	errServerUnavailable       = "serverUnavailable"
 	errRequestTooLarge         = "requestTooLarge"
 	errCannotCalculateChanges  = "cannotCalculateChanges"
 	errUnsupportedFilter       = "unsupportedFilter"

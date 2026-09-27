@@ -217,6 +217,16 @@ func (b *scriptBook) byName(name string) *sieveScript {
 	return nil
 }
 
+// names are the names of the scripts.
+func (b *scriptBook) names() map[string]bool {
+	out := make(map[string]bool, len(b.list))
+	for _, sc := range b.list {
+		out[sc.name] = true
+	}
+
+	return out
+}
+
 // active is the active script, or nil.
 func (b *scriptBook) active() *sieveScript {
 	for _, sc := range b.list {
@@ -262,7 +272,11 @@ func loadScripts(sess *session) (*scriptBook, error) {
 var errScriptIDsBusy = errors.New("the script ids keep changing; try again")
 
 // loadScriptsOnce is one attempt of loadScripts; swapped is false when
-// the ids changed before the new ones could be written.
+// the ids changed before the new ones could be written. Nothing is
+// dropped from the record here: an entry whose name is not listed may
+// belong to a creation or a rename that has registered its id and not
+// yet written the script. Entries go when JMAP destroys a script, and
+// when the record would outgrow its bound (see fitScriptIDs).
 func loadScriptsOnce(sess *session) (*scriptBook, bool, error) {
 	names, active, err := sess.user.ListScripts()
 	if err != nil {
@@ -270,7 +284,7 @@ func loadScriptsOnce(sess *session) (*scriptBook, bool, error) {
 	}
 
 	raw, ids := readScriptIDs(sess)
-	next := make(map[string]string, len(names))
+	listed := make(map[string]bool, len(names))
 	used := map[string]bool{}
 	b := &scriptBook{}
 
@@ -286,18 +300,38 @@ func loadScriptsOnce(sess *session) (*scriptBook, bool, error) {
 
 		// An id seen twice can only come from a record gone wrong; the
 		// second script gets one of its own.
-		id := ids[name]
-		if id == "" || used[id] {
-			id = randomHex(8)
+		if id := ids[name]; id == "" || used[id] {
+			ids[name] = randomHex(8)
 		}
 
-		used[id], next[name] = true, id
-		b.list = append(b.list, &sieveScript{id: id, name: name, text: text, active: name == active})
+		used[ids[name]], listed[name] = true, true
+		b.list = append(b.list, &sieveScript{name: name, text: text, active: name == active})
 	}
 
-	swapped, err := writeScriptIDs(sess, raw, next)
+	kept, swapped, err := writeScriptIDs(sess, raw, ids, listed)
+	if err != nil || !swapped {
+		return nil, false, err
+	}
 
-	return b, swapped, err
+	for _, sc := range b.list {
+		sc.id = effectiveScriptID(kept, sc.name)
+	}
+
+	return b, true, nil
+}
+
+// effectiveScriptID is the id of a script: the one the record keeps, or
+// one derived from the name for a script the record had no room for.
+func effectiveScriptID(ids map[string]string, name string) string {
+	if id := ids[name]; id != "" {
+		return id
+	}
+
+	sum := sha256.Sum256([]byte(name))
+
+	// A derived id has a prefix no random one has (those are hex), so the
+	// two cannot collide.
+	return "n" + hex.EncodeToString(sum[:8])
 }
 
 // readScriptIDs reads the stored ids, and the record they came from. A
@@ -322,48 +356,105 @@ func readScriptIDs(sess *session) (string, map[string]string) {
 	return raw, ids
 }
 
-// errScriptIDsFull is the error of more scripts than the record holds.
-var errScriptIDsFull = errors.New("the script ids of this account would not fit what it may keep")
+// maxScriptIDRecord bounds the record of the ids, like the identities'.
+var maxScriptIDRecord = maxIdentityRecord
 
-// writeScriptIDs replaces the stored ids while they are still raw.
-func writeScriptIDs(sess *session, raw string, ids map[string]string) (bool, error) {
+// writeScriptIDs replaces the stored ids while they are still raw, and
+// returns the ids that were kept: all of them, unless the record would
+// outgrow its bound (see fitScriptIDs). listed are the names of the
+// scripts that exist, nil when the caller does not know them.
+func writeScriptIDs(sess *session, raw string, ids map[string]string, listed map[string]bool) (map[string]string, bool, error) {
+	ids = fitScriptIDs(sess, ids, listed)
+
 	var next *string
 
 	if len(ids) > 0 {
 		b, err := json.Marshal(ids)
 		if err != nil {
-			return false, err
+			return nil, false, err
 		}
 
 		rec := string(b)
-		if len(rec) > maxIdentityRecord {
-			return false, errScriptIDsFull
-		}
-
 		next = &rec
 	}
 
 	if (next == nil && raw == "") || (next != nil && *next == raw) {
-		return true, nil
+		return ids, true, nil
 	}
 
-	return sess.user.SwapMetadata("", sess.account, sieveScriptsEntry, raw, next)
+	swapped, err := sess.user.SwapMetadata("", sess.account, sieveScriptsEntry, raw, next)
+
+	return ids, swapped, err
+}
+
+// fitScriptIDs keeps the record within its bound. Entries of names that
+// are not scripts go first; if that is not enough, the entries of the
+// last scripts by name, which then have ids derived from their names (see
+// effectiveScriptID): stable while the name is, but not across a rename.
+// It degrades an account with more scripts than the record holds —
+// several hundred with long names — instead of failing it.
+func fitScriptIDs(sess *session, ids map[string]string, listed map[string]bool) map[string]string {
+	if scriptIDRecordSize(ids) <= maxScriptIDRecord {
+		return ids
+	}
+
+	names := make([]string, 0, len(ids))
+	for name := range ids {
+		names = append(names, name)
+	}
+
+	// Unlisted names first, then the listed ones from the end.
+	sort.Slice(names, func(i, j int) bool {
+		if li, lj := listed == nil || listed[names[i]], listed == nil || listed[names[j]]; li != lj {
+			return lj
+		}
+
+		return names[i] > names[j]
+	})
+
+	dropped := 0
+
+	for _, name := range names {
+		if scriptIDRecordSize(ids) <= maxScriptIDRecord {
+			break
+		}
+
+		delete(ids, name)
+
+		if listed == nil || listed[name] {
+			dropped++
+		}
+	}
+
+	if dropped > 0 {
+		sess.log.Warn("jmap: more Sieve scripts than their ids fit; some have ids derived from their names", "scripts", dropped)
+	}
+
+	return ids
+}
+
+// scriptIDRecordSize is the size of the record the ids make.
+func scriptIDRecordSize(ids map[string]string) int {
+	b, _ := json.Marshal(ids)
+
+	return len(b)
 }
 
 // changeScriptIDs applies a change to the stored ids, starting over when
-// another write came first.
-func changeScriptIDs(sess *session, change func(ids map[string]string)) error {
+// another write came first, and returns the ids that were kept. listed
+// are the names of the scripts, as for writeScriptIDs.
+func changeScriptIDs(sess *session, listed map[string]bool, change func(ids map[string]string)) (map[string]string, error) {
 	for range scriptRetries {
 		raw, ids := readScriptIDs(sess)
 		change(ids)
 
-		swapped, err := writeScriptIDs(sess, raw, ids)
+		kept, swapped, err := writeScriptIDs(sess, raw, ids, listed)
 		if err != nil || swapped {
-			return err
+			return kept, err
 		}
 	}
 
-	return errScriptIDsBusy
+	return nil, errScriptIDsBusy
 }
 
 // sieveScriptGet implements SieveScript/get (RFC 9661 2.3). Without ids

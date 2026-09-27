@@ -104,8 +104,8 @@ type blobGetRequest struct {
 // data one call returns is bounded by maxSizeBlobGet — the whole call,
 // not each blob, because it all ends up in one response; a call beyond
 // it is requestTooLarge, and the client asks for a range or downloads
-// the blob. A digest without the data is computed a chunk at a time and
-// is not counted.
+// the blob. A digest counts the octets it covers against the same bound:
+// it reads them, even when it is computed a chunk at a time.
 func blobGet(_ context.Context, sess *session, args json.RawMessage) (any, *methodError) {
 	var req blobGetRequest
 	if merr := forAccount(sess, args, &req); merr != nil {
@@ -115,6 +115,11 @@ func blobGet(_ context.Context, sess *session, args json.RawMessage) (any, *meth
 	props, merr := req.check(sess)
 	if merr != nil {
 		return nil, merr
+	}
+
+	cache, err := newBlobCache(sess)
+	if err != nil {
+		return nil, &methodError{Type: errServerFail, Description: descNoBlobs}
 	}
 
 	out := &blobGetResponse{AccountID: accountID(sess.account), List: []map[string]any{}, NotFound: []string{}}
@@ -128,7 +133,7 @@ func blobGet(_ context.Context, sess *session, args json.RawMessage) (any, *meth
 
 		seen[ref] = true
 
-		h, err := openBlob(sess, ref)
+		h, err := cache.open(ref)
 
 		switch {
 		case errors.Is(err, model.ErrNoBlob):
@@ -179,14 +184,18 @@ func renderBlob(h *blobHandle, props *blobProps, req *blobGetRequest, budget *in
 
 	var data []byte
 
-	if props.wantsData() {
+	// The data and the digests read the same octets; they are counted
+	// once, and against the same bound.
+	if props.wantsData() || len(props.digests) > 0 {
 		if hi-lo > *budget {
 			return nil, &methodError{Type: errRequestTooLarge, Description: "the data asked for is more than maxSizeBlobGet (" +
 				strconv.FormatInt(*budget, 10) + " bytes left in this call); ask for a range, or download the blob"}
 		}
 
 		*budget -= hi - lo
+	}
 
+	if props.wantsData() {
 		var err error
 		if data, err = h.read(lo, hi-lo); err != nil {
 			return nil, &methodError{Type: errServerFail, Description: err.Error()}

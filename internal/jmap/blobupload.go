@@ -98,13 +98,21 @@ func blobUpload(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, &methodError{Type: errRequestTooLarge, Description: descTooManyObjects}
 	}
 
-	blobs, ok := sess.user.(model.Blobs)
-	if !ok {
+	// A Blob/upload writes blobs as the upload endpoint does, so it takes
+	// a slot of the same per-account counter.
+	if srv := sess.srv; srv != nil {
+		if !srv.enter(srv.inFlup, sess.account, srv.o.Limits.MaxConcurrentUpload) {
+			return nil, &methodError{Type: errServerUnavailable, Description: "too many uploads in flight for this account"}
+		}
+		defer srv.leave(srv.inFlup, sess.account)
+	}
+
+	u, err := newUploader(sess)
+	if err != nil {
 		return nil, &methodError{Type: errServerFail, Description: descNoBlobs}
 	}
 
-	out := &blobUploadResponse{AccountID: accountID(sess.account),
-		Created: map[string]map[string]any{}, NotCreated: map[string]*setError{}}
+	out := u.out
 
 	specs := map[string]*uploadSpec{}
 
@@ -120,7 +128,7 @@ func blobUpload(_ context.Context, sess *session, args json.RawMessage) (any, *m
 
 	for len(specs) > 0 {
 		for _, cid := range readyUploads(specs) {
-			uploadOne(sess, blobs, cid, specs[cid], out)
+			u.upload(cid, specs[cid])
 			delete(specs, cid)
 		}
 	}
@@ -167,22 +175,51 @@ func waitsForCreation(spec *uploadSpec, pending map[string]*uploadSpec) bool {
 	return false
 }
 
-// uploadOne builds and stores one blob.
-func uploadOne(sess *session, blobs model.Blobs, cid string, spec *uploadSpec, out *blobUploadResponse) {
-	data, serr := buildBlob(sess, spec)
+// uploader carries out the creations of one Blob/upload. Together they
+// build at most maxSizeBlobSet bytes: each source is read into memory
+// before the blob is stored, so without a bound on the call a few
+// hundred creations could each copy the largest blob of the account.
+// A creation beyond what is left is tooLarge, as one beyond the limit
+// on its own is; those before it stand.
+type uploader struct {
+	sess  *session
+	cache *blobCache
+	out   *blobUploadResponse
+	// left is what the creations of the call may still build.
+	left int64
+}
+
+// newUploader starts one Blob/upload.
+func newUploader(sess *session) (*uploader, error) {
+	cache, err := newBlobCache(sess)
+	if err != nil {
+		return nil, err
+	}
+
+	return &uploader{sess: sess, cache: cache, left: sess.limits.MaxSizeBlobSet,
+		out: &blobUploadResponse{AccountID: accountID(sess.account),
+			Created: map[string]map[string]any{}, NotCreated: map[string]*setError{}}}, nil
+}
+
+// upload builds and stores one blob.
+func (u *uploader) upload(cid string, spec *uploadSpec) {
+	sess, out := u.sess, u.out
+
+	data, serr := u.build(spec)
 	if serr != nil {
 		out.NotCreated[cid] = serr
 		return
 	}
 
 	size := int64(len(data))
+	u.left -= size
 
 	if !withinQuota(sess.user, size) {
 		out.NotCreated[cid] = &setError{Type: setOverQuota, Description: "the account is out of quota"}
 		return
 	}
 
-	guid, err := blobs.PutBlob(data)
+	guid, err := u.cache.blobs.PutBlob(data)
 	if err != nil {
 		sess.log.Error("jmap: Blob/upload", "err", err)
 
@@ -191,7 +228,8 @@ func uploadOne(sess *session, blobs model.Blobs, cid string, spec *uploadSpec, o
 		return
 	}
 
-	typ := defaultBlobType
+	// RFC 9404 4.1: the type as given, and null when none was.
+	var typ any
 	if spec.typ != nil {
 		typ = blobType(*spec.typ)
 	}
@@ -397,17 +435,17 @@ func unsignedInt(raw json.RawMessage) (int64, bool) {
 // maxUnsignedInt is the largest UnsignedInt JSON can carry exactly.
 const maxUnsignedInt = 1<<53 - 1
 
-// buildBlob puts the pieces of a creation together. Every blob it names
-// is looked up first, so a creation with several missing blobs names all
-// of them; then the pieces are read, and the creation stops as soon as it
-// would grow beyond maxSizeBlobSet.
-func buildBlob(sess *session, spec *uploadSpec) ([]byte, *setError) {
-	handles, serr := sourceBlobs(sess, spec)
+// build puts the pieces of a creation together. Every blob it names is
+// looked up first, so a creation with several missing blobs names all of
+// them; then the pieces are read, and the creation stops as soon as it
+// would grow beyond what the call has left of maxSizeBlobSet.
+func (u *uploader) build(spec *uploadSpec) ([]byte, *setError) {
+	handles, serr := u.sourceBlobs(spec)
 	if serr != nil {
 		return nil, serr
 	}
 
-	limit := sess.limits.MaxSizeBlobSet
+	limit := u.left
 	out := []byte{}
 
 	for i, src := range spec.sources {
@@ -433,11 +471,11 @@ func buildBlob(sess *session, spec *uploadSpec) ([]byte, *setError) {
 }
 
 // descBlobSetTooLarge is the error of a creation beyond the limit.
-const descBlobSetTooLarge = "the blob would be larger than maxSizeBlobSet"
+const descBlobSetTooLarge = "the blob would be larger than maxSizeBlobSet, or than what this call has left of it"
 
 // sourceBlobs opens the blobs the sources of a creation name, by the
 // index of the source.
-func sourceBlobs(sess *session, spec *uploadSpec) (map[int]*blobHandle, *setError) {
+func (u *uploader) sourceBlobs(spec *uploadSpec) (map[int]*blobHandle, *setError) {
 	handles := map[int]*blobHandle{}
 
 	var missing []string
@@ -447,7 +485,7 @@ func sourceBlobs(sess *session, spec *uploadSpec) (map[int]*blobHandle, *setErro
 			continue
 		}
 
-		h, err := openBlob(sess, src.blobID)
+		h, err := u.cache.open(src.blobID)
 
 		switch {
 		case errors.Is(err, model.ErrNoBlob):
@@ -508,40 +546,159 @@ type blobHandle struct {
 	size int64
 }
 
-// openBlob looks up a blob the account can read — an upload, a message,
-// a body part of one — by its id or by the creation id of a Blob/upload
-// earlier in the request. A stored blob is read in ranges; a body part
-// exists only inside its message, which is read and parsed once. The
-// blob store is the account's own, so another account's blob is not
+// blobCache opens the blobs one method call reads, each of them once: a
+// stored blob is looked up once and read in ranges; a message that body
+// parts are taken from is read and parsed once, however many of its
+// parts the call names and however often; the scripts are listed once.
+// The blob store is the account's own, so another account's blob is not
 // found rather than refused.
-func openBlob(sess *session, ref string) (*blobHandle, error) {
-	id, pending := resolveCreationID(sess, ref)
-	if pending {
-		return nil, model.ErrNoBlob
-	}
+type blobCache struct {
+	sess    *session
+	blobs   model.Blobs
+	handles map[string]*blobHandle
+	roots   map[string]*mimePart
+	// scripts are the contents of the account's scripts by blob id; nil
+	// until the call names a script blob.
+	scripts map[string][]byte
+}
 
+// newBlobCache starts the cache of one call.
+func newBlobCache(sess *session) (*blobCache, error) {
 	blobs, ok := sess.user.(model.Blobs)
 	if !ok {
 		return nil, errNoIndex
 	}
 
-	if model.ValidGUID(id) {
-		size, err := blobs.BlobSize(id)
-		if err != nil {
-			return nil, err
-		}
+	return &blobCache{sess: sess, blobs: blobs, handles: map[string]*blobHandle{}, roots: map[string]*mimePart{}}, nil
+}
 
-		return &blobHandle{id: id, size: size, read: func(off, n int64) ([]byte, error) {
-			return blobs.ReadBlob(id, size, off, n)
-		}}, nil
+// open looks up a blob the account can read — an upload, a message, a
+// body part of one, a script's content — by its id or by the creation id
+// of a Blob/upload earlier in the request.
+func (c *blobCache) open(ref string) (*blobHandle, error) {
+	id, pending := resolveCreationID(c.sess, ref)
+	if pending {
+		return nil, model.ErrNoBlob
 	}
 
-	content, err := blobContent(sess, id, 0)
+	if h := c.handles[id]; h != nil {
+		return h, nil
+	}
+
+	var (
+		content []byte
+		err     error
+	)
+
+	switch guid, path, isPart := parsePartBlob(id); {
+	case model.ValidGUID(id):
+		return c.stored(id)
+	case isPart:
+		content, err = c.part(guid, path)
+	case isScriptBlob(id):
+		content, err = c.script(id)
+	default:
+		err = model.ErrNoBlob
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
-	return &blobHandle{id: id, size: int64(len(content)), read: func(off, n int64) ([]byte, error) {
+	h := &blobHandle{id: id, size: int64(len(content)), read: func(off, n int64) ([]byte, error) {
 		return content[off : off+n], nil
-	}}, nil
+	}}
+	c.handles[id] = h
+
+	return h, nil
+}
+
+// stored opens a blob of the store, which is read in ranges.
+func (c *blobCache) stored(id string) (*blobHandle, error) {
+	size, err := c.blobs.BlobSize(id)
+	if err != nil {
+		return nil, err
+	}
+
+	h := &blobHandle{id: id, size: size, read: func(off, n int64) ([]byte, error) {
+		return c.blobs.ReadBlob(id, size, off, n)
+	}}
+	c.handles[id] = h
+
+	return h, nil
+}
+
+// part is the decoded content of a body part (see readPart), from the
+// message parsed once per call.
+func (c *blobCache) part(guid, path string) ([]byte, error) {
+	root := c.roots[guid]
+	if root == nil {
+		size, err := c.blobs.BlobSize(guid)
+		if err != nil {
+			return nil, err
+		}
+
+		raw, err := c.blobs.ReadBlob(guid, size, 0, -1)
+		if err != nil {
+			return nil, err
+		}
+
+		if root, err = parseMessage(raw); err != nil {
+			return nil, err
+		}
+
+		c.roots[guid] = root
+	}
+
+	var body []byte
+
+	for i, section := range strings.Split(path, "_") {
+		if i > 0 {
+			var err error
+			if root, err = parseMessage(body); err != nil {
+				return nil, err
+			}
+		}
+
+		part := root.find(section)
+		if part == nil {
+			return nil, model.ErrNoBlob
+		}
+
+		body, _ = part.decodedBody()
+	}
+
+	return body, nil
+}
+
+// script is the content of a script by its blob id, from the scripts
+// listed once per call.
+func (c *blobCache) script(id string) ([]byte, error) {
+	if c.scripts == nil {
+		names, _, err := c.sess.user.ListScripts()
+		if err != nil {
+			return nil, err
+		}
+
+		c.scripts = map[string][]byte{}
+
+		for _, name := range names {
+			text, err := c.sess.user.GetScript(name)
+			if errors.Is(err, model.ErrNoScript) {
+				continue
+			}
+
+			if err != nil {
+				return nil, err
+			}
+
+			c.scripts[scriptBlobID(text)] = []byte(text)
+		}
+	}
+
+	if text, ok := c.scripts[id]; ok {
+		return text, nil
+	}
+
+	return nil, model.ErrNoBlob
 }

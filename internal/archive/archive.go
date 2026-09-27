@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"shardpost/internal/model"
 )
 
 // Format and Version identify the archive format.
@@ -115,8 +117,14 @@ var (
 
 var (
 	idPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	sievePatten = regexp.MustCompile(`^[^/\\\x00-\x1f]{1,128}$`)
+	sievePatten = regexp.MustCompile(`^[^/\\\x00-\x1f]{1,512}$`)
 )
+
+// validSieveName bounds a script name as the store does: at most 512
+// characters by the pattern, and at most model.MaxScriptName bytes.
+func validSieveName(name string) bool {
+	return len(name) <= model.MaxScriptName && sievePatten.MatchString(name)
+}
 
 func sum(b []byte) string {
 	s := sha256.Sum256(b)
@@ -205,7 +213,7 @@ func (w *Writer) SkipMailbox(name string) {
 
 // Sieve adds a script.
 func (w *Writer) Sieve(name, text string) error {
-	if !sievePatten.MatchString(name) {
+	if !validSieveName(name) {
 		return fmt.Errorf("archive: unusable script name %q", name)
 	}
 
@@ -344,7 +352,7 @@ func (r *Reader) Next() (*Entry, error) {
 		return r.manifest(b)
 	case strings.HasPrefix(name, sieveDir) && strings.HasSuffix(name, ".sieve"):
 		script := strings.TrimSuffix(strings.TrimPrefix(name, sieveDir), ".sieve")
-		if !sievePatten.MatchString(script) || script == "." || script == ".." {
+		if !validSieveName(script) || script == "." || script == ".." {
 			return nil, fmt.Errorf("%w: script name %q", ErrFormat, script)
 		}
 

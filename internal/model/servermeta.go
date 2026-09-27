@@ -24,10 +24,11 @@ const JMAPVacationScript = "jmap-vacation"
 // migration does not carry it (it follows from the account's metadata).
 func ReservedScript(name string) bool { return name == JMAPVacationScript }
 
-// The bounds of a Sieve script, which the RADOS store and ManageSieve
-// enforce and ManageSieve and JMAP advertise: the name in bytes (RFC 5804
-// allows 128 characters; this server counts bytes) and the text.
+// The bounds of a Sieve script, which the RADOS store, ManageSieve, the
+// admin API and the archive enforce and JMAP advertises: the name in bytes
+// (512, the room RFC 9661 asks for: 128 characters of up to four bytes)
+// and the text.
 const (
-	MaxScriptName = 128
+	MaxScriptName = 512
 	MaxScriptSize = 256 << 10
 )

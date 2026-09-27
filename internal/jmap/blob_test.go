@@ -1,10 +1,14 @@
 package jmap
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"shardpost/internal/auth"
@@ -99,7 +103,7 @@ func TestBlobUploadChaining(t *testing.T) {
 		["Blob/get",{"properties":["data:asText","size"],"ids":["#cat","#again"]},"G4"]`)
 
 	b4 := res[0]["created"].(map[string]any)["b4"].(map[string]any)
-	if b4[propSize] != float64(45) || b4[partType] != defaultBlobType || b4[propBlobID] != b4[propID] {
+	if b4[propSize] != float64(45) || b4[partType] != nil || b4[propBlobID] != b4[propID] {
 		t.Errorf("b4 is %#v", b4)
 	}
 
@@ -422,5 +426,126 @@ func TestBlobCapability(t *testing.T) {
 		`"maxSizeBlobSet":1000,"maxDataSources":64}`
 	if acc := string(got.Accounts["test"].AccountCapabilities[CapBlob]); acc != want {
 		t.Errorf("the account lists %s, want %s", acc, want)
+	}
+}
+
+// TestBlobUploadCountsAsAnUpload: a Blob/upload takes a slot of the
+// upload counter, and the creations of one call build at most
+// maxSizeBlobSet bytes together.
+func TestBlobUploadCountsAsAnUpload(t *testing.T) {
+	s := newTestServer(t, func(o *Options) { o.Limits.MaxSizeBlobSet = 16; o.Limits.MaxConcurrentUpload = 1 })
+	stored := upload(t, s, "0123456789", "text/plain")
+
+	res := blobCalls(t, s, `["Blob/upload",{"create":{"a":{"data":[{"blobId":"`+stored+`"}]},
+		"b":{"data":[{"blobId":"`+stored+`"}]}}},"c1"]`)[0]
+	if createdID(t, res, "a") == "" || setErrorType(res, "notCreated", "b") != setTooLarge {
+		t.Errorf("two blobs beyond the call's budget gave %#v", res)
+	}
+
+	if !s.enter(s.inFlup, "test", 1) {
+		t.Fatal("the upload slot is taken")
+	}
+	defer s.leave(s.inFlup, "test")
+
+	if got := blobError(t, s, "Blob/upload", `{"create":{"a":{"data":[]}}}`); got != errServerUnavailable {
+		t.Errorf("a Blob/upload beside a running upload gave %q", got)
+	}
+}
+
+// TestBlobSourcesOfEveryKind: a body part, a script's content, an empty
+// range and a range at the very end are sources like any other; two
+// creations that name each other find nothing.
+func TestBlobSourcesOfEveryKind(t *testing.T) {
+	s, u := hookedServer(t)
+
+	if err := u.PutScript("s", scriptKeep); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := u.Deliver(inboxName, []byte(alternativeMessage), nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	script, part := scriptBlobID(scriptKeep), m.GUID+"_2"
+
+	res := blobCalls(t, s, `["Blob/upload",{"create":{
+		"x":{"data":[{"blobId":"`+part+`","offset":1,"length":3},{"blobId":"`+script+`"},
+			{"blobId":"`+part+`","length":0},{"blobId":"`+script+`","offset":`+strconv.Itoa(len(scriptKeep))+`}]},
+		"p":{"data":[{"blobId":"#q"}]},"q":{"data":[{"blobId":"#p"}]}}},"c1"],
+		["Blob/get",{"ids":["#x"],"properties":["data:asText"]},"c2"]`)
+
+	if got := blobList(t, res[1])[createdID(t, res[0], "x")][propDataAsText]; got != "PDF"+scriptKeep {
+		t.Errorf("the blob is %q", got)
+	}
+
+	if setErrorType(res[0], "notCreated", "p") != setBlobNotFound || setErrorType(res[0], "notCreated", "q") != setBlobNotFound {
+		t.Errorf("a two-node cycle gave %#v", res[0]["notCreated"])
+	}
+
+	if n := u.wholeReads[m.GUID]; n != 1 {
+		t.Errorf("the message was read %d times for one call", n)
+	}
+}
+
+// TestBlobGetReadsAMessageOnce: the parts of one message, some named
+// twice, are read out of one read of the message; a digest of a part's
+// range is the digest of those octets.
+func TestBlobGetReadsAMessageOnce(t *testing.T) {
+	s, u := hookedServer(t)
+
+	m, err := u.Deliver(inboxName, []byte(alternativeMessage), nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := blobCalls(t, s, `["Blob/get",{"ids":["`+m.GUID+`_1-1","`+m.GUID+`_1-2","`+m.GUID+`_2","`+m.GUID+`_2"],
+		"properties":["size"]},"c1"],
+		["Blob/get",{"ids":["`+m.GUID+`_2"],"properties":["digest:sha-256"],"offset":1,"length":3},"c2"]`)
+
+	if n := u.wholeReads[m.GUID]; n != 2 {
+		t.Errorf("two calls read the message %d times", n)
+	}
+
+	if len(res[0]["list"].([]any)) != 3 {
+		t.Errorf("Blob/get %#v", res[0])
+	}
+
+	sum := sha256.Sum256([]byte("PDF"))
+	if got := blobList(t, res[1])[m.GUID+"_2"][digestPrefix+digestSHA256]; got != base64.StdEncoding.EncodeToString(sum[:]) {
+		t.Errorf("the digest of the range is %v", got)
+	}
+}
+
+// TestBlobGetCountsDigests: a digest reads the octets it covers, so it
+// counts against maxSizeBlobGet as the data does.
+func TestBlobGetCountsDigests(t *testing.T) {
+	s := newTestServer(t, func(o *Options) { o.Limits.MaxSizeBlobGet = 16 })
+	a, b := upload(t, s, "0123456789", "text/plain"), upload(t, s, "abcdefghij", "text/plain")
+
+	if got := blobError(t, s, "Blob/get", `{"ids":["`+a+`","`+b+`"],"properties":["digest:sha"]}`); got != errRequestTooLarge {
+		t.Errorf("digests beyond the bound gave %q", got)
+	}
+}
+
+// TestScriptBlobIDs: a script's blob id is its prefix and lower-case hex;
+// anything else is not one.
+func TestScriptBlobIDs(t *testing.T) {
+	id := scriptBlobID(scriptKeep)
+
+	for bad, why := range map[string]string{
+		strings.ToUpper(id[:1]) + strings.ToUpper(id[1:]): "upper-case hex",
+		id[:len(id)-1]:       "too short",
+		id + "0":             "too long",
+		"X" + id[1:]:         "another prefix",
+		id[:len(id)-1] + "g": "not hex",
+	} {
+		if bad != id && isScriptBlob(bad) {
+			t.Errorf("%s (%s) is taken for a script blob", bad, why)
+		}
+	}
+
+	if !isScriptBlob(id) {
+		t.Errorf("%s is not taken for a script blob", id)
 	}
 }

@@ -1362,10 +1362,11 @@ components:
       name: name
       in: path
       required: true
+      description: At most 512 bytes of UTF-8.
       schema:
         type: string
         minLength: 1
-        maxLength: 128
+        maxLength: 512
     IfMatch:
       name: If-Match
       in: header

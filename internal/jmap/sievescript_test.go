@@ -2,7 +2,9 @@ package jmap
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -529,5 +531,166 @@ func TestSieveScriptNotOffered(t *testing.T) {
 
 	if e := sieveError(t, off, "SieveScript/get", `{}`); e["type"] != errUnknownMethod {
 		t.Errorf("without the options SieveScript/get gave %#v", e)
+	}
+}
+
+// scriptIDOf is the id SieveScript/get gives the script of a name.
+func scriptIDOf(t *testing.T, s *Server, name string) string {
+	t.Helper()
+
+	got, _ := scripts(t, s)
+	id, _ := got[name][propID].(string)
+
+	return id
+}
+
+// TestSieveScriptUpdateIsAtomic: an update that fails changes nothing —
+// a name another session took meanwhile, a script another session
+// renamed meanwhile, and a content that cannot be written after the
+// rename, which is then undone.
+func TestSieveScriptUpdateIsAtomic(t *testing.T) {
+	s, u := hookedServer(t)
+	a := createScript(t, s, "a", scriptArchive)
+	blob := upload(t, s, scriptKeep, "application/sieve")
+	update := `{"update":{"` + a + `":{"name":"new","blobId":"` + blob + `"}}}`
+
+	// A ManageSieve client stores "new" between the check and the rename.
+	u.beforeRename = func(_, newName string) { _ = u.User.PutScript(newName, scriptKeep) }
+
+	res := sieveCall(t, s, "SieveScript/set", update)
+	if got := setErrorType(res, "notUpdated", a); got != setAlreadyExists {
+		t.Errorf("a name taken meanwhile gave %q", got)
+	}
+
+	if text, _ := u.GetScript("a"); text != scriptArchive {
+		t.Errorf("a failed update changed the content to %q", text)
+	}
+
+	if err := u.DeleteScript("new"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A ManageSieve client renames the script first.
+	u.beforeRename = func(oldName, _ string) { _ = u.User.RenameScript(oldName, "elsewhere") }
+
+	res = sieveCall(t, s, "SieveScript/set", update)
+	if got := setErrorType(res, "notUpdated", a); got != setNotFound {
+		t.Errorf("a script renamed meanwhile gave %q", got)
+	}
+
+	if text, _ := u.GetScript("elsewhere"); text != scriptArchive {
+		t.Errorf("the renamed script holds %q", text)
+	}
+
+	id := scriptIDOf(t, s, "elsewhere")
+	u.failPut = errors.New("the store is full")
+
+	res = sieveCall(t, s, "SieveScript/set", `{"update":{"`+id+`":{"name":"new","blobId":"`+blob+`"}}}`)
+	if got := setErrorType(res, "notUpdated", id); got != setServerFail {
+		t.Errorf("a failing content write gave %q", got)
+	}
+
+	u.failPut = nil
+
+	if names, _, _ := u.ListScripts(); len(names) != 1 || names[0] != "elsewhere" || scriptIDOf(t, s, "elsewhere") != id {
+		t.Errorf("after a failed update the scripts are %v", names)
+	}
+}
+
+// TestSieveScriptIDsDuringWrites: a listing between the steps of a
+// creation or a rename sees the id the call reports, never another one.
+func TestSieveScriptIDsDuringWrites(t *testing.T) {
+	s, u := hookedServer(t)
+
+	var seen string
+
+	u.afterPut = func(name string) { seen = scriptIDOf(t, s, name) }
+
+	a := createScript(t, s, "a", scriptKeep)
+	if seen != a {
+		t.Errorf("a listing during the creation saw %q, the creation reported %q", seen, a)
+	}
+
+	u.afterRename = func(_, newName string) { seen = scriptIDOf(t, s, newName) }
+
+	sieveCall(t, s, "SieveScript/set", `{"update":{"`+a+`":{"name":"b"}}}`)
+
+	if seen != a || scriptIDOf(t, s, "b") != a {
+		t.Errorf("a listing during the rename saw %q, want %q", seen, a)
+	}
+}
+
+// TestSieveScriptRenamedOverManageSieve: ManageSieve knows no ids, so a
+// script it renames is a new script to JMAP, with a new id.
+func TestSieveScriptRenamedOverManageSieve(t *testing.T) {
+	s, u := sieveServer(t)
+	a := createScript(t, s, "a", scriptKeep)
+
+	if err := u.RenameScript("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+
+	if b := scriptIDOf(t, s, "b"); b == "" || b == a {
+		t.Errorf("the renamed script has the id %q (it had %q)", b, a)
+	}
+}
+
+// TestSieveScriptLongNames: a name of 512 bytes — 128 characters of four
+// bytes each — is a name; one byte more is not.
+func TestSieveScriptLongNames(t *testing.T) {
+	s, u := sieveServer(t)
+	long := strings.Repeat("\U0001F600", 128)
+
+	id := createScript(t, s, long, scriptKeep)
+	sieveCall(t, s, "SieveScript/set", `{"onSuccessActivateScript":"`+id+`"}`)
+
+	if _, active, _ := u.ListScripts(); active != long {
+		t.Errorf("the active script is %q", active)
+	}
+
+	blob := upload(t, s, scriptKeep, "application/sieve")
+
+	res := sieveCall(t, s, "SieveScript/set", `{"create":{"x":{"name":"`+long+`x","blobId":"`+blob+`"}}}`)
+	if got := setErrorType(res, "notCreated", "x"); got != setInvalidProperties {
+		t.Errorf("a name of 513 bytes gave %q", got)
+	}
+}
+
+// TestSieveScriptIDsBeyondTheRecord: when the ids do not fit the record,
+// the scripts that do not fit get ids derived from their names — every
+// script still has one, stable from one listing to the next.
+func TestSieveScriptIDsBeyondTheRecord(t *testing.T) {
+	s, u := sieveServer(t)
+
+	defer func(was int) { maxScriptIDRecord = was }(maxScriptIDRecord)
+
+	maxScriptIDRecord = 100
+
+	for i := range 10 {
+		if err := u.PutScript("script"+strconv.Itoa(i), scriptKeep); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, _ := scripts(t, s)
+	second, _ := scripts(t, s)
+	ids, derived := map[string]bool{}, 0
+
+	for name, obj := range first {
+		id, _ := obj[propID].(string)
+		if id == "" || ids[id] || second[name][propID] != id {
+			t.Errorf("%s has the id %q, then %v", name, id, second[name][propID])
+		}
+
+		ids[id] = true
+
+		if strings.HasPrefix(id, "n") {
+			derived++
+		}
+	}
+
+	md, _ := u.GetMetadata("", "test")
+	if len(ids) != 10 || derived == 0 || len(md[sieveScriptsEntry]) > maxScriptIDRecord {
+		t.Errorf("%d ids, %d derived, a record of %d bytes", len(ids), derived, len(md[sieveScriptsEntry]))
 	}
 }

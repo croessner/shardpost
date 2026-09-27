@@ -217,32 +217,40 @@ func readScriptCreation(raw json.RawMessage) (*scriptCreation, *setError) {
 	return &c, nil
 }
 
-// store writes a new script and gives it its id: the one proposed, or
-// the one a concurrent listing already gave the name, which id then
-// holds. A script that the id record has no room for is removed again.
+// store registers the id of a new script, then writes the script: a
+// listing in between finds the id waiting for the name, never a script
+// without one. A write that fails takes the id back. The id the script
+// ends up with is returned in id; it differs from the one proposed only
+// when the record had no room for it (see fitScriptIDs).
 func (w *scriptWriter) store(name, text string, id *string) *setError {
+	listed := w.book.names()
+	listed[name] = true
+
+	kept, err := changeScriptIDs(w.sess, listed, func(ids map[string]string) { ids[name] = *id })
+	if err != nil {
+		return &setError{Type: setServerFail, Description: err.Error()}
+	}
+
 	if err := w.sess.user.PutScript(name, text); err != nil {
+		w.forgetID(name, *id)
+
 		return &setError{Type: setServerFail, Description: err.Error()}
 	}
 
-	err := changeScriptIDs(w.sess, func(ids map[string]string) {
-		if ids[name] == "" {
-			ids[name] = *id
-		}
-
-		*id = ids[name]
-	})
-
-	switch {
-	case errors.Is(err, errScriptIDsFull):
-		_ = w.sess.user.DeleteScript(name)
-
-		return &setError{Type: setOverQuota, Description: err.Error()}
-	case err != nil:
-		return &setError{Type: setServerFail, Description: err.Error()}
-	}
+	*id = effectiveScriptID(kept, name)
 
 	return nil
+}
+
+// forgetID removes the entry of a name while it still holds id.
+func (w *scriptWriter) forgetID(name, id string) {
+	if _, err := changeScriptIDs(w.sess, w.book.names(), func(ids map[string]string) {
+		if ids[name] == id {
+			delete(ids, name)
+		}
+	}); err != nil {
+		w.sess.log.Warn("jmap: a script id stays behind", "err", err)
+	}
 }
 
 // checkNewName checks a name a script is to be given: the rules of RFC
@@ -286,27 +294,35 @@ type scriptPatch struct {
 	blobID string
 }
 
-// update renames a script, replaces its content, or both. Everything is
-// checked before the first write; the content is written before the
-// rename, so a rename that fails leaves the script under its old name.
+// update renames a script, replaces its content, or both, and changes
+// nothing when it fails (RFC 8620 5.3). Everything is checked first. The
+// rename comes before the content, since it is what can still fail — a
+// name taken meanwhile, a script renamed over ManageSieve — and a content
+// write that fails after it renames the script back.
 func (w *scriptWriter) update(id string, raw map[string]json.RawMessage) *setError {
 	sc, p, text, serr := w.checkUpdate(id, raw)
 	if serr != nil {
 		return serr
 	}
 
-	if p.blobID != "" {
-		if err := w.sess.user.PutScript(sc.name, text); err != nil {
-			return &setError{Type: setServerFail, Description: err.Error()}
-		}
-
-		sc.text = text
-	}
+	old := sc.name
 
 	if p.name != nil && *p.name != sc.name {
 		if serr := w.rename(sc, *p.name); serr != nil {
 			return serr
 		}
+	}
+
+	if p.blobID != "" {
+		if err := w.sess.user.PutScript(sc.name, text); err != nil {
+			if sc.name != old {
+				w.renameBack(sc, old)
+			}
+
+			return &setError{Type: setServerFail, Description: err.Error()}
+		}
+
+		sc.text = text
 	}
 
 	var changed map[string]any
@@ -397,29 +413,48 @@ func checkServerSet(sc *sieveScript, k string, v json.RawMessage) *setError {
 	return nil
 }
 
-// rename gives a script a new name and moves its id along.
+// rename gives a script a new name and moves its id along: the id is
+// registered for the new name first, so a listing during the rename
+// finds it under either name, and the old entry goes afterwards. A
+// rename that fails takes the new entry back.
 func (w *scriptWriter) rename(sc *sieveScript, name string) *setError {
+	listed := w.book.names()
+	listed[name] = true
+
+	if _, err := changeScriptIDs(w.sess, listed, func(ids map[string]string) { ids[name] = sc.id }); err != nil {
+		return &setError{Type: setServerFail, Description: err.Error()}
+	}
+
 	err := w.sess.user.RenameScript(sc.name, name)
 
 	switch {
 	case errors.Is(err, model.ErrScriptExists):
+		w.forgetID(name, sc.id)
+
 		return &setError{Type: setAlreadyExists, Description: descScriptExists}
+	case errors.Is(err, model.ErrNoScript):
+		// Renamed or deleted over ManageSieve since the call began.
+		w.forgetID(name, sc.id)
+
+		return &setError{Type: setNotFound, Description: "the script changed meanwhile"}
 	case err != nil:
+		w.forgetID(name, sc.id)
+
 		return &setError{Type: setServerFail, Description: err.Error()}
 	}
 
 	old := sc.name
 	sc.name = name
-
-	if err := changeScriptIDs(w.sess, func(ids map[string]string) {
-		delete(ids, old)
-		ids[name] = sc.id
-	}); err != nil {
-		// The script is renamed; the next listing gives it a new id.
-		w.sess.log.Warn("jmap: the id of a renamed script was not kept", "err", err)
-	}
+	w.forgetID(old, sc.id)
 
 	return nil
+}
+
+// renameBack undoes a rename whose content write failed.
+func (w *scriptWriter) renameBack(sc *sieveScript, old string) {
+	if serr := w.rename(sc, old); serr != nil {
+		w.sess.log.Error("jmap: a failed script update could not rename the script back", "script", sc.name, "err", serr.Description)
+	}
 }
 
 // destroy removes a script. The active one stays (RFC 9661 2.4: it is
@@ -445,9 +480,7 @@ func (w *scriptWriter) destroy(id string) *setError {
 		return &setError{Type: setServerFail, Description: err.Error()}
 	}
 
-	if err := changeScriptIDs(w.sess, func(ids map[string]string) { delete(ids, sc.name) }); err != nil {
-		w.sess.log.Warn("jmap: the id of a destroyed script stays behind", "err", err)
-	}
+	w.forgetID(sc.name, sc.id)
 
 	for i, s := range w.book.list {
 		if s == sc {

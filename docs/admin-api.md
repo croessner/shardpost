@@ -368,7 +368,8 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
   size, never the content.
 - **Sieve** is compiled before it is stored, together with the account's
   includes. A faulty script is not stored (400). Versions go through ETags
-  (`If-Match`, `If-None-Match: *` to create only). The active script
+  (`If-Match`, `If-None-Match: *` to create only). A script name is at
+  most 512 bytes of UTF-8, as over ManageSieve and JMAP. The active script
   cannot be deleted. `jmap-vacation` is the server's copy of the JMAP
   VacationResponse, for display (see [JMAP](jmap.md#vacation)): it can
   be listed, shown and checked, but storing, deleting or activating it

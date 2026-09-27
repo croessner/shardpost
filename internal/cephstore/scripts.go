@@ -43,7 +43,8 @@ func (u *User) ListScripts() (names []string, active string, err error) {
 
 	sort.Strings(names)
 
-	var buf [256]byte
+	// The xattr holds a script name, which is never longer than this.
+	var buf [model.MaxScriptName]byte
 
 	n, err := u.idx.GetXattr(oidSieve, sieveActive, buf[:])
 	switch {
