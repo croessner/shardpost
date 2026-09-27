@@ -69,6 +69,11 @@
                 "name": "quota-oidc",
                 "mountPath": "/secrets/quota-oidc",
                 "readOnly": true
+              },
+              {
+                "name": "nauthilus-introspection",
+                "mountPath": "/secrets/nauthilus-introspection",
+                "readOnly": true
               }
             ]
           }
@@ -108,6 +113,19 @@
               "secretName": "shardpost-quota-oidc",
               "defaultMode": 288,
               "optional": true
+            }
+          },
+          {
+            "name": "nauthilus-introspection",
+            "secret": {
+              "secretName": "shardpost-nauthilus-introspection",
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "client-secret",
+                  "path": "client-secret"
+                }
+              ]
             }
           }
         ]

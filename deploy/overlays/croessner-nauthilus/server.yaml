@@ -31,7 +31,15 @@ nauthilus:
   grpc_server_name: "login.authserv.me"
   oidc_client_secret_file: "/secrets/nauthilus-oidc/client-secret"
   oidc_scopes: "nauthilus:authenticate nauthilus:lookup_identity"
-  bearer_mode: "password"
+  # Bearer tokens (IMAP XOAUTH2/OAUTHBEARER, later JMAP) are introspected:
+  # Nauthilus does not verify a token handed to it as a password. The
+  # introspection client may see the tokens of the mail clients Nauthilus
+  # allowlists for it; the account is the canonical dovecot_account claim.
+  bearer_mode: "introspect"
+  introspect_url: "https://login.authserv.me/oidc/introspect"
+  introspect_client_id: "shardpost-introspection"
+  introspect_client_secret_file: "/secrets/nauthilus-introspection/client-secret"
+  account_claims: "dovecot_account"
 smtp:
   addr: "relay.roessner-net.de:25025"
   server_name: "relay.roessner-net.de"
