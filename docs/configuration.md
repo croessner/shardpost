@@ -58,15 +58,24 @@ Unknown keys, mistyped YAML values, invalid env numbers, invalid boolean values,
 
 `config check` validates the configuration structure and reads the referenced secret files. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards.
 
-A running server looks every `tls.reload_seconds` (default 60; `0` loads once) whether the files of `tls.cert`/`tls.key` and `jmap.tls_cert`/`jmap.tls_key` changed and loads the renewed pair, so a certificate that cert-manager renews in a mounted Secret reaches the listeners without a restart. A renewed pair that does not load is logged and the previous certificate stays in use. Without a file path, the existing env-based deployments remain usable.
+A running server looks every `tls.reload_seconds` (default 60; `0` loads once) whether the files of `tls.cert`/`tls.key` and `jmap.tls_cert`/`jmap.tls_key` changed and loads the renewed pair, so a certificate that cert-manager renews in a mounted Secret reaches the listeners without a restart; a renewal is recognised by the files' content, and the reload logs the new certificate's serial and expiry. A renewed pair that does not load is logged and the previous certificate stays in use. Mount the Secret as a volume, not with `subPath`: a `subPath` mount never sees an update. The kubelet itself takes up to about a minute to update a mounted Secret. Without a file path, the existing env-based deployments remain usable.
 
 ## Client IP behind the Director
 
 `server.proxy_protocol_trusted_cidrs` controls whether client addresses from
 PROXY protocol v1/v2 are adopted ahead of the actual mail protocol/TLS. For
 this to work, the Director must also set `haproxy.enabled: true` for the
-backends in question. The setting applies jointly to IMAP, POP3, ManageSieve
-and LMTP.
+backends in question. The setting applies jointly to IMAP, POP3, ManageSieve,
+LMTP and JMAP; the list is global, one trust boundary for all listeners.
+
+A proxy that reaches a listener through a Kubernetes NodePort has its
+address rewritten on the way: with `externalTrafficPolicy: Cluster` the pod
+sees a node address (the Calico tunnel address from another node, the
+node's own address from the same node), so the header is honoured for some
+connections and dropped for others. For JMAP behind HAProxy use
+`externalTrafficPolicy: Local` and list the proxy addresses here, and let
+the network policy admit the JMAP port only from those addresses — every
+peer in the list can name any client address.
 
 The production overlay uses the verified Calico pod network
 `172.16.0.0/12` together with `network-policy.yaml`. The mail ports are

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"shardpost/internal/provision"
 )
 
 // Account is one account of the session resource (RFC 8620 2).
@@ -45,6 +47,7 @@ type coreCapability struct {
 // handleSession answers the session resource.
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	sess := sessionOf(r)
+	s.provision(sess)
 
 	out := s.session(sess.account, s.baseURL(r))
 
@@ -226,4 +229,18 @@ func (s *Server) baseURL(r *http.Request) string {
 	}
 
 	return scheme + "://" + r.Host
+}
+
+// provision gives an account its INBOX and the configured mailboxes and
+// refreshes its quota from the authentication result, as an IMAP login
+// does: an account that only ever uses JMAP needs Drafts and Sent too. It
+// runs when a client fetches the session resource, which a client does
+// when it starts, not on every API request. A failure is logged and the
+// session served anyway.
+func (s *Server) provision(sess *session) {
+	provision.Apply(sess.user, sess.auth, sess.log)
+
+	if err := provision.Mailboxes(sess.user, s.o.Autocreate); err != nil {
+		sess.log.Error("jmap: provision account", "err", err)
+	}
 }

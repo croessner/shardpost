@@ -39,9 +39,10 @@ type JMAP struct {
 	// ShardAttribute and Shard restrict JMAP to the accounts the
 	// authentication backend assigns to this shard (for Nauthilus with the
 	// Director, mailShard). A proxy in front that does not route JMAP per
-	// account lets every account of the deployment reach this server, and
-	// one whose mail lives elsewhere would get empty mailboxes here. Both
-	// empty serve every authenticated account.
+	// account lets every account of the deployment reach this server; one
+	// whose mail lives elsewhere would see an empty account here, and what
+	// it wrote would land in the wrong shard. Both empty serve every
+	// authenticated account.
 	ShardAttribute string `mapstructure:"shard_attribute" env:"JMAP_SHARD_ATTRIBUTE"`
 	Shard          string `mapstructure:"shard" env:"JMAP_SHARD"`
 	// Push configures push subscriptions and the push worker.

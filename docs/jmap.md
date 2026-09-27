@@ -651,22 +651,36 @@ of the token. Authentication on a plaintext connection is refused unless
 **One shard behind a proxy.** A proxy that does not route JMAP per
 account — a load balancer in front of one ShardPost shard — lets every
 account of the deployment reach this server. An account whose mail
-lives on another shard would find nothing here, and its first request
-would create its mailboxes (`server.autocreate`). With
+lives on another shard would find an empty account here, and what it
+wrote would land in this shard. With
 `jmap.shard_attribute` and `jmap.shard` set, JMAP serves only the
 accounts whose authentication result carries this shard in that
 attribute (Nauthilus with the Director returns `mailShard`); any other
 account, and one without the attribute, is answered 403 before its
 store is opened — not 401, so a client does not ask for the password
-again. Both empty serve every authenticated account.
+again. Both empty serve every authenticated account; the server logs a
+warning at startup when JMAP runs without them. When the attribute is
+missing from the authentication result altogether, the log says so
+(usually a misspelt `shard_attribute`), apart from an account that lives
+elsewhere.
+
+**Provisioning.** Fetching the session resource gives the account its
+INBOX and the `server.autocreate` mailboxes it does not have and refreshes
+its quota from the authentication result, as an IMAP login does — an
+account that only ever uses JMAP needs Drafts and Sent too. It happens
+when a client fetches the session, which it does when it starts, not on
+every API request.
 
 **Behind a TLS-terminating proxy.** The listener takes the PROXY
 protocol (v1, v2) from the peers in `server.proxy_protocol_trusted_cidrs`,
 like the other front-ends, so the client address — for rate limits,
 logs and `XCLIENT ADDR` — is the client's and not the proxy's. A proxy
 that re-encrypts towards ShardPost sends the header before TLS
-(`send-proxy-v2` in HAProxy). The certificate files are reloaded when
-they change (`tls.reload_seconds`).
+(`send-proxy-v2` in HAProxy). The list of trusted peers is global and
+a NodePort in between rewrites the peer address; see
+[Client IP behind the Director](configuration.md#client-ip-behind-the-director).
+The certificate files are reloaded when they change
+(`tls.reload_seconds`).
 
 JMAP listens on an address of its own rather than sharing
 `server.http_addr`: that one serves metrics and the health probes and is

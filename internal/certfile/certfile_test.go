@@ -1,6 +1,7 @@
 package certfile
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,8 +10,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -140,9 +143,6 @@ func TestFollowsSecretSymlinkSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	later := time.Now().Add(time.Second)
-	_ = os.Chtimes(filepath.Join(root, "b", "tls.crt"), later, later)
-
 	if got := serialOf(t, s); got != 11 {
 		t.Fatalf("after the swap serial %d, want 11", got)
 	}
@@ -169,5 +169,74 @@ func TestNoIntervalNeverReloads(t *testing.T) {
 
 	if _, err := New(filepath.Join(dir, "missing.crt"), kf, time.Minute, nil); err == nil {
 		t.Fatal("a missing certificate was accepted at startup")
+	}
+}
+
+// TestHandshakeWithoutSNI: a client that sends no server name, as many
+// IMAP and POP3 clients do, gets the certificate from GetCertificate.
+func TestHandshakeWithoutSNI(t *testing.T) {
+	cf, kf := writePair(t, t.TempDir(), 7)
+
+	s, err := New(cf, kf, time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	done := make(chan error, 1)
+
+	go func() { done <- tls.Server(serverConn, s.Config()).HandshakeContext(context.Background()) }()
+
+	client := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // self-signed test certificate
+	if err := client.HandshakeContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	if got := client.ConnectionState().PeerCertificates[0].SerialNumber.Int64(); got != 7 {
+		t.Fatalf("serial %d, want 7", got)
+	}
+}
+
+// TestConcurrentHandshakesDuringRenewal: many handshakes while the files
+// change get a certificate each, and the renewal is picked up.
+func TestConcurrentHandshakesDuringRenewal(t *testing.T) {
+	dir := t.TempDir()
+	cf, kf := writePair(t, dir, 1)
+
+	s, err := New(cf, kf, time.Nanosecond, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+
+	for range 16 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for range 200 {
+				if c, err := s.GetCertificate(&tls.ClientHelloInfo{}); err != nil || c == nil {
+					t.Error("no certificate during renewal")
+
+					return
+				}
+			}
+		}()
+	}
+
+	writePair(t, dir, 2)
+	wg.Wait()
+
+	if got := serialOf(t, s); got != 2 {
+		t.Fatalf("serial %d after renewal, want 2", got)
 	}
 }

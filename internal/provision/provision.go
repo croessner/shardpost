@@ -4,6 +4,7 @@
 package provision
 
 import (
+	"errors"
 	"log/slog"
 
 	"shardpost/internal/auth"
@@ -84,4 +85,64 @@ func CheckOverFlag(u model.User, res *auth.Result, log *slog.Logger) {
 	}
 
 	Quota.CheckOverFlag(res.Account, res.Attributes, usage, limit)
+}
+
+// Folder is a mailbox every account gets besides its INBOX
+// (server.autocreate, Dovecot's autocreate).
+type Folder struct {
+	Name string
+	Use  string
+	// Subscribe subscribes the mailbox when it is created. It is not
+	// applied to a mailbox that already exists: an account that
+	// unsubscribed one keeps it that way.
+	Subscribe bool
+}
+
+// Mailboxes creates INBOX and the configured mailboxes of an account that
+// does not have them. A mailbox is subscribed when it is created, never
+// afterwards. A mailbox added to the configuration later reaches the
+// accounts that log in after it, as it does in Dovecot.
+func Mailboxes(u model.User, folders []Folder) error {
+	fresh, err := ensureMailbox(u, "INBOX", nil)
+	if err != nil {
+		return err
+	}
+
+	if fresh {
+		_ = u.SetSubscribed("INBOX", true)
+	}
+
+	for _, f := range folders {
+		var use []string
+		if f.Use != "" {
+			use = []string{f.Use}
+		}
+
+		fresh, err := ensureMailbox(u, f.Name, use)
+		if err != nil {
+			return err
+		}
+
+		if fresh && f.Subscribe {
+			_ = u.SetSubscribed(f.Name, true)
+		}
+	}
+
+	return nil
+}
+
+// ensureMailbox creates a mailbox if it is missing and reports whether it
+// was created now.
+func ensureMailbox(u model.User, name string, use []string) (bool, error) {
+	if _, err := u.Lookup(name); err == nil {
+		return false, nil
+	} else if !errors.Is(err, model.ErrNoMailbox) {
+		return false, err
+	}
+
+	if err := u.EnsureMailbox(name, use); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }

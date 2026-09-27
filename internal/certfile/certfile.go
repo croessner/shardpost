@@ -6,31 +6,32 @@
 package certfile
 
 import (
+	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Source is a certificate kept in step with its files. Use GetCertificate
-// in a tls.Config.
+// (or Config) in a server tls.Config.
 type Source struct {
 	certFile, keyFile string
 	every             time.Duration
 	log               *slog.Logger
 
-	mu      sync.Mutex
-	cert    *tls.Certificate
-	checked time.Time
-	stamp   stamp
-}
+	cert atomic.Pointer[tls.Certificate]
+	// next is when the files are looked at again, in Unix nanoseconds.
+	next atomic.Int64
 
-// stamp identifies a version of the two files.
-type stamp struct {
-	certMod, keyMod   time.Time
-	certSize, keySize int64
+	// refreshing keeps a second handshake from reading the files while
+	// one already does; certPEM and keyPEM are the loaded files' content.
+	refreshing      sync.Mutex
+	certPEM, keyPEM []byte
 }
 
 // New loads the pair once and returns a source that looks for a new one
@@ -43,17 +44,14 @@ func New(certFile, keyFile string, every time.Duration, log *slog.Logger) (*Sour
 
 	s := &Source{certFile: certFile, keyFile: keyFile, every: every, log: log}
 
-	st, err := s.stat()
+	certPEM, keyPEM, pair, err := s.load()
 	if err != nil {
 		return nil, err
 	}
 
-	pair, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load tls keypair: %w", err)
-	}
-
-	s.cert, s.stamp, s.checked = &pair, st, time.Now()
+	s.cert.Store(pair)
+	s.certPEM, s.keyPEM = certPEM, keyPEM
+	s.next.Store(time.Now().Add(every).UnixNano())
 
 	return s, nil
 }
@@ -63,58 +61,86 @@ func (s *Source) Config() *tls.Config {
 	return &tls.Config{GetCertificate: s.GetCertificate, MinVersion: tls.VersionTLS12}
 }
 
-// GetCertificate returns the current certificate, loading a new pair
-// first when the files changed since the last look. A new pair that does
-// not load is logged and the previous certificate kept, so a half-written
-// renewal does not take the listener down.
+// GetCertificate returns the current certificate. When the interval has
+// passed, the handshake that notices it reads the files and loads a
+// changed pair; every other handshake meanwhile gets the current
+// certificate without waiting. A changed pair that does not load is
+// logged and the previous certificate kept, so a half-written renewal
+// does not take the listener down.
 func (s *Source) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.every > 0 && time.Since(s.checked) >= s.every {
-		s.checked = time.Now()
+	if s.every > 0 && time.Now().UnixNano() >= s.next.Load() && s.refreshing.TryLock() {
+		s.next.Store(time.Now().Add(s.every).UnixNano())
 		s.refresh()
+		s.refreshing.Unlock()
 	}
 
-	return s.cert, nil
+	return s.cert.Load(), nil
 }
 
-// refresh loads the pair again when its files are not the ones loaded.
+// refresh loads the pair again when the content of its files differs
+// from the loaded one. The caller holds refreshing.
 func (s *Source) refresh() {
-	st, err := s.stat()
+	certPEM, err := os.ReadFile(s.certFile)
 	if err != nil {
-		s.log.Warn("tls certificate files unreadable, keeping the loaded certificate", "cert", s.certFile, "err", err)
+		s.log.Warn("tls certificate file unreadable, keeping the loaded certificate", "cert", s.certFile, "err", err)
 
 		return
 	}
 
-	if st == s.stamp {
+	keyPEM, err := os.ReadFile(s.keyFile)
+	if err != nil {
+		s.log.Warn("tls key file unreadable, keeping the loaded certificate", "cert", s.certFile, "err", err)
+
 		return
 	}
 
-	pair, err := tls.LoadX509KeyPair(s.certFile, s.keyFile)
+	if bytes.Equal(certPEM, s.certPEM) && bytes.Equal(keyPEM, s.keyPEM) {
+		return
+	}
+
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		s.log.Warn("renewed tls certificate does not load, keeping the loaded one", "cert", s.certFile, "err", err)
 
 		return
 	}
 
-	s.cert, s.stamp = &pair, st
-	s.log.Info("tls certificate reloaded", "cert", s.certFile)
+	s.cert.Store(&pair)
+	s.certPEM, s.keyPEM = certPEM, keyPEM
+	s.log.Info("tls certificate reloaded", append([]any{"cert", s.certFile}, leafAttrs(&pair)...)...)
 }
 
-// stat reads the modification time and size of both files, following
-// symlinks, which is how a mounted Secret changes.
-func (s *Source) stat() (stamp, error) {
-	c, err := os.Stat(s.certFile)
+// load reads and parses the pair.
+func (s *Source) load() ([]byte, []byte, *tls.Certificate, error) {
+	certPEM, err := os.ReadFile(s.certFile)
 	if err != nil {
-		return stamp{}, err
+		return nil, nil, nil, fmt.Errorf("read tls certificate: %w", err)
 	}
 
-	k, err := os.Stat(s.keyFile)
+	keyPEM, err := os.ReadFile(s.keyFile)
 	if err != nil {
-		return stamp{}, err
+		return nil, nil, nil, fmt.Errorf("read tls key: %w", err)
 	}
 
-	return stamp{certMod: c.ModTime(), keyMod: k.ModTime(), certSize: c.Size(), keySize: k.Size()}, nil
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load tls keypair: %w", err)
+	}
+
+	return certPEM, keyPEM, &pair, nil
+}
+
+// leafAttrs are the log attributes naming the leaf certificate: its
+// serial and when it expires.
+func leafAttrs(c *tls.Certificate) []any {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+
+	leaf, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		return nil
+	}
+
+	return []any{"serial", leaf.SerialNumber.String(), "not_after", leaf.NotAfter.UTC().Format(time.RFC3339)}
 }

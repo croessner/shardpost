@@ -37,14 +37,7 @@ type Store interface {
 }
 
 // SpecialFolder is a mailbox created on first login.
-type SpecialFolder struct {
-	Name string
-	Use  string
-	// Subscribe subscribes the mailbox when it is created. It is not
-	// applied to a mailbox that already exists: an account that
-	// unsubscribed one keeps it that way.
-	Subscribe bool
-}
+type SpecialFolder = provision.Folder
 
 // DefaultSpecialFolders are provisioned for every user (Dovecot: autocreate).
 var DefaultSpecialFolders = []SpecialFolder{
@@ -1089,7 +1082,7 @@ func (c *conn) finishLogin(tag string, req auth.Request, res *auth.Result, err e
 	c.log = c.log.With("user", account)
 	provision.Apply(u, res, c.log)
 
-	if err := c.provision(); err != nil {
+	if err := provision.Mailboxes(u, c.s.o.Autocreate); err != nil {
 		c.log.Error("provision user", "err", err)
 	}
 
@@ -1204,56 +1197,6 @@ func closingQuote(s string) int {
 	}
 
 	return -1
-}
-
-// provision creates INBOX and the configured mailboxes of an account
-// that does not have them. A mailbox is subscribed when it is created,
-// never afterwards: an account that unsubscribed one keeps it that way.
-// A mailbox that is added to the configuration later reaches the
-// accounts that log in after it, as it does in Dovecot.
-func (c *conn) provision() error {
-	fresh, err := c.ensureMailbox("INBOX", nil)
-	if err != nil {
-		return err
-	}
-
-	if fresh {
-		_ = c.user.SetSubscribed("INBOX", true)
-	}
-
-	for _, f := range c.s.o.Autocreate {
-		var use []string
-		if f.Use != "" {
-			use = []string{f.Use}
-		}
-
-		fresh, err := c.ensureMailbox(f.Name, use)
-		if err != nil {
-			return err
-		}
-
-		if fresh && f.Subscribe {
-			_ = c.user.SetSubscribed(f.Name, true)
-		}
-	}
-
-	return nil
-}
-
-// ensureMailbox creates a mailbox if it is missing and reports whether
-// it was created now.
-func (c *conn) ensureMailbox(name string, use []string) (bool, error) {
-	if _, err := c.user.Lookup(name); err == nil {
-		return false, nil
-	} else if !errors.Is(err, model.ErrNoMailbox) {
-		return false, err
-	}
-
-	if err := c.user.EnsureMailbox(name, use); err != nil {
-		return false, err
-	}
-
-	return true, nil
 }
 
 // --- authenticated: ENABLE, IDLE -------------------------------------------

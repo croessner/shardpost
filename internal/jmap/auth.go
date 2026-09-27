@@ -26,6 +26,9 @@ type session struct {
 	srv     *Server
 	// remote is the client's IP address, for the relay (XCLIENT ADDR).
 	remote string
+	// auth is the authentication result, whose attributes provisioning
+	// reads (the quota).
+	auth *auth.Result
 }
 
 // ctxKey is the context key of the authenticated session.
@@ -65,8 +68,14 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 			return
 		}
 
-		if !s.o.Shard.serves(res) {
-			s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", res.Attributes[s.o.Shard.Attribute])
+		if ok, shard := s.o.Shard.serves(res); !ok {
+			if shard == nil {
+				s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
+					"account", res.Account, "attribute", s.o.Shard.Attribute)
+			} else {
+				s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", shard)
+			}
+
 			writeProblem(w, http.StatusForbidden, errURNNotRequest, "this account is not served here", "")
 
 			return
@@ -82,7 +91,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		defer u.Close()
 
 		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
-			log: s.o.Log.With("account", res.Account)})
+			log: s.o.Log.With("account", res.Account), auth: res})
 		next(w, r.WithContext(ctx))
 	}
 }

@@ -20,6 +20,7 @@ import (
 
 	"shardpost/internal/auth"
 	"shardpost/internal/model"
+	"shardpost/internal/provision"
 )
 
 // CapCore is the URN of the JMAP Core capability.
@@ -99,34 +100,47 @@ type Options struct {
 	// Shard, when set, restricts the front-end to the accounts the
 	// authentication backend assigns to this shard.
 	Shard ShardGate
+	// Autocreate are the mailboxes an account gets besides its INBOX
+	// (server.autocreate), created when a client fetches the session.
+	Autocreate []provision.Folder
 }
 
 // ShardGate names the backend attribute that carries an account's shard
 // and the shard this server holds. Behind a proxy that does not route
 // JMAP per account, every account of a deployment can reach this
-// front-end; one that lives on another shard has no mail here, and
-// serving it would create empty mailboxes for it. The zero value serves
-// every authenticated account.
+// front-end; one that lives on another shard has no mail here — it
+// would see an empty account, and what it wrote would land in the wrong
+// shard. The zero value serves every authenticated account.
 type ShardGate struct {
 	Attribute string
 	Value     string
 }
 
 // serves reports whether the account of an authentication result belongs
-// here: always without a gate, otherwise only when one of the attribute's
-// values is this shard. A missing attribute is not this shard.
-func (g ShardGate) serves(res *auth.Result) bool {
+// here, and the shard values the result carries: always without a gate,
+// otherwise only when one of the attribute's values is this shard. The
+// attribute name is matched without regard to case, as LDAP names are; a
+// missing attribute (nil values) is not this shard.
+func (g ShardGate) serves(res *auth.Result) (bool, []string) {
 	if g.Value == "" {
-		return true
+		return true, nil
 	}
 
-	for _, v := range res.Attributes[g.Attribute] {
-		if strings.EqualFold(strings.TrimSpace(v), g.Value) {
-			return true
+	var values []string
+
+	for name, vals := range res.Attributes {
+		if strings.EqualFold(name, g.Attribute) {
+			values = append(values, vals...)
 		}
 	}
 
-	return false
+	for _, v := range values {
+		if strings.EqualFold(strings.TrimSpace(v), g.Value) {
+			return true, values
+		}
+	}
+
+	return false, values
 }
 
 // PushOptions configure push (RFC 8620 7). The event source works with

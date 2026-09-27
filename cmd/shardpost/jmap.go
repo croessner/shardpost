@@ -76,8 +76,14 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		Limits:        jmapLimits(settings.JMAP),
 		Push:          push,
 		Submission:    submission,
+		Autocreate:    autocreate(settings.Server.Autocreate),
 		Shard:         jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
 	})
+
+	if strings.TrimSpace(settings.JMAP.Shard) == "" {
+		log.Warn("jmap serves every authenticated account; behind a proxy that does not route JMAP per account, " +
+			"set jmap.shard_attribute and jmap.shard")
+	}
 
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
 

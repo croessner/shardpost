@@ -3,9 +3,13 @@ package jmap
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"shardpost/internal/auth"
+	"shardpost/internal/memstore"
+	"shardpost/internal/model"
+	"shardpost/internal/provision"
 )
 
 // shardAuth is an authenticator whose result carries the shard attribute
@@ -43,18 +47,74 @@ func TestShardGate(t *testing.T) {
 		{"other shard", ShardGate{Attribute: "mailShard", Value: "shardpost"}, map[string][]string{"mailShard": {"mailstack"}}, http.StatusForbidden},
 		{"no attribute", ShardGate{Attribute: "mailShard", Value: "shardpost"}, nil, http.StatusForbidden},
 		{"empty value", ShardGate{Attribute: "mailShard", Value: "shardpost"}, map[string][]string{"mailShard": {""}}, http.StatusForbidden},
+		{"several values, one ours", ShardGate{Attribute: "mailShard", Value: "shardpost"}, map[string][]string{"mailShard": {"mailstack", "shardpost"}}, http.StatusOK},
+		{"attribute name in other case", ShardGate{Attribute: "mailShard", Value: "shardpost"}, map[string][]string{"mailshard": {"shardpost"}}, http.StatusOK},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			store := &countingStore{Store: memstore.New()}
 			s := newTestServer(t, func(o *Options) {
+				o.Store = store
 				o.Auth = shardAuth{Static: auth.Static{"test": "secret"}, attrs: c.attrs}
 				o.Shard = c.gate
 			})
 
+			// A refused account is refused on every endpoint; an event
+			// source that is let through would stay open, so only the
+			// refused cases ask for one.
+			if c.want != http.StatusOK {
+				if w := do(t, s, http.MethodGet, PathEvents, ""); w.Code != c.want {
+					t.Fatalf("event source: %d, want %d", w.Code, c.want)
+				}
+			}
+
 			if w := do(t, s, http.MethodGet, PathSession, ""); w.Code != c.want {
 				t.Fatalf("session: %d, want %d", w.Code, c.want)
 			}
+
+			if c.want == http.StatusForbidden && store.opened.Load() != 0 {
+				t.Fatalf("the store was opened %d times for a refused account", store.opened.Load())
+			}
 		})
+	}
+}
+
+// countingStore counts how often an account's store view is opened.
+type countingStore struct {
+	Store
+	opened atomic.Int64
+}
+
+func (c *countingStore) User(name string) (model.User, error) {
+	c.opened.Add(1)
+
+	return c.Store.User(name)
+}
+
+// TestSessionProvisions: fetching the session gives an account that never
+// logged in over IMAP its INBOX and the configured mailboxes, once.
+func TestSessionProvisions(t *testing.T) {
+	store := memstore.New()
+	s := newTestServer(t, func(o *Options) {
+		o.Store = store
+		o.Autocreate = []provision.Folder{{Name: "Drafts", Use: `\Drafts`, Subscribe: true}, {Name: "Sent", Use: `\Sent`}}
+	})
+
+	for range 2 {
+		if w := do(t, s, http.MethodGet, PathSession, ""); w.Code != http.StatusOK {
+			t.Fatalf("session: %d", w.Code)
+		}
+	}
+
+	u, err := store.User("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"INBOX", "Drafts", "Sent"} {
+		if _, err := u.Lookup(name); err != nil {
+			t.Fatalf("%s after the session: %v", name, err)
+		}
 	}
 }
