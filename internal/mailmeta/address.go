@@ -1,7 +1,6 @@
 package mailmeta
 
 import (
-	"mime"
 	"strings"
 
 	"github.com/emersion/go-imap/v2"
@@ -351,8 +350,6 @@ func (p *addrParser) skipJunk() {
 	}
 }
 
-var wordDecoder = mime.WordDecoder{}
-
 func decodeName(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -360,7 +357,7 @@ func decodeName(s string) string {
 	}
 
 	if strings.Contains(s, "=?") {
-		if d, err := wordDecoder.DecodeHeader(s); err == nil {
+		if d, err := WordDecoder.DecodeHeader(s); err == nil {
 			return d
 		}
 	}

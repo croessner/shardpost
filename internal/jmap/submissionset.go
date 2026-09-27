@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"mime"
 	"net/mail"
 	"sort"
 	"strings"
@@ -329,7 +331,7 @@ func (r *submissionRun) deriveEnvelope(hdr textproto.Header, ident *identity) (*
 	env := &envelope{MailFrom: envAddress{Email: ident.Email}}
 
 	for _, field := range []string{fieldSender, fieldFrom} {
-		list, err := mail.ParseAddressList(hdr.Get(field))
+		list, err := parseAddresses(hdr.Get(field))
 		if err != nil || len(list) == 0 {
 			continue
 		}
@@ -345,7 +347,7 @@ func (r *submissionRun) deriveEnvelope(hdr textproto.Header, ident *identity) (*
 
 	for _, field := range []string{fieldTo, fieldCc, fieldBcc} {
 		for _, v := range hdr.Values(field) {
-			list, err := mail.ParseAddressList(v)
+			list, err := parseAddresses(v)
 			if err != nil {
 				// A recipient field that does not parse would drop its
 				// recipients without a word; the client is told instead.
@@ -381,13 +383,13 @@ func checkOriginator(hdr textproto.Header) *setError {
 	}
 
 	if len(senders) == 1 {
-		if list, err := mail.ParseAddressList(senders[0]); err != nil || len(list) != 1 {
+		if list, err := parseAddresses(senders[0]); err != nil || len(list) != 1 {
 			return &setError{Type: setInvalidEmail, Properties: []string{propSender}, Description: "the Sender field is not one address"}
 		}
 	}
 
 	if len(froms) == 1 && len(senders) == 0 {
-		if list, err := mail.ParseAddressList(froms[0]); err == nil && len(list) > 1 {
+		if list, err := parseAddresses(froms[0]); err == nil && len(list) > 1 {
 			return &setError{Type: setInvalidEmail, Properties: []string{propSender},
 				Description: "a From with several addresses needs a Sender"}
 		}
@@ -444,13 +446,13 @@ func (r *submissionRun) checkFrom(hdr textproto.Header) *setError {
 		return nil
 	}
 
-	list, err := mail.ParseAddressList(hdr.Get(fieldFrom))
+	list, err := parseAddresses(hdr.Get(fieldFrom))
 	if err != nil || len(list) == 0 {
 		return &setError{Type: setInvalidEmail, Properties: []string{propFrom}, Description: "the message has no usable From"}
 	}
 
 	if v := hdr.Get(fieldSender); v != "" {
-		sender, err := mail.ParseAddressList(v)
+		sender, err := parseAddresses(v)
 		if err != nil {
 			return &setError{Type: setInvalidEmail, Properties: []string{propSender}, Description: "the Sender field does not parse"}
 		}
@@ -696,3 +698,21 @@ func (r *submissionRun) onSuccess(ctx context.Context, req *submissionSetRequest
 
 	return []invocation{{Name: methodEmailSet, Args: mustRaw(res)}}
 }
+
+// addressParser reads the address fields a submission and a creation
+// check. Only the addresses count there, so a display name in a charset
+// no decoder knows is left undecoded rather than making the whole field
+// unreadable — net/mail refuses such a field, and a From with a KOI8-R or
+// windows-1252 name would have been "no usable From".
+var addressParser = &mail.AddressParser{WordDecoder: &mime.WordDecoder{
+	CharsetReader: func(charset string, r io.Reader) (io.Reader, error) {
+		if dec, err := mailmeta.WordDecoder.CharsetReader(charset, r); err == nil {
+			return dec, nil
+		}
+
+		return r, nil
+	},
+}}
+
+// parseAddresses parses an address list with addressParser.
+func parseAddresses(s string) ([]*mail.Address, error) { return addressParser.ParseList(s) }

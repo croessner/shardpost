@@ -307,3 +307,17 @@ func TestEmailSubmissionWithoutXClient(t *testing.T) {
 		t.Errorf("a relay without XCLIENT gave %q", got)
 	}
 }
+
+// TestParseAddressesCharsets: a display name in a charset net/mail does
+// not decode, or in one nobody knows, does not make the field unreadable.
+func TestParseAddressesCharsets(t *testing.T) {
+	for _, v := range []string{
+		"=?koi8-r?B?8NLJ18XU?= <test@example.org>",
+		"=?x-unknown?Q?abc?= <test@example.org>",
+	} {
+		list, err := parseAddresses(v)
+		if err != nil || len(list) != 1 || list[0].Address != "test@example.org" {
+			t.Errorf("%s: %v %v", v, list, err)
+		}
+	}
+}

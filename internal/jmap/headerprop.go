@@ -2,9 +2,6 @@ package jmap
 
 import (
 	"bytes"
-	"fmt"
-	"io"
-	"mime"
 	"net/mail"
 	"strings"
 	"unicode/utf8"
@@ -13,7 +10,6 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-message/textproto"
-	"golang.org/x/text/encoding/htmlindex"
 
 	"shardpost/internal/mailmeta"
 )
@@ -199,14 +195,7 @@ func unfold(raw string) string {
 }
 
 // wordDecoder decodes RFC 2047 encoded words in any charset Go knows.
-var wordDecoder = mime.WordDecoder{CharsetReader: func(charset string, r io.Reader) (io.Reader, error) {
-	enc, err := htmlindex.Get(charset)
-	if err != nil {
-		return nil, fmt.Errorf("charset %q: %w", charset, err)
-	}
-
-	return enc.NewDecoder().Reader(r), nil
-}}
+var wordDecoder = mailmeta.WordDecoder
 
 // textForm is the Text form: unfolded, encoded words decoded, trimmed.
 func textForm(raw string) string {

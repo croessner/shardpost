@@ -1,9 +1,6 @@
 package mailmeta
 
-import (
-	"mime"
-	"strings"
-)
+import "strings"
 
 // BaseSubject implements the RFC 5256 2.1 "base subject" extraction:
 // RFC 2047 decoding, whitespace folding, removal of subj-trailer
@@ -15,7 +12,7 @@ import (
 // subject sort both use it, so the two protocols order alike.
 func BaseSubject(s string) string {
 	// (1) decode, fold whitespace
-	if d, err := (&mime.WordDecoder{}).DecodeHeader(s); err == nil {
+	if d, err := WordDecoder.DecodeHeader(s); err == nil {
 		s = d
 	}
 

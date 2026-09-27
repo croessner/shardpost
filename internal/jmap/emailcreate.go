@@ -3,7 +3,6 @@ package jmap
 import (
 	"encoding/json"
 	"errors"
-	"net/mail"
 	"os"
 	"strings"
 	"time"
@@ -375,7 +374,7 @@ func messageIDHost(sess *session, fields []hfield) string {
 			continue
 		}
 
-		if list, err := mail.ParseAddressList(f.value); err == nil && len(list) > 0 {
+		if list, err := parseAddresses(f.value); err == nil && len(list) > 0 {
 			if _, host, ok := strings.Cut(list[0].Address, "@"); ok && host != "" {
 				return host
 			}

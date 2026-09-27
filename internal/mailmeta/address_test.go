@@ -43,3 +43,23 @@ func TestExtractDefaultsSenderReplyTo(t *testing.T) {
 		t.Fatalf("got %+v", env)
 	}
 }
+
+// TestParseAddressListCharsets: display names in charsets beyond UTF-8
+// and ISO-8859-1 are decoded; one in a charset nobody knows stays as
+// written.
+func TestParseAddressListCharsets(t *testing.T) {
+	for in, want := range map[string]string{
+		"=?koi8-r?B?8NLJ18XU?= <a@example.org>":           "Привет",
+		"=?windows-1252?B?R3L832UggA==?= <a@example.org>": "Grüße €",
+		"=?x-unknown?Q?abc?= <a@example.org>":             "=?x-unknown?Q?abc?=",
+	} {
+		got := ParseAddressList(in)
+		if len(got) != 1 || got[0].Name != want {
+			t.Errorf("%s: %+v, want %q", in, got, want)
+		}
+	}
+
+	if got := BaseSubject("=?koi8-r?B?8NLJ18XU?="); got != "ПРИВЕТ" {
+		t.Errorf("subject %q", got)
+	}
+}
