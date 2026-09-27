@@ -4,6 +4,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: shardpost-push
+  namespace: shardpost
   labels:
     app.kubernetes.io/name: shardpost-push
 spec:

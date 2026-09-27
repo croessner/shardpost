@@ -74,6 +74,17 @@
                 "name": "nauthilus-introspection",
                 "mountPath": "/secrets/nauthilus-introspection",
                 "readOnly": true
+              },
+              {
+                "name": "jmap-tls",
+                "mountPath": "/tls/jmap",
+                "readOnly": true
+              }
+            ],
+            "ports": [
+              {
+                "name": "jmap",
+                "containerPort": 9443
               }
             ]
           }
@@ -126,6 +137,13 @@
                   "path": "client-secret"
                 }
               ]
+            }
+          },
+          {
+            "name": "jmap-tls",
+            "secret": {
+              "secretName": "shardpost-jmap-tls",
+              "defaultMode": 288
             }
           }
         ]

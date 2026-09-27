@@ -9,8 +9,9 @@ server:
   # large-omap warning at 200000 keys. Mailboxes created with the former
   # POC value 20 keep it.
   mbox_shard_size: 100000
-  # Calico Pod network; mail-port access is restricted by network-policy.yaml.
-  proxy_protocol_trusted_cidrs: "172.16.0.0/12"
+  # The Calico pod network (Director, test pods) and the VLAN addresses of
+  # lbr1/lbr2, from which HAProxy reaches the JMAP NodePort.
+  proxy_protocol_trusted_cidrs: "172.16.0.0/12,192.168.0.5/32,192.168.0.6/32"
   imap_addr: ":1143"
   lmtp_addr: ":2424"
   http_addr: ":8080"
@@ -194,3 +195,23 @@ admin:
     max_batch_messages: 500
     max_inventory: 5000
     shard_size: 100000
+jmap:
+  addr: ":9443"
+  tls_cert: "/tls/jmap/tls.crt"
+  tls_key: "/tls/jmap/tls.key"
+  public_base_url: "https://jmap.roessner-net.de"
+  # The Director does not route JMAP: every RNS account reaches this shard
+  # through HAProxy, and only its own accounts may be served.
+  shard_attribute: "mailShard"
+  shard: "shardpost"
+  push:
+    vapid_key_file: "/secrets/jmap-vapid/vapid.pem"
+    vapid_subject: "mailto:postmaster@roessner-net.de"
+  submission:
+    # The XCLIENT listener on the relay (mailstack), open to the node
+    # addresses only; it relays for the account XCLIENT LOGIN names.
+    relay_addr: "relay.roessner-net.de:25587"
+    server_name: "relay.roessner-net.de"
+    starttls: true
+    helo: "shardpost.shardpost.svc.cluster.local"
+    address_attributes: "rnsMSRecipientAddress"

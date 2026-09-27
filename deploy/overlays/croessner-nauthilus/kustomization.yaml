@@ -6,11 +6,13 @@ kind: Kustomization
 resources:
   - ../croessner
   - network-policy.yaml
+  - jmap.yaml
 components:
   - ../../components/nauthilus
   - ../../components/quota-ldap-renew
   - ../../components/admin-mtls
   - ../../components/import-sidecar
+  - ../../components/jmap-push
 # Pinned here as well: the import sidecar of the component above is added
 # after ../croessner has pinned its images.
 images:
