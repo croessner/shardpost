@@ -90,11 +90,11 @@ func (a *account) loadWith(refs []model.SharedRef) error {
 	case a.public:
 		boxes, err = publicBoxes(a.own, a.user, a.login, a.srv.maxBoxes())
 	case refs == nil:
-		if refs, err = a.own.ListShared(); err == nil {
-			boxes, err = ownerBoxes(a.own, a.user, a.login, a.srv.capOwner(a.owner, refs))
+		if refs, err = a.srv.ownerRefs(a.own, a.owner); err == nil {
+			boxes, err = ownerBoxes(a.own, a.user, a.login, refs)
 		}
 	default:
-		boxes, err = ownerBoxes(a.own, a.user, a.login, a.srv.capOwner(a.owner, refs))
+		boxes, err = ownerBoxes(a.own, a.user, a.login, refs)
 	}
 
 	if err != nil {
@@ -116,33 +116,39 @@ func (s *Server) maxBoxes() int {
 	return s.o.Sharing.MaxMailboxes
 }
 
-// capOwner is the user's pointers to one owner, in name order and at
-// most maxBoxes of them. The ones beyond the bound are left out of the
-// account — the same ones every time — and the first time an owner is
-// cut, the process logs it.
-func (s *Server) capOwner(owner string, refs []model.SharedRef) []model.SharedRef {
-	var mine []model.SharedRef
-
-	for _, r := range refs {
-		if r.Owner == owner {
-			mine = append(mine, r)
-		}
+// sessionPointers is the bound on the pointers the session resource and
+// the session state examine in all.
+func (s *Server) sessionPointers() int {
+	if s == nil || s.o.Sharing.MaxSessionPointers <= 0 {
+		return defaultSessionPointersFactor * s.maxBoxes()
 	}
 
-	sort.Slice(mine, func(i, j int) bool { return mine[i].Mailbox < mine[j].Mailbox })
+	return s.o.Sharing.MaxSessionPointers
+}
 
-	if limit := s.maxBoxes(); len(mine) > limit {
-		if s != nil {
-			if _, logged := s.capLogged.LoadOrStore(owner, true); !logged {
-				s.o.Log.Warn("jmap: shared account cut at jmap.max_shared_mailboxes",
-					"shared", owner, "pointers", len(mine), "limit", limit)
-			}
-		}
-
-		mine = mine[:limit]
+// logOnce logs a warning the first time the process meets key.
+func (s *Server) logOnce(key, msg string, args ...any) {
+	if s == nil {
+		return
 	}
 
-	return mine
+	if _, logged := s.capLogged.LoadOrStore(key, true); !logged {
+		s.o.Log.Warn(msg, args...)
+	}
+}
+
+// ownerRefs reads the user's pointers to one owner: the first maxBoxes
+// of them by mailbox name, one bounded read of the user's own registry.
+// The ones beyond the bound are left out of the account — the same ones
+// every time — and the first time an owner is cut, the process logs it.
+func (s *Server) ownerRefs(own model.User, owner string) ([]model.SharedRef, error) {
+	refs, more, err := model.ListSharedN(own, owner, s.maxBoxes())
+	if more {
+		s.logOnce("account:"+owner, "jmap: shared account cut at jmap.max_shared_mailboxes",
+			"shared", owner, "limit", s.maxBoxes())
+	}
+
+	return refs, err
 }
 
 // ownerBoxes resolves the user's pointers to the mailboxes of one owner,
@@ -680,15 +686,23 @@ type SharingOptions struct {
 	MaxAccounts int
 	// MaxMailboxes bounds the mailboxes one shared account examines —
 	// the user's pointers to one owner, in name order, or the visible
-	// public folders by name — and the pointers the session resource
-	// examines in total. What lies beyond is left out, and logged.
+	// public folders by name. What lies beyond is left out, and logged.
 	MaxMailboxes int
+	// MaxSessionPointers bounds the pointers the session resource and the
+	// session state of every API response examine in all; 0 takes eight
+	// times MaxMailboxes. An owner that no longer fits is left out of the
+	// session resource and stays reachable by its id.
+	MaxSessionPointers int
 }
 
 // The bounds a configuration that says nothing gets.
 const (
 	defaultMaxSharedAccounts  = 64
 	defaultMaxSharedMailboxes = 1000
+	// defaultSessionPointersFactor makes the session's bound a multiple
+	// of one account's, so that one owner sharing up to its own bound
+	// uses an eighth of it.
+	defaultSessionPointersFactor = 8
 )
 
 // sharingDefaults fills in the bounds left at zero.
@@ -699,6 +713,10 @@ func sharingDefaults(o SharingOptions) SharingOptions {
 
 	if o.MaxMailboxes <= 0 {
 		o.MaxMailboxes = defaultMaxSharedMailboxes
+	}
+
+	if o.MaxSessionPointers <= 0 {
+		o.MaxSessionPointers = defaultSessionPointersFactor * o.MaxMailboxes
 	}
 
 	return o
@@ -736,23 +754,33 @@ func (s *Server) resolveAccount(sess *session, id string) (*account, *methodErro
 func (s *Server) sharedAccount(sess *session, id string) (*account, error) {
 	switch {
 	case id == model.PublicNamespace:
-		return s.openShared(sess, id, nil)
+		return s.openShared(sess, id)
 	case s.o.Sharing.SharedPrefix == "" || id == "" || strings.HasPrefix(id, "~") || id == sess.account:
 		return nil, nil
 	}
 
-	refs, err := sess.own.ListShared()
+	return s.openShared(sess, id)
+}
+
+// openShared opens a shared account, or returns nil when the user sees
+// no mailbox in it. An owner's account starts from the user's pointers
+// to that owner, a bounded read of the user's own registry; without one
+// the owner's namespace is not opened at all.
+func (s *Server) openShared(sess *session, id string) (*account, error) {
+	if id == model.PublicNamespace {
+		return s.openSharedWith(sess, id, nil)
+	}
+
+	refs, err := s.ownerRefs(sess.own, id)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.openShared(sess, id, refs)
+	return s.openSharedWith(sess, id, refs)
 }
 
-// openShared opens a shared account with the user's pointers already
-// read (nil for the public account), or returns nil when the user sees
-// no mailbox in it.
-func (s *Server) openShared(sess *session, id string, refs []model.SharedRef) (*account, error) {
+// openSharedWith is openShared with the owner's pointers already read.
+func (s *Server) openSharedWith(sess *session, id string, refs []model.SharedRef) (*account, error) {
 	a := &account{id: id, owner: id, login: sess.account, own: sess.own, srv: s}
 
 	switch {
@@ -762,7 +790,7 @@ func (s *Server) openShared(sess *session, id string, refs []model.SharedRef) (*
 		}
 
 		a.public = true
-	case !namesOwner(refs, id):
+	case len(refs) == 0:
 		return nil, nil
 	}
 
@@ -784,59 +812,30 @@ func (s *Server) openShared(sess *session, id string, refs []model.SharedRef) (*
 	return a, nil
 }
 
-// namesOwner reports whether a pointer names the owner.
-func namesOwner(refs []model.SharedRef, owner string) bool {
-	for _, r := range refs {
-		if r.Owner == owner {
-			return true
-		}
-	}
-
-	return false
-}
-
 // sharedAccounts are the accounts of other namespaces the session lists:
-// one per owner who shares a visible mailbox with the user, in the order
-// of their names and at most SharingOptions.MaxAccounts of them, and the
-// public namespace when the user sees a folder in it. An owner whose
-// namespace cannot be read now is left out and logged; it is listed
-// again once it can be.
+// one per owner who shares a visible mailbox with the user, in the key
+// order of the user's pointers and at most SharingOptions.MaxAccounts of
+// them, and the public namespace when the user sees a folder in it. An
+// owner whose namespace cannot be read now is left out and logged; it is
+// listed again once it can be.
 //
 // Only the session resource builds this list — it opens the owners'
-// namespaces and reads one registry entry per pointer. So it examines at
-// most MaxMailboxes pointers in all; the owners beyond are left out of
-// the resource (and logged), and stay reachable by their ids.
+// namespaces and reads one registry entry per pointer — so it examines
+// at most MaxSessionPointers pointers in all. The owners are found one
+// step each (model.NextSharedOwner), however many pointers one of them
+// has, and an owner costs only its own pointers, at most MaxMailboxes of
+// them: one that no longer fits into what is left is skipped, not the
+// end of the list, so an account that shares many mailboxes with the
+// user cannot push the others out. What is left out is logged once per
+// owner and stays reachable by its id.
 func (s *Server) sharedAccounts(sess *session) []*account {
 	var out []*account
 
-	owners, refs := s.sharingOwners(sess)
-	budget := s.maxBoxes()
-
-	for _, owner := range owners {
-		if len(out) >= s.o.Sharing.MaxAccounts {
-			break
-		}
-
-		n := len(s.capOwner(owner, refs))
-		if n > budget {
-			sess.log.Warn("jmap: session resource cut at jmap.max_shared_mailboxes", "shared", owner)
-			break
-		}
-
-		budget -= n
-
-		a, err := s.openShared(sess, owner, refs)
-		if err != nil {
-			sess.log.Warn("jmap: shared account left out of the session", "shared", owner, "err", err)
-			continue
-		}
-
-		if a != nil {
-			out = append(out, a)
-		}
+	if s.o.Sharing.SharedPrefix != "" {
+		out = s.ownerAccounts(sess)
 	}
 
-	a, err := s.openShared(sess, model.PublicNamespace, nil)
+	a, err := s.openShared(sess, model.PublicNamespace)
 	if err != nil {
 		sess.log.Warn("jmap: public account left out of the session", "err", err)
 	} else if a != nil {
@@ -846,40 +845,66 @@ func (s *Server) sharedAccounts(sess *session) []*account {
 	return out
 }
 
-// sharingOwners are the owners the user's pointers name, sorted, and
-// the pointers. A pointer into the public namespace is a leftover (public
-// folders are found through their namespace) and is dropped, as IMAP
-// LIST drops it.
-func (s *Server) sharingOwners(sess *session) ([]string, []model.SharedRef) {
-	if s.o.Sharing.SharedPrefix == "" {
-		return nil, nil
-	}
+// ownerAccounts walks the owners the user's pointers name for
+// sharedAccounts.
+func (s *Server) ownerAccounts(sess *session) []*account {
+	var out []*account
 
-	refs, err := sess.own.ListShared()
-	if err != nil {
-		sess.log.Warn("jmap: shared mailboxes not read", "err", err)
+	budget := s.sessionPointers()
 
-		return nil, nil
-	}
+	for owner := ""; len(out) < s.o.Sharing.MaxAccounts && budget > 0; {
+		next, ok, err := model.NextSharedOwner(sess.own, owner)
+		if err != nil {
+			sess.log.Warn("jmap: shared mailboxes not read", "err", err)
+		}
 
-	seen := map[string]bool{}
+		if err != nil || !ok || next == owner {
+			break
+		}
 
-	var owners []string
+		owner = next
 
-	for _, r := range refs {
-		switch {
-		case model.IsPublic(r.Owner):
-			_ = sess.own.RemoveSharedRef(r)
-		case r.Owner == sess.account || seen[r.Owner] || strings.HasPrefix(r.Owner, "~"):
-		default:
-			seen[r.Owner] = true
-			owners = append(owners, r.Owner)
+		a, cost := s.ownerAccount(sess, owner, budget)
+		budget -= cost
+
+		if a != nil {
+			out = append(out, a)
 		}
 	}
 
-	sort.Strings(owners)
+	return out
+}
 
-	return owners, refs
+// ownerAccount opens one owner's account for the session resource and
+// returns what it cost of the budget: its pointers, or one for a look
+// at an owner that is not listed.
+func (s *Server) ownerAccount(sess *session, owner string, budget int) (*account, int) {
+	if owner == sess.account || strings.HasPrefix(owner, "~") {
+		// Pointers into the public namespace are leftovers IMAP LIST
+		// drops; nothing here is an account.
+		return nil, 1
+	}
+
+	refs, err := s.ownerRefs(sess.own, owner)
+	if err != nil {
+		sess.log.Warn("jmap: shared account left out of the session", "shared", owner, "err", err)
+
+		return nil, 1
+	}
+
+	if len(refs) > budget {
+		s.logOnce("session:"+owner, "jmap: shared account left out of a session at jmap.max_session_pointers",
+			"shared", owner, "pointers", len(refs), "left", budget)
+
+		return nil, 1
+	}
+
+	a, err := s.openSharedWith(sess, owner, refs)
+	if err != nil {
+		sess.log.Warn("jmap: shared account left out of the session", "shared", owner, "err", err)
+	}
+
+	return a, max(len(refs), 1)
 }
 
 // sharingFingerprint summarises what the shared accounts of a session
@@ -889,8 +914,8 @@ func (s *Server) sharingOwners(sess *session) ([]string, []model.SharedRef) {
 // rewrites the pointer with the mailbox's new ACL generation, and a
 // deletion or a rename removes or moves it — and the public folders the
 // user sees, with its rights. It goes into the session state that every
-// API response carries, so it has to be cheap: two registry reads, and
-// none when both namespaces are off. A change of the "anyone" entry of a
+// API response carries, so it has to be cheap: two bounded registry
+// reads, and none when both namespaces are off. A change of the "anyone" entry of a
 // shared mailbox alone does not touch the pointers and is not seen here;
 // the session resource shows it when a client next fetches it.
 func (s *Server) sharingFingerprint(sess *session) string {
@@ -902,7 +927,14 @@ func (s *Server) sharingFingerprint(sess *session) string {
 	h := sha256.New()
 
 	if sh.SharedPrefix != "" {
-		refs, err := sess.own.ListShared()
+		// The first MaxSessionPointers pointers in key order: one bounded
+		// read however many pointers others have written for the user;
+		// that the registry holds more is part of the fingerprint.
+		refs, more, err := model.ListSharedN(sess.own, "", s.sessionPointers())
+		if more {
+			_, _ = h.Write([]byte("shared:more\n"))
+		}
+
 		if err != nil {
 			// An error is a state of its own; the next good read changes
 			// it back, and a client fetches the session again.

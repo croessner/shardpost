@@ -425,6 +425,85 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 	return out, nil
 }
 
+var _ model.SharedPager = (*User)(nil)
+
+// ListSharedN implements model.SharedPager: one bounded omap read of the
+// registry's pointer keys, in key order (owner, then mailbox); a revoked
+// pointer's tombstone counts against the limit.
+func (u *User) ListSharedN(owner string, limit int) ([]model.SharedRef, bool, error) {
+	prefix := regSharedPrefix
+	if owner != "" {
+		prefix = regSharedPrefix + owner + "/"
+	}
+
+	vals, err := u.idx.GetOmapValues(oidRegistry, "", prefix, int64(limit)+1)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return nil, false, nil
+		}
+
+		return nil, false, fmt.Errorf("list shared: %w", err)
+	}
+
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	more := len(keys) > limit
+	if more {
+		keys = keys[:limit]
+	}
+
+	out := make([]model.SharedRef, 0, len(keys))
+
+	for _, k := range keys {
+		o, mailbox, ok := strings.Cut(strings.TrimPrefix(k, regSharedPrefix), "/")
+		if !ok {
+			continue
+		}
+
+		var rec sharedRec
+
+		_ = json.Unmarshal(vals[k], &rec)
+		if rec.Deleted {
+			continue
+		}
+
+		out = append(out, model.SharedRef{Owner: o, Mailbox: mailbox, Subscribed: rec.Subscribed, Gen: rec.Gen})
+	}
+
+	return out, more, nil
+}
+
+// NextSharedOwner implements model.SharedPager: one omap read of a
+// single key, the first pointer key after the given owner's range.
+func (u *User) NextSharedOwner(after string) (string, bool, error) {
+	start := ""
+	if after != "" {
+		start = regSharedPrefix + after + model.SharedKeyEnd
+	}
+
+	vals, err := u.idx.GetOmapValues(oidRegistry, start, regSharedPrefix, 1)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return "", false, nil
+		}
+
+		return "", false, fmt.Errorf("list shared: %w", err)
+	}
+
+	for k := range vals {
+		if owner, _, ok := strings.Cut(strings.TrimPrefix(k, regSharedPrefix), "/"); ok {
+			return owner, true, nil
+		}
+	}
+
+	return "", false, nil
+}
+
 // SetSharedSubscribed changes the subscription flag of a shared folder.
 func (u *User) SetSharedSubscribed(owner, mailbox string, subscribed bool) error {
 	key := sharedKey(owner, mailbox)

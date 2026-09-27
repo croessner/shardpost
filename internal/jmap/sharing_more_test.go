@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -76,13 +77,9 @@ func TestSharingSessionStateIsCheap(t *testing.T) {
 
 // TestSharingMailboxCap: a shared account examines at most
 // max_shared_mailboxes pointers, the first by name, every time; the
-// session resource examines that many in all, and an owner beyond it is
-// left out of the resource but reachable by its id.
+// public account the first visible folders by name.
 func TestSharingMailboxCap(t *testing.T) {
 	f := newSharing(t, func(o *Options) { o.Sharing.MaxMailboxes = 2 })
-
-	carol, _ := f.store.User("carol")
-	createShared(t, carol, "Shared", "lr")
 
 	// alice's pointers by name: Drop, Hidden/Child, Listed, Secret, ...
 	got := objects(t, f.mail(t, "Mailbox/get", `{"accountId":"alice","properties":["name"]}`))
@@ -90,20 +87,59 @@ func TestSharingMailboxCap(t *testing.T) {
 		t.Errorf("the capped account shows %v", got)
 	}
 
-	accounts := sessionAs(t, f.s, "test").Accounts
-	if _, ok := accounts["carol"]; ok || accounts["alice"].Name != "alice" {
-		t.Errorf("the session lists %v, want alice and not carol beyond the budget", accounts)
-	}
-
-	if res := f.mail(t, "Mailbox/get", `{"accountId":"carol","properties":["name"]}`); len(res["list"].([]any)) != 1 {
-		t.Errorf("carol is not reachable by id: %#v", res)
-	}
-
-	// The public account is capped by name as well: Closed has no l for
-	// test, so News and Staff are the first two it sees.
+	// Closed has no l for test, so News and Staff are the first two.
 	pub := objects(t, f.mail(t, "Mailbox/get", `{"accountId":"~public","properties":["name"]}`))
 	if len(pub) != 2 {
 		t.Errorf("the public account shows %v", pub)
+	}
+}
+
+// hostileOwner is an account that sorts before every other owner and
+// shares n mailboxes with test.
+func hostileOwner(t *testing.T, f *sharing, n int) {
+	t.Helper()
+
+	u, _ := f.store.User("aaaa")
+	for i := range n {
+		createShared(t, u, "Spam"+strconv.Itoa(i), "lr")
+	}
+}
+
+// TestSharingSessionBudget: an owner that shares more mailboxes than one
+// account examines costs only its own share of the session's budget and
+// hides nobody; an owner that no longer fits is skipped, not the end of
+// the list, and stays reachable by its id.
+func TestSharingSessionBudget(t *testing.T) {
+	// The default budget: eight accounts' worth.
+	f := newSharing(t, func(o *Options) { o.Sharing.MaxMailboxes = 3 })
+	hostileOwner(t, f, 5)
+
+	carol, _ := f.store.User("carol")
+	createShared(t, carol, "Shared", "lr")
+
+	accounts := sessionAs(t, f.s, "test").Accounts
+	for _, id := range []string{"aaaa", "alice", "carol"} {
+		if _, ok := accounts[id]; !ok {
+			t.Errorf("%s is missing from the session: %v", id, accounts)
+		}
+	}
+
+	// A budget of five: aaaa costs three, alice (three of six) no longer
+	// fits and is skipped — the look at it costs one — and carol (one)
+	// still does.
+	tight := newSharing(t, func(o *Options) { o.Sharing.MaxMailboxes, o.Sharing.MaxSessionPointers = 3, 5 })
+	hostileOwner(t, tight, 5)
+
+	carol, _ = tight.store.User("carol")
+	createShared(t, carol, "Shared", "lr")
+
+	accounts = sessionAs(t, tight.s, "test").Accounts
+	if _, ok := accounts["alice"]; ok || accounts["aaaa"].Name == "" || accounts["carol"].Name == "" {
+		t.Errorf("with a budget of five the session lists %v, want aaaa and carol", accounts)
+	}
+
+	if res := tight.mail(t, "Mailbox/get", `{"accountId":"alice","properties":["name"]}`); len(res["list"].([]any)) != 3 {
+		t.Errorf("alice is not reachable by id: %#v", res)
 	}
 }
 
@@ -201,5 +237,31 @@ func TestSharingPublicKeywordRights(t *testing.T) {
 	name, carol := callAs(t, f.s, "carol", `,"urn:ietf:params:jmap:mail"`, "Email/query", query)
 	if got := strList(carol["ids"]); name != "Email/query" || len(got) != 1 || !strings.EqualFold(got[0], news.GUID) {
 		t.Errorf("carol's unseen News: %s %v", name, carol)
+	}
+}
+
+// TestSharingFingerprintBounded: the session state reads a bounded
+// window of the user's pointers, and a grant inside it still moves the
+// state.
+func TestSharingFingerprintBounded(t *testing.T) {
+	f := newSharing(t, func(o *Options) { o.Sharing.MaxMailboxes, o.Sharing.MaxSessionPointers = 2, 3 })
+	hostileOwner(t, f, 5)
+
+	echo := func() string {
+		out := call(t, f.s, `{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["Core/echo",{},"c1"]]}`)
+		state, _ := out["sessionState"].(string)
+
+		return state
+	}
+
+	before := echo()
+
+	aaaa, _ := f.store.User("aaaa")
+	if err := aaaa.SetACL("Spam0", "test", "lrw"); err != nil {
+		t.Fatal(err)
+	}
+
+	if echo() == before {
+		t.Error("a grant within the window did not move the session state")
 	}
 }

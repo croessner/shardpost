@@ -1222,6 +1222,42 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 	return out, nil
 }
 
+var _ model.SharedPager = (*User)(nil)
+
+// ListSharedN implements model.SharedPager.
+func (u *User) ListSharedN(owner string, limit int) ([]model.SharedRef, bool, error) {
+	all, err := u.ListShared()
+	if err != nil {
+		return nil, false, err
+	}
+
+	var out []model.SharedRef
+
+	for _, r := range all {
+		if owner != "" && r.Owner != owner {
+			continue
+		}
+
+		if len(out) == limit {
+			return out, true, nil
+		}
+
+		out = append(out, r)
+	}
+
+	return out, false, nil
+}
+
+// NextSharedOwner implements model.SharedPager.
+func (u *User) NextSharedOwner(after string) (string, bool, error) {
+	all, err := u.ListShared()
+	if err != nil {
+		return "", false, err
+	}
+
+	return model.NextSharedOwnerOf(all, after)
+}
+
 // equalFlags reports whether two flag sets are the same, ignoring order
 // and case, as the real store compares them.
 func equalFlags(a, b []string) bool {
