@@ -408,8 +408,9 @@ than approximated.
   (`Public`).
 
 Both are `isPersonal: false`, and `isReadOnly: true` when the user holds
-none of the rights `i`, `w`, `s`, `t`, `e`, `k`, `x` on any of their
-mailboxes. Their `accountCapabilities` are core and mail, with
+none of the rights `i`, `w`, `s`, `t`, `e`, `x` on any of their
+mailboxes. `k` does not count: no mailbox is created in a shared account
+(see below), so `k` alone lets the user do nothing there. Their `accountCapabilities` are core and mail, with
 `mayCreateTopLevelMailbox: false`: submission, vacation, Sieve, quota
 and the blob methods belong to the owner's own account, and a call of
 one of them with the id of a shared account is `accountNotFound`, like a
@@ -428,19 +429,43 @@ directly and filtered by `l`. `server.shared_prefix` and
 `server.public_prefix` switch the two kinds of account like the IMAP
 namespaces: an empty prefix, no accounts.
 
-The session is built on every fetch, and its state goes into every API
-response, so each of them reads the user's pointers, one registry entry
-per pointer and the public registry. `jmap.max_shared_accounts` (default
-64) bounds how many owners the session lists, in the order of their
-names; the public account is one more. An account beyond the bound is
-still reachable by its id.
+**Cost.** The state of the session resource goes into every API
+response, and building the shared accounts means opening each owner's
+namespace and reading one registry entry per pointer. So the state does
+not hash the shared accounts themselves but a fingerprint of what they
+are made of, read from the user's own registry and the public one: the
+pointers with their ACL generations — a grant or a revocation of the
+user's rights rewrites the pointer with the mailbox's new generation, a
+deletion or a rename removes or moves it — and the public folders the
+user sees, with its rights. An API response reads those two and opens no
+owner's namespace; the owners are opened when the session resource is
+fetched, and when a method call names one of their accounts. A change
+of the `anyone` entry of a shared mailbox alone does not touch the
+pointers, so it reaches a client when it next fetches the session
+resource, not through the state of an API response.
+
+Two bounds keep the rest cheap. `jmap.max_shared_accounts` (default 64)
+bounds how many owners the session resource lists, in the order of
+their names; the public account is one more. `jmap.max_shared_mailboxes`
+(default 1000) bounds the mailboxes one shared account examines — the
+user's pointers to that owner, the first ones by name, or the first
+visible public folders by name — and the pointers the session resource
+examines in all. What lies beyond an account's bound is left out of the
+account, the same mailboxes every time, and logged once per owner; an
+owner beyond the session resource's bound is left out of the resource
+(and logged) and stays reachable by its id, as does one beyond
+`max_shared_accounts`.
 
 **Existence is not revealed.** An id that names no account, an owner who
 shares nothing with the user, a reserved namespace and an owner whose
 mailboxes the user may not see are all `accountNotFound`. A mailbox
 without `l` is not found, by id either, as IMAP answers `NONEXISTENT`;
 a message that lies only in mailboxes the user may not read is not
-found; a download of anything else is a 404.
+found; a download of anything else is a 404. One exception is inherited
+from IMAP: a rename onto the name of a mailbox the user cannot see is
+refused because the name is taken, as IMAP `RENAME` answers
+`ALREADYEXISTS`. The emptiness of a mailbox without `r` is not revealed:
+see the deletion below.
 
 **Rights.** `myRights` of a shared mailbox:
 
@@ -469,8 +494,14 @@ since every other user sees it too. A rename or a move needs `x` on the
 mailbox and `k` on the nearest existing mailbox above its new place, as
 IMAP `RENAME` does; the top level of another namespace has no mailbox to
 hold `k` on, so nothing moves there, and a move to another account is
-not possible at all. A deletion needs `x`, removes the messages as IMAP
-`DELETE` does, and a mailbox with visible children is `mailboxHasChild`.
+not possible at all. A deletion needs `x` and removes the messages as
+IMAP `DELETE` does; a mailbox with visible children is
+`mailboxHasChild`, while children the user cannot see stay where they
+are, as after an IMAP `DELETE`. Whether a mailbox still holds messages
+(`mailboxHasEmail`) is only checked where the user may read it (`r`);
+without `r` the deletion is `forbidden` unless the client passes
+`onDestroyRemoveEmails` — which is what IMAP `DELETE` does anyway — so
+the answer never tells whether the mailbox was empty.
 
 A mailbox is not created in another namespace: IMAP `CREATE` allows it
 with `k` on the parent, but the new mailbox carries no ACL — the store
@@ -549,7 +580,11 @@ source's view; the destination checks what any new message there needs.
 A namespace keeps its own blobs, so the copy is stored again and gets a
 new id, as an IMAP `COPY` into another namespace does. Its `keywords`
 and `receivedAt` default to the original's as the user sees them — its
-own `$seen` in a public folder. `onSuccessDestroyOriginal` runs the
+own `$seen` in a public folder. The destination needs the rights for
+those keywords like for any others: a read message copied into a
+mailbox without `s` is `forbidden` unless the creation passes `keywords`
+without `$seen`. IMAP `COPY` drops the `\Seen` silently instead; JMAP
+does not drop what a client did not ask to drop. `onSuccessDestroyOriginal` runs the
 implicit `Email/set` on the source, which needs `t` and `e` there; its
 response follows the copy's under the same call id.
 
@@ -1222,6 +1257,7 @@ jmap:
   max_data_sources: 64           # per Blob/upload creation; at least 64
   max_size_blob_get: 10485760    # the blob data one Blob/get returns
   max_shared_accounts: 64        # owners the session lists; the public account is one more
+  max_shared_mailboxes: 1000     # mailboxes one shared account examines, pointers the session examines in all
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
@@ -1345,6 +1381,8 @@ authentication backend, and the relay learns the account from
   6c-3); a mailbox shared only with `anyone` is not found; no mailbox is
   created in another namespace; an upload into a shared account, and
   with it an attachment from an upload in a message created there, is
-  refused; `Quota/*` is not offered for the public account; a JMAP
+  refused; `Quota/*` is not offered for the public account; a change of
+  only the `anyone` entry of a shared mailbox does not change the
+  session state of API responses; a JMAP
   client does not clean up the private `\Seen` marks of expunged
   messages (IMAP `SELECT` does).
