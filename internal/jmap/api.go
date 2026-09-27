@@ -118,11 +118,14 @@ var methods = map[string]method{
 	"Quota/queryChanges":           {capability: CapQuota, run: quotaQueryChanges},
 	"VacationResponse/get":         {capability: CapVacationResponse, run: vacationGet},
 	"VacationResponse/set":         {capability: CapVacationResponse, run: vacationSet},
+	"Blob/upload":                  {capability: CapBlob, run: blobUpload},
+	"Blob/get":                     {capability: CapBlob, run: blobGet},
+	"Blob/lookup":                  {capability: CapBlob, run: blobLookup},
 }
 
 // knownCapabilities are the URNs a request may list in "using".
 var knownCapabilities = map[string]bool{CapCore: true, CapMail: true, CapWebPushVAPID: true, CapSubmission: true,
-	CapQuota: true, CapVacationResponse: true}
+	CapQuota: true, CapVacationResponse: true, CapBlob: true}
 
 // coreEcho returns its arguments unchanged (RFC 8620 4).
 func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *methodError) {
@@ -243,6 +246,8 @@ func (s *Server) runCalls(ctx context.Context, sess *session, req *apiRequest) [
 	for _, urn := range req.Using {
 		using[urn] = true
 	}
+
+	sess.using = using
 
 	out := make([]invocation, 0, len(req.MethodCalls))
 

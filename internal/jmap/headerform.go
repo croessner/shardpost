@@ -308,12 +308,18 @@ func sortedRawKeys(m map[string]json.RawMessage) []string {
 var errBlobTooLarge = errors.New("the blob is larger than allowed here")
 
 // blobContent is the content of a blob a client names: an upload, a
-// stored message, or a body part of one. A blob, or the message a part
+// stored message, or a body part of one, by its id or by the creation id
+// of a Blob/upload earlier in the request. A blob, or the message a part
 // is taken from, larger than limit is not read; 0 means no bound.
-func blobContent(sess *session, id string, limit int64) ([]byte, error) {
+func blobContent(sess *session, ref string, limit int64) ([]byte, error) {
 	blobs, ok := sess.user.(model.Blobs)
 	if !ok {
 		return nil, errNoIndex
+	}
+
+	id, pending := resolveCreationID(sess, ref)
+	if pending {
+		return nil, model.ErrNoBlob
 	}
 
 	if guid, path, ok := parsePartBlob(id); ok {

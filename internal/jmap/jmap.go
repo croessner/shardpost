@@ -64,6 +64,17 @@ type Limits struct {
 	// MaxObjectsInGet and MaxObjectsInSet bound one /get and one /set.
 	MaxObjectsInGet int
 	MaxObjectsInSet int
+	// MaxSizeBlobSet bounds one blob Blob/upload builds (RFC 9404 3.1);
+	// it is never more than MaxSizeUpload, which bounds a blob however it
+	// is made.
+	MaxSizeBlobSet int64
+	// MaxDataSources bounds the pieces of one Blob/upload creation; RFC
+	// 9404 asks for at least 64.
+	MaxDataSources int
+	// MaxSizeBlobGet bounds the blob data one Blob/get returns, in bytes
+	// before the base64 or JSON encoding. A client that wants more asks
+	// for a range, or downloads the blob.
+	MaxSizeBlobGet int64
 }
 
 // DefaultLimits are the values a configuration that says nothing gets.
@@ -77,7 +88,13 @@ var DefaultLimits = Limits{
 	MaxCallsInRequest:     16,
 	MaxObjectsInGet:       500,
 	MaxObjectsInSet:       500,
+	MaxDataSources:        minDataSources,
+	MaxSizeBlobGet:        10 << 20,
 }
+
+// minDataSources is the fewest data sources per Blob/upload creation RFC
+// 9404 3.1 lets a server accept.
+const minDataSources = 64
 
 // Options configure the JMAP front-end.
 type Options struct {
@@ -277,6 +294,23 @@ func withDefaults(l Limits) Limits {
 
 	if l.MaxObjectsInSet <= 0 {
 		l.MaxObjectsInSet = d.MaxObjectsInSet
+	}
+
+	return blobDefaults(l)
+}
+
+// blobDefaults fills in the limits of the blob methods: a blob built by
+// Blob/upload is bounded like an upload, and a server may not accept
+// fewer than 64 data sources.
+func blobDefaults(l Limits) Limits {
+	if l.MaxSizeBlobSet <= 0 || l.MaxSizeBlobSet > l.MaxSizeUpload {
+		l.MaxSizeBlobSet = l.MaxSizeUpload
+	}
+
+	l.MaxDataSources = max(l.MaxDataSources, minDataSources)
+
+	if l.MaxSizeBlobGet <= 0 {
+		l.MaxSizeBlobGet = DefaultLimits.MaxSizeBlobGet
 	}
 
 	return l

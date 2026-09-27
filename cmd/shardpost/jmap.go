@@ -264,6 +264,9 @@ func jmapLimits(c config.JMAP) jmap.Limits {
 		MaxCallsInRequest:     int(c.MaxCallsInRequest),
 		MaxObjectsInGet:       int(c.MaxObjectsInGet),
 		MaxObjectsInSet:       int(c.MaxObjectsInSet),
+		MaxSizeBlobSet:        c.MaxSizeBlobSet,
+		MaxDataSources:        int(c.MaxDataSources),
+		MaxSizeBlobGet:        c.MaxSizeBlobGet,
 	}
 }
 

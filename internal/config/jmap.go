@@ -36,6 +36,12 @@ type JMAP struct {
 	MaxCallsInRequest     int64 `mapstructure:"max_calls_in_request" env:"JMAP_MAX_CALLS_IN_REQUEST" validate:"gte=0"`
 	MaxObjectsInGet       int64 `mapstructure:"max_objects_in_get" env:"JMAP_MAX_OBJECTS_IN_GET" validate:"gte=0"`
 	MaxObjectsInSet       int64 `mapstructure:"max_objects_in_set" env:"JMAP_MAX_OBJECTS_IN_SET" validate:"gte=0"`
+	// The limits of the blob methods (RFC 9404): the size of a blob
+	// Blob/upload builds (never more than max_size_upload), its data
+	// sources (at least 64), and the blob data one Blob/get returns.
+	MaxSizeBlobSet int64 `mapstructure:"max_size_blob_set" env:"JMAP_MAX_SIZE_BLOB_SET" validate:"gte=0"`
+	MaxDataSources int64 `mapstructure:"max_data_sources" env:"JMAP_MAX_DATA_SOURCES" validate:"gte=0"`
+	MaxSizeBlobGet int64 `mapstructure:"max_size_blob_get" env:"JMAP_MAX_SIZE_BLOB_GET" validate:"gte=0"`
 	// ShardAttribute and Shard restrict JMAP to the accounts the
 	// authentication backend assigns to this shard (for Nauthilus with the
 	// Director, mailShard). A proxy in front that does not route JMAP per

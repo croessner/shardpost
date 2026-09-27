@@ -21,9 +21,12 @@ type session struct {
 	account string
 	user    model.User
 	created map[string]string
-	log     *slog.Logger
-	limits  Limits
-	srv     *Server
+	// using are the capabilities the request listed; Blob/lookup names
+	// only the data types of those (RFC 9404 4.3).
+	using  map[string]bool
+	log    *slog.Logger
+	limits Limits
+	srv    *Server
 	// remote is the client's IP address, for the relay (XCLIENT ADDR).
 	remote string
 	// auth is the authentication result, whose attributes provisioning

@@ -19,7 +19,8 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
 | 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
 | 6 | `Quota/*`, `VacationResponse/*` | built |
-| 6 | `SieveScript/*`, `Blob/*`, sharing | planned |
+| 6 | `Blob/*` | built |
+| 6 | `SieveScript/*`, sharing | planned |
 
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
@@ -684,6 +685,70 @@ header, is not answered. The Sieve setting
 `sieve_vacation_check_recipient` (`sieve.settings`, `no` turns the check
 off) is the knob for a deployment with such aliases.
 
+## Blobs
+
+A blob is a sequence of octets the account can read: a stored message
+(its id is the GUID of the message data, the same identity IMAP reports
+as `EMAILID`), a body part of one (`<guid>_2-1`, see Messages), or an
+upload. The upload endpoint stores the request body; the download
+endpoint serves any of them, with HTTP ranges. Blobs live in the
+account's own namespace of the store, so a blob id of another account is
+not found rather than refused, whoever knows it.
+
+**Lifetime.** An uploaded blob that nothing references is debris: the
+scrubber removes it once two consecutive runs have seen it
+unreferenced, which is the expiry RFC 8620 6.1 allows. Two consequences
+an operator should know: the expiry is the scrub cadence, not a time, so
+a deployment that does not schedule `shardpost scrub` never collects
+them; and an upload is only refused when the account is already over its
+quota, because an unreferenced blob is counted nowhere until something
+references it.
+
+**The blob methods** (RFC 9404, `urn:ietf:params:jmap:blob`) are always
+offered. The capability is empty in the session; the account's says
+`maxSizeBlobSet`, `maxDataSources`, the types `Blob/lookup` answers for
+(`Email`, `Mailbox`, `Thread`) and the digests `Blob/get` computes
+(`sha-256`, `sha`).
+
+- **`Blob/upload`** builds a blob from pieces: `data:asText` (UTF-8),
+  `data:asBase64` (with or without padding) and ranges of other blobs
+  (`blobId` with `offset` and `length`), concatenated in order. The blob
+  is stored the way an upload is — same store, same lifetime, the same
+  quota check (`overQuota` for an account that is already full) — and its
+  id goes into `createdIds`, so a later call, or a later creation of the
+  same call, names it as `#creationId`; so do `Email/import`,
+  `Email/parse` and the body parts of `Email/set`. A creation is refused
+  as a whole: a source that is not exactly one of the three kinds, text
+  that is not UTF-8 (the server checks what the client sent, not what a
+  JSON decoder made of it), base64 with a foreign character, a range that
+  does not lie within its blob, and more than `maxDataSources` sources are
+  `invalidProperties` with the source's path (`data/2`); a blob that is
+  not there is `blobNotFound` with every missing id; a blob beyond
+  `maxSizeBlobSet` is `tooLarge`, found out before the source that would
+  overflow it is read. The media type is echoed as the upload endpoint
+  echoes it; the server keeps bytes, not types. Creations that name each
+  other in a cycle find no blob.
+- **`Blob/get`** returns `data`, `data:asText`, `data:asBase64`, `size`,
+  `digest:sha` and `digest:sha-256` (default: `data` and `size`) of every
+  kind of blob, optionally of a range (`offset`, `length`). `size` is the
+  size of the whole blob. Octets that are not UTF-8 are `data:asBase64`
+  for `data` and null for `data:asText`, with `isEncodingProblem`; a range
+  that starts or runs past the end is cut and says `isTruncated`. `ids`
+  are required, at most `maxObjectsInGet`. The data one call returns is at
+  most `jmap.max_size_blob_get` (10 MiB) in total, counted before the
+  encoding; a call that would return more is `requestTooLarge` as a whole,
+  and the client asks for a range or downloads the blob. A digest without
+  the data is computed a megabyte at a time and is not counted.
+- **`Blob/lookup`** finds the objects a blob belongs to. A message's blob
+  and its body parts' blobs name the message, so this is a lookup in the
+  locator, not a search: the result is the message, its thread and the
+  mailboxes it is in. A body part is matched by its message without the
+  message being parsed. Any other blob — an upload nothing uses yet, a
+  blob that does not exist — gets empty lists, as RFC 9404 asks, so that
+  nothing is learnt about what is not the account's. A type other than
+  the three, or one whose capability (`urn:ietf:params:jmap:mail`) the
+  request does not use, is `unknownDataType`.
+
 ## Server-managed metadata
 
 The entries under `/private/vendor/shardpost/jmap/` — the identities
@@ -712,16 +777,8 @@ authenticated user is listed in the session — other accounts (shared
 mailboxes, the public namespace) belong to JMAP Sharing, which is stage
 6 of the plan.
 
-A blob id is the GUID of the message data, the same identity IMAP
-reports as `EMAILID`. An uploaded blob that nothing references is
-debris: the scrubber removes it once two consecutive runs have seen it
-unreferenced, which is the expiry RFC 8620 6.1 allows. Two consequences
-an operator should know: the expiry is the scrub cadence, not a time, so
-a deployment that does not schedule `shardpost scrub` never collects
-them; and an upload is only refused when the account is already over its
-quota, because an unreferenced blob is counted nowhere until something
-references it. A tighter bound belongs with `Blob/*` (RFC 9404) in stage
-6, where blob lifetime is a protocol matter rather than a guess.
+What a blob id names, and how long an upload lives, is described under
+[Blobs](#blobs).
 
 A download is served with `X-Content-Type-Options: nosniff` and a
 sandboxing `Content-Security-Policy`, because the media type is whatever
@@ -825,6 +882,9 @@ jmap:
   max_calls_in_request: 16
   max_objects_in_get: 500
   max_objects_in_set: 500
+  max_size_blob_set: 52428800    # Blob/upload; at most max_size_upload
+  max_data_sources: 64           # per Blob/upload creation; at least 64
+  max_size_blob_get: 10485760    # the blob data one Blob/get returns
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
@@ -928,6 +988,12 @@ authentication backend, and the relay learns the account from
   account change log. A client
   that shows the quota fetches it again, for example when a push names
   `Email`.
+- `Blob/lookup` answers for `Email`, `Mailbox` and `Thread` only, and
+  matches a body-part blob by its message without checking that the part
+  exists. An upload that a message was built from is not found by the
+  message: the message is a blob of its own. The digests of `Blob/get`
+  are not rate-limited beyond `maxConcurrentRequests`; a digest reads the
+  range it covers.
 - The private `\Seen` marks of a public folder are recorded in the
   account log of the public account, not of the account the mark belongs
   to. JMAP Sharing (RFC 9670) is where that is resolved.

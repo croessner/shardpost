@@ -34,6 +34,9 @@ const (
 	errUnsupportedSort         = "unsupportedSort"
 	errAnchorNotFound          = "anchorNotFound"
 	errTooManyChanges          = "tooManyChanges"
+	// errUnknownDataType is Blob/lookup's (RFC 9404 4.3): a type name the
+	// server does not know, or whose capability the request did not use.
+	errUnknownDataType = "unknownDataType"
 )
 
 // kwError is the method name of an error response.

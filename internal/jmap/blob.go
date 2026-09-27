@@ -57,7 +57,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.withinQuota(sess, int64(len(raw))) {
+	if !withinQuota(sess.user, int64(len(raw))) {
 		writeProblem(w, http.StatusRequestEntityTooLarge, errURNLimit,
 			"the account is out of quota", "maxSizeUpload")
 
@@ -168,14 +168,15 @@ func (s *Server) servePart(w http.ResponseWriter, r *http.Request, blobs model.B
 // An uploaded blob that nothing references is not counted anywhere until
 // something does, so this is not an exact reservation; it is the bound
 // that keeps an account which is already full from filling the pool with
-// blobs it can never reference. A store without a quota says yes.
-func (s *Server) withinQuota(sess *session, size int64) bool {
-	limit, err := sess.user.QuotaLimit()
+// blobs it can never reference. A store without a quota says yes. The
+// upload endpoint and Blob/upload ask the same question.
+func withinQuota(u model.User, size int64) bool {
+	limit, err := u.QuotaLimit()
 	if err != nil || limit.Bytes <= 0 {
 		return err == nil
 	}
 
-	usage, err := sess.user.QuotaUsage()
+	usage, err := u.QuotaUsage()
 	if err != nil {
 		return false
 	}
