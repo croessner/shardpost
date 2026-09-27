@@ -437,24 +437,40 @@ are made of, read from the user's own registry and the public one: the
 pointers with their ACL generations — a grant or a revocation of the
 user's rights rewrites the pointer with the mailbox's new generation, a
 deletion or a rename removes or moves it — and the public folders the
-user sees, with its rights. An API response reads those two and opens no
+user sees, with its rights. An API response reads those two — the
+pointers only as far as `jmap.max_session_pointers` of them in key
+order, one bounded read however many pointers other accounts have
+written for the user, with a marker when there are more — and opens no
 owner's namespace; the owners are opened when the session resource is
 fetched, and when a method call names one of their accounts. A change
 of the `anyone` entry of a shared mailbox alone does not touch the
 pointers, so it reaches a client when it next fetches the session
-resource, not through the state of an API response.
+resource, not through the state of an API response; so does a grant
+whose pointer lies beyond the first `jmap.max_session_pointers`.
 
-Two bounds keep the rest cheap. `jmap.max_shared_accounts` (default 64)
-bounds how many owners the session resource lists, in the order of
-their names; the public account is one more. `jmap.max_shared_mailboxes`
-(default 1000) bounds the mailboxes one shared account examines — the
-user's pointers to that owner, the first ones by name, or the first
-visible public folders by name — and the pointers the session resource
-examines in all. What lies beyond an account's bound is left out of the
-account, the same mailboxes every time, and logged once per owner; an
-owner beyond the session resource's bound is left out of the resource
-(and logged) and stays reachable by its id, as does one beyond
-`max_shared_accounts`.
+Three bounds keep the rest cheap:
+
+- `jmap.max_shared_mailboxes` (default 1000) bounds the mailboxes one
+  shared account examines: the user's pointers to that owner, the first
+  ones by name, or the first visible public folders by name. What lies
+  beyond is left out of the account — the same mailboxes every time —
+  and logged once per owner.
+- `jmap.max_session_pointers` (default eight times
+  `max_shared_mailboxes`) bounds the pointers the session resource and
+  the session state examine in all. The session resource finds the
+  owners one step each, however many pointers one of them has, and an
+  owner costs only its own pointers, at most `max_shared_mailboxes` of
+  them. An owner that no longer fits into what is left is skipped (the
+  look at it costs one), not the end of the list: an account that shares
+  a thousand mailboxes with the user cannot push the others out of its
+  session. A skipped owner is logged once and stays reachable by its id.
+- `jmap.max_shared_accounts` (default 64) bounds how many owners the
+  session resource lists; the public account is one more. An owner
+  beyond it stays reachable by its id as well.
+
+The owners are listed in the key order of the user's pointers, which is
+the order of their names except where a name holds a character that
+sorts before `/`.
 
 **Existence is not revealed.** An id that names no account, an owner who
 shares nothing with the user, a reserved namespace and an owner whose
@@ -1257,7 +1273,8 @@ jmap:
   max_data_sources: 64           # per Blob/upload creation; at least 64
   max_size_blob_get: 10485760    # the blob data one Blob/get returns
   max_shared_accounts: 64        # owners the session lists; the public account is one more
-  max_shared_mailboxes: 1000     # mailboxes one shared account examines, pointers the session examines in all
+  max_shared_mailboxes: 1000     # mailboxes one shared account examines
+  max_session_pointers: 8000     # pointers the session examines in all; 0 = 8 × max_shared_mailboxes
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
