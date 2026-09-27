@@ -280,9 +280,12 @@ stage 4 (`Email/query`, `Email/queryChanges`, `Email/set`,
 event source and a Web Push worker, `Identity/*`, `EmailSubmission/*`
 as a proxy to the relay with XCLIENT; delayed sending prepared, not
 offered) are implemented, and of stage 6 itself `Quota/*`,
-`VacationResponse/*`, `Blob/*` (RFC 9404) and `SieveScript/*` (RFC 9661);
-sharing is next. See [JMAP](docs/jmap.md) for what exists and
-what does not. What follows is the full
+`VacationResponse/*`, `Blob/*` (RFC 9404), `SieveScript/*` (RFC 9661)
+and the first part of sharing (6c-1: shared mailboxes and public folders
+as accounts of the session, with the RFC 4314 rights enforced as IMAP
+enforces them, and `Email/copy` between accounts); principals and share
+notifications (6c-2) and push for shared accounts (6c-3) are next. See
+[JMAP](docs/jmap.md) for what exists and what does not. What follows is the full
 target of the stage, unchanged.
 
 Goal for this server: a complete JMAP server alongside IMAP, not

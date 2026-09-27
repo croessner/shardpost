@@ -510,7 +510,7 @@ shardpostctl mailbox list -all '~public'
   `~public`: there are no pointers to reconcile.
 - **Switching them off:** an empty `server.public_prefix` disables the
   namespace for clients (no entry in `NAMESPACE`, no extra reads per
-  `LIST`); the folders stay in the store and remain administrable. While
+  `LIST`, no public account in a JMAP session); the folders stay in the store and remain administrable. While
   it is off, an account can create a mailbox of its own called
   `Public/...`; once the prefix is in use again, such a mailbox is
   shadowed by the public namespace. The same applies to an account that

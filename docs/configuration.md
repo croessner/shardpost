@@ -165,7 +165,10 @@ be redone. Subscriptions survive: they are kept per account and per
 mailbox, not by name.
 
 With an empty prefix no client can reach a shared mailbox, although the
-permissions remain in the store and the admin API still shows them.
+permissions remain in the store and the admin API still shows them. The
+same prefix switches the shared accounts of JMAP: with it empty, the
+JMAP session lists none (see [JMAP: Sharing](jmap.md#sharing)); so does
+an empty `server.public_prefix` for the public account.
 
 **Before changing a prefix on a running server**, check that no account
 owns a mailbox below the new one:
@@ -235,7 +238,7 @@ server had.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `server.public_prefix` | `Public/` | client-visible prefix of the public namespace (must end with the separator); empty switches public folders off entirely |
+| `server.public_prefix` | `Public/` | client-visible prefix of the public namespace (must end with the separator); empty switches public folders off entirely, for IMAP and JMAP alike; without the delimiter it names the public account in a JMAP session |
 | `server.public_quota_bytes` | 0 | limit of the public namespace as a whole, 0 = unlimited |
 | `server.public_quota_msgs` | 0 | the same as a message count |
 

@@ -20,7 +20,9 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
 | 6 | `Quota/*`, `VacationResponse/*` | built |
 | 6 | `Blob/*`, `SieveScript/*` | built |
-| 6 | Sharing | planned |
+| 6c-1 | Sharing of mail: shared mailboxes and public folders as accounts, `Email/copy` between them | built |
+| 6c-2 | `Principal/*`, `shareWith`, `ShareNotification` (RFC 9670) | planned |
+| 6c-3 | Push for shared accounts | planned |
 
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
@@ -54,7 +56,8 @@ consequences matter outside the store:
 8621 2). Everything they report comes from what IMAP already keeps:
 `role` from the RFC 6154 special-use attribute (and from the name, for
 INBOX), `isSubscribed` from the subscription, `myRights` from the fact
-that every mailbox in the session belongs to the account itself.
+that every mailbox of the personal account belongs to the account itself
+— in a shared account from the ACL (see [Sharing](#sharing)).
 `sortOrder` is the one property with no IMAP counterpart; it is a field
 of the registry record that nothing else reads.
 
@@ -362,10 +365,11 @@ be parsed in turn by its blob id, and the parts of that message get blob
 ids with one more level (`<guid>_2_1-2`) that the download endpoint
 serves.
 
-**`Email/copy`** copies between accounts, and a session here has one:
-another account is `fromAccountNotFound`, the same account on both sides
-`invalidArguments` (RFC 8620 5.4). Within an account, a copy is an
-update of `mailboxIds`.
+**`Email/copy`** copies between accounts: the personal one and the
+shared ones (see [Sharing](#sharing)). An account the user cannot reach
+is `fromAccountNotFound` on the source side and `accountNotFound` on the
+destination side, the same account on both sides `invalidArguments`
+(RFC 8620 5.4). Within an account, a copy is an update of `mailboxIds`.
 
 **The new state** of a write advances over the log entries that name
 only the call's own messages. Such an entry can still be another
@@ -376,6 +380,185 @@ server report properties it changed beyond the request): keywords and
 `mailboxIds` as they are now. A destroyed message that is still there
 keeps the old state. A client that adopts the new state therefore ends
 up at least as far as the state says, never behind it.
+
+## Sharing
+
+Stage 6c-1. The mailboxes other accounts share with the user, and the
+public folders, are accounts of their own in the session (RFC 8620
+1.6.2), beside the personal one. They are the same mailboxes IMAP shows
+under `Shared/<owner>/` and `Public/`, with the same rights: RFC 4314
+ACLs, set over IMAP `SETACL` or `shardpostctl acl`.
+
+The store view of another namespace checks no permissions — IMAP
+enforces them in its protocol layer, and JMAP does the same in its own
+(`internal/jmap/account.go`). An account of another namespace is built
+from the mailboxes the user may see in it, with the rights it holds on
+each, and everything the account answers comes from that set: its
+mailbox tree has the visible mailboxes only, its messages are found only
+where the user may read them, and every write checks the right it needs
+before anything is written. Whatever is not allowed is refused rather
+than approximated.
+
+**Accounts.** Besides the personal account the session lists:
+
+- one account per owner who shares at least one mailbox the user can see
+  (right `l`). Its id and name are the owner's account name.
+- the public folders, when the user can see at least one: the id is
+  `~public`, the name the public prefix without its delimiter
+  (`Public`).
+
+Both are `isPersonal: false`, and `isReadOnly: true` when the user holds
+none of the rights `i`, `w`, `s`, `t`, `e`, `k`, `x` on any of their
+mailboxes. Their `accountCapabilities` are core and mail, with
+`mayCreateTopLevelMailbox: false`: submission, vacation, Sieve, quota
+and the blob methods belong to the owner's own account, and a call of
+one of them with the id of a shared account is `accountNotFound`, like a
+call with any id the user cannot reach. `primaryAccounts` stay the
+personal account.
+
+**Discovery** works as IMAP `LIST` does: a grant writes a pointer into
+the grantee's registry, and the user's pointers name the owners. Each
+pointer is checked against the owner's ACL; a pointer whose mailbox is
+gone is pruned, and one into the public namespace is dropped (public
+folders are found through their namespace). A mailbox shared with
+`anyone` alone has no pointer and is therefore not found — IMAP `LIST`
+does not show it either, and where IMAP can still open it by its name,
+JMAP has no name to address it by. The public namespace is read
+directly and filtered by `l`. `server.shared_prefix` and
+`server.public_prefix` switch the two kinds of account like the IMAP
+namespaces: an empty prefix, no accounts.
+
+The session is built on every fetch, and its state goes into every API
+response, so each of them reads the user's pointers, one registry entry
+per pointer and the public registry. `jmap.max_shared_accounts` (default
+64) bounds how many owners the session lists, in the order of their
+names; the public account is one more. An account beyond the bound is
+still reachable by its id.
+
+**Existence is not revealed.** An id that names no account, an owner who
+shares nothing with the user, a reserved namespace and an owner whose
+mailboxes the user may not see are all `accountNotFound`. A mailbox
+without `l` is not found, by id either, as IMAP answers `NONEXISTENT`;
+a message that lies only in mailboxes the user may not read is not
+found; a download of anything else is a 404.
+
+**Rights.** `myRights` of a shared mailbox:
+
+| Property | Needs |
+|---|---|
+| `mayReadItems` | `l` and `r` |
+| `mayAddItems` | `i` |
+| `mayRemoveItems` | `t` and `e` |
+| `maySetSeen` | `s` |
+| `maySetKeywords` | `w` |
+| `mayCreateChild` | never (see below) |
+| `mayRename`, `mayDelete` | `x`, and never for INBOX |
+| `maySubmit` | never |
+
+**Mailboxes.** The tree is built from the visible mailboxes. A visible
+mailbox below a level the user cannot see keeps that level in its name
+and has no parent, as a mailbox below a level without a mailbox does in
+the personal account; IMAP `LIST` shows the same level as a `\Noselect`
+parent, so its name is no secret either. The counts need `r` and are 0
+without it; in a public folder `unreadEmails` and `unreadThreads` follow
+the reader's own `\Seen`. `isSubscribed` is the user's subscription —
+its pointer, or its list of public subscriptions — never the owner's
+flag, and `Mailbox/set` writes it there; it needs nothing beyond seeing
+the mailbox. `sortOrder` is the owner's, and changing it needs `x`,
+since every other user sees it too. A rename or a move needs `x` on the
+mailbox and `k` on the nearest existing mailbox above its new place, as
+IMAP `RENAME` does; the top level of another namespace has no mailbox to
+hold `k` on, so nothing moves there, and a move to another account is
+not possible at all. A deletion needs `x`, removes the messages as IMAP
+`DELETE` does, and a mailbox with visible children is `mailboxHasChild`.
+
+A mailbox is not created in another namespace: IMAP `CREATE` allows it
+with `k` on the parent, but the new mailbox carries no ACL — the store
+does not inherit one — so its creator could not see it afterwards, and a
+JMAP client would hold a mailbox that answers `notFound` from then on. A
+creation is therefore `forbidden`, and `mayCreateChild` is false; the
+owner creates the mailbox and shares it.
+
+**Messages.** An Email of a shared account is a message in a mailbox the
+user may read (`l` and `r`), and its `mailboxIds` are those mailboxes;
+a copy elsewhere is not part of it. `Email/get`, `/query`, `/changes`,
+`/queryChanges` and `Thread/*` see only those mailboxes. The full-text
+index is the namespace's, so it finds messages the user may not read,
+but every hit is resolved through the locator, which finds a message
+only where the user may read it, so such a hit never becomes a result.
+
+Writes check every right they need before the first write, as IMAP
+does:
+
+| Change | Needs |
+|---|---|
+| adding a message to a mailbox (creation, import, copy, move) | `i` there |
+| removing it from a mailbox (move, `mailboxIds`, destruction) | `t` and `e` there |
+| `$seen` changing on a copy, or carried by a new one | `s` there |
+| any other keyword changing on a copy, or carried by a new one | `w` there |
+
+A missing right refuses the whole creation or update with `forbidden`
+and writes nothing; a keyword is never dropped silently. A new copy
+takes only the flags the mailbox allows, as IMAP `COPY` does (a
+`\Deleted` without `t`, for instance). A destruction removes the message
+from every mailbox the user can read, and needs `t` and `e` in each; a
+copy in a mailbox the user cannot read stays.
+
+**Public folders** keep `\Seen` per reader (see
+[Public folders](development/public-folders.md)). `$seen` in the public
+account is the reader's own mark where it has one, the shared flag
+otherwise; setting it writes the mark the way an IMAP `STORE` does —
+the folder's next MODSEQ is allocated, the mark written under it, and
+the folder's change log and the public account log name the message as
+changed. The shared `\Seen` is left alone, and every other keyword is
+shared. A message created, imported or copied into a public folder
+carries `$seen` as the shared default, as an IMAP `APPEND` or `COPY`
+does, which needs `s`. The marks of messages that are gone are cleaned
+up by the next IMAP `SELECT` of the folder, not by JMAP.
+
+**State and changes.** A shared account's state is the owner's account
+log (or the public namespace's), followed by a fingerprint of what the
+user sees: for `Mailbox` the visible mailboxes with the user's rights
+and subscriptions, for `Email` and `Thread` the readable mailboxes. The
+log records what happens to the owner's mailboxes, not what the user may
+see of them — a grant, a revocation, a pointer that appears or goes and
+the user's own subscriptions change the answer without a log entry the
+user's view could be read from. So a `/changes` against a token whose
+fingerprint is not the current one answers `cannotCalculateChanges`, and
+the client resynchronises that account rather than being handed a wrong
+delta. Otherwise the delta is the owner's log with the entries about
+invisible mailboxes, and about the messages of unreadable ones, left
+out. A `/set` returns a token with the fingerprint of afterwards, so a
+client's own subscription change or deletion does not cost it a
+resynchronisation.
+
+**Blobs.** The blob store of a shared account is the owner's, and it
+holds more than the user may read. A blob of a shared account is a
+message the user can read there, or a part of one: the download
+endpoint, `Email/import`, `Email/parse` and the `blobId` of a body part
+in a creation accept nothing else and answer as for a blob that does
+not exist. An upload into a shared account is refused (404), and
+`Blob/*` is not offered there. A message with an attachment from the
+user's own upload is therefore written in the personal account and
+copied over with `Email/copy`.
+
+**`Email/copy`** works between any two accounts the user can reach:
+personal to shared, shared to personal, shared to shared. The source
+message has to be readable where it is, and is read through the
+source's view; the destination checks what any new message there needs.
+A namespace keeps its own blobs, so the copy is stored again and gets a
+new id, as an IMAP `COPY` into another namespace does. Its `keywords`
+and `receivedAt` default to the original's as the user sees them — its
+own `$seen` in a public folder. `onSuccessDestroyOriginal` runs the
+implicit `Email/set` on the source, which needs `t` and `e` there; its
+response follows the copy's under the same call id.
+
+**Not in this stage.** `Principal/*`, `shareWith` and `ShareNotification`
+(RFC 9670) are stage 6c-2: until then rights are granted over IMAP or
+`shardpostctl acl`, and a client sees the result as accounts and
+`myRights`. Push is stage 6c-3: the event source and Web Push report the
+personal account only, and a client polls a shared account with
+`/changes`. `Quota/*` is not offered for the public account.
 
 ## Push
 
@@ -924,10 +1107,9 @@ from.
 
 The account id is the canonical account name. It is already stable,
 unique within the server and the thing every log line names; an opaque
-number would only add a mapping to keep correct. Only the account of the
-authenticated user is listed in the session — other accounts (shared
-mailboxes, the public namespace) belong to JMAP Sharing, which is stage
-6 of the plan.
+number would only add a mapping to keep correct. The accounts other
+namespaces share with the user are listed beside it, with the owner's
+account name or `~public` as their id (see [Sharing](#sharing)).
 
 What a blob id names, and how long an upload lives, is described under
 [Blobs](#blobs).
@@ -935,9 +1117,11 @@ What a blob id names, and how long an upload lives, is described under
 A download is served with `X-Content-Type-Options: nosniff` and a
 sandboxing `Content-Security-Policy`, because the media type is whatever
 the client asked for and must never be interpreted as a document of this
-origin. A request for an account other than the authenticated one is a
-404 rather than a 403: the server does not confirm that the other
-account exists.
+origin. A request for an account the user cannot reach is a 404 rather
+than a 403: the server does not confirm that the other account exists.
+In a shared account a download serves only the messages the user may
+read and their parts, and an upload is refused (see
+[Sharing](#sharing)).
 
 ## Authentication
 
@@ -1037,6 +1221,7 @@ jmap:
   max_size_blob_set: 52428800    # Blob/upload; at most max_size_upload
   max_data_sources: 64           # per Blob/upload creation; at least 64
   max_size_blob_get: 10485760    # the blob data one Blob/get returns
+  max_shared_accounts: 64        # owners the session lists; the public account is one more
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
@@ -1151,5 +1336,15 @@ authentication backend, and the relay learns the account from
   are not rate-limited beyond `maxConcurrentRequests`; a digest reads the
   range it covers.
 - The private `\Seen` marks of a public folder are recorded in the
-  account log of the public account, not of the account the mark belongs
-  to. JMAP Sharing (RFC 9670) is where that is resolved.
+  account log of the public namespace, not of the account the mark
+  belongs to: every reader's `Email/changes` in the public account names
+  the message as updated, although only one reader's `$seen` changed.
+- Sharing (see [Sharing](#sharing)): no `Principal/*`, `shareWith` or
+  `ShareNotification` yet (stage 6c-2) — rights are granted over IMAP
+  `SETACL` or `shardpostctl acl`; no push for shared accounts yet (stage
+  6c-3); a mailbox shared only with `anyone` is not found; no mailbox is
+  created in another namespace; an upload into a shared account, and
+  with it an attachment from an upload in a message created there, is
+  refused; `Quota/*` is not offered for the public account; a JMAP
+  client does not clean up the private `\Seen` marks of expunged
+  messages (IMAP `SELECT` does).
