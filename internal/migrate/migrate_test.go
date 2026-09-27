@@ -15,6 +15,7 @@ import (
 
 	"shardpost/internal/admin"
 	"shardpost/internal/adminapi"
+	"shardpost/internal/archive"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/imapproto"
@@ -523,5 +524,22 @@ func TestDiffConflictsAndReimport(t *testing.T) {
 
 	if len(p.conflicts) != 0 || len(p.expunge) != 2 || p.expunge[0] != 2 || len(p.missing) != 2 || p.missing[0].UID != 2 {
 		t.Fatalf("reimport: %+v", p)
+	}
+}
+
+// TestRestoreSkipsTheJMAPVacationScript: an archive that holds the JMAP
+// vacation script restores the user's scripts without it; the target
+// would refuse it.
+func TestRestoreSkipsTheJMAPVacationScript(t *testing.T) {
+	x := &restore{rep: &RestoreReport{}}
+
+	for _, name := range []string{"main", model.JMAPVacationScript} {
+		if err := x.entry(context.Background(), &archive.Entry{Kind: archive.KindSieve, Name: name, Raw: []byte("keep;")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(x.scripts) != 1 || x.scripts[0].Name != "main" {
+		t.Errorf("scripts %+v", x.scripts)
 	}
 }

@@ -1201,7 +1201,8 @@ paths:
       description: |
         Entry names are full (`/shared/comment`, `/private/comment`);
         private entries belong to the account. Entries not listed are
-        removed.
+        removed. Entries under `/private/vendor/shardpost/jmap/` are
+        kept by the server and refused (400).
       requestBody:
         required: true
         content:
@@ -1223,8 +1224,8 @@ paths:
       description: |
         Stores the scripts as given (nothing is executed), activates
         `active` ("" deactivates) and removes scripts not listed — except
-        `jmap-vacation`, the script of the JMAP VacationResponse, which
-        stays when it is not listed and cannot be `active` (409).
+        `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+        which stays; a set that names it is refused (409).
       requestBody:
         required: true
         content:

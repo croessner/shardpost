@@ -369,10 +369,12 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
 - **Sieve** is compiled before it is stored, together with the account's
   includes. A faulty script is not stored (400). Versions go through ETags
   (`If-Match`, `If-None-Match: *` to create only). The active script
-  cannot be deleted. `jmap-vacation` is the script of the JMAP
-  VacationResponse (see [JMAP](jmap.md#vacation)): it can be listed,
-  shown and checked, but storing, deleting or activating it is refused
-  (409), and an import of scripts leaves it in place.
+  cannot be deleted. `jmap-vacation` is the server's copy of the JMAP
+  VacationResponse, for display (see [JMAP](jmap.md#vacation)): it can
+  be listed, shown and checked, but storing, deleting or activating it
+  is refused (409). An import of scripts that names it is refused (409)
+  and one that does not leaves it in place; export, restore and
+  `migrate` leave it out.
 - **Checking Sieve without side effects:** `sieve check` compiles the
   script and, on request, runs it against a stored message (role
   `content`) or a text supplied with the request (`diagnose`). Nothing is
@@ -647,6 +649,8 @@ imapsync cannot do this, because IMAP APPEND always assigns new UIDs.
   active script; all scripts are compiled beforehand as they are in
   ManageSieve (`422 rejected` if one does not compile; nothing changes
   then). `PUT .../mailboxes/{id}/acl` replaces the explicit ACL entries.
+  `PUT .../import/mailboxes/{id}/metadata` refuses entries under
+  `/private/vendor/shardpost/jmap/`, which the server keeps (400).
 - **POP3:** with `-pop3-uidl-format` (Dovecot syntax 2.3 `%08Xu%08Xv` or
   2.4 `%{uid | hex(8)}`) the UIDL of the source is stored for every INBOX
   message; POP3 `UIDL` then returns it instead of the GUID. COPY/MOVE do

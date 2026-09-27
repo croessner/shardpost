@@ -619,45 +619,80 @@ capability is not in the session and the methods answer `unknownMethod`.
 
 An account has one VacationResponse, `singleton`; it can be read and
 updated, not created or destroyed (`singleton`). Its default is off,
-with no dates and no texts. The setting is kept as JSON in the
-account's metadata (the server entry
-`/private/vendor/shardpost/jmap/vacation`); its state is a hash of it,
-and there is no `/changes` for this type. A change is checked first:
-the dates are UTCDates (written back in UTC) and `toDate` does not lie
-before `fromDate`, the subject is one line of at most 998 bytes, each
-body at most 16 KiB without control characters.
+with no dates and no texts. A change is checked first: `isEnabled` is
+`true` or `false` (null is `invalidProperties`), the dates are UTCDates
+(written back in UTC) and `toDate` does not lie before `fromDate`, the
+subject is one line of at most 998 bytes, each body at most 16 KiB
+without control characters.
 
-**The script.** Every change also writes the setting out as a Sieve
-script named `jmap-vacation` in the account's script store — while it is
-enabled; turning it off removes the script. The script sends the reply
-with `vacation`, once per sender in seven days, under a handle that
-changes with the setting, so a sender answered before a change is
-answered again with what is new. `fromDate` and `toDate` become
-`currentdate` tests (RFC 5260) in UTC: the reply goes to messages that
-arrive on or after `fromDate` and before `toDate`. A text body alone is
-a plain reply; with an HTML body the reply is a MIME entity, the text
-and the HTML as alternatives, or the HTML alone. Without either body the
-reply carries a short default text, as RFC 8621 asks; without a subject
-it takes the server's default subject. Every text a client sends is
-written as a quoted Sieve string and cannot become part of the script.
+**The setting is the source.** It is kept as JSON in the account's
+metadata, in the server entry `/private/vendor/shardpost/jmap/vacation`,
+and that entry is what delivery answers from. Only the JMAP front-end
+writes it (see [server-managed entries](#server-managed-metadata)). Its
+state is a hash of it, and there is no `/changes` for this type. The
+state check and the write are one step: the entry is replaced only while
+it still holds what the state was computed from. Of two sets that name
+the same `ifInState`, one wins and the other is `stateMismatch`; a set
+without `ifInState` starts over on the new setting.
 
-**After the active script.** `jmap-vacation` is never activated and
+**The script.** Delivery turns the setting into a Sieve script and runs
+it. The script sends the reply with `vacation`, once per sender in seven
+days. `fromDate` and `toDate` become `currentdate` tests (RFC 5260) in
+UTC: the reply goes to messages that arrive on or after `fromDate` and
+before `toDate`. A text body alone is a plain reply; with an HTML body
+the reply is a MIME entity, the text and the HTML as alternatives, or
+the HTML alone. Without either body the reply carries a short default
+text, as RFC 8621 asks; without a subject it takes the server's default
+subject. A subject is cut to 256 characters in the reply, with an
+ellipsis, as every Sieve vacation subject is. Every text a client sends
+is written as a quoted Sieve string and cannot become part of the
+script, and a set whose script would not compile is refused
+(`serverFail`) before anything is stored.
+
+The once-per-sender record is kept under a handle derived from the
+setting — dates, subject and bodies. A changed text therefore reaches a
+sender that was answered before; turning the vacation off and on again
+with the same setting does not, within the seven days.
+
+**A copy for display.** Every change also stores the script under the
+name `jmap-vacation` in the account's script store while the vacation
+is enabled, and removes it when it is not, so that a ManageSieve client
+such as Roundcube can show the setting. Delivery never reads that copy.
+ManageSieve and the admin API show it but refuse to store, rename,
+delete or activate it; an import of scripts that names it is refused,
+and an export, a restore or a migration leaves it out.
+
+**After the active script.** The JMAP vacation is never activated and
 never replaces the user's active script. Delivery runs the active script
-as always; when that produced no vacation reply — none in the script, or
-its conditions did not match — and did not reject the message, delivery
-runs `jmap-vacation` as well and takes its vacation alone. A message
-the active script discards is not answered, as with any Sieve vacation. A vacation
-the user keeps in the active script, such as Roundcube's, therefore
-wins; the two never answer the same message twice. An account without an
-active script still gets the JMAP vacation. The reply goes out the way
-every Sieve vacation does: through the relay, with the RFC 5230 checks
-(no reply to automatic mail, lists or the null sender) and the
-per-sender record. A `jmap-vacation` that cannot be read or does not
-run is logged and leaves the delivery alone.
+as always; when that produced no vacation reply — none in the script,
+its conditions did not match, or the script failed — did not reject the
+message and keeps it in a mailbox, delivery evaluates the JMAP vacation
+and takes its vacation alone. A vacation the user keeps in the active
+script, such as Roundcube's, therefore wins; the two never answer the
+same message twice. An account without an active script still gets the
+JMAP vacation. The reply goes out the way every Sieve vacation does:
+through the relay, with the RFC 5230 checks (no reply to automatic mail,
+lists or the null sender) and the per-sender record. A setting that
+cannot be read or does not run is logged and leaves the delivery alone.
 
-ManageSieve and the admin API show the script, so a client such as
-Roundcube can display the setting, but refuse to store, rename, delete
-or activate it: it changes over JMAP only.
+**Who is answered.** The RFC 5230 check answers a message only when one
+of the account's addresses is among its recipients (`To`, `Cc` and the
+like), and JMAP has no way to name further addresses (`:addresses`):
+the one address counted is the one the message was delivered to. A
+message to an alias the delivery rewrote, with that alias alone in the
+header, is not answered. The Sieve setting
+`sieve_vacation_check_recipient` (`sieve.settings`, `no` turns the check
+off) is the knob for a deployment with such aliases.
+
+## Server-managed metadata
+
+The entries under `/private/vendor/shardpost/jmap/` — the identities
+and the vacation response — are the server's. They can be read over
+IMAP (`GETMETADATA`), but `SETMETADATA` refuses to set or remove them
+(`NO [NOPERM]`), in any spelling of the name, and an account import
+refuses them in a mailbox's annotations (400). They change over JMAP
+only, where they are checked, and the vacation is what delivery answers
+from.
 
 ## Endpoints
 
@@ -883,6 +918,11 @@ authentication backend, and the relay learns the account from
   header itself and has neither deviation.
 - `EmailSubmission` hands messages to the relay and does not evaluate
   DSNs or MDNs, and delayed sending is not offered (see Sending).
+- A message that is not kept — discarded, or only forwarded
+  (`redirect` without `:copy` or `keep`) — gets no vacation reply, from
+  the JMAP vacation or from a vacation in the user's script: the reply
+  is sent once the message is stored, and here nothing is. This is how
+  every Sieve vacation of this server behaves.
 - Push has no `Identity`, `PushSubscription`, `Quota` or
   `VacationResponse` type in its `StateChange`s: none of them is in the
   account change log. A client

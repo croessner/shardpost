@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"shardpost/internal/memstore"
@@ -129,7 +131,7 @@ func TestVacationResponseDefaultBody(t *testing.T) {
 
 	vacationCall(t, s, "VacationResponse/set", `{"accountId":"test","update":{"singleton":{"isEnabled":true}}}`)
 
-	if script := jmapScript(t, u); !strings.Contains(script, defaultVacationText) {
+	if script := jmapScript(t, u); !strings.Contains(script, sieve.DefaultVacationText) {
 		t.Errorf("script %s", script)
 	}
 }
@@ -154,6 +156,7 @@ func TestVacationResponseRefuses(t *testing.T) {
 		`{"isEnabled":true,"textBody":"` + strings.Repeat("x", maxVacationBody+1) + `"}`,
 		`{"isEnabled":true,"textBody":"nul\u0000"}`,
 		`{"isEnabled":"yes"}`,
+		`{"isEnabled":null}`,
 		`{"isEnabled":true,"id":"other"}`,
 		`{"isEnabled":true,"body":"x"}`,
 	} {
@@ -214,4 +217,95 @@ func TestVacationResponseNeedsARelay(t *testing.T) {
 	if got := mailError(t, on, "VacationResponse/get", `{"accountId":"test"}`); got != errUnknownMethod {
 		t.Errorf("without the capability in using: %s", got)
 	}
+}
+
+// TestVacationResponseConcurrentSets: sets that name the same state are
+// decided one after the other — exactly one wins, the others are told
+// stateMismatch — and sets without a state all get through.
+func TestVacationResponseConcurrentSets(t *testing.T) {
+	s, _ := vacationServer(t)
+	_, state := vacationObject(t, s)
+
+	results := concurrentSets(t, s, func(i int) string {
+		return `{"accountId":"test","ifInState":"` + state + `","update":{"singleton":{"isEnabled":true,"subject":"` +
+			strconv.Itoa(i) + `"}}}`
+	})
+
+	won, mismatched := 0, 0
+
+	for _, r := range results {
+		switch r {
+		case "VacationResponse/set":
+			won++
+		case errStateMismatch:
+			mismatched++
+		}
+	}
+
+	if won != 1 || mismatched != len(results)-1 {
+		t.Errorf("with ifInState: %v", results)
+	}
+
+	results = concurrentSets(t, s, func(i int) string {
+		return `{"accountId":"test","update":{"singleton":{"subject":"` + strconv.Itoa(i) + `"}}}`
+	})
+
+	for _, r := range results {
+		if r != "VacationResponse/set" {
+			t.Errorf("without ifInState: %v", results)
+		}
+	}
+}
+
+// concurrentSets runs as many VacationResponse/set calls at once as an
+// account may have in flight and returns what each answered: the method
+// name, or the error type.
+func concurrentSets(t *testing.T, s *Server, args func(i int) string) []string {
+	t.Helper()
+
+	n := DefaultLimits.MaxConcurrentRequests
+	out := make([]string, n)
+	start := make(chan struct{})
+
+	var wg sync.WaitGroup
+
+	for i := range n {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			<-start
+
+			w := do(t, s, http.MethodPost, PathAPI, `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:vacationresponse"],
+				"methodCalls":[["VacationResponse/set",`+args(i)+`,"c1"]]}`)
+
+			var res struct {
+				MethodResponses [][]json.RawMessage `json:"methodResponses"`
+			}
+
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &res) != nil {
+				out[i] = "http " + strconv.Itoa(w.Code)
+				return
+			}
+
+			var (
+				name string
+				e    methodError
+			)
+
+			_ = json.Unmarshal(res.MethodResponses[0][0], &name)
+			_ = json.Unmarshal(res.MethodResponses[0][1], &e)
+
+			out[i] = name
+			if name == kwError {
+				out[i] = e.Type
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	return out
 }

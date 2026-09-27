@@ -722,6 +722,10 @@ func (s *Server) PutImportSieve(w http.ResponseWriter, r *http.Request, account 
 	scripts := map[string]string{}
 
 	for _, sc := range req.Scripts {
+		if refuseReserved(w, sc.Name) {
+			return
+		}
+
 		if !validScriptName(sc.Name) || len(sc.Script) > maxSieveScript || scripts[sc.Name] != "" {
 			writeError(w, http.StatusBadRequest, adminapi.BadRequest, "invalid, oversized or duplicate script "+sc.Name)
 			return
@@ -732,10 +736,6 @@ func (s *Server) PutImportSieve(w http.ResponseWriter, r *http.Request, account 
 
 	if _, ok := scripts[req.Active]; req.Active != "" && !ok {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "the active script is not in the set")
-		return
-	}
-
-	if refuseReserved(w, req.Active) {
 		return
 	}
 

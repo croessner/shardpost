@@ -187,6 +187,12 @@ func (x *exporter) sieve() (string, error) {
 	sort.Strings(names)
 
 	for _, name := range names {
+		// The JMAP vacation script is a copy the server writes; it is
+		// not the user's and a restore could not store it.
+		if model.ReservedScript(name) {
+			continue
+		}
+
 		text, err := x.u.GetScript(name)
 		if err != nil {
 			return "", fmt.Errorf("sieve %q: %w", name, err)
@@ -198,6 +204,39 @@ func (x *exporter) sieve() (string, error) {
 	}
 
 	return active, nil
+}
+
+// serverManaged is an entry the JMAP front-end keeps, which is the
+// server's to write, or "".
+func serverManaged(entries map[string]string) string {
+	for k := range entries {
+		if model.ServerManagedEntry(k) {
+			return k
+		}
+	}
+
+	return ""
+}
+
+// metadataChange is what turns the entries a mailbox has into the ones
+// wanted: the others removed — except those the server keeps — and the
+// new or different ones set.
+func metadataChange(have, want map[string]string) map[string]*string {
+	change := map[string]*string{}
+
+	for k := range have {
+		if _, keep := want[k]; !keep && !model.ServerManagedEntry(k) {
+			change[k] = nil
+		}
+	}
+
+	for k, v := range want {
+		if have[k] != v {
+			change[k] = &v
+		}
+	}
+
+	return change
 }
 
 // PutImportMetadata replaces the annotations of a mailbox.
@@ -216,6 +255,11 @@ func (s *Server) PutImportMetadata(w http.ResponseWriter, r *http.Request, accou
 		return
 	}
 
+	if k := serverManaged(req.Entries); k != "" {
+		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "metadata: "+k+" is kept by the server")
+		return
+	}
+
 	mb, err := c.imp.MailboxByID(id)
 	if err != nil {
 		s.importError(w, r, err)
@@ -230,21 +274,7 @@ func (s *Server) PutImportMetadata(w http.ResponseWriter, r *http.Request, accou
 		return
 	}
 
-	change := map[string]*string{}
-
-	for k := range have {
-		if _, keep := req.Entries[k]; !keep {
-			change[k] = nil
-		}
-	}
-
-	for k, v := range req.Entries {
-		if have[k] != v {
-			change[k] = &v
-		}
-	}
-
-	if len(change) > 0 {
+	if change := metadataChange(have, req.Entries); len(change) > 0 {
 		if err := c.u.SetMetadata(mb.Name, account, change); err != nil {
 			writeError(w, http.StatusBadRequest, adminapi.BadRequest, "metadata: "+err.Error())
 			return

@@ -99,3 +99,43 @@ func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string)
 		return set, rm
 	})
 }
+
+// SwapMetadata sets one entry (nil: removes it) in one CAS, only while it
+// still holds old ("" is an absent entry).
+func (u *User) SwapMetadata(mailbox, accessor, entry, old string, next *string) (bool, error) {
+	acc := ""
+	if strings.HasPrefix(entry, "/private/") {
+		acc = accessor
+	}
+
+	prefix, err := u.annotPrefix(mailbox, acc)
+	if err != nil {
+		return false, err
+	}
+
+	if next != nil && len(*next) > MaxAnnotationSize {
+		return false, ErrTooLarge
+	}
+
+	key := prefix + entry
+	swapped := false
+
+	err = casOmap(u, u.idx, oidMetadata, []string{key}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		swapped = string(cur[key]) == old
+		if !swapped {
+			return nil, nil
+		}
+
+		if next == nil {
+			if _, had := cur[key]; !had {
+				return nil, nil
+			}
+
+			return nil, []string{key}
+		}
+
+		return map[string][]byte{key: []byte(*next)}, nil
+	})
+
+	return swapped && err == nil, err
+}

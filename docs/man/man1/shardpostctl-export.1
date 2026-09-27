@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-EXPORT 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-EXPORT 1 "2026-09-27" "ShardPost 0.26.2" "ShardPost Manual"
 .SH NAME
 shardpostctl-export \- export an account to an archive, verify it and restore it
 .SH SYNOPSIS
@@ -32,8 +32,12 @@ immediately followed by the message as stored, then the Sieve scripts,
 and last a manifest with the checksum of every entry.
 .PP
 Not in the archive: subscriptions to mailboxes that do not exist, server
-annotations, the trace switch, and the quota limit (it comes from the
-user database). The full-text index is not stored either; it is rebuilt
+annotations (among them the JMAP identities and the JMAP vacation
+response), the script
+.B jmap-vacation
+(a copy the server writes of that vacation response; a restore skips it
+in an older archive too), the trace switch, and the quota limit (it
+comes from the user database). The full-text index is not stored either; it is rebuilt
 from the messages.
 .SS export
 Streams the account into

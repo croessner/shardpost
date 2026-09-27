@@ -1524,6 +1524,38 @@ func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string)
 	return nil
 }
 
+// SwapMetadata sets one entry only while it still holds old.
+func (u *User) SwapMetadata(mailbox, accessor, entry, old string, next *string) (bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	acc := ""
+	if strings.HasPrefix(entry, "/private/") {
+		acc = accessor
+	}
+
+	prefix, err := u.annotKey(mailbox, acc)
+	if err != nil {
+		return false, err
+	}
+
+	if u.annot[prefix+entry] != old {
+		return false, nil
+	}
+
+	if u.annot == nil {
+		u.annot = map[string]string{}
+	}
+
+	if next == nil {
+		delete(u.annot, prefix+entry)
+	} else {
+		u.annot[prefix+entry] = *next
+	}
+
+	return true, nil
+}
+
 // VacationSeen reports whether key was seen within ttl and records it.
 func (u *User) VacationSeen(key string, ttl time.Duration) (bool, error) {
 	u.mu.Lock()

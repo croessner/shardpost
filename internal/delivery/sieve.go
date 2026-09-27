@@ -12,8 +12,8 @@ import (
 
 // runSieve runs the active script with its pipes; a missing script
 // delivers to INBOX, a failing script or pipe keeps the original in
-// INBOX. When the active script did not answer the message with a
-// vacation, the vacation of the JMAP VacationResponse may.
+// INBOX. When the active script did not answer a message it keeps with
+// a vacation, the vacation of the JMAP VacationResponse may.
 func (r *run) runSieve(ctx context.Context) *sieve.Delivery {
 	user, raw := r.req.Account, r.req.Raw
 
@@ -39,38 +39,60 @@ func (r *run) runSieve(ctx context.Context) *sieve.Delivery {
 		d = &sieve.Delivery{FileInto: []sieve.FileInto{{Mailbox: inboxName}}, Raw: raw}
 	}
 
-	if d.Vacation == nil && d.Rejected == "" {
+	// A message that is not kept is not answered: that is how every Sieve
+	// vacation behaves here (the reply goes out after the message is
+	// stored), so there is nothing to evaluate.
+	if d.Vacation == nil && d.Rejected == "" && len(d.FileInto) > 0 {
 		d.Vacation = r.jmapVacation(ctx)
 	}
 
 	return d
 }
 
-// jmapVacation runs the account's JMAP vacation script, when it has one,
-// and returns the vacation it asks for. The script is not the active one
-// and never becomes it: it runs after the active script, so a vacation
-// the user keeps there wins, and a second vacation in one run — which
-// Sieve forbids — cannot happen. Only its vacation counts; the script
-// holds nothing else, and it runs without store hooks or programs. A
-// script that is missing, unreadable or broken leaves the delivery as it
-// is.
+// jmapVacation evaluates the account's JMAP VacationResponse and returns
+// the vacation it asks for. Its source is the account's METADATA entry,
+// which only the JMAP front-end writes; the script is generated from it
+// here, and the copy in the script store — for display in ManageSieve
+// clients — is never read. It runs after the active script, so a
+// vacation the user keeps there wins, and a second vacation in one run —
+// which Sieve forbids — cannot happen; it runs without store hooks or
+// programs. A setting that is missing, unreadable or does not run leaves
+// the delivery as it is.
 func (r *run) jmapVacation(ctx context.Context) *sieve.Vacation {
 	user := r.req.Account
 
-	script, err := r.u.GetScript(sieve.JMAPVacationScript)
-
-	switch {
-	case errors.Is(err, model.ErrNoScript):
-		return nil
-	case err != nil:
-		r.log.Warn("jmap vacation script unavailable", "user", user, "err", err)
+	md, err := r.u.GetMetadata("", user)
+	if err != nil {
+		r.log.Warn("jmap vacation unavailable", "user", user, "err", err)
 
 		return nil
 	}
 
-	d, err := sieve.RunWithHooks(ctx, script, r.req.From, r.req.Rcpt, user, r.req.Raw, sieve.Hooks{Config: r.svc.SieveConfig})
+	raw := md[sieve.JMAPVacationEntry]
+	if raw == "" {
+		return nil
+	}
+
+	v, err := sieve.ParseJMAPVacation(raw)
+	if err != nil || !v.IsEnabled {
+		if err != nil {
+			r.log.Warn("jmap vacation does not read", "user", user, "err", err)
+		}
+
+		return nil
+	}
+
+	settings, err := v.Settings()
 	if err != nil {
-		r.log.Warn("jmap vacation script failed", "user", user, "err", err)
+		r.log.Warn("jmap vacation has a bad date", "user", user, "err", err)
+
+		return nil
+	}
+
+	d, err := sieve.RunWithHooks(ctx, sieve.VacationScript(settings), r.req.From, r.req.Rcpt, user, r.req.Raw,
+		sieve.Hooks{Config: r.svc.SieveConfig})
+	if err != nil {
+		r.log.Warn("jmap vacation failed", "user", user, "err", err)
 
 		return nil
 	}

@@ -273,6 +273,10 @@ type User interface {
 	// account. SetMetadata with a nil value removes the entry.
 	GetMetadata(mailbox, accessor string) (map[string]string, error)
 	SetMetadata(mailbox, accessor string, entries map[string]*string) error
+	// SwapMetadata sets one entry (nil: removes it) only while it still
+	// holds old ("" is an absent entry), in one atomic step; swapped is
+	// false, and nothing written, when it held something else.
+	SwapMetadata(mailbox, accessor, entry, old string, next *string) (swapped bool, err error)
 
 	// Delivery intents bracket a delivery that consists of several index
 	// updates (Sieve fileinto into several mailboxes, MULTIAPPEND): what

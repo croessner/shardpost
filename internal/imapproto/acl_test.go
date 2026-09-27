@@ -143,6 +143,23 @@ func TestACLSharedFolders(t *testing.T) {
 	mustHave(t, alice.cmd("SETACL Team alice lr"), "CANNOT")
 }
 
+// TestMetadataServerManaged: the entries the JMAP front-end keeps can be
+// read over IMAP, not written or removed, in any spelling.
+func TestMetadataServerManaged(t *testing.T) {
+	alice, _ := twoUsers(t)
+
+	for _, entry := range []string{"/private/vendor/shardpost/jmap/vacation", "/private/vendor/shardpost/jmap/identities",
+		"/private/Vendor/ShardPost/JMAP/vacation", "/private/vendor/shardpost/jmap/other"} {
+		mustHave(t, alice.cmd(`SETMETADATA "" (`+entry+` "{\"isEnabled\":true}")`), "NOPERM")
+		mustHave(t, alice.cmd(`SETMETADATA "" (`+entry+` NIL)`), "NOPERM")
+	}
+
+	mustHave(t, alice.cmd(`SETMETADATA "" (/private/comment "x" /private/vendor/shardpost/jmap/vacation "y")`), "NOPERM")
+	mustLack(t, alice.ok(`GETMETADATA (DEPTH infinity) "" /private`), "/private/comment", "vendor/shardpost")
+
+	alice.ok(`GETMETADATA "" (/private/vendor/shardpost/jmap/vacation)`)
+}
+
 func TestMetadata(t *testing.T) {
 	alice, bob := twoUsers(t)
 	// Server entries: private ones are per account, shared ones are global

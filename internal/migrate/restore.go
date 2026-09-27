@@ -10,6 +10,7 @@ import (
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/archive"
+	"shardpost/internal/model"
 )
 
 // Restore of an account archive (roadmap 8e) through the import API: the
@@ -148,6 +149,12 @@ func (x *restore) entry(ctx context.Context, e *archive.Entry) error {
 	case archive.KindMessage:
 		return x.message(ctx, e)
 	case archive.KindSieve:
+		// An archive of an older version may hold the JMAP vacation
+		// script, which the target refuses: it is the server's copy.
+		if model.ReservedScript(e.Name) {
+			return nil
+		}
+
 		x.scripts = append(x.scripts, adminapi.ImportSieveScript{Name: e.Name, Script: string(e.Raw)})
 		x.rep.Scripts = append(x.rep.Scripts, e.Name)
 

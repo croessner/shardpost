@@ -1447,7 +1447,8 @@ type ClientInterface interface {
 	//
 	// Entry names are full (`/shared/comment`, `/private/comment`);
 	// private entries belong to the account. Entries not listed are
-	// removed.
+	// removed. Entries under `/private/vendor/shardpost/jmap/` are
+	// kept by the server and refused (400).
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1458,7 +1459,8 @@ type ClientInterface interface {
 	//
 	// Entry names are full (`/shared/comment`, `/private/comment`);
 	// private entries belong to the account. Entries not listed are
-	// removed.
+	// removed. Entries under `/private/vendor/shardpost/jmap/` are
+	// kept by the server and refused (400).
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -1469,8 +1471,8 @@ type ClientInterface interface {
 	//
 	// Stores the scripts as given (nothing is executed), activates
 	// `active` ("" deactivates) and removes scripts not listed — except
-	// `jmap-vacation`, the script of the JMAP VacationResponse, which
-	// stays when it is not listed and cannot be `active` (409).
+	// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+	// which stays; a set that names it is refused (409).
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1481,8 +1483,8 @@ type ClientInterface interface {
 	//
 	// Stores the scripts as given (nothing is executed), activates
 	// `active` ("" deactivates) and removes scripts not listed — except
-	// `jmap-vacation`, the script of the JMAP VacationResponse, which
-	// stays when it is not listed and cannot be `active` (409).
+	// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+	// which stays; a set that names it is refused (409).
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2391,7 +2393,8 @@ func (c *Client) ImportMessagesWithBody(ctx context.Context, account Account, id
 //
 // Entry names are full (`/shared/comment`, `/private/comment`);
 // private entries belong to the account. Entries not listed are
-// removed.
+// removed. Entries under `/private/vendor/shardpost/jmap/` are
+// kept by the server and refused (400).
 //
 // Takes any type of body and a specified content type.
 //
@@ -2412,7 +2415,8 @@ func (c *Client) PutImportMetadataWithBody(ctx context.Context, account Account,
 //
 // Entry names are full (`/shared/comment`, `/private/comment`);
 // private entries belong to the account. Entries not listed are
-// removed.
+// removed. Entries under `/private/vendor/shardpost/jmap/` are
+// kept by the server and refused (400).
 //
 // Takes a body of the `application/json` content type.
 //
@@ -2433,8 +2437,8 @@ func (c *Client) PutImportMetadata(ctx context.Context, account Account, id Mail
 //
 // Stores the scripts as given (nothing is executed), activates
 // `active` ("" deactivates) and removes scripts not listed — except
-// `jmap-vacation`, the script of the JMAP VacationResponse, which
-// stays when it is not listed and cannot be `active` (409).
+// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+// which stays; a set that names it is refused (409).
 //
 // Takes any type of body and a specified content type.
 //
@@ -2455,8 +2459,8 @@ func (c *Client) PutImportSieveWithBody(ctx context.Context, account Account, pa
 //
 // Stores the scripts as given (nothing is executed), activates
 // `active` ("" deactivates) and removes scripts not listed — except
-// `jmap-vacation`, the script of the JMAP VacationResponse, which
-// stays when it is not listed and cannot be `active` (409).
+// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+// which stays; a set that names it is refused (409).
 //
 // Takes a body of the `application/json` content type.
 //
@@ -6530,7 +6534,8 @@ type ClientWithResponsesInterface interface {
 	//
 	// Entry names are full (`/shared/comment`, `/private/comment`);
 	// private entries belong to the account. Entries not listed are
-	// removed.
+	// removed. Entries under `/private/vendor/shardpost/jmap/` are
+	// kept by the server and refused (400).
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6541,7 +6546,8 @@ type ClientWithResponsesInterface interface {
 	//
 	// Entry names are full (`/shared/comment`, `/private/comment`);
 	// private entries belong to the account. Entries not listed are
-	// removed.
+	// removed. Entries under `/private/vendor/shardpost/jmap/` are
+	// kept by the server and refused (400).
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6552,8 +6558,8 @@ type ClientWithResponsesInterface interface {
 	//
 	// Stores the scripts as given (nothing is executed), activates
 	// `active` ("" deactivates) and removes scripts not listed — except
-	// `jmap-vacation`, the script of the JMAP VacationResponse, which
-	// stays when it is not listed and cannot be `active` (409).
+	// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+	// which stays; a set that names it is refused (409).
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6564,8 +6570,8 @@ type ClientWithResponsesInterface interface {
 	//
 	// Stores the scripts as given (nothing is executed), activates
 	// `active` ("" deactivates) and removes scripts not listed — except
-	// `jmap-vacation`, the script of the JMAP VacationResponse, which
-	// stays when it is not listed and cannot be `active` (409).
+	// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+	// which stays; a set that names it is refused (409).
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -9912,7 +9918,8 @@ func (c *ClientWithResponses) ImportMessagesWithBodyWithResponse(ctx context.Con
 //
 // Entry names are full (`/shared/comment`, `/private/comment`);
 // private entries belong to the account. Entries not listed are
-// removed.
+// removed. Entries under `/private/vendor/shardpost/jmap/` are
+// kept by the server and refused (400).
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -9929,7 +9936,8 @@ func (c *ClientWithResponses) PutImportMetadataWithBodyWithResponse(ctx context.
 //
 // Entry names are full (`/shared/comment`, `/private/comment`);
 // private entries belong to the account. Entries not listed are
-// removed.
+// removed. Entries under `/private/vendor/shardpost/jmap/` are
+// kept by the server and refused (400).
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -9946,8 +9954,8 @@ func (c *ClientWithResponses) PutImportMetadataWithResponse(ctx context.Context,
 //
 // Stores the scripts as given (nothing is executed), activates
 // `active` ("" deactivates) and removes scripts not listed — except
-// `jmap-vacation`, the script of the JMAP VacationResponse, which
-// stays when it is not listed and cannot be `active` (409).
+// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+// which stays; a set that names it is refused (409).
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -9964,8 +9972,8 @@ func (c *ClientWithResponses) PutImportSieveWithBodyWithResponse(ctx context.Con
 //
 // Stores the scripts as given (nothing is executed), activates
 // `active` ("" deactivates) and removes scripts not listed — except
-// `jmap-vacation`, the script of the JMAP VacationResponse, which
-// stays when it is not listed and cannot be `active` (409).
+// `jmap-vacation`, the server's copy of the JMAP VacationResponse,
+// which stays; a set that names it is refused (409).
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

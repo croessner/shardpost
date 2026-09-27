@@ -4,28 +4,104 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"mime/quotedprintable"
 	"strconv"
 	"strings"
 	"time"
+
+	"shardpost/internal/model"
 )
 
-// The vacation of the JMAP VacationResponse (RFC 8621 8) is a Sieve
-// script the server writes into the account's script store under a
-// reserved name. It is never the active script: delivery runs it after
-// the active one, for its vacation alone, when the active script did not
-// answer the message itself. So a vacation a user keeps in the active
-// script (Roundcube's managesieve plugin) wins, and a user script is
-// never rewritten. ManageSieve and the admin API show the script, and
-// refuse to write, rename, delete or activate it.
+// The vacation of the JMAP VacationResponse (RFC 8621 8). Its source of
+// truth is a METADATA entry of the account (JMAPVacationEntry), which
+// only the JMAP front-end writes. Delivery generates the Sieve script
+// from that entry and runs it after the active script, for its vacation
+// alone, when the active script did not answer the message itself. So a
+// vacation a user keeps in the active script (Roundcube's managesieve
+// plugin) wins, and a user script is never rewritten.
+//
+// The same script is also stored in the account's script store under a
+// reserved name, so that a ManageSieve client can show the setting. That
+// copy is for display only: delivery never reads it. ManageSieve and the
+// admin API show it and refuse to write, rename, delete or activate it.
 
 // JMAPVacationScript is the name of the script the JMAP VacationResponse
 // writes.
-const JMAPVacationScript = "jmap-vacation"
+const JMAPVacationScript = model.JMAPVacationScript
+
+// JMAPVacationEntry is the METADATA entry (of the server, private to the
+// account) that holds the JMAP VacationResponse as JSON.
+const JMAPVacationEntry = "/private/vendor/shardpost/jmap/vacation"
+
+// DefaultVacationText is the body of a reply the client gave none for:
+// RFC 8621 8 asks for an appropriate default rather than an empty reply.
+const DefaultVacationText = "This is an automatic reply. I am away and will read your message when I am back."
+
+// JMAPVacation is the JMAP VacationResponse as it is kept in
+// JMAPVacationEntry: the object without its id. The dates are UTCDates.
+type JMAPVacation struct {
+	FromDate  *string `json:"fromDate"`
+	ToDate    *string `json:"toDate"`
+	Subject   *string `json:"subject"`
+	TextBody  *string `json:"textBody"`
+	HTMLBody  *string `json:"htmlBody"`
+	IsEnabled bool    `json:"isEnabled"`
+}
+
+// ParseJMAPVacation reads a stored JMAP VacationResponse.
+func ParseJMAPVacation(raw string) (*JMAPVacation, error) {
+	v := &JMAPVacation{}
+	if err := json.Unmarshal([]byte(raw), v); err != nil {
+		return nil, err
+	}
+
+	return v, nil
+}
+
+// Settings are what the script is written from. A date that does not
+// read is refused, so that a damaged record answers nobody rather than
+// everybody; without a body the reply takes DefaultVacationText.
+func (v *JMAPVacation) Settings() (VacationSettings, error) {
+	var s VacationSettings
+
+	for _, d := range []struct {
+		val  *string
+		into **time.Time
+	}{{v.FromDate, &s.FromDate}, {v.ToDate, &s.ToDate}} {
+		if d.val == nil {
+			continue
+		}
+
+		t, err := time.Parse(time.RFC3339, *d.val)
+		if err != nil {
+			return s, err
+		}
+
+		*d.into = &t
+	}
+
+	s.Subject, s.TextBody, s.HTMLBody = orEmpty(v.Subject), orEmpty(v.TextBody), orEmpty(v.HTMLBody)
+
+	if s.TextBody == "" && s.HTMLBody == "" {
+		s.TextBody = DefaultVacationText
+	}
+
+	return s, nil
+}
+
+// orEmpty is a String|null as a string, "" for null.
+func orEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+
+	return *s
+}
 
 // ReservedScript reports whether a script name belongs to the server:
 // clients may read the script, not change it.
-func ReservedScript(name string) bool { return name == JMAPVacationScript }
+func ReservedScript(name string) bool { return model.ReservedScript(name) }
 
 // DescReservedScript is what a client that tries to change the reserved
 // script is told.

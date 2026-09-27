@@ -13,13 +13,17 @@ import (
 	"shardpost/internal/sieve"
 )
 
-// VacationResponse (RFC 8621 8). The setting is kept as JSON in the
-// account's metadata, like the identities, and every change writes it
-// out as a Sieve script under a reserved name (sieve.JMAPVacationScript).
-// That script is never activated: delivery runs it after the active
-// script, for its vacation alone, when the active script did not answer
-// the message itself. A vacation the user keeps in the active script —
-// Roundcube's — therefore wins, and no user script is ever rewritten.
+// VacationResponse (RFC 8621 8). The setting is kept as JSON in a
+// METADATA entry of the account that only the server writes
+// (sieve.JMAPVacationEntry), and that entry is what delivery answers
+// from: it generates the Sieve vacation from it and runs it after the
+// active script, when the active script did not answer the message
+// itself. A vacation the user keeps in the active script — Roundcube's —
+// therefore wins, and no user script is ever rewritten.
+//
+// Every change also stores the generated script under a reserved name
+// (sieve.JMAPVacationScript), never active, so that a ManageSieve client
+// can show the setting. Delivery does not read that copy.
 //
 // The reply goes out through the relay of the delivery path, so the
 // capability is only offered when there is one.
@@ -27,9 +31,6 @@ import (
 // CapVacationResponse is the capability of the VacationResponse data
 // type (RFC 8621 1.3.3).
 const CapVacationResponse = "urn:ietf:params:jmap:vacationresponse"
-
-// vacationEntry is the metadata entry the setting is kept in.
-const vacationEntry = "/private/vendor/shardpost/jmap/vacation"
 
 // vacationID is the id of the one VacationResponse of an account.
 const vacationID = "singleton"
@@ -46,9 +47,9 @@ const (
 	maxVacationBody    = maxSignatureBytes
 )
 
-// defaultVacationText is the body of a reply the client gave none for:
-// RFC 8621 8 asks for an appropriate default rather than an empty reply.
-const defaultVacationText = "This is an automatic reply. I am away and will read your message when I am back."
+// vacationRetries bounds how often a /set without ifInState starts over
+// when another one changed the setting under it.
+const vacationRetries = 5
 
 // The properties of a VacationResponse.
 const (
@@ -66,12 +67,7 @@ var vacationProperties = map[string]bool{
 // vacationResponse is the setting, as it is kept and as it is returned
 // (without the id).
 type vacationResponse struct {
-	FromDate  *string `json:"fromDate"`
-	ToDate    *string `json:"toDate"`
-	Subject   *string `json:"subject"`
-	TextBody  *string `json:"textBody"`
-	HTMLBody  *string `json:"htmlBody"`
-	IsEnabled bool    `json:"isEnabled"`
+	sieve.JMAPVacation
 }
 
 // vacationOf refuses the methods when the server cannot send a reply.
@@ -83,17 +79,18 @@ func vacationOf(sess *session) *methodError {
 	return nil
 }
 
-// loadVacation reads the account's setting; none is the default, which
-// is off.
-func loadVacation(sess *session) (*vacationResponse, *methodError) {
+// loadVacation reads the account's setting, and the stored record it
+// came from ("" for none); none is the default, which is off.
+func loadVacation(sess *session) (*vacationResponse, string, *methodError) {
 	md, err := sess.user.GetMetadata("", sess.account)
 	if err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
+		return nil, "", &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
+	raw := md[sieve.JMAPVacationEntry]
 	v := &vacationResponse{}
 
-	if raw := md[vacationEntry]; raw != "" {
+	if raw != "" {
 		// A record that does not read is treated as none: the client
 		// sees the default and can write a new one.
 		if err := json.Unmarshal([]byte(raw), v); err != nil {
@@ -103,7 +100,7 @@ func loadVacation(sess *session) (*vacationResponse, *methodError) {
 		}
 	}
 
-	return v, nil
+	return v, raw, nil
 }
 
 // record is the setting as it is stored. HTML is not escaped: the
@@ -163,7 +160,7 @@ func vacationGet(_ context.Context, sess *session, args json.RawMessage) (any, *
 		return nil, merr
 	}
 
-	v, merr := loadVacation(sess)
+	v, _, merr := loadVacation(sess)
 	if merr != nil {
 		return nil, merr
 	}
@@ -188,7 +185,11 @@ func vacationGet(_ context.Context, sess *session, args json.RawMessage) (any, *
 }
 
 // vacationSet implements VacationResponse/set (RFC 8621 8.2): the
-// singleton can be updated, not created or destroyed.
+// singleton can be updated, not created or destroyed. The state check
+// and the write are one step: the record is replaced only while it is
+// still the one the state was computed from. A /set that loses that race
+// is stateMismatch when it named a state, and starts over when it did
+// not.
 func vacationSet(_ context.Context, sess *session, args json.RawMessage) (any, *methodError) {
 	if merr := vacationOf(sess); merr != nil {
 		return nil, merr
@@ -203,19 +204,38 @@ func vacationSet(_ context.Context, sess *session, args json.RawMessage) (any, *
 		return nil, &methodError{Type: errRequestTooLarge, Description: descTooManyObjects}
 	}
 
-	v, merr := loadVacation(sess)
+	for range vacationRetries {
+		out, lost, merr := vacationSetOnce(sess, &req)
+
+		switch {
+		case merr != nil:
+			return nil, merr
+		case !lost:
+			return out, nil
+		case req.IfInState != nil:
+			return nil, &methodError{Type: errStateMismatch}
+		}
+	}
+
+	return nil, &methodError{Type: errServerFail, Description: "the vacation response keeps changing; try again"}
+}
+
+// vacationSetOnce runs a /set against the setting as it is now; lost
+// reports that the setting changed before the update could be written.
+func vacationSetOnce(sess *session, req *setRequest) (*setResponse, bool, *methodError) {
+	v, raw, merr := loadVacation(sess)
 	if merr != nil {
-		return nil, merr
+		return nil, false, merr
 	}
 
 	state := v.state()
 	if req.IfInState != nil && *req.IfInState != state {
-		return nil, &methodError{Type: errStateMismatch}
+		return nil, false, &methodError{Type: errStateMismatch}
 	}
 
 	out := newSetResponse(accountID(sess.account), state)
 
-	refuseSingleton(&req, out)
+	refuseSingleton(req, out)
 
 	for ref, patch := range req.Update {
 		if ref != vacationID {
@@ -225,7 +245,12 @@ func vacationSet(_ context.Context, sess *session, args json.RawMessage) (any, *
 
 		next, serr := applyVacation(*v, patch)
 		if serr == nil {
-			serr = saveVacation(sess, v, next)
+			var swapped bool
+
+			swapped, serr = commitVacation(sess, raw, next)
+			if serr == nil && !swapped {
+				return nil, true, nil
+			}
 		}
 
 		if serr != nil {
@@ -239,7 +264,7 @@ func vacationSet(_ context.Context, sess *session, args json.RawMessage) (any, *
 
 	out.NewState = v.state()
 
-	return out, nil
+	return out, false, nil
 }
 
 // refuseSingleton answers the creations and destructions of a /set:
@@ -267,6 +292,11 @@ func applyVacation(v vacationResponse, patch map[string]json.RawMessage) (*vacat
 		case isText:
 			*into, err = nullableString(raw)
 		case k == propIsEnabled:
+			// A Boolean, not Boolean|null: null would read as no change.
+			if string(raw) == jsonNull {
+				return nil, invalidProperty(k, "isEnabled is true or false, not null")
+			}
+
 			err = json.Unmarshal(raw, &v.IsEnabled)
 		case k == propID:
 			var id string
@@ -367,32 +397,61 @@ func hasControl(s string, lines bool) bool {
 	return false
 }
 
-// saveVacation writes the script of the new setting, then the setting.
-// The script goes first: if it cannot be written, nothing has changed;
-// if the setting cannot, the script of the old one is put back.
-func saveVacation(sess *session, old, next *vacationResponse) *setError {
-	if err := writeVacationScript(sess.user, next); err != nil {
-		return &setError{Type: setServerFail, Description: err.Error()}
+// commitVacation writes a new setting. Its script is generated and
+// compiled first, so a setting that would not run is never stored. The
+// record is then swapped in, only while the stored one is still raw;
+// swapped is false when it is not. Last comes the copy of the script in
+// the script store, which is for display only: a failure there is logged
+// and does not undo the change.
+func commitVacation(sess *session, raw string, next *vacationResponse) (bool, *setError) {
+	script, err := vacationScript(next)
+	if err != nil {
+		return false, &setError{Type: setServerFail, Description: err.Error()}
 	}
 
 	rec := next.record()
-	if err := sess.user.SetMetadata("", sess.account, map[string]*string{vacationEntry: &rec}); err != nil {
-		if rerr := writeVacationScript(sess.user, old); rerr != nil {
-			sess.log.Error("jmap: the vacation script no longer matches the setting", "err", rerr)
-		}
 
-		return &setError{Type: setServerFail, Description: err.Error()}
+	swapped, err := sess.user.SwapMetadata("", sess.account, sieve.JMAPVacationEntry, raw, &rec)
+	if err != nil {
+		return false, &setError{Type: setServerFail, Description: err.Error()}
 	}
 
-	return nil
+	if !swapped {
+		return false, nil
+	}
+
+	if err := writeVacationScript(sess.user, script); err != nil {
+		sess.log.Warn("jmap: the displayed vacation script was not updated", "err", err)
+	}
+
+	return true, nil
 }
 
-// writeVacationScript makes the account's vacation script say what the
-// setting says: the script of it while it is enabled, no script while it
-// is not.
-func writeVacationScript(u model.User, v *vacationResponse) error {
-	if v.IsEnabled {
-		return u.PutScript(sieve.JMAPVacationScript, sieve.VacationScript(v.settings()))
+// vacationScript is the script of a setting, compiled; "" while it is
+// off.
+func vacationScript(v *vacationResponse) (string, error) {
+	if !v.IsEnabled {
+		return "", nil
+	}
+
+	settings, err := v.Settings()
+	if err != nil {
+		return "", err
+	}
+
+	script := sieve.VacationScript(settings)
+	if err := sieve.Compile(script); err != nil {
+		return "", errors.New("the vacation script does not compile: " + err.Error())
+	}
+
+	return script, nil
+}
+
+// writeVacationScript stores the displayed copy of the script, or
+// removes it when there is none.
+func writeVacationScript(u model.User, script string) error {
+	if script != "" {
+		return u.PutScript(sieve.JMAPVacationScript, script)
 	}
 
 	err := u.DeleteScript(sieve.JMAPVacationScript)
@@ -401,37 +460,10 @@ func writeVacationScript(u model.User, v *vacationResponse) error {
 	case errors.Is(err, model.ErrNoScript):
 		return nil
 	case errors.Is(err, model.ErrScriptActive):
-		// Only an import could have made it the active script. An empty
-		// script keeps the message and answers nothing.
+		// Only an old import could have made it the active script. An
+		// empty script keeps the message and answers nothing.
 		return u.PutScript(sieve.JMAPVacationScript, "# The JMAP VacationResponse of this account is off.\n")
 	}
 
 	return err
-}
-
-// settings are what the script is written from. The dates were checked
-// when the setting was stored.
-func (v *vacationResponse) settings() sieve.VacationSettings {
-	var s sieve.VacationSettings
-
-	for _, d := range []struct {
-		val  *string
-		into **time.Time
-	}{{v.FromDate, &s.FromDate}, {v.ToDate, &s.ToDate}} {
-		if d.val == nil {
-			continue
-		}
-
-		if t, ok := parseUTCDate(*d.val); ok {
-			*d.into = &t
-		}
-	}
-
-	s.Subject, s.TextBody, s.HTMLBody = deref(v.Subject), deref(v.TextBody), deref(v.HTMLBody)
-
-	if s.TextBody == "" && s.HTMLBody == "" {
-		s.TextBody = defaultVacationText
-	}
-
-	return s
 }

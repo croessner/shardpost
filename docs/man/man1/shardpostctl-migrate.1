@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-MIGRATE 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-MIGRATE 1 "2026-09-27" "ShardPost 0.26.2" "ShardPost Manual"
 .SH NAME
 shardpostctl-migrate \- copy an account from another IMAP server, keeping its identities
 .SH SYNOPSIS
@@ -30,7 +30,10 @@ Mailboxes that the source no longer has are removed from the target
 .RB ( \-no-prune
 keeps them; INBOX always stays). Sieve scripts are copied when
 .B \-sieve-addr
-is given.
+is given, except
+.BR jmap-vacation :
+a ShardPost source lists it, but it is the server's copy of the JMAP
+vacation response, and the target refuses it.
 .PP
 While a run is in progress, the account is locked: IMAP, POP3 and LMTP
 refuse it. Role:

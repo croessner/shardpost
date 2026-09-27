@@ -374,6 +374,9 @@ func (u *readOnlyUser) RemoveSharedRef(model.SharedRef) error { return u.write("
 func (u *readOnlyUser) SetMetadata(string, string, map[string]*string) error {
 	return u.write("SetMetadata")
 }
+func (u *readOnlyUser) SwapMetadata(string, string, string, string, *string) (bool, error) {
+	return false, u.write("SwapMetadata")
+}
 func (u *readOnlyUser) BeginDelivery() (string, error)              { return "", u.write("BeginDelivery") }
 func (u *readOnlyUser) RecordDelivery(string, string, string) error { return u.write("RecordDelivery") }
 func (u *readOnlyUser) EndDelivery(string) error                    { return u.write("EndDelivery") }

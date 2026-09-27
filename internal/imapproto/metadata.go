@@ -262,6 +262,16 @@ func (c *conn) cmdSetMetadata(tag string) error {
 		return err
 	}
 
+	// The JMAP identities and vacation response are the server's: it
+	// checks them and delivery answers from the vacation. Clients read
+	// them, and change them over JMAP.
+	for e := range entries {
+		if model.ServerManagedEntry(e) {
+			c.no(tag, "NOPERM", "Entries under "+model.ServerManagedPrefix+" are kept by the server")
+			return nil
+		}
+	}
+
 	right := metadataRight(entries, needW)
 
 	if mailbox == "" && needW {

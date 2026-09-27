@@ -49,11 +49,12 @@ one script can be active; it is the one that runs on delivery.
 .PP
 The script
 .B jmap-vacation
-belongs to the server: it is the JMAP VacationResponse of the account,
-written whenever a JMAP client changes that setting, and run on delivery
-after the active script when the active script sent no vacation reply of
-its own. It is listed, can be shown and checked, and is never the active
-script;
+belongs to the server: it is a copy of the account's JMAP
+VacationResponse, written whenever a JMAP client changes that setting,
+so that the setting can be seen. Delivery does not read it; it answers
+from the setting itself, after the active script, when the active script
+sent no vacation reply of its own. The script is listed, can be shown
+and checked, and is never the active script;
 .BR put ,
 .B delete
 and

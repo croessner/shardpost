@@ -674,6 +674,12 @@ func (r *run) sieve(ctx context.Context) {
 	out := make([]adminapi.ImportSieveScript, 0, len(scripts))
 
 	for _, s := range scripts {
+		// A ShardPost source lists its JMAP vacation script; it is a
+		// copy the server writes, and the target refuses it.
+		if model.ReservedScript(s.Name) {
+			continue
+		}
+
 		out = append(out, adminapi.ImportSieveScript{Name: s.Name, Script: s.Text})
 
 		if s.Active {
