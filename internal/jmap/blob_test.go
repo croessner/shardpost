@@ -549,3 +549,49 @@ func TestScriptBlobIDs(t *testing.T) {
 		t.Errorf("%s is not taken for a script blob", id)
 	}
 }
+
+// TestBlobCacheIsBounded: the parts of many messages, asked for their
+// size only, never keep more than the bound; what went is read again.
+func TestBlobCacheIsBounded(t *testing.T) {
+	_, u := hookedServer(t)
+
+	var guids []string
+
+	for range 8 {
+		m, err := u.Deliver(inboxName, []byte(alternativeMessage), nil, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		guids = append(guids, m.GUID)
+	}
+
+	bound := int64(2*len(alternativeMessage) + 100)
+
+	c, err := newBlobCache(&session{user: u, limits: Limits{MaxSizeBlobGet: bound, MaxSizeBlobSet: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, guid := range append(guids, guids[0]) {
+		for _, part := range []string{"_1-1", "_1-2", "_2"} {
+			if _, err := c.open(guid + part); err != nil {
+				t.Fatal(err)
+			}
+
+			if c.held > bound {
+				t.Fatalf("the cache holds %d bytes, the bound is %d", c.held, bound)
+			}
+		}
+	}
+
+	if u.wholeReads[guids[0]] != 2 || u.wholeReads[guids[1]] != 1 {
+		t.Errorf("the reads were %v", u.wholeReads)
+	}
+
+	// Something larger than the bound is read and not kept.
+	c.bound = 10
+	if _, err := c.open(guids[2] + "_2"); err != nil || c.held > 10 {
+		t.Errorf("an oversized entry: %v, %d bytes held", err, c.held)
+	}
+}

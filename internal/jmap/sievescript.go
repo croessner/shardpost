@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"shardpost/internal/model"
@@ -255,38 +257,20 @@ func (b *scriptBook) state() string {
 	return hex.EncodeToString(h.Sum(nil))[:24]
 }
 
-// loadScripts reads the scripts and gives every one without an id an id,
-// which is written back before it is handed out.
+// loadScripts reads the scripts and their ids. It writes nothing: a
+// script's id is derived from its name unless the record says otherwise
+// (see assignScriptIDs), so a script stored over ManageSieve has an id
+// without anything being written for it.
 func loadScripts(sess *session) (*scriptBook, error) {
-	for range scriptRetries {
-		b, swapped, err := loadScriptsOnce(sess)
-		if err != nil || swapped {
-			return b, err
-		}
-	}
-
-	return nil, errScriptIDsBusy
-}
-
-// errScriptIDsBusy is the answer when the ids keep changing under a write.
-var errScriptIDsBusy = errors.New("the script ids keep changing; try again")
-
-// loadScriptsOnce is one attempt of loadScripts; swapped is false when
-// the ids changed before the new ones could be written. Nothing is
-// dropped from the record here: an entry whose name is not listed may
-// belong to a creation or a rename that has registered its id and not
-// yet written the script. Entries go when JMAP destroys a script, and
-// when the record would outgrow its bound (see fitScriptIDs).
-func loadScriptsOnce(sess *session) (*scriptBook, bool, error) {
 	names, active, err := sess.user.ListScripts()
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
-	raw, ids := readScriptIDs(sess)
-	listed := make(map[string]bool, len(names))
-	used := map[string]bool{}
+	_, rec := readScriptIDs(sess)
 	b := &scriptBook{}
+
+	var listed []string
 
 	for _, name := range names {
 		text, err := sess.user.GetScript(name)
@@ -295,47 +279,78 @@ func loadScriptsOnce(sess *session) (*scriptBook, bool, error) {
 		}
 
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 
-		// An id seen twice can only come from a record gone wrong; the
-		// second script gets one of its own.
-		if id := ids[name]; id == "" || used[id] {
-			ids[name] = randomHex(8)
-		}
-
-		used[ids[name]], listed[name] = true, true
+		listed = append(listed, name)
 		b.list = append(b.list, &sieveScript{name: name, text: text, active: name == active})
 	}
 
-	kept, swapped, err := writeScriptIDs(sess, raw, ids, listed)
-	if err != nil || !swapped {
-		return nil, false, err
-	}
-
+	ids := assignScriptIDs(listed, rec)
 	for _, sc := range b.list {
-		sc.id = effectiveScriptID(kept, sc.name)
+		sc.id = ids[sc.name]
 	}
 
-	return b, true, nil
+	return b, nil
 }
 
-// effectiveScriptID is the id of a script: the one the record keeps, or
-// one derived from the name for a script the record had no room for.
-func effectiveScriptID(ids map[string]string, name string) string {
-	if id := ids[name]; id != "" {
-		return id
+// derivedScriptID is the id a script has by its name. k counts the
+// attempts after a collision, which only a record that had to shed
+// entries can cause (see fitScriptIDs). A derived id starts with a letter
+// no random one (hex) has, so the two kinds never collide.
+func derivedScriptID(name string, k int) string {
+	if k > 0 {
+		name += "\x00" + strconv.Itoa(k)
 	}
 
 	sum := sha256.Sum256([]byte(name))
 
-	// A derived id has a prefix no random one has (those are hex), so the
-	// two cannot collide.
 	return "n" + hex.EncodeToString(sum[:8])
 }
 
+// assignScriptIDs gives every script its id: the one the record keeps
+// for its name, else the one derived from the name. The record holds the
+// ids that differ from that — scripts created over JMAP, which get a
+// random id, scripts renamed over JMAP, which keep theirs, and the names
+// a script left over JMAP, which keep a fresh id waiting so that the
+// name never hands out the old one again. An id the record keeps for a
+// name that is not a script now is reserved: it belongs to a creation or
+// a rename that has registered it and not yet written the script.
+func assignScriptIDs(names []string, rec map[string]string) map[string]string {
+	out := make(map[string]string, len(names))
+	used := map[string]bool{}
+	listed := map[string]bool{}
+
+	for _, name := range names {
+		listed[name] = true
+
+		if id := rec[name]; id != "" && !used[id] {
+			out[name], used[id] = id, true
+		}
+	}
+
+	for name, id := range rec {
+		if !listed[name] {
+			used[id] = true
+		}
+	}
+
+	for _, name := range names {
+		for k := 0; out[name] == ""; k++ {
+			if id := derivedScriptID(name, k); !used[id] {
+				out[name], used[id] = id, true
+			}
+		}
+	}
+
+	return out
+}
+
+// errScriptIDsBusy is the answer when the ids keep changing under a write.
+var errScriptIDsBusy = errors.New("the script ids keep changing; try again")
+
 // readScriptIDs reads the stored ids, and the record they came from. A
-// record that does not read is treated as none: the scripts get new ids.
+// record that does not read is treated as none.
 func readScriptIDs(sess *session) (string, map[string]string) {
 	ids := map[string]string{}
 
@@ -360,10 +375,16 @@ func readScriptIDs(sess *session) (string, map[string]string) {
 var maxScriptIDRecord = maxIdentityRecord
 
 // writeScriptIDs replaces the stored ids while they are still raw, and
-// returns the ids that were kept: all of them, unless the record would
-// outgrow its bound (see fitScriptIDs). listed are the names of the
-// scripts that exist, nil when the caller does not know them.
+// returns the ids that were kept. An entry that says what the name says
+// anyway is not stored; see fitScriptIDs for a record beyond its bound.
+// listed are the names of the scripts.
 func writeScriptIDs(sess *session, raw string, ids map[string]string, listed map[string]bool) (map[string]string, bool, error) {
+	for name, id := range ids {
+		if id == derivedScriptID(name, 0) {
+			delete(ids, name)
+		}
+	}
+
 	ids = fitScriptIDs(sess, ids, listed)
 
 	var next *string
@@ -387,12 +408,17 @@ func writeScriptIDs(sess *session, raw string, ids map[string]string, listed map
 	return ids, swapped, err
 }
 
-// fitScriptIDs keeps the record within its bound. Entries of names that
-// are not scripts go first; if that is not enough, the entries of the
-// last scripts by name, which then have ids derived from their names (see
-// effectiveScriptID): stable while the name is, but not across a rename.
-// It degrades an account with more scripts than the record holds —
-// several hundred with long names — instead of failing it.
+// scriptIDsOverflowed is set once the record had to shed entries, so that
+// the warning is logged once per process rather than with every write.
+var scriptIDsOverflowed atomic.Bool
+
+// fitScriptIDs keeps the record within its bound, as a last resort: the
+// record holds only the ids that differ from the derived ones, so it
+// takes an account with hundreds of scripts renamed or created over JMAP
+// to get here. Entries of names that are not scripts go first — the
+// waiting ids of names scripts left, which then may hand out an old id
+// again; if that is not enough, the entries of the last scripts by name,
+// whose ids then fall back to the derived ones.
 func fitScriptIDs(sess *session, ids map[string]string, listed map[string]bool) map[string]string {
 	if scriptIDRecordSize(ids) <= maxScriptIDRecord {
 		return ids
@@ -405,14 +431,12 @@ func fitScriptIDs(sess *session, ids map[string]string, listed map[string]bool) 
 
 	// Unlisted names first, then the listed ones from the end.
 	sort.Slice(names, func(i, j int) bool {
-		if li, lj := listed == nil || listed[names[i]], listed == nil || listed[names[j]]; li != lj {
+		if li, lj := listed[names[i]], listed[names[j]]; li != lj {
 			return lj
 		}
 
 		return names[i] > names[j]
 	})
-
-	dropped := 0
 
 	for _, name := range names {
 		if scriptIDRecordSize(ids) <= maxScriptIDRecord {
@@ -420,14 +444,10 @@ func fitScriptIDs(sess *session, ids map[string]string, listed map[string]bool) 
 		}
 
 		delete(ids, name)
-
-		if listed == nil || listed[name] {
-			dropped++
-		}
 	}
 
-	if dropped > 0 {
-		sess.log.Warn("jmap: more Sieve scripts than their ids fit; some have ids derived from their names", "scripts", dropped)
+	if !scriptIDsOverflowed.Swap(true) {
+		sess.log.Warn("jmap: the Sieve script ids outgrew their record; some fall back to ids derived from names")
 	}
 
 	return ids

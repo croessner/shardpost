@@ -732,8 +732,12 @@ offered. The capability is empty in the session; the account's says
   left is `tooLarge` as well, and the ones before it stand. A call takes
   a slot of the same per-account counter as the upload endpoint
   (`maxConcurrentUpload`); without a free one it is `serverUnavailable`,
-  and the client tries again. A message that body parts are taken from
-  is read and parsed once per call, and the scripts are listed once. The
+  and the client tries again. The messages that body parts are taken
+  from, the part contents and the script list are kept for the call so
+  that each is read once, up to the larger of `maxSizeBlobSet` and
+  `jmap.max_size_blob_get` in bytes; beyond that the oldest goes and is
+  read again when it is named again, and something larger than the bound
+  on its own is not kept at all. The
   media type is echoed as given, and null when none was (RFC 9404 4.1);
   the server keeps bytes, not types. Creations that name each other in a
   cycle find no blob.
@@ -749,8 +753,9 @@ offered. The capability is empty in the session; the account's says
   and the client asks for a range or downloads the blob. A digest reads
   the octets it covers and counts against the same bound, once per blob
   with its data; without the data it is computed a megabyte at a time.
-  As for `Blob/upload`, a message is read and parsed once per call,
-  however many of its parts the call names.
+  Messages, parts and the script list are kept for the call within the
+  same bound as for `Blob/upload`; `size` alone costs no data budget, but
+  it does not make the call hold more than that bound either.
 - **`Blob/lookup`** finds the objects a blob belongs to. A message's blob
   and its body parts' blobs name the message, so this is a lookup in the
   locator, not a search: the result is the message, its thread and the
@@ -785,30 +790,40 @@ same 512 bytes bound a name over ManageSieve, the admin API, in an
 account archive and in the store.
 
 **Ids.** ManageSieve knows a script by its name; JMAP wants an id that
-stays when the name changes. The ids are kept in the account's metadata,
-in the server entry `/private/vendor/shardpost/jmap/sievescripts` (a map
-from name to id, see [server-managed entries](#server-managed-metadata)),
-and written with a compare-and-swap, so two front-ends that list the
-scripts at once agree on one id. A script that has none — stored over
-ManageSieve, the admin API or an import — gets one the next time a JMAP
-client lists the scripts. A creation or a rename over JMAP registers the
-id for the new name before it writes the script, so a listing in
-between finds the id waiting and never hands out another one; a listing
-therefore never drops an entry, since a name it does not see may be one
-that is about to appear. Entries go when JMAP destroys a script, or a
-creation or rename fails. An entry of a script deleted over ManageSieve
-stays, and a script stored under that name again gets the old id back.
-A rename over JMAP moves the id along; a rename over ManageSieve does
-not — JMAP sees the old script destroyed and a new one created — and
-neither does an export and a restore, which do not carry the entry.
+stays when the name changes. A script's id is derived from its name
+(`n` and 16 hex digits of its SHA-256) unless the account's metadata
+says otherwise: the server entry
+`/private/vendor/shardpost/jmap/sievescripts` (see [server-managed
+entries](#server-managed-metadata)) keeps, by name, only the ids that
+differ from the derived ones. A script stored over ManageSieve, the
+admin API or an import therefore has its id at once, and listing the
+scripts writes nothing. The entry is written with a compare-and-swap,
+by `SieveScript/set` alone:
 
-The record is bounded like the identities' (48 KiB, about a hundred
-scripts with names of the full 512 bytes, many more with ordinary
-names). When it would outgrow that, the entries of names that are not
-scripts go first; if that is not enough, the scripts last by name are
-left out of it and have ids derived from their names (`n` and 16 hex
-digits), stable while the name is, but not across a rename, and the
-server logs a warning. The type keeps working either way.
+- A script created over JMAP gets a random id, registered for its name
+  before the script is written, so a listing in between finds it waiting.
+- A rename over JMAP registers the id for both names before it renames,
+  and keeps it for the new name afterwards; the old name gets a fresh id
+  to wait with.
+- A destruction over JMAP gives the name a fresh id to wait with as
+  well. No id a script had is handed to the next script under its name,
+  whichever protocol stores that one.
+- A creation or rename that fails puts back what the names had.
+
+What stays as it was: a rename over ManageSieve is a new script to JMAP
+— the new name has its derived id — and a script deleted over ManageSieve
+and stored again under the same name has the same id, since ManageSieve
+changes nothing in the entry. An export and a restore do not carry the
+entry either: the scripts of a restored account have their derived ids.
+The ids of existing entries, from the time every script had a random id,
+are kept.
+
+The entry grows only with scripts created, renamed or destroyed over
+JMAP. It is bounded like the identities' (48 KiB, hundreds of entries);
+a write that would outgrow it drops the entries of names that are not
+scripts first — which lets such a name hand out an old id again — and
+then those of the scripts last by name, whose ids fall back to the
+derived ones. That is a last resort, logged once per process.
 
 **The content** is a blob whose id is derived from the text: `S` and 40
 hex digits of its SHA-256. A new content is therefore a new `blobId`
@@ -839,7 +854,10 @@ replaces its content, and destroys it, the way ManageSieve's
   checks it renames first — the step that can still fail, when another
   session took the name or renamed the script meanwhile
   (`alreadyExists`, `notFound`) — and then writes the new content under
-  the new name; a content write that fails renames the script back. The
+  the new name; a content write that fails renames the script back. If
+  that is impossible too — another session took the old name meanwhile —
+  the error is `serverFail` saying that the script was renamed and its
+  content is unchanged, so that a client does not blindly retry. The
   response names the new `blobId`, since it is not the one the client
   sent.
 - The active script is not destroyed (`sieveIsActive`); it is
@@ -1124,9 +1142,8 @@ authentication backend, and the relay learns the account from
   `Email`.
 - `SieveScript`: there is no `SieveScript/changes`, a script that does
   not compile for delivery is silently not activated, and a rename over
-  ManageSieve, or an export and restore, gives a script a new id; beyond
-  what the id record holds, ids are derived from names (see Sieve
-  scripts).
+  ManageSieve, or an export and restore, gives a script its derived id
+  rather than the one it had (see Sieve scripts).
 - `Blob/lookup` answers for `Email`, `Mailbox`, `Thread` and
   `SieveScript` only, and matches a body-part blob by its message
   without checking that the part exists. An upload that a message was built from is not found by the

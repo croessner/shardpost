@@ -440,8 +440,7 @@ const maxUnsignedInt = 1<<53 - 1
 // them; then the pieces are read, and the creation stops as soon as it
 // would grow beyond what the call has left of maxSizeBlobSet.
 func (u *uploader) build(spec *uploadSpec) ([]byte, *setError) {
-	handles, serr := u.sourceBlobs(spec)
-	if serr != nil {
+	if serr := u.checkSources(spec); serr != nil {
 		return nil, serr
 	}
 
@@ -451,7 +450,15 @@ func (u *uploader) build(spec *uploadSpec) ([]byte, *setError) {
 	for i, src := range spec.sources {
 		piece := src.literal
 
-		if h := handles[i]; h != nil {
+		if src.blobID != "" {
+			// Opened again rather than kept from the check: the cache
+			// holds what fits its bound, and a creation of many sources
+			// must not hold all of them besides.
+			h, err := u.cache.open(src.blobID)
+			if err != nil {
+				return nil, &setError{Type: setServerFail, Description: err.Error()}
+			}
+
 			var serr *setError
 
 			piece, serr = readSource(h, &src, propData+"/"+strconv.Itoa(i), limit-int64(len(out)))
@@ -473,35 +480,31 @@ func (u *uploader) build(spec *uploadSpec) ([]byte, *setError) {
 // descBlobSetTooLarge is the error of a creation beyond the limit.
 const descBlobSetTooLarge = "the blob would be larger than maxSizeBlobSet, or than what this call has left of it"
 
-// sourceBlobs opens the blobs the sources of a creation name, by the
-// index of the source.
-func (u *uploader) sourceBlobs(spec *uploadSpec) (map[int]*blobHandle, *setError) {
-	handles := map[int]*blobHandle{}
-
+// checkSources looks up the blobs the sources of a creation name, so
+// that a creation with several missing blobs names all of them.
+func (u *uploader) checkSources(spec *uploadSpec) *setError {
 	var missing []string
 
-	for i, src := range spec.sources {
+	for _, src := range spec.sources {
 		if src.blobID == "" {
 			continue
 		}
 
-		h, err := u.cache.open(src.blobID)
+		_, err := u.cache.open(src.blobID)
 
 		switch {
 		case errors.Is(err, model.ErrNoBlob):
 			missing = append(missing, src.blobID)
 		case err != nil:
-			return nil, &setError{Type: setServerFail, Description: err.Error()}
-		default:
-			handles[i] = h
+			return &setError{Type: setServerFail, Description: err.Error()}
 		}
 	}
 
 	if len(missing) > 0 {
-		return nil, &setError{Type: setBlobNotFound, NotFound: missing}
+		return &setError{Type: setBlobNotFound, NotFound: missing}
 	}
 
-	return handles, nil
+	return nil
 }
 
 // readSource reads the range a source names. A range that does not lie
@@ -537,168 +540,4 @@ func readSource(h *blobHandle, src *dataSource, name string, room int64) ([]byte
 	}
 
 	return b, nil
-}
-
-// blobHandle is a blob a client named, ready to be read in ranges.
-type blobHandle struct {
-	read func(offset, length int64) ([]byte, error)
-	id   string
-	size int64
-}
-
-// blobCache opens the blobs one method call reads, each of them once: a
-// stored blob is looked up once and read in ranges; a message that body
-// parts are taken from is read and parsed once, however many of its
-// parts the call names and however often; the scripts are listed once.
-// The blob store is the account's own, so another account's blob is not
-// found rather than refused.
-type blobCache struct {
-	sess    *session
-	blobs   model.Blobs
-	handles map[string]*blobHandle
-	roots   map[string]*mimePart
-	// scripts are the contents of the account's scripts by blob id; nil
-	// until the call names a script blob.
-	scripts map[string][]byte
-}
-
-// newBlobCache starts the cache of one call.
-func newBlobCache(sess *session) (*blobCache, error) {
-	blobs, ok := sess.user.(model.Blobs)
-	if !ok {
-		return nil, errNoIndex
-	}
-
-	return &blobCache{sess: sess, blobs: blobs, handles: map[string]*blobHandle{}, roots: map[string]*mimePart{}}, nil
-}
-
-// open looks up a blob the account can read — an upload, a message, a
-// body part of one, a script's content — by its id or by the creation id
-// of a Blob/upload earlier in the request.
-func (c *blobCache) open(ref string) (*blobHandle, error) {
-	id, pending := resolveCreationID(c.sess, ref)
-	if pending {
-		return nil, model.ErrNoBlob
-	}
-
-	if h := c.handles[id]; h != nil {
-		return h, nil
-	}
-
-	var (
-		content []byte
-		err     error
-	)
-
-	switch guid, path, isPart := parsePartBlob(id); {
-	case model.ValidGUID(id):
-		return c.stored(id)
-	case isPart:
-		content, err = c.part(guid, path)
-	case isScriptBlob(id):
-		content, err = c.script(id)
-	default:
-		err = model.ErrNoBlob
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	h := &blobHandle{id: id, size: int64(len(content)), read: func(off, n int64) ([]byte, error) {
-		return content[off : off+n], nil
-	}}
-	c.handles[id] = h
-
-	return h, nil
-}
-
-// stored opens a blob of the store, which is read in ranges.
-func (c *blobCache) stored(id string) (*blobHandle, error) {
-	size, err := c.blobs.BlobSize(id)
-	if err != nil {
-		return nil, err
-	}
-
-	h := &blobHandle{id: id, size: size, read: func(off, n int64) ([]byte, error) {
-		return c.blobs.ReadBlob(id, size, off, n)
-	}}
-	c.handles[id] = h
-
-	return h, nil
-}
-
-// part is the decoded content of a body part (see readPart), from the
-// message parsed once per call.
-func (c *blobCache) part(guid, path string) ([]byte, error) {
-	root := c.roots[guid]
-	if root == nil {
-		size, err := c.blobs.BlobSize(guid)
-		if err != nil {
-			return nil, err
-		}
-
-		raw, err := c.blobs.ReadBlob(guid, size, 0, -1)
-		if err != nil {
-			return nil, err
-		}
-
-		if root, err = parseMessage(raw); err != nil {
-			return nil, err
-		}
-
-		c.roots[guid] = root
-	}
-
-	var body []byte
-
-	for i, section := range strings.Split(path, "_") {
-		if i > 0 {
-			var err error
-			if root, err = parseMessage(body); err != nil {
-				return nil, err
-			}
-		}
-
-		part := root.find(section)
-		if part == nil {
-			return nil, model.ErrNoBlob
-		}
-
-		body, _ = part.decodedBody()
-	}
-
-	return body, nil
-}
-
-// script is the content of a script by its blob id, from the scripts
-// listed once per call.
-func (c *blobCache) script(id string) ([]byte, error) {
-	if c.scripts == nil {
-		names, _, err := c.sess.user.ListScripts()
-		if err != nil {
-			return nil, err
-		}
-
-		c.scripts = map[string][]byte{}
-
-		for _, name := range names {
-			text, err := c.sess.user.GetScript(name)
-			if errors.Is(err, model.ErrNoScript) {
-				continue
-			}
-
-			if err != nil {
-				return nil, err
-			}
-
-			c.scripts[scriptBlobID(text)] = []byte(text)
-		}
-	}
-
-	if text, ok := c.scripts[id]; ok {
-		return text, nil
-	}
-
-	return nil, model.ErrNoBlob
 }

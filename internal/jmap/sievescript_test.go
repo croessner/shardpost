@@ -3,6 +3,7 @@ package jmap
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -323,9 +324,9 @@ func TestSieveScriptUpdateRefuses(t *testing.T) {
 	}
 }
 
-// TestSieveScriptFromManageSieve: a script stored over ManageSieve gets
-// an id the first time JMAP lists it, and keeps it; the ids are kept in
-// the server-managed metadata entry.
+// TestSieveScriptFromManageSieve: a script stored over ManageSieve has
+// the id derived from its name, the same every time, and nothing is
+// written for it.
 func TestSieveScriptFromManageSieve(t *testing.T) {
 	s, u := sieveServer(t)
 
@@ -337,18 +338,12 @@ func TestSieveScriptFromManageSieve(t *testing.T) {
 	second, again := scripts(t, s)
 
 	id, _ := first["roundcube"][propID].(string)
-	if id == "" || second["roundcube"][propID] != id || state != again {
+	if id != derivedScriptID("roundcube", 0) || second["roundcube"][propID] != id || state != again {
 		t.Fatalf("the ids are %#v then %#v", first, second)
 	}
 
-	md, err := u.GetMetadata("", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var ids map[string]string
-	if err := json.Unmarshal([]byte(md[sieveScriptsEntry]), &ids); err != nil || ids["roundcube"] != id {
-		t.Errorf("the entry holds %q", md[sieveScriptsEntry])
+	if md, err := u.GetMetadata("", "test"); err != nil || md[sieveScriptsEntry] != "" {
+		t.Errorf("listing wrote %q (%v)", md[sieveScriptsEntry], err)
 	}
 
 	// A change over ManageSieve moves the state.
@@ -358,6 +353,51 @@ func TestSieveScriptFromManageSieve(t *testing.T) {
 
 	if _, changed := scripts(t, s); changed == state {
 		t.Error("a new content left the state as it was")
+	}
+}
+
+// TestSieveScriptIDsAreNeverReused: a script created over JMAP has an id
+// of its own; a rename over JMAP keeps it, also for a script ManageSieve
+// stored; a name a script left does not hand its id to the next script
+// under it; and the record growing or shrinking changes no id.
+func TestSieveScriptIDsAreNeverReused(t *testing.T) {
+	s, u := sieveServer(t)
+
+	if err := u.PutScript("manage", scriptKeep); err != nil {
+		t.Fatal(err)
+	}
+
+	jmapID := createScript(t, s, "jmap", scriptKeep)
+	manageID := scriptIDOf(t, s, "manage")
+	other := createScript(t, s, "other", scriptKeep)
+
+	if strings.HasPrefix(jmapID, "n") || manageID != derivedScriptID("manage", 0) {
+		t.Fatalf("the ids are %q and %q", jmapID, manageID)
+	}
+
+	sieveCall(t, s, "SieveScript/set", `{"update":{"`+manageID+`":{"name":"renamed"}}}`)
+	sieveCall(t, s, "SieveScript/set", `{"destroy":["`+jmapID+`"]}`)
+
+	for _, name := range []string{"manage", "jmap"} {
+		if err := u.PutScript(name, scriptKeep); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, _ := scripts(t, s)
+	if got["renamed"][propID] != manageID || got["other"][propID] != other ||
+		got["manage"][propID] == manageID || got["jmap"][propID] == jmapID {
+		t.Errorf("after rename, destroy and new scripts: %#v", got)
+	}
+
+	// Destroying more grows the record, and no remaining id moves.
+	sieveCall(t, s, "SieveScript/set", `{"destroy":["`+got["manage"][propID].(string)+`"]}`)
+
+	after, _ := scripts(t, s)
+	for _, name := range []string{"renamed", "other", "jmap"} {
+		if after[name][propID] != got[name][propID] {
+			t.Errorf("%s moved from %v to %v", name, got[name][propID], after[name][propID])
+		}
 	}
 }
 
@@ -597,6 +637,30 @@ func TestSieveScriptUpdateIsAtomic(t *testing.T) {
 	}
 }
 
+// TestSieveScriptHalfDoneUpdate: the content fails, and another session
+// took the old name meanwhile: the rename cannot be undone, and the
+// error says what happened, so that the client does not retry blindly.
+func TestSieveScriptHalfDoneUpdate(t *testing.T) {
+	s, u := hookedServer(t)
+	id := createScript(t, s, "elsewhere", scriptArchive)
+	blob := upload(t, s, scriptKeep, "application/sieve")
+
+	u.afterRename = func(oldName, _ string) { _ = u.User.PutScript(oldName, scriptKeep) }
+	u.failPut = errors.New("the store is full")
+
+	res := sieveCall(t, s, "SieveScript/set", `{"update":{"`+id+`":{"name":"new","blobId":"`+blob+`"}}}`)
+	u.failPut = nil
+
+	e, _ := res["notUpdated"].(map[string]any)[id].(map[string]any)
+	if d, _ := e["description"].(string); e["type"] != setServerFail || !strings.Contains(d, "renamed to new but its content is unchanged") {
+		t.Errorf("a half-done update gave %#v", e)
+	}
+
+	if text, _ := u.GetScript("new"); text != scriptArchive {
+		t.Errorf("the renamed script holds %q", text)
+	}
+}
+
 // TestSieveScriptIDsDuringWrites: a listing between the steps of a
 // creation or a rename sees the id the call reports, never another one.
 func TestSieveScriptIDsDuringWrites(t *testing.T) {
@@ -656,25 +720,27 @@ func TestSieveScriptLongNames(t *testing.T) {
 	}
 }
 
-// TestSieveScriptIDsBeyondTheRecord: when the ids do not fit the record,
-// the scripts that do not fit get ids derived from their names — every
-// script still has one, stable from one listing to the next.
+// TestSieveScriptIDsBeyondTheRecord: when the record of ids would
+// outgrow its bound, entries go — of names that are no scripts first —
+// every script keeps an id of its own, and the warning comes once.
 func TestSieveScriptIDsBeyondTheRecord(t *testing.T) {
-	s, u := sieveServer(t)
+	var logs strings.Builder
+
+	s, u := sieveServer(t, func(o *Options) { o.Log = slog.New(slog.NewTextHandler(&logs, nil)) })
 
 	defer func(was int) { maxScriptIDRecord = was }(maxScriptIDRecord)
 
-	maxScriptIDRecord = 100
+	maxScriptIDRecord = 120
 
-	for i := range 10 {
-		if err := u.PutScript("script"+strconv.Itoa(i), scriptKeep); err != nil {
-			t.Fatal(err)
-		}
+	scriptIDsOverflowed.Store(false)
+
+	for i := range 8 {
+		createScript(t, s, "script"+strconv.Itoa(i), scriptKeep)
 	}
 
 	first, _ := scripts(t, s)
 	second, _ := scripts(t, s)
-	ids, derived := map[string]bool{}, 0
+	ids := map[string]bool{}
 
 	for name, obj := range first {
 		id, _ := obj[propID].(string)
@@ -683,14 +749,14 @@ func TestSieveScriptIDsBeyondTheRecord(t *testing.T) {
 		}
 
 		ids[id] = true
-
-		if strings.HasPrefix(id, "n") {
-			derived++
-		}
 	}
 
 	md, _ := u.GetMetadata("", "test")
-	if len(ids) != 10 || derived == 0 || len(md[sieveScriptsEntry]) > maxScriptIDRecord {
-		t.Errorf("%d ids, %d derived, a record of %d bytes", len(ids), derived, len(md[sieveScriptsEntry]))
+	if len(ids) != 8 || len(md[sieveScriptsEntry]) > maxScriptIDRecord {
+		t.Errorf("%d ids, a record of %d bytes", len(ids), len(md[sieveScriptsEntry]))
+	}
+
+	if n := strings.Count(logs.String(), "outgrew their record"); n != 1 {
+		t.Errorf("the warning came %d times", n)
 	}
 }
