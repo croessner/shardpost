@@ -39,7 +39,7 @@ def call(using, *calls):
 
 
 print("capabilities:", sorted(k.rsplit(":", 1)[-1] for k in session["capabilities"]))
-cap = session["capabilities"][SIEVE]
+cap = session["accounts"][aid]["accountCapabilities"][SIEVE]
 print("sieve: maxSizeScriptName", cap.get("maxSizeScriptName"), "| maxNumberRedirects", cap.get("maxNumberRedirects"),
       "| extensions", len(cap.get("sieveExtensions") or []))
 
