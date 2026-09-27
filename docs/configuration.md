@@ -194,6 +194,24 @@ Version 0.26.1 changed the default from `Other Users/` to `Shared/`. A
 server that was running before it keeps the old name by setting
 `server.shared_prefix: "Other Users/"` explicitly.
 
+### Share notifications
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `server.share_notifications_max` | 50 | share notifications an account keeps (at most 200); a new one beyond it removes the oldest |
+| `server.share_notifications_retention_seconds` | 2592000 | how long one is kept (30 days) |
+
+A change of the rights an account holds on another account's mailbox
+or on a public folder — through IMAP `SETACL` or `DELETEACL`, the admin
+API or JMAP `shareWith` — leaves a notification in that account (RFC
+9670 3), which a JMAP client reads as `ShareNotification` (see
+[JMAP: Sharing](jmap.md#share-notifications)). The notifications of an
+account are one server-managed METADATA entry of its own namespace,
+bounded by these two settings and by the 64 KiB of one entry; a second
+change of the same mailbox replaces the first. Writing one is best
+effort: an ACL change never fails because of it, and a failure is
+logged (`share notification not written`).
+
 ### What an account starts with, and what it is subscribed to
 
 | Key | Default | Meaning |

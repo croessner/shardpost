@@ -66,6 +66,15 @@ type JMAP struct {
 	// session state of every API response examine in all; 0 takes eight
 	// times max_shared_mailboxes.
 	MaxSessionPointers int64 `mapstructure:"max_session_pointers" env:"JMAP_MAX_SESSION_POINTERS" validate:"gte=0"`
+	// MaxPrincipalLookups bounds the addresses one API request may look
+	// up in the authentication backend by an exact match (Principal/query
+	// email, Principal/get and shareWith ids of accounts the user does not
+	// see already); 0 takes 5.
+	MaxPrincipalLookups int64 `mapstructure:"max_principal_lookups" env:"JMAP_MAX_PRINCIPAL_LOOKUPS" validate:"gte=0"`
+	// MaxPrincipals bounds the principals a user sees without a lookup:
+	// itself, the owners who share with it and the identifiers in the
+	// ACLs of its own mailboxes; 0 takes 1000.
+	MaxPrincipals int64 `mapstructure:"max_principals" env:"JMAP_MAX_PRINCIPALS" validate:"gte=0"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
 	// Submission configures sending (EmailSubmission) and identities.

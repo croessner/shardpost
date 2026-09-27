@@ -15,6 +15,7 @@ import (
 	"shardpost/internal/config"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
+	"shardpost/internal/sharenotice"
 	"shardpost/internal/version"
 )
 
@@ -33,7 +34,9 @@ type adminServers struct {
 
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
-func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store) (*adminServers, error) {
+func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store,
+	notices *sharenotice.Recorder,
+) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
 
@@ -68,7 +71,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
 		ClientScopes:         scopes, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
 		StorePing: store.Ping, Jobs: a.jobs, Learning: cephstore.LearningQueue{Store: store}, SearchScanLimit: c.SearchScanLimit,
-		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix})
+		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices})
 
 	if c.Addr != "" {
 		srv, err := s.TLSServer(c.TLSCert, c.TLSKey, c.ClientCA)

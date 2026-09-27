@@ -270,13 +270,28 @@ func TestSharingSessionAccounts(t *testing.T) {
 	}
 }
 
-// checkSharedCapabilities: a shared account offers core and mail, and no
-// top-level mailbox.
+// checkSharedCapabilities: a shared account offers core, mail and
+// mail:share, an owner's account names its owner as a principal (RFC
+// 9670 1.5.2), and none offers a top-level mailbox.
 func checkSharedCapabilities(t *testing.T, id string, a Account) {
 	t.Helper()
 
-	if len(a.AccountCapabilities) != 2 || a.AccountCapabilities[CapMail] == nil || a.AccountCapabilities[CapCore] == nil {
-		t.Errorf("%s offers %v, want core and mail only", id, a.AccountCapabilities)
+	want := 4
+	if id == model.PublicNamespace {
+		want = 3
+	}
+
+	if len(a.AccountCapabilities) != want || a.AccountCapabilities[CapMail] == nil || a.AccountCapabilities[CapCore] == nil ||
+		a.AccountCapabilities[CapMailShare] == nil {
+		t.Errorf("%s offers %v, want core, mail, mail:share and for an owner principals:owner", id, a.AccountCapabilities)
+	}
+
+	if id != model.PublicNamespace {
+		var owner map[string]string
+		if err := json.Unmarshal(a.AccountCapabilities[CapPrincipalsOwner], &owner); err != nil ||
+			owner["principalId"] != id || owner["accountIdForPrincipal"] != "test" {
+			t.Errorf("%s: principals:owner is %s", id, a.AccountCapabilities[CapPrincipalsOwner])
+		}
 	}
 
 	var mail mailCapability

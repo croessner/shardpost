@@ -49,7 +49,7 @@ const danglingCreation = "the creation this one points at did not happen"
 // mailboxSet implements Mailbox/set (RFC 8621 2.5): creations first,
 // then updates, then destructions, each reported on its own, so that one
 // rejected object does not undo the rest.
-func mailboxSet(_ context.Context, sess *session, args json.RawMessage) (any, *methodError) {
+func mailboxSet(ctx context.Context, sess *session, args json.RawMessage) (any, *methodError) {
 	var req mailboxSetRequest
 	if err := json.Unmarshal(args, &req); err != nil {
 		return nil, &methodError{Type: errInvalidArguments, Description: err.Error()}
@@ -74,8 +74,8 @@ func mailboxSet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 
 	out := newSetResponse(sess.accountID(), state)
 
-	mailboxCreates(sess, &req, out)
-	mailboxUpdates(sess, &req, out)
+	mailboxCreates(ctx, sess, &req, out)
+	mailboxUpdates(ctx, sess, &req, out)
 	mailboxDestroys(sess, &req, out)
 
 	out.NewState = stateAfter(sess, state, out)
@@ -170,13 +170,13 @@ type mailboxCreate struct {
 // parent by the creation id of another one in the same call (RFC 8620
 // 5.3), and a JSON object has no order, so the ones whose parent is
 // still missing are retried until a round creates nothing new.
-func mailboxCreates(sess *session, req *mailboxSetRequest, out *setResponse) {
+func mailboxCreates(ctx context.Context, sess *session, req *mailboxSetRequest, out *setResponse) {
 	pending := map[string]json.RawMessage{}
 	for cid, raw := range req.Create {
 		pending[cid] = raw
 	}
 
-	for len(pending) > 0 && createRound(sess, pending, out) {
+	for len(pending) > 0 && createRound(ctx, sess, pending, out) {
 		continue
 	}
 
@@ -188,7 +188,7 @@ func mailboxCreates(sess *session, req *mailboxSetRequest, out *setResponse) {
 
 // createRound carries out every creation whose parent is there by now
 // and reports whether it got anything done.
-func createRound(sess *session, pending map[string]json.RawMessage, out *setResponse) bool {
+func createRound(ctx context.Context, sess *session, pending map[string]json.RawMessage, out *setResponse) bool {
 	progress := false
 
 	for cid, raw := range pending {
@@ -203,7 +203,7 @@ func createRound(sess *session, pending map[string]json.RawMessage, out *setResp
 			continue
 		}
 
-		created, serr, wait := createMailbox(sess, t, raw)
+		created, serr, wait := createMailbox(ctx, sess, t, raw)
 		if wait {
 			continue
 		}
@@ -226,13 +226,13 @@ func createRound(sess *session, pending map[string]json.RawMessage, out *setResp
 
 // createMailbox validates one creation and carries it out. wait reports
 // that it names a creation id of this call that has not happened yet.
-func createMailbox(sess *session, t *tree, raw json.RawMessage) (map[string]any, *setError, bool) {
+func createMailbox(ctx context.Context, sess *session, t *tree, raw json.RawMessage) (map[string]any, *setError, bool) {
 	var given map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &given); err != nil {
 		return nil, &setError{Type: setInvalidProperties, Description: err.Error()}, false
 	}
 
-	if serr := checkProperties(given); serr != nil {
+	if serr := checkProperties(sess, given); serr != nil {
 		return nil, serr, false
 	}
 
@@ -255,13 +255,59 @@ func createMailbox(sess *session, t *tree, raw json.RawMessage) (map[string]any,
 		return nil, serr, false
 	}
 
+	edits, serr := createShare(ctx, sess, given)
+	if serr != nil {
+		return nil, serr, false
+	}
+
 	if err := sess.user.CreateMailbox(path, use); err != nil {
 		return nil, createFailed(err), false
 	}
 
 	created, serr := finishCreate(sess, path, &spec)
+	if serr != nil || len(edits) == 0 {
+		return created, serr, false
+	}
 
-	return created, serr, false
+	return created, finishShare(sess, path, edits, created), false
+}
+
+// createShare validates the shareWith of a creation — a new mailbox has
+// no ACL, so every principal in it is a new entry — and returns the
+// edits to make once it exists.
+func createShare(ctx context.Context, sess *session, given map[string]json.RawMessage) ([]*shareEdit, *setError) {
+	raw, ok := given[propShareWith]
+	if !ok {
+		return nil, nil
+	}
+
+	p := &sharePatch{edits: map[string]*shareEdit{}}
+	if serr := p.read(propShareWith, raw); serr != nil {
+		return nil, serr
+	}
+
+	return sess.srv.shareCheck(ctx, sess, sess.current(), nil, p)
+}
+
+// finishShare writes the shareWith of a new mailbox and puts what it is
+// now into the creation's answer.
+func finishShare(sess *session, path string, edits []*shareEdit, created map[string]any) *setError {
+	mb, err := sess.user.Lookup(path)
+	if err == nil {
+		err = sess.srv.shareApply(sess, sess.current(), mb, edits)
+	}
+
+	if err == nil {
+		mb, err = sess.user.Lookup(path)
+	}
+
+	if err != nil {
+		return &setError{Type: setServerFail, Description: err.Error()}
+	}
+
+	created[propShareWith] = shareWithOf(sess.current(), mb)
+
+	return nil
 }
 
 // placeOf validates the name, the sort order and the role of a creation
@@ -371,7 +417,14 @@ func finishCreate(sess *session, path string, spec *mailboxCreate) (map[string]a
 		return nil, &setError{Type: setServerFail, Description: err.Error()}
 	}
 
-	created := map[string]any{propID: mb.ID, propMyRights: ownerRights(path),
+	rights := ownerRights(path)
+
+	if sess.shareProps() {
+		owner := true
+		rights.MayShare = &owner
+	}
+
+	created := map[string]any{propID: mb.ID, propMyRights: rights,
 		propTotalEmails: 0, propUnreadEmails: 0, propTotalThreads: 0, propUnreadThreads: 0}
 
 	if spec.SortOrder == nil {
@@ -390,9 +443,11 @@ func finishCreate(sess *session, path string, spec *mailboxCreate) (map[string]a
 }
 
 // checkProperties refuses the properties a client may not write.
-func checkProperties(given map[string]json.RawMessage) *setError {
+// shareWith is one with the capabilities that define it.
+func checkProperties(sess *session, given map[string]json.RawMessage) *setError {
 	for key := range given {
 		switch {
+		case key == propShareWith && sess.shareProps():
 		case serverSetProperties[key]:
 			return invalidProperty(key, "the server sets this property")
 		case !mailboxWritable[key]:
@@ -434,12 +489,16 @@ func checkName(name string) *setError {
 type mailboxPatch struct {
 	sortOrder    *uint32
 	isSubscribed *bool
-	path         string
-	moves        bool
+	// share is the shareWith part of the patch, edits what it comes to
+	// against the mailbox's ACL.
+	share *sharePatch
+	edits []*shareEdit
+	path  string
+	moves bool
 }
 
 // mailboxUpdates runs the updates of a /set.
-func mailboxUpdates(sess *session, req *mailboxSetRequest, out *setResponse) {
+func mailboxUpdates(ctx context.Context, sess *session, req *mailboxSetRequest, out *setResponse) {
 	for id, patch := range req.Update {
 		t, err := sess.current().tree()
 		if err != nil {
@@ -453,12 +512,13 @@ func mailboxUpdates(sess *session, req *mailboxSetRequest, out *setResponse) {
 			continue
 		}
 
-		if serr := updateMailbox(sess, t, &mb, patch); serr != nil {
+		changed, serr := updateMailbox(ctx, sess, t, &mb, patch)
+		if serr != nil {
 			out.NotUpdated[id] = serr
 			continue
 		}
 
-		out.Updated[id] = nil
+		out.Updated[id] = changed
 
 		reloadAfterWrite(sess)
 	}
@@ -469,39 +529,72 @@ func mailboxUpdates(sess *session, req *mailboxSetRequest, out *setResponse) {
 // an update to one record, and a rename that failed after a sort order
 // had already been written would be exactly that. The rename goes first
 // because it is the step that can still fail on the state of the store.
-func updateMailbox(sess *session, t *tree, mb *model.Mailbox, raw map[string]json.RawMessage) *setError {
+//
+// It returns what the server changed beyond the patch: after a shareWith
+// change, the shareWith as it is now, since a patch of one right can move
+// another (mayRename and mayDelete are one IMAP right).
+func updateMailbox(ctx context.Context, sess *session, t *tree, mb *model.Mailbox, raw map[string]json.RawMessage) (any, *setError) {
 	patch, serr := readPatch(sess, t, mb, raw)
 	if serr != nil {
-		return serr
+		return nil, serr
 	}
 
 	a := sess.current()
 	if serr := mayUpdate(a, mb, patch); serr != nil {
-		return serr
+		return nil, serr
+	}
+
+	if patch.share != nil {
+		if patch.edits, serr = sess.srv.shareCheck(ctx, sess, a, mb.ACL, patch.share); serr != nil {
+			return nil, serr
+		}
 	}
 
 	if patch.moves {
 		if err := sess.user.RenameMailbox(mb.Name, patch.path); err != nil {
-			return renameFailed(err)
+			return nil, renameFailed(err)
 		}
 	}
 
 	if patch.sortOrder != nil {
 		if err := sess.user.SetSortOrder(patch.path, *patch.sortOrder); err != nil {
-			return &setError{Type: setServerFail, Description: err.Error()}
+			return nil, &setError{Type: setServerFail, Description: err.Error()}
 		}
 	}
+
+	now := *mb
+	now.Name = patch.path
 
 	if patch.isSubscribed != nil {
-		now := *mb
-		now.Name = patch.path
-
 		if err := a.setSubscribed(&now, *patch.isSubscribed); err != nil {
-			return &setError{Type: setServerFail, Description: err.Error()}
+			return nil, &setError{Type: setServerFail, Description: err.Error()}
 		}
 	}
 
-	return nil
+	if patch.share == nil {
+		return nil, nil
+	}
+
+	return updateShare(sess, a, &now, patch.edits)
+}
+
+// updateShare writes the shareWith of an update and answers with it as it
+// is now.
+func updateShare(sess *session, a *account, mb *model.Mailbox, edits []*shareEdit) (any, *setError) {
+	if err := sess.srv.shareApply(sess, a, mb, edits); err != nil {
+		if errors.Is(err, model.ErrNoMailbox) {
+			return nil, &setError{Type: setNotFound}
+		}
+
+		return nil, &setError{Type: setServerFail, Description: err.Error()}
+	}
+
+	after, err := sess.user.Lookup(mb.Name)
+	if err != nil {
+		return nil, &setError{Type: setServerFail, Description: err.Error()}
+	}
+
+	return map[string]any{propShareWith: shareWithOf(a, after)}, nil
 }
 
 // reloadAfterWrite reads a shared account's mailboxes again after a
@@ -527,6 +620,11 @@ func reloadAfterWrite(sess *session) {
 // the owner's mailbox that every other user sees. A subscription is the
 // user's own and needs nothing beyond seeing the mailbox (l).
 func mayUpdate(a *account, mb *model.Mailbox, patch *mailboxPatch) *setError {
+	if patch.share != nil && !a.mayShare(mb.ID) {
+		return &setError{Type: setForbidden, Properties: []string{propShareWith},
+			Description: "changing who a mailbox is shared with needs the right to administer it (a)"}
+	}
+
 	if a.personal {
 		return nil
 	}
@@ -568,11 +666,20 @@ func renameFailed(err error) *setError {
 
 // readPatch decodes and validates an update without writing anything.
 func readPatch(sess *session, t *tree, mb *model.Mailbox, raw map[string]json.RawMessage) (*mailboxPatch, *setError) {
-	if serr := checkPatch(raw); serr != nil {
+	if serr := checkPatch(sess, raw); serr != nil {
 		return nil, serr
 	}
 
 	patch := &mailboxPatch{path: mb.Name}
+
+	if sess.shareProps() {
+		share, serr := readShare(raw)
+		if serr != nil {
+			return nil, serr
+		}
+
+		patch.share = share
+	}
 
 	if v, ok := raw[propSortOrder]; ok {
 		var order uint64
@@ -695,10 +802,12 @@ func checkMove(t *tree, mb *model.Mailbox, name string, parent *string, patch *m
 	return patch, nil
 }
 
-// checkPatch refuses the properties an update may not carry.
-func checkPatch(patch map[string]json.RawMessage) *setError {
+// checkPatch refuses the properties an update may not carry. shareWith,
+// and a path into it, is one with the capabilities that define it.
+func checkPatch(sess *session, patch map[string]json.RawMessage) *setError {
 	for key := range patch {
 		switch {
+		case sess.shareProps() && (key == propShareWith || strings.HasPrefix(key, propShareWith+"/")):
 		case serverSetProperties[key]:
 			return invalidProperty(key, "the server sets this property")
 		case key == propRole:

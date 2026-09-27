@@ -41,6 +41,9 @@ type session struct {
 	acct *account
 	// views are the other namespaces the request opened.
 	views *views
+	// principals is what the request learned about principals; the
+	// sessions of its method calls share it.
+	principals *principalCache
 }
 
 // home is the personal account of the session.
@@ -154,7 +157,8 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		defer others.close()
 
 		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
-			log: s.o.Log.With("account", res.Account), auth: res, views: others})
+			log: s.o.Log.With("account", res.Account), auth: res, views: others,
+			principals: &principalCache{}})
 		next(w, r.WithContext(ctx))
 	}
 }

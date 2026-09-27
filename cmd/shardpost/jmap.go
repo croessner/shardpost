@@ -17,6 +17,7 @@ import (
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
 	"shardpost/internal/outbound"
+	"shardpost/internal/sharenotice"
 	"shardpost/internal/webpush"
 )
 
@@ -29,7 +30,7 @@ func (srv *servers) setupHTTP(log *slog.Logger, settings *config.Config, store *
 		return err
 	}
 
-	admin, err := newAdminServers(log, settings, authn, srv.delivery, store)
+	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices)
 	if err != nil {
 		return err
 	}
@@ -93,6 +94,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 			// 0 takes eight times MaxMailboxes.
 			MaxSessionPointers: int(settings.JMAP.MaxSessionPointers),
 		},
+		Principals: jmapPrincipals(settings.JMAP, srv.notices),
 	})
 
 	if strings.TrimSpace(settings.JMAP.Shard) == "" {
@@ -103,6 +105,12 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
 
 	return nil
+}
+
+// jmapPrincipals maps the principal bounds; the notices are the ones IMAP
+// and the admin API write as well.
+func jmapPrincipals(c config.JMAP, notices *sharenotice.Recorder) jmap.PrincipalOptions {
+	return jmap.PrincipalOptions{MaxLookups: int(c.MaxPrincipalLookups), MaxVisible: int(c.MaxPrincipals), Notices: notices}
 }
 
 // jmapPush builds the push settings of the front-end. With a VAPID key,

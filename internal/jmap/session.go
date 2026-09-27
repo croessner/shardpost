@@ -80,9 +80,13 @@ func (s *Server) session(sess *session, base string, shared bool) *Session {
 			// RFC 9404 3.1: empty in the session, the limits are the
 			// account's.
 			CapBlob: json.RawMessage(`{}`),
+			// RFC 9670 1.5.1 and JMAP Mail Sharing: empty objects in the
+			// session.
+			CapPrincipals: json.RawMessage(`{}`),
+			CapMailShare:  json.RawMessage(`{}`),
 		},
 		Accounts:        map[string]Account{id: s.account(account)},
-		PrimaryAccounts: map[string]string{CapMail: id, CapQuota: id, CapBlob: id},
+		PrimaryAccounts: map[string]string{CapMail: id, CapQuota: id, CapBlob: id, CapPrincipals: id},
 		Username:        account,
 		APIURL:          base + PathAPI,
 		DownloadURL:     base + PathDownload + "{accountId}/{blobId}/{name}?accept={type}",
@@ -211,6 +215,12 @@ func (s *Server) account(name string) Account {
 		},
 	}
 
+	// The principals live in the personal account, and the account is
+	// the user's own (RFC 9670 1.5).
+	a.AccountCapabilities[CapPrincipals] = mustRaw(map[string]any{"currentUserPrincipalId": name})
+	a.AccountCapabilities[CapPrincipalsOwner] = mustRaw(ownerCapability(name, name))
+	a.AccountCapabilities[CapMailShare] = json.RawMessage(`{}`)
+
 	if s.o.Submission != nil {
 		a.AccountCapabilities[CapSubmission] = mustRaw(submissionCapability())
 	}
@@ -224,6 +234,13 @@ func (s *Server) account(name string) Account {
 	}
 
 	return a
+}
+
+// ownerCapability is the value of principals:owner (RFC 9670 1.5.2):
+// the owner of an account as a principal, kept in the personal account
+// of the user who asks.
+func ownerCapability(login, owner string) map[string]string {
+	return map[string]string{"accountIdForPrincipal": accountID(login), propPrincipalID: owner}
 }
 
 // submissionCapability is the value of the submission capability (RFC

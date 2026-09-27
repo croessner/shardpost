@@ -60,6 +60,9 @@ type mailboxRights struct {
 	MayRename      bool `json:"mayRename"`
 	MayDelete      bool `json:"mayDelete"`
 	MaySubmit      bool `json:"maySubmit"`
+	// MayShare is right a (JMAP Mail Sharing); it is only shown to a
+	// request that uses the principals or the mail:share capability.
+	MayShare *bool `json:"mayShare,omitempty"`
 }
 
 // ownerRights are the rights of the account on its own mailbox. INBOX
@@ -233,7 +236,7 @@ func countMessages(a *account, id string) (counts, error) {
 
 // mailboxObject renders one mailbox with the properties the client
 // asked for. id is always present, as RFC 8620 5.1 requires.
-func mailboxObject(a *account, t *tree, mb *model.Mailbox, props *[]string) (map[string]any, error) {
+func mailboxObject(a *account, t *tree, mb *model.Mailbox, props *[]string, share bool) (map[string]any, error) {
 	name, parent := t.split(mb.Name)
 
 	out := map[string]any{propID: mb.ID}
@@ -248,7 +251,16 @@ func mailboxObject(a *account, t *tree, mb *model.Mailbox, props *[]string) (map
 	put(propParentID, parent)
 	put(propSortOrder, mb.SortOrder)
 	put(propIsSubscribed, mb.Subscribed)
-	put(propMyRights, a.myRights(mb))
+
+	if share {
+		rights := a.myRights(mb)
+		may := a.mayShare(mb.ID)
+		rights.MayShare = &may
+		put(propMyRights, rights)
+		put(propShareWith, shareWithOf(a, mb))
+	} else {
+		put(propMyRights, a.myRights(mb))
+	}
 
 	if selected(props, propRole) {
 		out[propRole] = nilIfEmpty(roleOf(mb))
@@ -290,6 +302,23 @@ var mailboxProperties = map[string]bool{
 	propTotalThreads: true, propUnreadThreads: true,
 }
 
+// mailboxPropertiesOf are the properties a Mailbox has for a request:
+// shareWith with the capabilities that define it.
+func mailboxPropertiesOf(sess *session) map[string]bool {
+	if !sess.shareProps() {
+		return mailboxProperties
+	}
+
+	out := make(map[string]bool, len(mailboxProperties)+1)
+	for k := range mailboxProperties {
+		out[k] = true
+	}
+
+	out[propShareWith] = true
+
+	return out
+}
+
 // mailboxGet implements Mailbox/get (RFC 8621 2.1).
 func mailboxGet(_ context.Context, sess *session, args json.RawMessage) (any, *methodError) {
 	var req getRequest
@@ -297,7 +326,7 @@ func mailboxGet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, merr
 	}
 
-	if merr := checkRequested(req.Properties, mailboxProperties); merr != nil {
+	if merr := checkRequested(req.Properties, mailboxPropertiesOf(sess)); merr != nil {
 		return nil, merr
 	}
 
@@ -336,7 +365,7 @@ func mailboxList(sess *session, t *tree, req *getRequest) ([]map[string]any, err
 			continue
 		}
 
-		obj, err := mailboxObject(sess.current(), t, mb, req.Properties)
+		obj, err := mailboxObject(sess.current(), t, mb, req.Properties, sess.shareProps())
 		if err != nil {
 			return nil, err
 		}

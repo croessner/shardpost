@@ -283,8 +283,9 @@ offered) are implemented, and of stage 6 itself `Quota/*`,
 `VacationResponse/*`, `Blob/*` (RFC 9404), `SieveScript/*` (RFC 9661)
 and the first part of sharing (6c-1: shared mailboxes and public folders
 as accounts of the session, with the RFC 4314 rights enforced as IMAP
-enforces them, and `Email/copy` between accounts); principals and share
-notifications (6c-2) and push for shared accounts (6c-3) are next. See
+enforces them, and `Email/copy` between accounts) and its second part
+(6c-2: `Principal/*`, `Mailbox.shareWith` and `ShareNotification`, RFC
+9670); push for shared accounts (6c-3) is next. See
 [JMAP](docs/jmap.md) for what exists and what does not. What follows is the full
 target of the stage, unchanged.
 

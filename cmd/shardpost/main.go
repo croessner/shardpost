@@ -36,6 +36,7 @@ import (
 	"shardpost/internal/provision"
 	"shardpost/internal/quota"
 	"shardpost/internal/rookcreds"
+	"shardpost/internal/sharenotice"
 	"shardpost/internal/sieve"
 	"shardpost/internal/telemetry"
 	"shardpost/internal/version"
@@ -337,6 +338,9 @@ type servers struct {
 	// delivery is shared by LMTP and the local delivery API.
 	delivery *delivery.Service
 	admin    *adminServers
+	// notices writes the share notifications (RFC 9670 3) of every ACL
+	// change: IMAP SETACL, the admin API and JMAP shareWith.
+	notices *sharenotice.Recorder
 }
 
 // serve starts all listeners and blocks until a signal or a fatal listener
@@ -410,7 +414,11 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 	insecure := settings.Server.InsecureAuth
 	manageConfig := manageSieveConfig(settings, sieveCfg, programs)
 
-	srv := servers{sieveConfig: manageConfig}
+	srv := servers{sieveConfig: manageConfig, notices: &sharenotice.Recorder{
+		Store: storeAdapter{store}, Log: log.With("component", "sharenotice"),
+		Limits: sharenotice.Limits{Max: int(settings.Server.ShareNotificationsMax),
+			MaxAge: time.Duration(settings.Server.ShareNotificationsRetentionSeconds) * time.Second},
+	}}
 
 	srv.imap = imapproto.New(imapproto.Options{
 		IMAPSieve: imapSieve,
@@ -425,6 +433,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 		QuotaSelfService: settings.Server.QuotaSelfService,
 		Trace: imapproto.TraceOptions{MaxLine: settings.Trace.MaxLineBytes,
 			Recheck: time.Duration(settings.Trace.RecheckSeconds) * time.Second},
+		ShareNotices: srv.notices,
 	})
 	srv.sieve = sieve.New(sieve.Options{GlobalScripts: settings.Sieve.GlobalDir, Config: manageConfig,
 		Store: storeAdapter{store}, Auth: authn, Log: log.With("proto", "managesieve"), TLS: tlsCfg, InsecureAuth: insecure,

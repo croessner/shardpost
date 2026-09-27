@@ -290,9 +290,14 @@ func (a *account) myRights(mb *model.Mailbox) mailboxRights {
 		return ownerRights(mb.Name)
 	}
 
-	r := a.rights(mb.ID)
+	return sharedRights(a.rights(mb.ID), mb.Name)
+}
+
+// sharedRights maps the RFC 4314 rights a user holds on a mailbox of
+// another namespace to MailboxRights (see account.myRights).
+func sharedRights(r, name string) mailboxRights {
 	has := func(c byte) bool { return model.HasRight(r, c) }
-	movable := mb.Name != inboxName
+	movable := name != inboxName
 
 	return mailboxRights{
 		MayReadItems:   has('l') && has('r'),
@@ -1010,15 +1015,26 @@ func (s *Server) sharedAccountObject(a *account) Account {
 	// namespace has no mailbox to hold it on.
 	mail.MayCreateTopLevelMailbox = false
 
-	return Account{
+	out := Account{
 		Name:       name,
 		IsPersonal: false,
 		IsReadOnly: a.readOnly(),
 		AccountCapabilities: map[string]json.RawMessage{
 			CapCore: json.RawMessage(`{}`),
 			CapMail: mustRaw(mail),
+			// Its mailboxes have shareWith, which a user with right a
+			// may change.
+			CapMailShare: json.RawMessage(`{}`),
 		},
 	}
+
+	// An owner's account is owned by a principal (RFC 9670 1.5.2); the
+	// public folders belong to nobody.
+	if !a.public {
+		out.AccountCapabilities[CapPrincipalsOwner] = mustRaw(ownerCapability(a.login, a.owner))
+	}
+
+	return out
 }
 
 // callSession is the session a method call of a shared-capable method

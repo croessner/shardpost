@@ -21,7 +21,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 6 | `Quota/*`, `VacationResponse/*` | built |
 | 6 | `Blob/*`, `SieveScript/*` | built |
 | 6c-1 | Sharing of mail: shared mailboxes and public folders as accounts, `Email/copy` between them | built |
-| 6c-2 | `Principal/*`, `shareWith`, `ShareNotification` (RFC 9670) | planned |
+| 6c-2 | `Principal/*`, `shareWith`, `ShareNotification` (RFC 9670) | built |
 | 6c-3 | Push for shared accounts | planned |
 
 A client that asks for a capability this server does not have is told
@@ -387,7 +387,8 @@ Stage 6c-1. The mailboxes other accounts share with the user, and the
 public folders, are accounts of their own in the session (RFC 8620
 1.6.2), beside the personal one. They are the same mailboxes IMAP shows
 under `Shared/<owner>/` and `Public/`, with the same rights: RFC 4314
-ACLs, set over IMAP `SETACL` or `shardpostctl acl`.
+ACLs, set over IMAP `SETACL`, `shardpostctl acl` or JMAP `shareWith`
+(see [Sharing a mailbox](#sharing-a-mailbox-sharewith)).
 
 The store view of another namespace checks no permissions — IMAP
 enforces them in its protocol layer, and JMAP does the same in its own
@@ -411,7 +412,8 @@ Both are `isPersonal: false`, and `isReadOnly: true` when the user holds
 none of the rights `i`, `w`, `s`, `t`, `e`, `x` on any of their
 mailboxes. `k` does not count: no mailbox is created in a shared account
 (see below), so `k` alone lets the user do nothing there. Their `accountCapabilities` are core and mail, with
-`mayCreateTopLevelMailbox: false`: submission, vacation, Sieve, quota
+`mayCreateTopLevelMailbox: false`, mail:share and, for an owner's
+account, principals:owner (see [Principals](#principals)): submission, vacation, Sieve, quota
 and the blob methods belong to the owner's own account, and a call of
 one of them with the id of a shared account is `accountNotFound`, like a
 call with any id the user cannot reach. `primaryAccounts` stay the
@@ -609,12 +611,194 @@ does not drop what a client did not ask to drop. `onSuccessDestroyOriginal` runs
 implicit `Email/set` on the source, which needs `t` and `e` there; its
 response follows the copy's under the same call id.
 
-**Not in this stage.** `Principal/*`, `shareWith` and `ShareNotification`
-(RFC 9670) are stage 6c-2: until then rights are granted over IMAP or
-`shardpostctl acl`, and a client sees the result as accounts and
-`myRights`. Push is stage 6c-3: the event source and Web Push report the
-personal account only, and a client polls a shared account with
-`/changes`. `Quota/*` is not offered for the public account.
+**Not in this stage.** Push is stage 6c-3: the event source and Web
+Push report the personal account only, and a client polls a shared
+account with `/changes`. `Quota/*` is not offered for the public
+account.
+
+**Deviation from RFC 9670 1.4.** The RFC lists a shared account in the
+session only when the user subscribes to at least one of its mailboxes.
+This server lists every account that shares a mailbox the user can see,
+as stage 6c-1 did and as IMAP `LIST` shows them; filtering by
+subscription would take shared accounts away from clients that already
+use them. `isSubscribed` of each mailbox says what the user subscribed
+to.
+
+### Principals
+
+Stage 6c-2 (RFC 9670 2). The session offers
+`urn:ietf:params:jmap:principals` (an empty object), and the personal
+account is the account of the principals — `primaryAccounts` names it —
+with `currentUserPrincipalId` in its capability. Every account that
+belongs to somebody carries `urn:ietf:params:jmap:principals:owner`
+with `accountIdForPrincipal` (the personal account) and `principalId`
+(its owner): the personal account names the user, a shared account its
+owner. The public account belongs to nobody and has none.
+
+A principal is an account of this server, of type `individual`. Its id
+is the canonical account name — the same string that is its account id,
+its ACL identifier and, where it is an address, its `email` — so a
+principal id tells a caller nothing it does not already know. `name` is
+the account name as well: display names are the directory's, and a
+principal looks the same however it was found. `description` and
+`timeZone` are null, `capabilities` is empty, and `accounts` holds the
+account the user can reach for it: its own personal account, or the
+shared account of an owner who shares with it; null for anybody else.
+
+**No directory listing.** The authentication backend resolves one
+address at a time and lists nobody, and Principal/* does not work
+around that. The principals a user sees are:
+
+- itself;
+- the owners who share mailboxes with it — its pointers, as far as the
+  session looks for shared accounts (`jmap.max_shared_accounts`);
+- the identifiers in the ACLs of its own mailboxes (not `anyone`, not a
+  negative or reserved identifier);
+- an account named exactly: an `email` condition of `Principal/query`,
+  an id of `Principal/get`, or a key of `shareWith` that is none of the
+  above is looked up in the backend (Nauthilus identity lookup, as for
+  `Identity`). It is a principal when the backend resolves the address
+  to that very account and the account lives on this shard (the JMAP
+  shard gate, `jmap.shard_attribute` and `jmap.shard`). An unknown
+  address, an alias and an account of another shard all give no result,
+  after the same lookup.
+
+The other conditions of `Principal/query` — `name`, `text`, a part of
+an address in `email`, `accountIds`, `type`, `timeZone` — filter this
+set and look nothing up; `email` and `name` are substring matches
+without regard to ASCII case. A query sorts by `name` or `email`
+(both the account name); without a sort the user comes first, then the
+others by id.
+
+Bounds: `jmap.max_principal_lookups` (default 5) lookups per API
+request, whatever calls make them — the same address twice counts once;
+a query or a get beyond it is `requestTooLarge`, a `shareWith` beyond it
+`rateLimit`. A backend that cannot answer is `serverUnavailable` (for a
+`shareWith`, `serverFail`).
+`jmap.max_principals` (default 1000) bounds the principals seen without
+a lookup; the rest, in id order, is left out and logged once, and stays
+reachable by an exact lookup. `Principal/get` without ids returns that
+set, and `requestTooLarge` when it is larger than `maxObjectsInGet`.
+
+**State and changes.** The principals are computed, not logged. Their
+state is a hash of the set a user sees and of the sharing fingerprint of
+the session (the `accounts` follow the shared accounts).
+`Principal/changes` from the current state reports nothing, from any
+other `cannotCalculateChanges`, which RFC 9670 2.2 foresees for a server
+backed by a directory; `Principal/queryChanges` is always
+`cannotCalculateChanges`. `Principal/set` refuses every change with
+`forbidden`: principals are the directory's.
+
+### Sharing a mailbox (shareWith)
+
+With `urn:ietf:params:jmap:principals` or
+`urn:ietf:params:jmap:mail:share` (JMAP Mail Sharing,
+draft-ietf-jmap-mail-sharing) in `using`, a Mailbox has `shareWith` and
+its `myRights` has `mayShare`; without them it looks as before. Every
+account offers `urn:ietf:params:jmap:mail:share` (an empty object).
+
+`mayShare` is the IMAP right `a`: always true in the personal account,
+the ACL's in a shared one. `shareWith` is the mailbox's ACL seen as JMAP
+rights: one entry per principal in it, never the owner (whose rights are
+implicit), `anyone` or a negative identifier. It is shown only to a user
+who may change it, as IMAP `GETACL` needs `a`; anybody else reads null.
+
+| MailboxRights property | IMAP rights |
+|---|---|
+| `mayReadItems` | `l` and `r` |
+| `mayAddItems` | `i` |
+| `mayRemoveItems` | `t` and `e` |
+| `maySetSeen` | `s` |
+| `maySetKeywords` | `w` |
+| `mayCreateChild` | `k` |
+| `mayRename`, `mayDelete` | `x` (one right: they are always equal) |
+| `mayShare` | `a` |
+| `maySubmit` | none: always false, cannot be granted |
+
+A property is true when the entry holds all of its IMAP rights. The two
+models do not map one to one — IMAP has `p`, and `l` or `t` without its
+partner, which JMAP cannot show — so a write changes only the IMAP
+rights of the properties whose value it changes: a property that
+arrives as the entry shows it leaves its rights alone, and a right JMAP
+cannot express is never dropped by an update. Only removing the
+principal (null, or leaving it out of a whole new `shareWith`) removes
+its entry, `p` included. `shareWith` here is the raw mapping: on INBOX
+the grantee's own `myRights` still say it can neither rename nor delete
+it, and in a shared account `mayCreateChild` is false whatever `k`
+says (a mailbox is not created in another namespace).
+
+`Mailbox/set` takes the patch forms of RFC 8620 5.3:
+
+- `shareWith`: a whole new map, or null. Every principal not in it
+  loses its entry; `anyone` and negative entries stay.
+- `shareWith/<principal>`: that principal's rights, a MailboxRights
+  object whose missing properties are false, or null to remove it.
+- `shareWith/<principal>/<property>`: one right, true or false.
+  `mayRename` and `mayDelete` patch each other.
+
+A whole map with a patch of it, or a principal with a patch of one of
+its rights, is `invalidPatch`. A key that is the owner, not a principal
+(see [Principals](#principals)), or an unknown or foreign account is
+`invalidProperties`; so are `maySubmit: true`, `mayRename` and
+`mayDelete` apart, an unknown property and a value that is not a
+boolean. A change of `shareWith` needs `mayShare` (`forbidden`
+otherwise); in a shared account a user with `a` may share further,
+change its own entry, and never name the owner. A creation may carry
+`shareWith` as well. Everything is checked before anything is written.
+
+The write is the one IMAP `SETACL` and the admin API make: one
+versioned change per identifier, computed from the entry as it is at
+that moment, with the grantee's pointer and the ACL generation
+following — a grant shows the owner's account in the grantee's session,
+a revocation removes it. A pointer that cannot be written is logged and
+the change stands, as for IMAP. Several principals of one update are
+several such changes, not one atomic step. The update answers with
+`shareWith` as it is afterwards, since one right can move another.
+
+### Share notifications
+
+RFC 9670 3. When the rights an account holds on a mailbox change — a
+grant, a change, a revocation, through JMAP `shareWith`, IMAP `SETACL`
+or `DELETEACL`, or the admin API — the account gets a notification.
+The rights are the ones that count for it, its own entry with
+`anyone`'s; a change that leaves them as they were, a change of
+`anyone` itself (RFC 9670 3 lets a server leave out groups), and a
+change an account makes to its own entry leave none. A second change
+of the same mailbox replaces the first, keeping the rights from before
+the first; a change back to where it started leaves nothing (RFC 9670
+6.3). Deleting or renaming a mailbox, and the maintenance jobs that
+remove the grants of a deleted account, write none.
+
+`ShareNotification` objects are in the personal account:
+`objectType` is `Mailbox`, `objectAccountId` the owner's account (or
+`~public`), `objectId` the mailbox id, `name` the mailbox's full name
+in the owner's namespace at the time — after a revocation it is all the
+user has to recognise it by — and `oldRights` and `newRights` are
+`myRights` as a shared mailbox shows them, with `mayShare`, or null for
+no rights. `changedBy` is the account that made the change, with its
+principal id; a change through the admin API is `Administrator`, with no
+address and no principal.
+
+They are kept in a server-managed METADATA entry of the account's own
+namespace, written by whoever makes the change, bounded by
+`server.share_notifications_max` (50, at most 200: the oldest goes) and
+`server.share_notifications_retention_seconds` (30 days), and by the
+64 KiB of one entry. Writing one is best effort and never fails the ACL
+change. It is written into the grantee's namespace in the store of the
+server that made the change: an account of another shard, which the
+change cannot reach there, gets no notification it can read.
+
+`ShareNotification/get`, `/changes`, `/query` (filters `after`,
+`before`, `objectType`, `objectAccountId`; sort by `created`, oldest
+first by default) and `/set`, which destroys and refuses everything
+else with `forbidden`. The state counts every creation and destruction;
+`/changes` reports both and remembers destructions four times
+`share_notifications_max` far back — an older state is
+`cannotCalculateChanges`. `/queryChanges` is `cannotCalculateChanges`.
+
+Neither principals nor notifications are pushed: a notification is not
+in the account change log, and a client that shows them fetches them
+with the session, or polls `/changes`.
 
 ## Push
 
@@ -1142,8 +1326,8 @@ user's filter with it. The vacation changes through
 ## Server-managed metadata
 
 The entries under `/private/vendor/shardpost/jmap/` — the identities,
-the vacation response and the ids of the Sieve scripts — are the
-server's. They can be read over
+the vacation response, the ids of the Sieve scripts and the share
+notifications — are the server's. They can be read over
 IMAP (`GETMETADATA`), but `SETMETADATA` refuses to set or remove them
 (`NO [NOPERM]`), in any spelling of the name, and an account import
 refuses them in a mailbox's annotations (400). They change over JMAP
@@ -1280,6 +1464,8 @@ jmap:
   max_shared_accounts: 64        # owners the session lists; the public account is one more
   max_shared_mailboxes: 1000     # mailboxes one shared account examines
   max_session_pointers: 8000     # pointers the session examines in all; 0 = 8 × max_shared_mailboxes
+  max_principal_lookups: 5       # exact address lookups per API request (Principal/*, shareWith)
+  max_principals: 1000           # principals a user sees without a lookup
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
@@ -1397,10 +1583,15 @@ authentication backend, and the relay learns the account from
   account log of the public namespace, not of the account the mark
   belongs to: every reader's `Email/changes` in the public account names
   the message as updated, although only one reader's `$seen` changed.
-- Sharing (see [Sharing](#sharing)): no `Principal/*`, `shareWith` or
-  `ShareNotification` yet (stage 6c-2) — rights are granted over IMAP
-  `SETACL` or `shardpostctl acl`; no push for shared accounts yet (stage
-  6c-3); a mailbox shared only with `anyone` is not found; no mailbox is
+- Sharing (see [Sharing](#sharing)): no push for shared accounts,
+  principals or share notifications yet (stage 6c-3); the session lists
+  shared accounts without regard to subscriptions (RFC 9670 1.4, see
+  above); `Principal/changes` and the `/queryChanges` of principals and
+  notifications answer `cannotCalculateChanges`; principals are found
+  only by an exact address beyond the ones a user sees, and have no
+  display name; a notification of a change made on another shard is not
+  readable; the maintenance jobs, deleting and renaming a mailbox write
+  no notification; a mailbox shared only with `anyone` is not found; no mailbox is
   created in another namespace; an upload into a shared account, and
   with it an attachment from an upload in a message created there, is
   refused; `Quota/*` is not offered for the public account; a change of

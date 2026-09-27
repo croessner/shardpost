@@ -79,6 +79,12 @@ type Server struct {
 	// an account keeps. It is what JMAP state tokens point into: a
 	// client whose token is older than the oldest entry resynchronises.
 	AccountLogRetention int64 `mapstructure:"account_log_retention" env:"ACCOUNT_LOG_RETENTION" validate:"gte=0"`
+	// ShareNotificationsMax and ShareNotificationsRetentionSeconds bound
+	// the share notifications (RFC 9670 3) an account keeps: how many
+	// (at most 200, 0 = 50) and how long (0 = 30 days). They are written
+	// by IMAP SETACL, the admin API and JMAP alike, and read by JMAP.
+	ShareNotificationsMax              int64 `mapstructure:"share_notifications_max" env:"SHARE_NOTIFICATIONS_MAX" validate:"gte=0,lte=200"`
+	ShareNotificationsRetentionSeconds int64 `mapstructure:"share_notifications_retention_seconds" env:"SHARE_NOTIFICATIONS_RETENTION_SECONDS" validate:"gte=0"`
 	// PublicPrefix is the client-visible prefix of the public folders.
 	PublicPrefix string `mapstructure:"public_prefix" env:"PUBLIC_PREFIX" validate:"omitempty,endswith=/"`
 	// SharedPrefix is the client-visible prefix of the mailboxes other
@@ -304,6 +310,8 @@ var defaults = []struct {
 	{"server.quota_msgs", 0},
 	{"server.mbox_shard_size", 100000},
 	{"server.account_log_retention", 10000},
+	{"server.share_notifications_max", 50},
+	{"server.share_notifications_retention_seconds", 30 * 24 * 3600},
 	{"jmap.addr", ""},
 	{"jmap.shard_attribute", ""},
 	{"jmap.shard", ""},
@@ -322,6 +330,8 @@ var defaults = []struct {
 	{"jmap.max_shared_accounts", 0},
 	{"jmap.max_shared_mailboxes", 0},
 	{"jmap.max_session_pointers", 0},
+	{"jmap.max_principal_lookups", 0},
+	{"jmap.max_principals", 0},
 	{"jmap.push.vapid_key_file", ""},
 	{"jmap.push.vapid_subject", ""},
 	{"jmap.push.max_subscriptions", 0},

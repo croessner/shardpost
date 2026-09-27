@@ -131,11 +131,22 @@ var methods = map[string]method{
 	"SieveScript/query":            {capability: CapSieve, run: sieveScriptQuery},
 	"SieveScript/queryChanges":     {capability: CapSieve, run: sieveScriptQueryChanges},
 	"SieveScript/validate":         {capability: CapSieve, run: sieveScriptValidate},
+
+	"Principal/get":                  {capability: CapPrincipals, run: principalGet},
+	"Principal/changes":              {capability: CapPrincipals, run: principalChanges},
+	"Principal/set":                  {capability: CapPrincipals, run: principalSet},
+	"Principal/query":                {capability: CapPrincipals, run: principalQuery},
+	"Principal/queryChanges":         {capability: CapPrincipals, run: principalQueryChanges},
+	"ShareNotification/get":          {capability: CapPrincipals, run: shareNotificationGet},
+	"ShareNotification/changes":      {capability: CapPrincipals, run: shareNotificationChanges},
+	"ShareNotification/set":          {capability: CapPrincipals, run: shareNotificationSet},
+	"ShareNotification/query":        {capability: CapPrincipals, run: shareNotificationQuery},
+	"ShareNotification/queryChanges": {capability: CapPrincipals, run: shareNotificationQueryChanges},
 }
 
 // knownCapabilities are the URNs a request may list in "using".
 var knownCapabilities = map[string]bool{CapCore: true, CapMail: true, CapWebPushVAPID: true, CapSubmission: true,
-	CapQuota: true, CapVacationResponse: true, CapBlob: true, CapSieve: true}
+	CapQuota: true, CapVacationResponse: true, CapBlob: true, CapSieve: true, CapPrincipals: true, CapMailShare: true}
 
 // coreEcho returns its arguments unchanged (RFC 8620 4).
 func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *methodError) {
