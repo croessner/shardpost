@@ -441,7 +441,12 @@ user sees, with its rights. An API response reads those two — the
 pointers only as far as `jmap.max_session_pointers` of them in key
 order, one bounded read however many pointers other accounts have
 written for the user, with a marker when there are more — and opens no
-owner's namespace; the owners are opened when the session resource is
+owner's namespace. Revoked pointers do not count against that bound:
+the store keeps the tombstone of a revocation for an hour, against a
+grant from an older ACL generation that lands late, and after that the
+listings that meet it remove it, at most 256 per listing, so an account
+that grants and revokes many mailboxes cannot fill another user's
+window for good; the owners are opened when the session resource is
 fetched, and when a method call names one of their accounts. A change
 of the `anyone` entry of a shared mailbox alone does not touch the
 pointers, so it reaches a client when it next fetches the session

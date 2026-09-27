@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"shardpost/internal/model"
 )
@@ -31,6 +32,32 @@ type sharedRec struct {
 	Subscribed bool   `json:"subscribed,omitempty"`
 	Gen        uint64 `json:"gen,omitempty"`     // ACL generation of the owner's record
 	Deleted    bool   `json:"deleted,omitempty"` // tombstone: revoked at Gen
+	At         int64  `json:"at,omitempty"`      // tombstone: when it was written (Unix seconds)
+}
+
+// sharedTombstoneTTL is how long the tombstone of a revoked pointer is
+// kept. It exists for one race: a grant computed from an older ACL
+// generation that lands after the revocation (syncSharedRef reads the
+// generation, then writes the grantee's registry in one CAS). Such a
+// write is seconds late at worst, so an hour is far beyond it. After that
+// the tombstone is garbage, removed by the next listing that meets it: a
+// revoked pointer must not stay in the registry for good, where every
+// bounded listing would have to read past it — an account revoking many
+// grants would otherwise fill another user's listings with them.
+const sharedTombstoneTTL = time.Hour
+
+// sharedCollectMax bounds the tombstones one listing removes, so that
+// the clean-up of a large backlog is spread over many calls.
+const sharedCollectMax = 256
+
+// sharedScanFactor is how many registry keys a bounded listing reads per
+// pointer it was asked for, tombstones included.
+const sharedScanFactor = 2
+
+// collectable reports whether a record is a tombstone past its time. One
+// without a time predates the field and is as old as can be.
+func (r *sharedRec) collectable(now time.Time) bool {
+	return r.Deleted && (r.At == 0 || now.Sub(time.Unix(r.At, 0)) > sharedTombstoneTTL)
 }
 
 func sharedKey(owner, mailbox string) string { return regSharedPrefix + owner + "/" + mailbox }
@@ -338,7 +365,7 @@ func (u *User) removeSharedRef(owner, mailbox string, gen uint64) error {
 				return nil, nil
 			}
 
-			b, _ := json.Marshal(&sharedRec{Gen: gen, Deleted: true})
+			b, _ := json.Marshal(&sharedRec{Gen: gen, Deleted: true, At: time.Now().Unix()})
 
 			return map[string][]byte{key: b}, nil
 		}
@@ -354,7 +381,7 @@ func (u *User) removeSharedRef(owner, mailbox string, gen uint64) error {
 			return nil, nil
 		}
 
-		b, _ := json.Marshal(&sharedRec{Gen: gen, Deleted: true})
+		b, _ := json.Marshal(&sharedRec{Gen: gen, Deleted: true, At: time.Now().Unix()})
 
 		return map[string][]byte{key: b}, nil
 	})
@@ -395,6 +422,10 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 		return nil, fmt.Errorf("list shared: %w", err)
 	}
 
+	now := time.Now()
+
+	var collect []string
+
 	out := make([]model.SharedRef, 0, len(vals))
 	for k, v := range vals {
 		rest := strings.TrimPrefix(k, regSharedPrefix)
@@ -408,11 +439,17 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 
 		_ = json.Unmarshal(v, &rec)
 		if rec.Deleted {
+			if rec.collectable(now) && len(collect) < sharedCollectMax {
+				collect = append(collect, k)
+			}
+
 			continue
 		}
 
 		out = append(out, model.SharedRef{Owner: owner, Mailbox: mailbox, Subscribed: rec.Subscribed, Gen: rec.Gen})
 	}
+
+	u.collectShared(collect)
 
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Owner != out[j].Owner {
@@ -427,55 +464,136 @@ func (u *User) ListShared() ([]model.SharedRef, error) {
 
 var _ model.SharedPager = (*User)(nil)
 
-// ListSharedN implements model.SharedPager: one bounded omap read of the
-// registry's pointer keys, in key order (owner, then mailbox); a revoked
-// pointer's tombstone counts against the limit.
+// ListSharedN implements model.SharedPager: the registry's pointer keys
+// in key order (owner, then mailbox), read in pages until limit live
+// pointers are found, the keys end, or sharedScanFactor × limit (plus
+// what one clean-up removes) keys were read. Tombstones do not count
+// against the limit; the ones past their time are removed on the way.
 func (u *User) ListSharedN(owner string, limit int) ([]model.SharedRef, bool, error) {
 	prefix := regSharedPrefix
 	if owner != "" {
 		prefix = regSharedPrefix + owner + "/"
 	}
 
-	vals, err := u.idx.GetOmapValues(oidRegistry, "", prefix, int64(limit)+1)
-	if err != nil {
-		if errCode(err) == syscall.ENOENT {
-			return nil, false, nil
+	read := func(start string, n int) (map[string][]byte, error) {
+		vals, err := u.idx.GetOmapValues(oidRegistry, start, prefix, int64(n))
+		if err != nil && errCode(err) == syscall.ENOENT {
+			return nil, nil
 		}
 
+		return vals, err
+	}
+
+	sc, err := scanSharedPages(read, limit, time.Now())
+	if err != nil {
 		return nil, false, fmt.Errorf("list shared: %w", err)
 	}
 
-	keys := make([]string, 0, len(vals))
-	for k := range vals {
-		keys = append(keys, k)
+	u.collectShared(sc.collect)
+
+	return sc.refs, sc.more, nil
+}
+
+// sharedScan is what a bounded listing found.
+type sharedScan struct {
+	refs    []model.SharedRef
+	collect []string // tombstones past their time
+	more    bool
+}
+
+// scanSharedPages reads pointer keys page by page through read (keys
+// after start, at most n) and collects at most limit live pointers.
+func scanSharedPages(read func(start string, n int) (map[string][]byte, error), limit int, now time.Time) (*sharedScan, error) {
+	sc := &sharedScan{}
+	budget := sharedScanFactor*limit + sharedCollectMax
+	start := ""
+
+	for !sc.more {
+		n := min(omapPageSize, budget)
+		if n <= 0 {
+			sc.more = true
+
+			break
+		}
+
+		vals, err := read(start, n)
+		if err != nil {
+			return nil, err
+		}
+
+		keys := make([]string, 0, len(vals))
+		for k := range vals {
+			keys = append(keys, k)
+		}
+
+		sort.Strings(keys)
+		sc.take(keys, vals, limit, now)
+
+		budget -= len(keys)
+
+		if len(keys) < n {
+			break
+		}
+
+		start = keys[len(keys)-1]
 	}
 
-	sort.Strings(keys)
+	return sc, nil
+}
 
-	more := len(keys) > limit
-	if more {
-		keys = keys[:limit]
-	}
-
-	out := make([]model.SharedRef, 0, len(keys))
-
+// take adds one page of keys to the scan.
+func (sc *sharedScan) take(keys []string, vals map[string][]byte, limit int, now time.Time) {
 	for _, k := range keys {
-		o, mailbox, ok := strings.Cut(strings.TrimPrefix(k, regSharedPrefix), "/")
+		var rec sharedRec
+
+		_ = json.Unmarshal(vals[k], &rec)
+
+		if rec.Deleted {
+			if rec.collectable(now) && len(sc.collect) < sharedCollectMax {
+				sc.collect = append(sc.collect, k)
+			}
+
+			continue
+		}
+
+		owner, mailbox, ok := strings.Cut(strings.TrimPrefix(k, regSharedPrefix), "/")
 		if !ok {
 			continue
 		}
 
-		var rec sharedRec
+		if len(sc.refs) == limit {
+			sc.more = true
 
-		_ = json.Unmarshal(vals[k], &rec)
-		if rec.Deleted {
-			continue
+			return
 		}
 
-		out = append(out, model.SharedRef{Owner: o, Mailbox: mailbox, Subscribed: rec.Subscribed, Gen: rec.Gen})
+		sc.refs = append(sc.refs, model.SharedRef{Owner: owner, Mailbox: mailbox, Subscribed: rec.Subscribed, Gen: rec.Gen})
+	}
+}
+
+// collectShared removes tombstones past their time, each only if it is
+// still that tombstone when the CAS runs (a new grant may have replaced
+// it meanwhile). It is a clean-up: a failure leaves them for the next
+// listing.
+func (u *User) collectShared(keys []string) {
+	if len(keys) == 0 {
+		return
 	}
 
-	return out, more, nil
+	now := time.Now()
+
+	_ = casOmap(u, u.idx, oidRegistry, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+		var rm []string
+
+		for k, v := range cur {
+			var rec sharedRec
+			if json.Unmarshal(v, &rec) == nil && rec.collectable(now) {
+				rm = append(rm, k)
+			}
+		}
+
+		return nil, rm
+	})
 }
 
 // NextSharedOwner implements model.SharedPager: one omap read of a
