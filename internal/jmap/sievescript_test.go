@@ -760,3 +760,30 @@ func TestSieveScriptIDsBeyondTheRecord(t *testing.T) {
 		t.Errorf("the warning came %d times", n)
 	}
 }
+
+// TestSieveScriptRecordDoesNotGrowWithRecordedIDs: a script with a
+// recorded id leaves no placeholder behind when it is destroyed, since the
+// next script under the name derives a different id anyway.
+func TestSieveScriptRecordDoesNotGrowWithRecordedIDs(t *testing.T) {
+	s, u := sieveServer(t)
+
+	id := createScript(t, s, "temporary", scriptKeep)
+	sieveCall(t, s, "SieveScript/set", `{"destroy":["`+id+`"]}`)
+
+	md, err := u.GetMetadata("", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(md[sieveScriptsEntry], "temporary") {
+		t.Fatalf("the record keeps the destroyed script: %s", md[sieveScriptsEntry])
+	}
+
+	if err := u.PutScript("temporary", scriptKeep); err != nil {
+		t.Fatal(err)
+	}
+
+	if again := scriptIDOf(t, s, "temporary"); again == id {
+		t.Fatalf("the next script under the name got the old id %q", id)
+	}
+}

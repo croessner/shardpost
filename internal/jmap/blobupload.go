@@ -455,6 +455,11 @@ func (u *uploader) build(spec *uploadSpec) ([]byte, *setError) {
 			// holds what fits its bound, and a creation of many sources
 			// must not hold all of them besides.
 			h, err := u.cache.open(src.blobID)
+			if errors.Is(err, model.ErrNoBlob) {
+				// Gone since the check: expunged, or the script removed.
+				return nil, &setError{Type: setBlobNotFound, NotFound: []string{src.blobID}}
+			}
+
 			if err != nil {
 				return nil, &setError{Type: setServerFail, Description: err.Error()}
 			}

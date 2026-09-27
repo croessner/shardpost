@@ -284,13 +284,21 @@ func (w *scriptWriter) undoIDs(undo idUndo) {
 	})
 }
 
-// leaveName gives a name a script left a fresh id to wait with, so that
-// the next script under the name — stored over ManageSieve, say — does
-// not get the id of the one that left.
+// leaveName keeps the next script under a name a script left — stored
+// over ManageSieve, say — from getting the id of the one that left. Only
+// a leaving derived id needs a placeholder, since the next script would
+// derive the same one; a recorded id is simply dropped, and the next
+// script derives a different one. That keeps the record from growing
+// with every rename and destroy.
 func (w *scriptWriter) leaveName(name, id string) {
 	w.changeIDs(func(ids map[string]string) {
-		if cur, ok := ids[name]; !ok || cur == id {
+		cur, ok := ids[name]
+
+		switch {
+		case !ok || id == derivedScriptID(name, 0):
 			ids[name] = randomHex(8)
+		case cur == id:
+			delete(ids, name)
 		}
 	})
 }
