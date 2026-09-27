@@ -53,3 +53,53 @@ func handleLine(t *testing.T, c *conn, line string) {
 		t.Fatal(err)
 	}
 }
+
+// TestReservedScriptIsReadOnly: the script of the JMAP VacationResponse
+// is listed and can be read, and nothing may change it.
+func TestReservedScriptIsReadOnly(t *testing.T) {
+	store := memstore.New()
+
+	user, _ := store.User("test")
+	if err := user.PutScript(JMAPVacationScript, `require "vacation"; vacation "away";`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := user.PutScript("main", "keep;"); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+
+	c := &conn{s: New(Options{}), user: user, bw: bufio.NewWriter(&out)}
+
+	for _, line := range []string{
+		`PUTSCRIPT "jmap-vacation" "keep;"`,
+		`DELETESCRIPT "jmap-vacation"`,
+		`SETACTIVE "jmap-vacation"`,
+		`RENAMESCRIPT "jmap-vacation" "mine"`,
+		`RENAMESCRIPT "main" "jmap-vacation"`,
+	} {
+		out.Reset()
+		handleLine(t, c, line)
+
+		if !strings.HasPrefix(out.String(), "NO ") || !strings.Contains(out.String(), "reserved") {
+			t.Errorf("%s answered %s", line, out.String())
+		}
+	}
+
+	if text, _ := user.GetScript(JMAPVacationScript); !strings.Contains(text, "away") {
+		t.Errorf("the script changed: %q", text)
+	}
+
+	if _, active, _ := user.ListScripts(); active != "" {
+		t.Errorf("active script %q", active)
+	}
+
+	out.Reset()
+	handleLine(t, c, "LISTSCRIPTS")
+	handleLine(t, c, `GETSCRIPT "jmap-vacation"`)
+
+	if got := out.String(); !strings.Contains(got, `"jmap-vacation"`) || !strings.Contains(got, `vacation "away"`) {
+		t.Errorf("listing and reading: %s", got)
+	}
+}

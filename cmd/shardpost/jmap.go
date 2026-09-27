@@ -77,8 +77,10 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		Push:          push,
 		Submission:    submission,
 		Quota:         jmapQuota(settings.Quota),
-		Autocreate:    autocreate(settings.Server.Autocreate),
-		Shard:         jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
+		// Delivery sends the vacation reply, through its own relay.
+		VacationResponse: settings.SMTP.Addr != "",
+		Autocreate:       autocreate(settings.Server.Autocreate),
+		Shard:            jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
 	})
 
 	if strings.TrimSpace(settings.JMAP.Shard) == "" {

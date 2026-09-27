@@ -18,7 +18,7 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
 | 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
-| 6 | `Quota/*` | built |
+| 6 | `Quota/*`, `VacationResponse/*` | built |
 | 6 | `SieveScript/*`, `Blob/*`, sharing | planned |
 
 A client that asks for a capability this server does not have is told
@@ -610,6 +610,55 @@ each with a state of its own. A token of another shape is
 `unsupportedFilter` or `unsupportedSort`. `Quota/queryChanges` is
 `cannotCalculateChanges`, as for mailboxes.
 
+## Vacation
+
+`VacationResponse/get` and `/set` (RFC 8621 8) belong to
+`urn:ietf:params:jmap:vacationresponse`, which is offered when delivery
+can send the reply: when `smtp.addr` names a relay. Without one the
+capability is not in the session and the methods answer `unknownMethod`.
+
+An account has one VacationResponse, `singleton`; it can be read and
+updated, not created or destroyed (`singleton`). Its default is off,
+with no dates and no texts. The setting is kept as JSON in the
+account's metadata (the server entry
+`/private/vendor/shardpost/jmap/vacation`); its state is a hash of it,
+and there is no `/changes` for this type. A change is checked first:
+the dates are UTCDates (written back in UTC) and `toDate` does not lie
+before `fromDate`, the subject is one line of at most 998 bytes, each
+body at most 16 KiB without control characters.
+
+**The script.** Every change also writes the setting out as a Sieve
+script named `jmap-vacation` in the account's script store — while it is
+enabled; turning it off removes the script. The script sends the reply
+with `vacation`, once per sender in seven days, under a handle that
+changes with the setting, so a sender answered before a change is
+answered again with what is new. `fromDate` and `toDate` become
+`currentdate` tests (RFC 5260) in UTC: the reply goes to messages that
+arrive on or after `fromDate` and before `toDate`. A text body alone is
+a plain reply; with an HTML body the reply is a MIME entity, the text
+and the HTML as alternatives, or the HTML alone. Without either body the
+reply carries a short default text, as RFC 8621 asks; without a subject
+it takes the server's default subject. Every text a client sends is
+written as a quoted Sieve string and cannot become part of the script.
+
+**After the active script.** `jmap-vacation` is never activated and
+never replaces the user's active script. Delivery runs the active script
+as always; when that produced no vacation reply — none in the script, or
+its conditions did not match — and did not reject the message, delivery
+runs `jmap-vacation` as well and takes its vacation alone. A message
+the active script discards is not answered, as with any Sieve vacation. A vacation
+the user keeps in the active script, such as Roundcube's, therefore
+wins; the two never answer the same message twice. An account without an
+active script still gets the JMAP vacation. The reply goes out the way
+every Sieve vacation does: through the relay, with the RFC 5230 checks
+(no reply to automatic mail, lists or the null sender) and the
+per-sender record. A `jmap-vacation` that cannot be read or does not
+run is logged and leaves the delivery alone.
+
+ManageSieve and the admin API show the script, so a client such as
+Roundcube can display the setting, but refuse to store, rename, delete
+or activate it: it changes over JMAP only.
+
 ## Endpoints
 
 | Path | Method | Contents |
@@ -834,8 +883,9 @@ authentication backend, and the relay learns the account from
   header itself and has neither deviation.
 - `EmailSubmission` hands messages to the relay and does not evaluate
   DSNs or MDNs, and delayed sending is not offered (see Sending).
-- Push has no `Identity`, `PushSubscription` or `Quota` type in its
-  `StateChange`s: none of them is in the account change log. A client
+- Push has no `Identity`, `PushSubscription`, `Quota` or
+  `VacationResponse` type in its `StateChange`s: none of them is in the
+  account change log. A client
   that shows the quota fetches it again, for example when a push names
   `Email`.
 - The private `\Seen` marks of a public folder are recorded in the

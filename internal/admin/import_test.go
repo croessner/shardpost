@@ -16,6 +16,7 @@ import (
 	"shardpost/internal/delivery"
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
+	"shardpost/internal/sieve"
 )
 
 // serveImport is an admin socket with the given roles and imports into a
@@ -273,14 +274,25 @@ func TestImportSieveValidates(t *testing.T) {
 		t.Fatalf("invalid script: %d", bad.StatusCode())
 	}
 
+	reserved, _ := c.PutImportSieveWithResponse(ctx, "user", p, adminapi.ImportSieve{Active: sieve.JMAPVacationScript,
+		Scripts: []adminapi.ImportSieveScript{{Name: sieve.JMAPVacationScript, Script: "keep;"}}})
+	if reserved.StatusCode() != http.StatusConflict {
+		t.Fatalf("the reserved script as the active one: %d", reserved.StatusCode())
+	}
+
+	// The JMAP vacation follows the account's metadata, not the set.
+	u, _ := store.User("user")
+	if err := u.PutScript(sieve.JMAPVacationScript, `require "vacation"; vacation "away";`); err != nil {
+		t.Fatal(err)
+	}
+
 	ok, _ := c.PutImportSieveWithResponse(ctx, "user", p, adminapi.ImportSieve{Active: "main",
 		Scripts: []adminapi.ImportSieveScript{{Name: "main", Script: `require "include"; include :personal "lib"; keep;`}, {Name: "lib", Script: "keep;"}}})
 	if ok.StatusCode() != http.StatusNoContent {
 		t.Fatalf("scripts: %d %s", ok.StatusCode(), ok.Body)
 	}
 
-	u, _ := store.User("user")
-	if names, active, _ := u.ListScripts(); len(names) != 2 || active != "main" {
+	if names, active, _ := u.ListScripts(); len(names) != 3 || active != "main" {
 		t.Fatalf("stored: %v %q", names, active)
 	}
 }

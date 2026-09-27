@@ -552,6 +552,10 @@ func (c *conn) cmdPutScript(args []string) {
 		return
 	}
 
+	if c.reserved(args[0]) {
+		return
+	}
+
 	if err := CompileWith(args[1], c.hooks()); err != nil {
 		c.no("Script error: " + err.Error())
 		return
@@ -587,6 +591,10 @@ const respNoSuchScript = "NO (NONEXISTENT) \"No such script\"\r\n"
 func (c *conn) cmdSetActive(args []string) {
 	if len(args) < 1 {
 		c.no("SETACTIVE name")
+		return
+	}
+
+	if c.reserved(args[0]) {
 		return
 	}
 
@@ -634,6 +642,10 @@ func (c *conn) cmdDeleteScript(args []string) {
 		return
 	}
 
+	if c.reserved(args[0]) {
+		return
+	}
+
 	switch err := c.user.DeleteScript(args[0]); {
 	case errors.Is(err, model.ErrScriptActive):
 		c.printf("NO (ACTIVE) \"Script is active\"\r\n")
@@ -650,6 +662,10 @@ func (c *conn) cmdRenameScript(args []string) {
 		return
 	}
 
+	if c.reserved(args[0]) || c.reserved(args[1]) {
+		return
+	}
+
 	switch err := c.user.RenameScript(args[0], args[1]); {
 	case errors.Is(err, model.ErrScriptExists):
 		c.printf("NO (ALREADYEXISTS) \"Script exists\"\r\n")
@@ -660,6 +676,20 @@ func (c *conn) cmdRenameScript(args []string) {
 	}
 
 	c.ok("Renamescript completed")
+}
+
+// reserved answers NO for a script the server keeps itself (the JMAP
+// VacationResponse) and reports whether it did. A client may read it with
+// GETSCRIPT and sees it in LISTSCRIPTS, so that the setting shows; it
+// changes over JMAP.
+func (c *conn) reserved(name string) bool {
+	if !ReservedScript(name) {
+		return false
+	}
+
+	c.no(DescReservedScript)
+
+	return true
 }
 
 func (c *conn) cmdCheckScript(args []string) {

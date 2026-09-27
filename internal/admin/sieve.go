@@ -158,6 +158,10 @@ func (s *Server) PutSieveScript(w http.ResponseWriter, r *http.Request, account 
 		return
 	}
 
+	if refuseReserved(w, name) {
+		return
+	}
+
 	u, ok := s.openScript(w, r, RoleSupport, account, name)
 	if !ok {
 		return
@@ -208,6 +212,10 @@ func (s *Server) scriptHooks(u model.User, name, text string) sieve.Hooks {
 func (s *Server) DeleteSieveScript(w http.ResponseWriter, r *http.Request, account adminapi.Account, name adminapi.ScriptName,
 	p adminapi.DeleteSieveScriptParams,
 ) {
+	if refuseReserved(w, name) {
+		return
+	}
+
 	u, ok := s.openScript(w, r, RoleSupport, account, name)
 	if !ok {
 		return
@@ -235,6 +243,10 @@ func (s *Server) SetActiveSieveScript(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 
+	if refuseReserved(w, req.Name) {
+		return
+	}
+
 	u, ok := s.openAccount(w, r, RoleSupport, account, true)
 	if !ok {
 		return
@@ -249,6 +261,19 @@ func (s *Server) SetActiveSieveScript(w http.ResponseWriter, r *http.Request, ac
 	}
 
 	s.writeSieveList(w, r, u)
+}
+
+// refuseReserved answers 409 for a script the server keeps itself (the
+// JMAP VacationResponse) and reports whether it did. The script may be
+// listed, shown and checked; it changes over JMAP.
+func refuseReserved(w http.ResponseWriter, name string) bool {
+	if !sieve.ReservedScript(name) {
+		return false
+	}
+
+	writeError(w, http.StatusConflict, adminapi.Conflict, sieve.DescReservedScript)
+
+	return true
 }
 
 // CheckSieve compiles a script and, with a message, runs it without

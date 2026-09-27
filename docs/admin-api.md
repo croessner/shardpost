@@ -369,7 +369,10 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
 - **Sieve** is compiled before it is stored, together with the account's
   includes. A faulty script is not stored (400). Versions go through ETags
   (`If-Match`, `If-None-Match: *` to create only). The active script
-  cannot be deleted.
+  cannot be deleted. `jmap-vacation` is the script of the JMAP
+  VacationResponse (see [JMAP](jmap.md#vacation)): it can be listed,
+  shown and checked, but storing, deleting or activating it is refused
+  (409), and an import of scripts leaves it in place.
 - **Checking Sieve without side effects:** `sieve check` compiles the
   script and, on request, runs it against a stored message (role
   `content`) or a text supplied with the request (`diagnose`). Nothing is

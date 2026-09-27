@@ -1468,7 +1468,9 @@ type ClientInterface interface {
 	// PutImportSieveWithBody Replace the Sieve scripts and the active script
 	//
 	// Stores the scripts as given (nothing is executed), activates
-	// `active` ("" deactivates) and removes scripts not listed.
+	// `active` ("" deactivates) and removes scripts not listed — except
+	// `jmap-vacation`, the script of the JMAP VacationResponse, which
+	// stays when it is not listed and cannot be `active` (409).
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1478,7 +1480,9 @@ type ClientInterface interface {
 	// PutImportSieve Replace the Sieve scripts and the active script
 	//
 	// Stores the scripts as given (nothing is executed), activates
-	// `active` ("" deactivates) and removes scripts not listed.
+	// `active` ("" deactivates) and removes scripts not listed — except
+	// `jmap-vacation`, the script of the JMAP VacationResponse, which
+	// stays when it is not listed and cannot be `active` (409).
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -1767,7 +1771,9 @@ type ClientInterface interface {
 
 	// SetActiveSieveScriptWithBody Activate a script or deactivate filtering
 	//
-	// An empty name deactivates. Requires the role `support`.
+	// An empty name deactivates. `jmap-vacation`, the script of the
+	// JMAP VacationResponse, is never the active script (409).
+	// Requires the role `support`.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1776,7 +1782,9 @@ type ClientInterface interface {
 
 	// SetActiveSieveScript Activate a script or deactivate filtering
 	//
-	// An empty name deactivates. Requires the role `support`.
+	// An empty name deactivates. `jmap-vacation`, the script of the
+	// JMAP VacationResponse, is never the active script (409).
+	// Requires the role `support`.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -1815,7 +1823,9 @@ type ClientInterface interface {
 
 	// DeleteSieveScript Delete an inactive Sieve script
 	//
-	// The active script cannot be deleted (409). Requires the role `support`.
+	// The active script cannot be deleted (409), and neither can
+	// `jmap-vacation`, the script of the JMAP VacationResponse (409).
+	// Requires the role `support`.
 	//
 	// Corresponds with DELETE /admin/v1/accounts/{account}/sieve/{name} (the `DeleteSieveScript` operationId).
 	DeleteSieveScript(ctx context.Context, account Account, name ScriptName, params *DeleteSieveScriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1831,8 +1841,9 @@ type ClientInterface interface {
 	//
 	// The script is compiled first; a script that does not compile is
 	// refused (400) and nothing is stored. `If-Match` is the script's
-	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-	// the role `support`.
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+	// script `jmap-vacation` belongs to the JMAP VacationResponse and
+	// cannot be stored here (409). Requires the role `support`.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1843,8 +1854,9 @@ type ClientInterface interface {
 	//
 	// The script is compiled first; a script that does not compile is
 	// refused (400) and nothing is stored. `If-Match` is the script's
-	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-	// the role `support`.
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+	// script `jmap-vacation` belongs to the JMAP VacationResponse and
+	// cannot be stored here (409). Requires the role `support`.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2420,7 +2432,9 @@ func (c *Client) PutImportMetadata(ctx context.Context, account Account, id Mail
 // PutImportSieveWithBody Replace the Sieve scripts and the active script
 //
 // Stores the scripts as given (nothing is executed), activates
-// `active` ("" deactivates) and removes scripts not listed.
+// `active` ("" deactivates) and removes scripts not listed — except
+// `jmap-vacation`, the script of the JMAP VacationResponse, which
+// stays when it is not listed and cannot be `active` (409).
 //
 // Takes any type of body and a specified content type.
 //
@@ -2440,7 +2454,9 @@ func (c *Client) PutImportSieveWithBody(ctx context.Context, account Account, pa
 // PutImportSieve Replace the Sieve scripts and the active script
 //
 // Stores the scripts as given (nothing is executed), activates
-// `active` ("" deactivates) and removes scripts not listed.
+// `active` ("" deactivates) and removes scripts not listed — except
+// `jmap-vacation`, the script of the JMAP VacationResponse, which
+// stays when it is not listed and cannot be `active` (409).
 //
 // Takes a body of the `application/json` content type.
 //
@@ -2989,7 +3005,9 @@ func (c *Client) ListSieveScripts(ctx context.Context, account Account, reqEdito
 
 // SetActiveSieveScriptWithBody Activate a script or deactivate filtering
 //
-// An empty name deactivates. Requires the role `support`.
+// An empty name deactivates. `jmap-vacation`, the script of the
+// JMAP VacationResponse, is never the active script (409).
+// Requires the role `support`.
 //
 // Takes any type of body and a specified content type.
 //
@@ -3008,7 +3026,9 @@ func (c *Client) SetActiveSieveScriptWithBody(ctx context.Context, account Accou
 
 // SetActiveSieveScript Activate a script or deactivate filtering
 //
-// An empty name deactivates. Requires the role `support`.
+// An empty name deactivates. `jmap-vacation`, the script of the
+// JMAP VacationResponse, is never the active script (409).
+// Requires the role `support`.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -3077,7 +3097,9 @@ func (c *Client) CheckSieve(ctx context.Context, account Account, body CheckSiev
 
 // DeleteSieveScript Delete an inactive Sieve script
 //
-// The active script cannot be deleted (409). Requires the role `support`.
+// The active script cannot be deleted (409), and neither can
+// `jmap-vacation`, the script of the JMAP VacationResponse (409).
+// Requires the role `support`.
 //
 // Corresponds with DELETE /admin/v1/accounts/{account}/sieve/{name} (the `DeleteSieveScript` operationId).
 func (c *Client) DeleteSieveScript(ctx context.Context, account Account, name ScriptName, params *DeleteSieveScriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -3113,8 +3135,9 @@ func (c *Client) GetSieveScript(ctx context.Context, account Account, name Scrip
 //
 // The script is compiled first; a script that does not compile is
 // refused (400) and nothing is stored. `If-Match` is the script's
-// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-// the role `support`.
+// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+// script `jmap-vacation` belongs to the JMAP VacationResponse and
+// cannot be stored here (409). Requires the role `support`.
 //
 // Takes any type of body and a specified content type.
 //
@@ -3135,8 +3158,9 @@ func (c *Client) PutSieveScriptWithBody(ctx context.Context, account Account, na
 //
 // The script is compiled first; a script that does not compile is
 // refused (400) and nothing is stored. `If-Match` is the script's
-// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-// the role `support`.
+// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+// script `jmap-vacation` belongs to the JMAP VacationResponse and
+// cannot be stored here (409). Requires the role `support`.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -6527,7 +6551,9 @@ type ClientWithResponsesInterface interface {
 	// PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
 	//
 	// Stores the scripts as given (nothing is executed), activates
-	// `active` ("" deactivates) and removes scripts not listed.
+	// `active` ("" deactivates) and removes scripts not listed — except
+	// `jmap-vacation`, the script of the JMAP VacationResponse, which
+	// stays when it is not listed and cannot be `active` (409).
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6537,7 +6563,9 @@ type ClientWithResponsesInterface interface {
 	// PutImportSieveWithResponse Replace the Sieve scripts and the active script
 	//
 	// Stores the scripts as given (nothing is executed), activates
-	// `active` ("" deactivates) and removes scripts not listed.
+	// `active` ("" deactivates) and removes scripts not listed — except
+	// `jmap-vacation`, the script of the JMAP VacationResponse, which
+	// stays when it is not listed and cannot be `active` (409).
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6848,7 +6876,9 @@ type ClientWithResponsesInterface interface {
 
 	// SetActiveSieveScriptWithBodyWithResponse Activate a script or deactivate filtering
 	//
-	// An empty name deactivates. Requires the role `support`.
+	// An empty name deactivates. `jmap-vacation`, the script of the
+	// JMAP VacationResponse, is never the active script (409).
+	// Requires the role `support`.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6857,7 +6887,9 @@ type ClientWithResponsesInterface interface {
 
 	// SetActiveSieveScriptWithResponse Activate a script or deactivate filtering
 	//
-	// An empty name deactivates. Requires the role `support`.
+	// An empty name deactivates. `jmap-vacation`, the script of the
+	// JMAP VacationResponse, is never the active script (409).
+	// Requires the role `support`.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6896,7 +6928,9 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteSieveScriptWithResponse Delete an inactive Sieve script
 	//
-	// The active script cannot be deleted (409). Requires the role `support`.
+	// The active script cannot be deleted (409), and neither can
+	// `jmap-vacation`, the script of the JMAP VacationResponse (409).
+	// Requires the role `support`.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -6916,8 +6950,9 @@ type ClientWithResponsesInterface interface {
 	//
 	// The script is compiled first; a script that does not compile is
 	// refused (400) and nothing is stored. `If-Match` is the script's
-	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-	// the role `support`.
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+	// script `jmap-vacation` belongs to the JMAP VacationResponse and
+	// cannot be stored here (409). Requires the role `support`.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6928,8 +6963,9 @@ type ClientWithResponsesInterface interface {
 	//
 	// The script is compiled first; a script that does not compile is
 	// refused (400) and nothing is stored. `If-Match` is the script's
-	// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-	// the role `support`.
+	// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+	// script `jmap-vacation` belongs to the JMAP VacationResponse and
+	// cannot be stored here (409). Requires the role `support`.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -9909,7 +9945,9 @@ func (c *ClientWithResponses) PutImportMetadataWithResponse(ctx context.Context,
 // PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
 //
 // Stores the scripts as given (nothing is executed), activates
-// `active` ("" deactivates) and removes scripts not listed.
+// `active` ("" deactivates) and removes scripts not listed — except
+// `jmap-vacation`, the script of the JMAP VacationResponse, which
+// stays when it is not listed and cannot be `active` (409).
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -9925,7 +9963,9 @@ func (c *ClientWithResponses) PutImportSieveWithBodyWithResponse(ctx context.Con
 // PutImportSieveWithResponse Replace the Sieve scripts and the active script
 //
 // Stores the scripts as given (nothing is executed), activates
-// `active` ("" deactivates) and removes scripts not listed.
+// `active` ("" deactivates) and removes scripts not listed — except
+// `jmap-vacation`, the script of the JMAP VacationResponse, which
+// stays when it is not listed and cannot be `active` (409).
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -10392,7 +10432,9 @@ func (c *ClientWithResponses) ListSieveScriptsWithResponse(ctx context.Context, 
 
 // SetActiveSieveScriptWithBodyWithResponse Activate a script or deactivate filtering
 //
-// An empty name deactivates. Requires the role `support`.
+// An empty name deactivates. `jmap-vacation`, the script of the
+// JMAP VacationResponse, is never the active script (409).
+// Requires the role `support`.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -10407,7 +10449,9 @@ func (c *ClientWithResponses) SetActiveSieveScriptWithBodyWithResponse(ctx conte
 
 // SetActiveSieveScriptWithResponse Activate a script or deactivate filtering
 //
-// An empty name deactivates. Requires the role `support`.
+// An empty name deactivates. `jmap-vacation`, the script of the
+// JMAP VacationResponse, is never the active script (409).
+// Requires the role `support`.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -10464,7 +10508,9 @@ func (c *ClientWithResponses) CheckSieveWithResponse(ctx context.Context, accoun
 
 // DeleteSieveScriptWithResponse Delete an inactive Sieve script
 //
-// The active script cannot be deleted (409). Requires the role `support`.
+// The active script cannot be deleted (409), and neither can
+// `jmap-vacation`, the script of the JMAP VacationResponse (409).
+// Requires the role `support`.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -10496,8 +10542,9 @@ func (c *ClientWithResponses) GetSieveScriptWithResponse(ctx context.Context, ac
 //
 // The script is compiled first; a script that does not compile is
 // refused (400) and nothing is stored. `If-Match` is the script's
-// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-// the role `support`.
+// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+// script `jmap-vacation` belongs to the JMAP VacationResponse and
+// cannot be stored here (409). Requires the role `support`.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -10514,8 +10561,9 @@ func (c *ClientWithResponses) PutSieveScriptWithBodyWithResponse(ctx context.Con
 //
 // The script is compiled first; a script that does not compile is
 // refused (400) and nothing is stored. `If-Match` is the script's
-// ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-// the role `support`.
+// ETag (`*`: must exist), `If-None-Match: *` creates only. The
+// script `jmap-vacation` belongs to the JMAP VacationResponse and
+// cannot be stored here (409). Requires the role `support`.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

@@ -116,11 +116,13 @@ var methods = map[string]method{
 	"Quota/changes":                {capability: CapQuota, run: quotaChanges},
 	"Quota/query":                  {capability: CapQuota, run: quotaQuery},
 	"Quota/queryChanges":           {capability: CapQuota, run: quotaQueryChanges},
+	"VacationResponse/get":         {capability: CapVacationResponse, run: vacationGet},
+	"VacationResponse/set":         {capability: CapVacationResponse, run: vacationSet},
 }
 
 // knownCapabilities are the URNs a request may list in "using".
 var knownCapabilities = map[string]bool{CapCore: true, CapMail: true, CapWebPushVAPID: true, CapSubmission: true,
-	CapQuota: true}
+	CapQuota: true, CapVacationResponse: true}
 
 // coreEcho returns its arguments unchanged (RFC 8620 4).
 func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *methodError) {

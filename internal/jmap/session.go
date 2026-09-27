@@ -85,6 +85,11 @@ func (s *Server) session(account, base string) *Session {
 		out.PrimaryAccounts[CapSubmission] = id
 	}
 
+	if s.o.VacationResponse {
+		out.Capabilities[CapVacationResponse] = json.RawMessage(`{}`)
+		out.PrimaryAccounts[CapVacationResponse] = id
+	}
+
 	if s.o.Push.KV != nil && s.o.Push.VAPIDPublicKey != "" {
 		out.Capabilities[CapWebPushVAPID] = mustRaw(map[string]string{"applicationServerKey": s.o.Push.VAPIDPublicKey})
 	}
@@ -188,6 +193,10 @@ func (s *Server) account(name string) Account {
 
 	if s.o.Submission != nil {
 		a.AccountCapabilities[CapSubmission] = mustRaw(submissionCapability())
+	}
+
+	if s.o.VacationResponse {
+		a.AccountCapabilities[CapVacationResponse] = json.RawMessage(`{}`)
 	}
 
 	return a

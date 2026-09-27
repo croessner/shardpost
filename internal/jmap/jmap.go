@@ -100,6 +100,10 @@ type Options struct {
 	// Quota configures the Quota objects; urn:ietf:params:jmap:quota is
 	// always offered.
 	Quota QuotaOptions
+	// VacationResponse offers urn:ietf:params:jmap:vacationresponse. It
+	// is set when delivery can send the reply: when it has a relay
+	// (smtp.addr).
+	VacationResponse bool
 	// Shard, when set, restricts the front-end to the accounts the
 	// authentication backend assigns to this shard.
 	Shard ShardGate

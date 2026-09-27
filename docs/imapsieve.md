@@ -133,6 +133,12 @@ validation. Their values stay unchanged.
 
 ManageSieve PUTSCRIPT stores the script. SETMETADATA assigns it; SETACTIVE still concerns delivery only and rejects scripts with `require "imapsieve"`.
 
+The script name `jmap-vacation` is reserved for the JMAP VacationResponse
+(see [JMAP](jmap.md#vacation)): LISTSCRIPTS lists it and GETSCRIPT
+returns it, so a client such as Roundcube can show the setting, but
+PUTSCRIPT, DELETESCRIPT, RENAMESCRIPT (to or from it) and SETACTIVE answer
+`NO` for it. It changes over JMAP only and is never the active script.
+
 ```text
 SETMETADATA INBOX ("/shared/imapsieve/script" "inbox-events")
 ```

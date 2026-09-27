@@ -12,6 +12,7 @@ import (
 	"shardpost/internal/adminapi"
 	"shardpost/internal/imapsieve"
 	"shardpost/internal/model"
+	"shardpost/internal/sieve"
 )
 
 // testLearning is the learning queue of serveDiag (nil: none).
@@ -241,6 +242,26 @@ func TestSieveAdmin(t *testing.T) {
 
 	if list, _ := c.SetActiveSieveScriptWithResponse(ctx, "alice", adminapi.SieveActivate{Name: ""}); list.JSON200 == nil || list.JSON200.Active != nil {
 		t.Fatalf("deactivate: %d", list.StatusCode())
+	}
+}
+
+// TestSieveAdminReservedScript: the script of the JMAP VacationResponse
+// cannot be stored, deleted or activated through the admin API.
+func TestSieveAdminReservedScript(t *testing.T) {
+	_, c := serveDiag(t, nil, RoleDiagnose, RoleContent, RoleSupport)
+	ctx := context.Background()
+	name := sieve.JMAPVacationScript
+
+	if put, _ := c.PutSieveScriptWithResponse(ctx, "alice", name, nil, adminapi.SievePut{Script: "keep;"}); put.StatusCode() != http.StatusConflict {
+		t.Errorf("put: %d", put.StatusCode())
+	}
+
+	if del, _ := c.DeleteSieveScriptWithResponse(ctx, "alice", name, nil); del.StatusCode() != http.StatusConflict {
+		t.Errorf("delete: %d", del.StatusCode())
+	}
+
+	if act, _ := c.SetActiveSieveScriptWithResponse(ctx, "alice", adminapi.SieveActivate{Name: name}); act.StatusCode() != http.StatusConflict {
+		t.Errorf("activate: %d", act.StatusCode())
 	}
 }
 

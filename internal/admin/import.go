@@ -735,6 +735,10 @@ func (s *Server) PutImportSieve(w http.ResponseWriter, r *http.Request, account 
 		return
 	}
 
+	if refuseReserved(w, req.Active) {
+		return
+	}
+
 	if msg := s.compileScripts(scripts); msg != "" {
 		writeError(w, http.StatusUnprocessableEntity, adminapi.Rejected, msg)
 		return
@@ -790,7 +794,9 @@ func (s *Server) sieveConfig() map[string]string {
 }
 
 // replaceScripts stores the scripts, sets the active one and removes the
-// others.
+// others — except the script of the JMAP VacationResponse, which follows
+// the account's metadata rather than the set: a set without it leaves it
+// alone.
 func replaceScripts(u model.User, scripts map[string]string, active string) error {
 	for name, text := range scripts {
 		if err := u.PutScript(name, text); err != nil {
@@ -808,7 +814,7 @@ func replaceScripts(u model.User, scripts map[string]string, active string) erro
 	}
 
 	for _, name := range names {
-		if _, keep := scripts[name]; !keep {
+		if _, keep := scripts[name]; !keep && !sieve.ReservedScript(name) {
 			if err := u.DeleteScript(name); err != nil {
 				return err
 			}

@@ -722,8 +722,9 @@ paths:
       description: |
         The script is compiled first; a script that does not compile is
         refused (400) and nothing is stored. `If-Match` is the script's
-        ETag (`*`: must exist), `If-None-Match: *` creates only. Requires
-        the role `support`.
+        ETag (`*`: must exist), `If-None-Match: *` creates only. The
+        script `jmap-vacation` belongs to the JMAP VacationResponse and
+        cannot be stored here (409). Requires the role `support`.
       parameters:
         - $ref: "#/components/parameters/IfMatch"
         - name: If-None-Match
@@ -753,7 +754,10 @@ paths:
     delete:
       operationId: deleteSieveScript
       summary: Delete an inactive Sieve script
-      description: The active script cannot be deleted (409). Requires the role `support`.
+      description: |
+        The active script cannot be deleted (409), and neither can
+        `jmap-vacation`, the script of the JMAP VacationResponse (409).
+        Requires the role `support`.
       parameters:
         - $ref: "#/components/parameters/IfMatch"
       responses:
@@ -767,7 +771,10 @@ paths:
     put:
       operationId: setActiveSieveScript
       summary: Activate a script or deactivate filtering
-      description: An empty name deactivates. Requires the role `support`.
+      description: |
+        An empty name deactivates. `jmap-vacation`, the script of the
+        JMAP VacationResponse, is never the active script (409).
+        Requires the role `support`.
       requestBody:
         required: true
         content:
@@ -1215,7 +1222,9 @@ paths:
       summary: Replace the Sieve scripts and the active script
       description: |
         Stores the scripts as given (nothing is executed), activates
-        `active` ("" deactivates) and removes scripts not listed.
+        `active` ("" deactivates) and removes scripts not listed — except
+        `jmap-vacation`, the script of the JMAP VacationResponse, which
+        stays when it is not listed and cannot be `active` (409).
       requestBody:
         required: true
         content:

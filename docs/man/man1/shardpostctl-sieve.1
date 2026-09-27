@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-SIEVE 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-SIEVE 1 "2026-09-27" "ShardPost 0.26.2" "ShardPost Manual"
 .SH NAME
 shardpostctl-sieve \- manage Sieve scripts and test them without side effects
 .SH SYNOPSIS
@@ -46,6 +46,19 @@ shardpostctl-sieve \- manage Sieve scripts and test them without side effects
 .SH DESCRIPTION
 The account's Sieve scripts, the same ones ManageSieve serves. Exactly
 one script can be active; it is the one that runs on delivery.
+.PP
+The script
+.B jmap-vacation
+belongs to the server: it is the JMAP VacationResponse of the account,
+written whenever a JMAP client changes that setting, and run on delivery
+after the active script when the active script sent no vacation reply of
+its own. It is listed, can be shown and checked, and is never the active
+script;
+.BR put ,
+.B delete
+and
+.B activate
+refuse it.
 .SS sieve list
 Every script with its size, its version (ETag) and a marker on the active
 one. Names and sizes only, no content, so the role
@@ -224,8 +237,10 @@ nothing was stored, and the message says where the error is.
 .B 65
 The checked script does not compile
 .RB ( "sieve check" ),
-the ETag no longer matches, or the script is active and cannot be
-deleted.
+the ETag no longer matches, the script is active and cannot be
+deleted, or the script is
+.B jmap-vacation
+and cannot be changed here.
 .TP
 .B 67
 No such account, script or message.
