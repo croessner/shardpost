@@ -112,10 +112,15 @@ var methods = map[string]method{
 	"Email/parse":                  {capability: CapMail, run: emailParse},
 	"Thread/get":                   {capability: CapMail, run: threadGet},
 	"Thread/changes":               {capability: CapMail, run: threadChanges},
+	"Quota/get":                    {capability: CapQuota, run: quotaGet},
+	"Quota/changes":                {capability: CapQuota, run: quotaChanges},
+	"Quota/query":                  {capability: CapQuota, run: quotaQuery},
+	"Quota/queryChanges":           {capability: CapQuota, run: quotaQueryChanges},
 }
 
 // knownCapabilities are the URNs a request may list in "using".
-var knownCapabilities = map[string]bool{CapCore: true, CapMail: true, CapWebPushVAPID: true, CapSubmission: true}
+var knownCapabilities = map[string]bool{CapCore: true, CapMail: true, CapWebPushVAPID: true, CapSubmission: true,
+	CapQuota: true}
 
 // coreEcho returns its arguments unchanged (RFC 8620 4).
 func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *methodError) {

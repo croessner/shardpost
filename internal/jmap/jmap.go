@@ -97,6 +97,9 @@ type Options struct {
 	Push         PushOptions
 	// Submission, when set, offers urn:ietf:params:jmap:submission.
 	Submission *SubmissionOptions
+	// Quota configures the Quota objects; urn:ietf:params:jmap:quota is
+	// always offered.
+	Quota QuotaOptions
 	// Shard, when set, restricts the front-end to the accounts the
 	// authentication backend assigns to this shard.
 	Shard ShardGate

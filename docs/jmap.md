@@ -18,7 +18,8 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
 | 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
-| 6 | `SieveScript/*`, `Quota/*`, `Blob/*`, sharing | planned |
+| 6 | `Quota/*` | built |
+| 6 | `SieveScript/*`, `Blob/*`, sharing | planned |
 
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
@@ -572,6 +573,43 @@ answer to the message — its queue id included — as `smtpReply`; DSNs
 are not evaluated, so it never becomes `yes` or `no`, and `dsnBlobIds`
 and `mdnBlobIds` stay empty.
 
+## Quotas
+
+`Quota/get`, `/changes`, `/query` and `/queryChanges` (RFC 9425) belong
+to `urn:ietf:params:jmap:quota`, which is always offered: every account
+has a quota, even if it is unlimited. The capability carries no
+properties, in the session or in the account.
+
+The objects are what IMAP `GETQUOTA` reports, from the same counters:
+one per limited resource of the account. `octets` is the storage (usage
+and limit in bytes), `count` the number of messages; both have the scope
+`account`, the names `Mail storage` and `Mail messages`, and the types
+`["Email"]` — RFC 9425 asks for the names of the JMAP data types
+registry, whose examples say `Mail`; a query for the type `Mail` finds
+them as well. A resource whose limit is zero is unlimited and has no
+object, as it has no resource in the IMAP answer. `warnLimit` is the
+lowest `quota.warnings` threshold with the direction `over` for that
+resource (see [Quota](quota.md)), as long as it lies below the limit;
+there is no `softLimit` and no `description`.
+
+**State.** The account change log does not record quota changes — the
+usage moves with every delivery and the limit comes from the user
+database — so the state is not the account counter. It is the values
+themselves, written into the token: a version prefix and, per object,
+`used`, `hardLimit` and `warnLimit`. `Quota/changes` compares them with
+the values of now: an object that appeared is created, one whose limit
+was removed is destroyed, one with other values is updated, and
+`updatedProperties` is `["used"]` when nothing else of the updated
+objects changed. More changes than `maxChanges` are handed out in steps,
+each with a state of its own. A token of another shape is
+`cannotCalculateChanges`.
+
+`Quota/query` filters by `name` (a substring, without regard to case),
+`scope`, `resourceType` and `type`, with the operators `AND`, `OR` and
+`NOT`, and sorts by `name` and `used`; anything else is
+`unsupportedFilter` or `unsupportedSort`. `Quota/queryChanges` is
+`cannotCalculateChanges`, as for mailboxes.
+
 ## Endpoints
 
 | Path | Method | Contents |
@@ -796,8 +834,10 @@ authentication backend, and the relay learns the account from
   header itself and has neither deviation.
 - `EmailSubmission` hands messages to the relay and does not evaluate
   DSNs or MDNs, and delayed sending is not offered (see Sending).
-- Push has no `Identity` or `PushSubscription` type in its
-  `StateChange`s: neither is in the account change log.
+- Push has no `Identity`, `PushSubscription` or `Quota` type in its
+  `StateChange`s: none of them is in the account change log. A client
+  that shows the quota fetches it again, for example when a push names
+  `Email`.
 - The private `\Seen` marks of a public folder are recorded in the
   account log of the public account, not of the account the mark belongs
   to. JMAP Sharing (RFC 9670) is where that is resolved.

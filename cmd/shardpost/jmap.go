@@ -76,6 +76,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		Limits:        jmapLimits(settings.JMAP),
 		Push:          push,
 		Submission:    submission,
+		Quota:         jmapQuota(settings.Quota),
 		Autocreate:    autocreate(settings.Server.Autocreate),
 		Shard:         jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
 	})
@@ -225,6 +226,30 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 		Scan:           sec(c.ScanSeconds),
 		Poll:           sec(c.PollSeconds),
 	})
+}
+
+// jmapQuota finds the warnLimit of the Quota objects: per resource the
+// lowest quota warning that fires on the way up. A warning on the way
+// down marks the end of a warning, not a limit to stay below.
+func jmapQuota(c config.Quota) jmap.QuotaOptions {
+	var o jmap.QuotaOptions
+
+	for _, w := range c.Warnings {
+		if w.Direction != "" && w.Direction != "over" {
+			continue
+		}
+
+		p := &o.StorageWarnPercent
+		if w.Resource == "messages" {
+			p = &o.MessagesWarnPercent
+		}
+
+		if *p == 0 || w.Percent < *p {
+			*p = w.Percent
+		}
+	}
+
+	return o
 }
 
 // jmapLimits maps the configured limits; a zero keeps the default.

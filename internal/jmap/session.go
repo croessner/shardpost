@@ -67,9 +67,12 @@ func (s *Server) session(account, base string) *Session {
 		Capabilities: map[string]json.RawMessage{
 			CapCore: mustRaw(s.core()),
 			CapMail: mustRaw(s.mail()),
+			// RFC 9425 3: the quota capability has no properties, in
+			// the session or in an account.
+			CapQuota: json.RawMessage(`{}`),
 		},
 		Accounts:        map[string]Account{id: s.account(account)},
-		PrimaryAccounts: map[string]string{CapMail: id},
+		PrimaryAccounts: map[string]string{CapMail: id, CapQuota: id},
 		Username:        account,
 		APIURL:          base + PathAPI,
 		DownloadURL:     base + PathDownload + "{accountId}/{blobId}/{name}?accept={type}",
@@ -177,8 +180,9 @@ func (s *Server) account(name string) Account {
 		IsPersonal: true,
 		IsReadOnly: false,
 		AccountCapabilities: map[string]json.RawMessage{
-			CapCore: json.RawMessage(`{}`),
-			CapMail: mustRaw(s.mail()),
+			CapCore:  json.RawMessage(`{}`),
+			CapMail:  mustRaw(s.mail()),
+			CapQuota: json.RawMessage(`{}`),
 		},
 	}
 
