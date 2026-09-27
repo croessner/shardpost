@@ -75,6 +75,12 @@ type JMAP struct {
 	// itself, the owners who share with it and the identifiers in the
 	// ACLs of its own mailboxes; 0 takes 1000.
 	MaxPrincipals int64 `mapstructure:"max_principals" env:"JMAP_MAX_PRINCIPALS" validate:"gte=0"`
+	// PrincipalMissPerMinute bounds, per account and across requests, the
+	// lookups of addresses that turn out to be no principal here (unknown,
+	// an alias, another shard): the refill rate of a bucket of that size,
+	// kept in each front-end's memory; 0 takes 30. A lookup that finds a
+	// principal is not counted.
+	PrincipalMissPerMinute int64 `mapstructure:"principal_miss_per_minute" env:"JMAP_PRINCIPAL_MISS_PER_MINUTE" validate:"gte=0"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
 	// Submission configures sending (EmailSubmission) and identities.

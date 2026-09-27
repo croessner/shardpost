@@ -332,6 +332,7 @@ var defaults = []struct {
 	{"jmap.max_session_pointers", 0},
 	{"jmap.max_principal_lookups", 0},
 	{"jmap.max_principals", 0},
+	{"jmap.principal_miss_per_minute", 0},
 	{"jmap.push.vapid_key_file", ""},
 	{"jmap.push.vapid_subject", ""},
 	{"jmap.push.max_subscriptions", 0},

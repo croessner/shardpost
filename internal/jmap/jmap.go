@@ -242,6 +242,8 @@ type Server struct {
 	closeOnce sync.Once
 	// noShardAttr logs a shard gate without its attribute once.
 	noShardAttr sync.Once
+	// misses bounds the principal lookups that find nothing, per account.
+	misses *missBudget
 	// capLogged remembers the shared accounts already logged as cut at
 	// jmap.max_shared_mailboxes.
 	capLogged sync.Map
@@ -267,7 +269,7 @@ func New(o Options) *Server {
 	}
 
 	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
-		inEvents: map[string]int{}, closing: make(chan struct{})}
+		inEvents: map[string]int{}, closing: make(chan struct{}), misses: newMissBudget(o.Principals.MissPerMinute)}
 
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.

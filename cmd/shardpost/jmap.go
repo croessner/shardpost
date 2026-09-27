@@ -110,7 +110,8 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 // jmapPrincipals maps the principal bounds; the notices are the ones IMAP
 // and the admin API write as well.
 func jmapPrincipals(c config.JMAP, notices *sharenotice.Recorder) jmap.PrincipalOptions {
-	return jmap.PrincipalOptions{MaxLookups: int(c.MaxPrincipalLookups), MaxVisible: int(c.MaxPrincipals), Notices: notices}
+	return jmap.PrincipalOptions{MaxLookups: int(c.MaxPrincipalLookups), MaxVisible: int(c.MaxPrincipals),
+		MissPerMinute: int(c.PrincipalMissPerMinute), Notices: notices}
 }
 
 // jmapPush builds the push settings of the front-end. With a VAPID key,

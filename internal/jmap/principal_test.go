@@ -32,6 +32,7 @@ type directory struct {
 	shard   map[string]string // account -> shard
 	alias   map[string]string // alias -> account
 	lookups int
+	client  string // the client address of the last lookup
 }
 
 func newDirectory() *directory {
@@ -53,8 +54,13 @@ func (d *directory) Authenticate(_ context.Context, r auth.Request) (*auth.Resul
 	return d.result(r.Username), nil
 }
 
-func (d *directory) Lookup(_ context.Context, address, _ string, _ net.Addr) (*auth.Result, error) {
+func (d *directory) Lookup(_ context.Context, address, _ string, client net.Addr) (*auth.Result, error) {
 	d.lookups++
+
+	d.client = ""
+	if client != nil {
+		d.client = client.String()
+	}
 
 	if a, ok := d.alias[address]; ok {
 		return d.result(a), nil

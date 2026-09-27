@@ -436,7 +436,7 @@ func (s *Server) checkPrincipal(ctx context.Context, sess *session, a *account, 
 	known, err := s.knownPrincipal(ctx, sess, e.id)
 
 	switch {
-	case errors.Is(err, errLookupBudget):
+	case errors.Is(err, errLookupBudget), errors.Is(err, errMissBudget):
 		return false, &setError{Type: "rateLimit", Properties: []string{key}, Description: err.Error()}
 	case err != nil:
 		sess.log.Warn("jmap: principal lookup failed", "err", err)

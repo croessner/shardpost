@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +59,9 @@ type PrincipalOptions struct {
 	MaxLookups int
 	// MaxVisible bounds the principals a user sees without a lookup.
 	MaxVisible int
+	// MissPerMinute is how many lookups of addresses that are no
+	// principal here one account may make per minute, across requests.
+	MissPerMinute int
 	// Notices writes the share notifications of the grantees whose
 	// rights a shareWith changes, and bounds what an account keeps.
 	Notices *sharenotice.Recorder
@@ -297,11 +301,20 @@ const descDirectoryDown = "the directory cannot be asked right now"
 // errLookupBudget is a lookup beyond jmap.max_principal_lookups.
 var errLookupBudget = errors.New("the request made more principal lookups than jmap.max_principal_lookups")
 
+// errMissBudget is a lookup refused because the account missed too often
+// lately (see missBudget).
+var errMissBudget = errors.New("too many lookups of addresses that are no principal here; try again later")
+
 // lookupPrincipal resolves an id the user does not see in the
 // authentication backend: it is a principal when the backend knows the
 // address as that very account and the account lives on this shard. An
 // alias, an unknown address and an account of another shard all make
 // the same lookup and are no result. The answer is kept for the request.
+//
+// A lookup is bounded per request (jmap.max_principal_lookups) and its
+// misses per account across requests (missBudget); it goes to the
+// backend with the client's address, so that Nauthilus can account for
+// it, and it is logged.
 func (s *Server) lookupPrincipal(ctx context.Context, sess *session, id string) (bool, error) {
 	c := sess.pcache()
 	if found, ok := c.found[id]; ok {
@@ -316,27 +329,79 @@ func (s *Server) lookupPrincipal(ctx context.Context, sess *session, id string) 
 		return false, errLookupBudget
 	}
 
+	if !s.misses.allow(sess.account) {
+		s.logLookup(sess, id, "refused: miss budget")
+
+		return false, errMissBudget
+	}
+
 	c.lookups++
 
 	ctx, cancel := context.WithTimeout(ctx, principalLookupTimeout)
 	defer cancel()
 
-	res, err := s.o.Auth.Lookup(ctx, id, "jmap", nil)
-
-	found := false
-
-	switch {
-	case errors.Is(err, auth.ErrInvalid):
-	case err != nil:
-		return false, err
-	default:
-		here, _ := s.o.Shard.serves(res)
-		found = here && strings.ToLower(strings.TrimSpace(res.Account)) == id
+	var client net.Addr
+	if sess.remote != "" {
+		client = &addr{s: sess.remote}
 	}
 
+	res, err := s.o.Auth.Lookup(ctx, id, "jmap", client)
+
+	result := s.lookupResult(id, res, err)
+	if result == lookupFailed {
+		s.logLookup(sess, id, result)
+
+		return false, err
+	}
+
+	found := result == lookupFound
+	if !found {
+		s.misses.miss(sess.account)
+	}
+
+	s.logLookup(sess, id, result)
 	c.found[id] = found
 
 	return found, nil
+}
+
+// The results of a principal lookup, as they are logged.
+const (
+	lookupFound   = "found"
+	lookupUnknown = "unknown"
+	lookupAlias   = "alias"
+	lookupForeign = "other shard"
+	lookupFailed  = "failed"
+)
+
+// lookupResult classifies the backend's answer to a lookup of id.
+func (s *Server) lookupResult(id string, res *auth.Result, err error) string {
+	switch {
+	case errors.Is(err, auth.ErrInvalid):
+		return lookupUnknown
+	case err != nil:
+		return lookupFailed
+	case strings.ToLower(strings.TrimSpace(res.Account)) != id:
+		return lookupAlias
+	}
+
+	if here, _ := s.o.Shard.serves(res); !here {
+		return lookupForeign
+	}
+
+	return lookupFound
+}
+
+// logLookup logs one principal lookup: at Info with a hash of the
+// address — addresses are personal data; the hash lets an operator tell
+// repeated lookups of one address apart from many, and compare with an
+// address it suspects — and at Debug with the address itself.
+func (s *Server) logLookup(sess *session, address, result string) {
+	sum := sha256.Sum256([]byte(address))
+	hash := hex.EncodeToString(sum[:8])
+
+	sess.log.Info("jmap: principal lookup", "address_sha256", hash, "result", result)
+	sess.log.Debug("jmap: principal lookup address", "address_sha256", hash, "address", address)
 }
 
 // knownPrincipal reports whether an id names a principal the user may
@@ -356,8 +421,13 @@ func (s *Server) knownPrincipal(ctx context.Context, sess *session, id string) (
 
 // lookupError is the method error of a failed lookup.
 func lookupError(sess *session, err error) *methodError {
-	if errors.Is(err, errLookupBudget) {
+	switch {
+	case errors.Is(err, errLookupBudget):
 		return &methodError{Type: errRequestTooLarge, Description: err.Error()}
+	case errors.Is(err, errMissBudget):
+		// RFC 8620 has no method-level rateLimit; serverUnavailable is
+		// the error a client retries later.
+		return &methodError{Type: errServerUnavailable, Description: err.Error()}
 	}
 
 	sess.log.Warn("jmap: principal lookup failed", "err", err)
