@@ -1620,7 +1620,14 @@ authentication backend, and the relay learns the account from
   only by an exact address beyond the ones a user sees, and have no
   display name; a notification of a change made on another shard is not
   readable; the maintenance jobs, deleting and renaming a mailbox write
-  no notification; a mailbox shared only with `anyone` is not found; no mailbox is
+  no notification;
+  a share notification is written synchronously in the path of the ACL
+  change (IMAP `SETACL`, the admin API, `Mailbox/set`) and opens the
+  grantee's namespace, so a slow store delays the answer to the change;
+  an identifier already in an ACL of the user's own mailboxes — a typo
+  written over IMAP `SETACL`, for instance — counts as a visible
+  principal and is accepted in `shareWith` of other mailboxes without a
+  backend lookup, so such a typo can spread; a mailbox shared only with `anyone` is not found; no mailbox is
   created in another namespace; an upload into a shared account, and
   with it an attachment from an upload in a message created there, is
   refused; `Quota/*` is not offered for the public account; a change of
