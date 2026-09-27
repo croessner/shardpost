@@ -112,7 +112,7 @@ func importDraft(sess *session, raw json.RawMessage) (map[string]any, *draft, *s
 		return nil, nil, invalidProperty(propBlobID, "an EmailImport names a blob")
 	}
 
-	t, err := newTree(sess.user)
+	t, err := readTree(sess.user)
 	if err != nil {
 		return nil, nil, &setError{Type: setServerFail, Description: err.Error()}
 	}

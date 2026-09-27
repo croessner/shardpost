@@ -83,6 +83,13 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		Shard:            jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
 		// The scripts ManageSieve manages, compiled as ManageSieve does.
 		Sieve: &jmap.SieveOptions{Config: srv.sieveConfig, GlobalScripts: settings.Sieve.GlobalDir},
+		// The accounts other namespaces share, switched like the IMAP
+		// namespaces of the same name.
+		Sharing: jmap.SharingOptions{
+			SharedPrefix: settings.Server.SharedPrefix,
+			PublicPrefix: settings.Server.PublicPrefix,
+			MaxAccounts:  int(settings.JMAP.MaxSharedAccounts),
+		},
 	})
 
 	if strings.TrimSpace(settings.JMAP.Shard) == "" {

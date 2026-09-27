@@ -131,9 +131,10 @@ func parseState(s string) (uint64, bool) {
 }
 
 // forAccount decodes the arguments and checks that the account the
-// client named is the one it authenticated as. Another account is
-// accountNotFound rather than forbidden: whether it exists is not this
-// account's business.
+// client named is the one the call works on: the personal account, or
+// for a shared-capable method the shared account the call was opened
+// for. Another account is accountNotFound rather than forbidden: whether
+// it exists is not this account's business.
 func forAccount(sess *session, args json.RawMessage, into any) *methodError {
 	if err := json.Unmarshal(args, into); err != nil {
 		return &methodError{Type: errInvalidArguments, Description: err.Error()}
@@ -145,7 +146,7 @@ func forAccount(sess *session, args json.RawMessage, into any) *methodError {
 
 	_ = json.Unmarshal(args, &named)
 
-	if id := named.AccountID; id != "" && id != accountID(sess.account) {
+	if id := named.AccountID; id != "" && id != sess.accountID() {
 		return &methodError{Type: errAccountNotFound}
 	}
 

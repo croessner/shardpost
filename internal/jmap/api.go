@@ -79,6 +79,11 @@ type method struct {
 	// method may be called.
 	capability string
 	run        func(ctx context.Context, s *session, args json.RawMessage) (any, *methodError)
+	// shared marks the methods that serve the accounts other namespaces
+	// share with the user (see account.go). They run with the session of
+	// the account their accountId names. Every other method serves the
+	// personal account alone and answers accountNotFound for any other.
+	shared bool
 }
 
 // methods are the methods this server implements. RFC 8621 adds the mail
@@ -97,11 +102,11 @@ var methods = map[string]method{
 	"EmailSubmission/query":        {capability: CapSubmission, run: emailSubmissionQuery},
 	"EmailSubmission/queryChanges": {capability: CapSubmission, run: emailSubmissionQueryChanges},
 	"EmailSubmission/set":          {capability: CapSubmission, run: emailSubmissionSet},
-	"Mailbox/get":                  {capability: CapMail, run: mailboxGet},
-	"Mailbox/changes":              {capability: CapMail, run: mailboxChanges},
-	"Mailbox/query":                {capability: CapMail, run: mailboxQuery},
-	"Mailbox/queryChanges":         {capability: CapMail, run: mailboxQueryChanges},
-	"Mailbox/set":                  {capability: CapMail, run: mailboxSet},
+	"Mailbox/get":                  {capability: CapMail, run: mailboxGet, shared: true},
+	"Mailbox/changes":              {capability: CapMail, run: mailboxChanges, shared: true},
+	"Mailbox/query":                {capability: CapMail, run: mailboxQuery, shared: true},
+	"Mailbox/queryChanges":         {capability: CapMail, run: mailboxQueryChanges, shared: true},
+	"Mailbox/set":                  {capability: CapMail, run: mailboxSet, shared: true},
 	"Email/get":                    {capability: CapMail, run: emailGet},
 	"Email/changes":                {capability: CapMail, run: emailChanges},
 	"Email/query":                  {capability: CapMail, run: emailQueryRun},
@@ -166,7 +171,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	out := apiResponse{
 		MethodResponses: s.runCalls(r.Context(), sess, req),
-		SessionState:    s.session(sess.account, s.baseURL(r)).State,
+		SessionState:    s.session(sess, s.baseURL(r)).State,
 	}
 
 	if req.CreatedIDs != nil || len(sess.created) > 0 {
@@ -277,7 +282,15 @@ func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bo
 		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
 	}
 
-	res, merr := m.run(ctx, sess, args)
+	callSess := sess
+
+	if m.shared {
+		if callSess, merr = s.callSession(sess, args); merr != nil {
+			return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
+		}
+	}
+
+	res, merr := m.run(ctx, callSess, args)
 	if merr != nil {
 		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
 	}

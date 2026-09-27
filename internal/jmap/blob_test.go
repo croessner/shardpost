@@ -417,7 +417,7 @@ func TestBlobUploadFeedsEmailImport(t *testing.T) {
 func TestBlobCapability(t *testing.T) {
 	s := newTestServer(t, func(o *Options) { o.Limits.MaxSizeUpload = 1000; o.Limits.MaxSizeBlobSet = 5000 })
 
-	got := s.session("test", "https://mail.example.org")
+	got := s.session(&session{account: "test"}, "https://mail.example.org")
 	if string(got.Capabilities[CapBlob]) != `{}` || got.PrimaryAccounts[CapBlob] != "test" {
 		t.Errorf("the session lists %s", got.Capabilities[CapBlob])
 	}

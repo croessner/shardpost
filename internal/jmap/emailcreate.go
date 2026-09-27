@@ -78,7 +78,7 @@ type draft struct {
 
 // createEmail validates one creation, writes the message and stores it.
 func createEmail(sess *session, raw json.RawMessage) (map[string]any, expectation, *setError) {
-	t, err := newTree(sess.user)
+	t, err := readTree(sess.user)
 	if err != nil {
 		return nil, expectation{}, &setError{Type: setServerFail, Description: err.Error()}
 	}

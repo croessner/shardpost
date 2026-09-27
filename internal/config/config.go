@@ -319,6 +319,7 @@ var defaults = []struct {
 	{"jmap.max_size_blob_set", 0},
 	{"jmap.max_data_sources", 0},
 	{"jmap.max_size_blob_get", 0},
+	{"jmap.max_shared_accounts", 0},
 	{"jmap.push.vapid_key_file", ""},
 	{"jmap.push.vapid_subject", ""},
 	{"jmap.push.max_subscriptions", 0},

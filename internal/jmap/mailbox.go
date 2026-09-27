@@ -47,10 +47,9 @@ const (
 )
 
 // mailboxRights is what the authenticated account may do with a mailbox
-// (RFC 8621 2). Every mailbox in the session belongs to the account
-// itself — shared and public folders are other accounts, which is JMAP
-// Sharing and not built — so the rights are the owner's, with the two
-// exceptions IMAP imposes on INBOX.
+// (RFC 8621 2). In the personal account the rights are the owner's, with
+// the two exceptions IMAP imposes on INBOX; in a shared account they are
+// mapped from the RFC 4314 rights (see account.myRights).
 type mailboxRights struct {
 	MayReadItems   bool `json:"mayReadItems"`
 	MayAddItems    bool `json:"mayAddItems"`
@@ -85,20 +84,28 @@ type tree struct {
 	all    []model.Mailbox
 }
 
-// newTree reads the mailboxes of the account.
-func newTree(u model.User) (*tree, error) {
+// readTree reads every mailbox of a namespace. Only the personal account
+// reads its tree this way; a shared account builds its tree from the
+// mailboxes the user may see (account.tree), and a handler asks the
+// account for its tree rather than reading one itself.
+func readTree(u model.User) (*tree, error) {
 	all, err := u.ListMailboxes()
 	if err != nil {
 		return nil, err
 	}
 
+	return buildTree(all), nil
+}
+
+// buildTree indexes a mailbox list.
+func buildTree(all []model.Mailbox) *tree {
 	t := &tree{byID: map[string]model.Mailbox{}, byName: map[string]model.Mailbox{}, all: all}
 	for _, mb := range all {
 		t.byID[mb.ID] = mb
 		t.byName[mb.Name] = mb
 	}
 
-	return t, nil
+	return t
 }
 
 // split returns the JMAP name of a mailbox and the id of its parent.
@@ -180,9 +187,15 @@ type counts struct {
 	emails, unread, threads, unreadThreads uint64
 }
 
-// countMessages reads the totals of one mailbox.
-func countMessages(u model.User, id string) (counts, error) {
-	msgs, err := u.ListMessages(id)
+// countMessages reads the totals of one mailbox as the user sees them:
+// in a public folder with its own \Seen marks. A mailbox the user may not
+// read counts nothing.
+func countMessages(a *account, id string) (counts, error) {
+	if !a.personal && !a.may(id, 'r') {
+		return counts{}, nil
+	}
+
+	msgs, err := a.listMessages(id)
 	if err != nil {
 		return counts{}, err
 	}
@@ -220,7 +233,7 @@ func countMessages(u model.User, id string) (counts, error) {
 
 // mailboxObject renders one mailbox with the properties the client
 // asked for. id is always present, as RFC 8620 5.1 requires.
-func mailboxObject(u model.User, t *tree, mb *model.Mailbox, props *[]string) (map[string]any, error) {
+func mailboxObject(a *account, t *tree, mb *model.Mailbox, props *[]string) (map[string]any, error) {
 	name, parent := t.split(mb.Name)
 
 	out := map[string]any{propID: mb.ID}
@@ -235,7 +248,7 @@ func mailboxObject(u model.User, t *tree, mb *model.Mailbox, props *[]string) (m
 	put(propParentID, parent)
 	put(propSortOrder, mb.SortOrder)
 	put(propIsSubscribed, mb.Subscribed)
-	put(propMyRights, ownerRights(mb.Name))
+	put(propMyRights, a.myRights(mb))
 
 	if selected(props, propRole) {
 		out[propRole] = nilIfEmpty(roleOf(mb))
@@ -246,7 +259,7 @@ func mailboxObject(u model.User, t *tree, mb *model.Mailbox, props *[]string) (m
 		return out, nil
 	}
 
-	c, err := countMessages(u, mb.ID)
+	c, err := countMessages(a, mb.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +321,7 @@ func mailboxGet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 	}
 
 	return &getResponse{
-		AccountID: accountID(sess.account), State: state,
+		AccountID: sess.accountID(), State: state,
 		List: list, NotFound: missingIDs(t, req.IDs),
 	}, nil
 }
@@ -323,7 +336,7 @@ func mailboxList(sess *session, t *tree, req *getRequest) ([]map[string]any, err
 			continue
 		}
 
-		obj, err := mailboxObject(sess.user, t, mb, req.Properties)
+		obj, err := mailboxObject(sess.current(), t, mb, req.Properties)
 		if err != nil {
 			return nil, err
 		}
@@ -370,12 +383,14 @@ func mailboxState(sess *session) (string, *tree, *methodError) {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	t, err := newTree(sess.user)
+	a := sess.current()
+
+	t, err := a.tree()
 	if err != nil {
 		return "", nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	return stateString(seq), t, nil
+	return a.state(stateMailboxes, seq), t, nil
 }
 
 // contains reports whether the list holds s.
@@ -401,7 +416,16 @@ func mailboxChanges(_ context.Context, sess *session, args json.RawMessage) (any
 		return nil, merr
 	}
 
-	since, ok := parseState(req.SinceState)
+	// The tree is read first: in a shared account it decides what the
+	// user sees now, and the state token is checked against that.
+	a := sess.current()
+
+	t, terr := a.tree()
+	if terr != nil {
+		return nil, &methodError{Type: errServerFail, Description: terr.Error()}
+	}
+
+	since, ok := a.parseState(stateMailboxes, req.SinceState)
 	if !ok {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
 	}
@@ -418,11 +442,6 @@ func mailboxChanges(_ context.Context, sess *session, args json.RawMessage) (any
 
 	if !ok {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descLogTrimmed}
-	}
-
-	t, terr := newTree(sess.user)
-	if terr != nil {
-		return nil, &methodError{Type: errServerFail, Description: terr.Error()}
 	}
 
 	return collectMailboxChanges(sess, req.SinceState, since, entries, len(entries) == limit, t)
@@ -466,8 +485,9 @@ type changeSet struct {
 func collectMailboxChanges(sess *session, sinceState string, since uint64,
 	entries []model.AccountChange, full bool, t *tree,
 ) (any, *methodError) {
+	a := sess.current()
 	out := &changesResponse{
-		AccountID: accountID(sess.account), OldState: sinceState, NewState: sinceState,
+		AccountID: a.id, OldState: sinceState, NewState: sinceState,
 		HasMoreChanges: full,
 		Created:        []string{}, Updated: []string{}, Destroyed: []string{},
 	}
@@ -479,17 +499,37 @@ func collectMailboxChanges(sess *session, sinceState string, since uint64,
 		e := &entries[i]
 		last = e.Seq
 
+		if hidden(a, e) {
+			continue
+		}
+
 		if merr := set.add(e, t); merr != nil {
 			return nil, merr
 		}
 	}
 
-	out.NewState = stateString(last)
+	out.NewState = a.state(stateMailboxes, last)
 	props := set.updatedProperties()
 	out.UpdatedProperties = &props
 	fill(out, set.kind, t)
 
 	return out, nil
+}
+
+// hidden reports whether a log entry of a shared account is about
+// something the user cannot see: a mailbox without right l, or the
+// messages of one without right r. The personal account sees
+// everything. The visible set itself cannot have changed since the
+// client's state, because the state token carries its fingerprint.
+func hidden(a *account, e *model.AccountChange) bool {
+	switch {
+	case a.personal || e.Mailbox == "":
+		return false
+	case e.Kind == model.KindEmail:
+		return !a.may(e.Mailbox, 'r')
+	}
+
+	return a.boxes[e.Mailbox] == nil
 }
 
 // add folds one log entry into the set.

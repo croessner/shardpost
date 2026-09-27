@@ -294,7 +294,7 @@ func emailUpdates(sess *session, loc *locator, update map[string]map[string]json
 // keywords the message had: under the union rule, dropping the one copy
 // that was \Seen would otherwise make the message unread.
 func updateEmail(sess *session, f *found, raw map[string]json.RawMessage) (expectation, *setError) {
-	t, err := newTree(sess.user)
+	t, err := readTree(sess.user)
 	if err != nil {
 		return expectation{}, &setError{Type: setServerFail, Description: err.Error()}
 	}
@@ -726,7 +726,7 @@ func emailDestroys(sess *session, loc *locator, destroy []string, out *setRespon
 		return
 	}
 
-	t, err := newTree(sess.user)
+	t, err := readTree(sess.user)
 	if err != nil {
 		for _, ref := range destroy {
 			out.NotDestroyed[ref] = &setError{Type: setServerFail, Description: err.Error()}

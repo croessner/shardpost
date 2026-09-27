@@ -32,6 +32,59 @@ type session struct {
 	// auth is the authentication result, whose attributes provisioning
 	// reads (the quota).
 	auth *auth.Result
+	// own is the store view of the user's own namespace. user is the
+	// view of the account a method call works on, which for a shared
+	// account is another namespace; own never is.
+	own model.User
+	// acct is the account a method call works on; nil means the personal
+	// account (see home).
+	acct *account
+	// views are the other namespaces the request opened.
+	views *views
+}
+
+// home is the personal account of the session.
+func (s *session) home() *account {
+	own := s.own
+	if own == nil {
+		own = s.user
+	}
+
+	return personalAccount(s.account, own)
+}
+
+// current is the account the method call works on.
+func (s *session) current() *account {
+	if s.acct == nil {
+		s.acct = personalAccount(s.account, s.user)
+		if s.own != nil {
+			s.acct.own = s.own
+		}
+	}
+
+	return s.acct
+}
+
+// accountID is the id of the account the method call works on.
+func (s *session) accountID() string { return s.current().id }
+
+// with is the session of a method call on an account: the same request,
+// the store view of that account.
+func (s *session) with(a *account) *session {
+	if a.personal {
+		cp := *s
+		cp.acct = a
+		cp.user = a.user
+
+		return &cp
+	}
+
+	cp := *s
+	cp.acct = a
+	cp.user = a.user
+	cp.log = s.log.With("shared", a.id)
+
+	return &cp
 }
 
 // ctxKey is the context key of the authenticated session.
@@ -97,8 +150,11 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		}
 		defer u.Close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
-			log: s.o.Log.With("account", res.Account), auth: res})
+		others := &views{store: s.o.Store}
+		defer others.close()
+
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
+			log: s.o.Log.With("account", res.Account), auth: res, views: others})
 		next(w, r.WithContext(ctx))
 	}
 }

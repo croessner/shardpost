@@ -51,6 +51,12 @@ type JMAP struct {
 	// authenticated account.
 	ShardAttribute string `mapstructure:"shard_attribute" env:"JMAP_SHARD_ATTRIBUTE"`
 	Shard          string `mapstructure:"shard" env:"JMAP_SHARD"`
+	// MaxSharedAccounts bounds how many accounts of other users (owners
+	// who share a mailbox with the user) the session resource lists; 0
+	// takes the built-in default. The public folders are one account
+	// more. Shared accounts follow server.shared_prefix and
+	// server.public_prefix: an empty prefix switches that namespace off.
+	MaxSharedAccounts int64 `mapstructure:"max_shared_accounts" env:"JMAP_MAX_SHARED_ACCOUNTS" validate:"gte=0"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
 	// Submission configures sending (EmailSubmission) and identities.

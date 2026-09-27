@@ -33,6 +33,15 @@ var mailboxWritable = map[string]bool{
 // maxSortOrder bounds Mailbox.sortOrder (RFC 8621 2).
 const maxSortOrder = 1 << 31
 
+// descNoSharedCreate is why a mailbox is not created in a shared
+// account. IMAP CREATE allows it with right k on the parent, but the new
+// mailbox carries no ACL — the store does not inherit one — so its
+// creator could not see it afterwards: a JMAP client would hold a
+// mailbox that answers notFound from then on. The owner creates the
+// mailbox and shares it.
+const descNoSharedCreate = "a mailbox created in another account would carry no rights for its creator; " +
+	"the owner creates and shares it"
+
 // danglingCreation is what a reference to a creation that never
 // happened is answered with.
 const danglingCreation = "the creation this one points at did not happen"
@@ -46,7 +55,7 @@ func mailboxSet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, &methodError{Type: errInvalidArguments, Description: err.Error()}
 	}
 
-	if req.AccountID != "" && req.AccountID != accountID(sess.account) {
+	if req.AccountID != "" && req.AccountID != sess.accountID() {
 		return nil, &methodError{Type: errAccountNotFound}
 	}
 
@@ -63,7 +72,7 @@ func mailboxSet(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, &methodError{Type: errStateMismatch}
 	}
 
-	out := newSetResponse(accountID(sess.account), state)
+	out := newSetResponse(sess.accountID(), state)
 
 	mailboxCreates(sess, &req, out)
 	mailboxUpdates(sess, &req, out)
@@ -85,7 +94,7 @@ func stateAfter(sess *session, before string, out *setResponse) string {
 		return before
 	}
 
-	since, ok := parseState(before)
+	since, ok := seqOf(before)
 	if !ok {
 		return before
 	}
@@ -106,7 +115,27 @@ func stateAfter(sess *session, before string, out *setResponse) string {
 		last = entries[i].Seq
 	}
 
-	return stateString(last)
+	// A shared account's token carries what the user sees now, which
+	// this call's own writes may have changed (a subscription, a
+	// destroyed mailbox); the client applied them already.
+	a := sess.current()
+	if !a.personal {
+		if _, err := a.tree(); err != nil {
+			return before
+		}
+	}
+
+	return a.state(stateMailboxes, last)
+}
+
+// seqOf is the log sequence of a state token of either kind of account,
+// without checking a shared account's fingerprint: a /set reads the log
+// from its own starting point, and the token it returns carries the
+// fingerprint of afterwards.
+func seqOf(state string) (uint64, bool) {
+	seq, _, _ := strings.Cut(state, stateSep)
+
+	return parseState(seq)
 }
 
 // touchedIDs are the mailboxes this /set changed.
@@ -165,7 +194,7 @@ func createRound(sess *session, pending map[string]json.RawMessage, out *setResp
 	progress := false
 
 	for cid, raw := range pending {
-		t, err := newTree(sess.user)
+		t, err := sess.current().tree()
 		if err != nil {
 			out.NotCreated[cid] = &setError{Type: setServerFail, Description: err.Error()}
 
@@ -212,6 +241,10 @@ func createMailbox(sess *session, t *tree, raw json.RawMessage) (map[string]any,
 	var spec mailboxCreate
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		return nil, &setError{Type: setInvalidProperties, Description: err.Error()}, false
+	}
+
+	if !sess.current().personal {
+		return nil, &setError{Type: setForbidden, Description: descNoSharedCreate}, false
 	}
 
 	parent, wait, serr := parentOf(sess, spec.ParentID)
@@ -410,7 +443,7 @@ type mailboxPatch struct {
 // mailboxUpdates runs the updates of a /set.
 func mailboxUpdates(sess *session, req *mailboxSetRequest, out *setResponse) {
 	for id, patch := range req.Update {
-		t, err := newTree(sess.user)
+		t, err := sess.current().tree()
 		if err != nil {
 			out.NotUpdated[id] = &setError{Type: setServerFail, Description: err.Error()}
 			continue
@@ -442,6 +475,11 @@ func updateMailbox(sess *session, t *tree, mb *model.Mailbox, raw map[string]jso
 		return serr
 	}
 
+	a := sess.current()
+	if serr := mayUpdate(a, mb, patch); serr != nil {
+		return serr
+	}
+
 	if patch.moves {
 		if err := sess.user.RenameMailbox(mb.Name, patch.path); err != nil {
 			return renameFailed(err)
@@ -455,9 +493,50 @@ func updateMailbox(sess *session, t *tree, mb *model.Mailbox, raw map[string]jso
 	}
 
 	if patch.isSubscribed != nil {
-		if err := sess.user.SetSubscribed(patch.path, *patch.isSubscribed); err != nil {
+		now := *mb
+		now.Name = patch.path
+
+		if err := a.setSubscribed(&now, *patch.isSubscribed); err != nil {
 			return &setError{Type: setServerFail, Description: err.Error()}
 		}
+	}
+
+	return nil
+}
+
+// mayUpdate checks the rights an update of a shared mailbox needs before
+// anything is written, as IMAP checks them: a rename or a move needs x on
+// the mailbox and k on the nearest existing mailbox above its new place
+// (a place without one is the top level of another namespace, which
+// nobody holds k on); the sort order needs x, since it is a property of
+// the owner's mailbox that every other user sees. A subscription is the
+// user's own and needs nothing beyond seeing the mailbox (l).
+func mayUpdate(a *account, mb *model.Mailbox, patch *mailboxPatch) *setError {
+	if a.personal {
+		return nil
+	}
+
+	if patch.sortOrder != nil && *patch.sortOrder != mb.SortOrder && !a.may(mb.ID, 'x') {
+		return &setError{Type: setForbidden, Properties: []string{propSortOrder},
+			Description: "changing the sort order needs the right to rename the mailbox"}
+	}
+
+	if !patch.moves {
+		return nil
+	}
+
+	if !a.may(mb.ID, 'x') {
+		return &setError{Type: setForbidden, Description: "no right to rename this mailbox"}
+	}
+
+	rights, err := a.parentRights(patch.path)
+	if err != nil {
+		return &setError{Type: setServerFail, Description: err.Error()}
+	}
+
+	if !model.HasRight(rights, 'k') {
+		return &setError{Type: setForbidden, Properties: []string{propParentID},
+			Description: "no right to create a mailbox there"}
 	}
 
 	return nil
@@ -621,7 +700,7 @@ func checkPatch(patch map[string]json.RawMessage) *setError {
 // mailboxDestroys runs the destructions of a /set.
 func mailboxDestroys(sess *session, req *mailboxSetRequest, out *setResponse) {
 	for _, id := range req.Destroy {
-		t, err := newTree(sess.user)
+		t, err := sess.current().tree()
 		if err != nil {
 			out.NotDestroyed[id] = &setError{Type: setServerFail, Description: err.Error()}
 			continue
@@ -647,6 +726,11 @@ func mailboxDestroys(sess *session, req *mailboxSetRequest, out *setResponse) {
 func destroyMailbox(sess *session, t *tree, mb *model.Mailbox, removeEmails bool) *setError {
 	if mb.Name == inboxName {
 		return &setError{Type: setForbidden, Description: "INBOX cannot be deleted"}
+	}
+
+	// IMAP DELETE needs x, and removes the messages with the mailbox.
+	if !sess.current().may(mb.ID, 'x') {
+		return &setError{Type: setForbidden, Description: "no right to delete this mailbox"}
 	}
 
 	if t.children(mb.Name) {

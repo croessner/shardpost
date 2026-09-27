@@ -130,6 +130,9 @@ type Options struct {
 	// Sieve, when set, offers urn:ietf:params:jmap:sieve over the
 	// scripts ManageSieve manages.
 	Sieve *SieveOptions
+	// Sharing lists the accounts other namespaces share with the user:
+	// shared mailboxes and public folders. The zero value lists none.
+	Sharing SharingOptions
 }
 
 // ShardGate names the backend attribute that carries an account's shard
@@ -247,6 +250,7 @@ func New(o Options) *Server {
 	o.Limits = withDefaults(o.Limits)
 	o.Push = pushDefaults(o.Push)
 	o.Submission = submissionDefaults(o.Submission, o.Limits.MaxSizeUpload)
+	o.Sharing = sharingDefaults(o.Sharing)
 
 	if o.Sieve != nil && (o.Sieve.MaxScript <= 0 || o.Sieve.MaxScript > model.MaxScriptSize) {
 		// The store holds nothing larger, whatever ManageSieve says.

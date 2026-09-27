@@ -49,7 +49,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	sess := sessionOf(r)
 	s.provision(sess)
 
-	out := s.session(sess.account, s.baseURL(r))
+	out := s.session(sess, s.baseURL(r))
 
 	w.Header().Set(fieldContentType, "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -59,8 +59,10 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// session builds the session resource of an account.
-func (s *Server) session(account, base string) *Session {
+// session builds the session resource of an account: the personal
+// account, and the accounts other namespaces share with it.
+func (s *Server) session(sess *session, base string) *Session {
+	account := sess.account
 	id := accountID(account)
 
 	out := &Session{
@@ -100,6 +102,13 @@ func (s *Server) session(account, base string) *Session {
 
 	if s.o.Push.KV != nil && s.o.Push.VAPIDPublicKey != "" {
 		out.Capabilities[CapWebPushVAPID] = mustRaw(map[string]string{"applicationServerKey": s.o.Push.VAPIDPublicKey})
+	}
+
+	// The state is a hash of the object, so an account that appears or
+	// goes, or one that becomes read-only, changes it, and a client
+	// fetches the session again (RFC 8620 2).
+	for _, a := range s.sharedAccounts(sess) {
+		out.Accounts[a.id] = s.sharedAccountObject(a)
 	}
 
 	out.State = sessionState(out)
@@ -183,10 +192,8 @@ func (s *Server) mail() *mailCapability {
 	}
 }
 
-// account describes the account itself. Only the account of the
-// authenticated user is listed; the accounts of other users (shared
-// mailboxes, the public namespace) belong to JMAP Sharing, which is not
-// built yet, and listing them empty would be a lie about what works.
+// account describes the account of the authenticated user itself. The
+// accounts of other namespaces are described by sharedAccountObject.
 func (s *Server) account(name string) Account {
 	a := Account{
 		Name:       name,
