@@ -32,11 +32,18 @@ spec:
         - {protocol: TCP, port: 2424}
         - {protocol: TCP, port: 1110}
         - {protocol: TCP, port: 1995}
-    # JMAP arrives from HAProxy on lbr1/lbr2 through the NodePort with
-    # externalTrafficPolicy Local, so the peer is the LBR's VLAN address.
-    # Both are PROXY-trusted: no other source may reach this port, apart
-    # from the operator's protocol test workloads.
+    # JMAP arrives from the director (the lasting path, mail.roessner-net.de)
+    # and, while the test name exists, from HAProxy on lbr1/lbr2 through the
+    # NodePort with externalTrafficPolicy Local, so the peer is the LBR's VLAN
+    # address. All are PROXY-trusted: no other source may reach this port,
+    # apart from the operator's protocol test workloads.
     - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: director
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nauthilus-director
         - ipBlock: {cidr: 192.168.0.5/32}
         - ipBlock: {cidr: 192.168.0.6/32}
         - namespaceSelector:
