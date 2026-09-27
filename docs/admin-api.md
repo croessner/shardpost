@@ -231,6 +231,14 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
   stands (the ACL is authoritative; a warning is logged, `acl explain`
   shows the missing pointer, and a `replace` with the same rights writes
   it afterwards).
+- **Share notifications**: a change that alters the rights of an
+  account leaves a notification in that account, as an IMAP `SETACL`
+  does (RFC 9670 3; see
+  [JMAP: Share notifications](jmap.md#share-notifications)). Its
+  `changedBy` is named `Administrator`, with no address and no
+  principal: the admin client is nobody the account could look up. A
+  change of `anyone` leaves none. The notification is best effort and
+  never fails the request.
 - **Names** are stored by the server as they arrive (UTF-8). IMAP clients
   with `UTF8=ACCEPT` see the same names; older clients using modified
   UTF-7 send `&AOQ-…` forms and do not see admin-created names with

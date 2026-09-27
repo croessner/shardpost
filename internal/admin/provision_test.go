@@ -6,9 +6,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/model"
+	"shardpost/internal/sharenotice"
 )
 
 func etagOf(resp *http.Response) *string {
@@ -128,7 +130,7 @@ func sharedPointer(t *testing.T, c *adminapi.ClientWithResponses) bool {
 }
 
 func TestACLChanges(t *testing.T) {
-	_, c := serveDiag(t, nil, RoleDiagnose, RoleProvision)
+	store, c := serveDiag(t, nil, RoleDiagnose, RoleProvision)
 	ctx := context.Background()
 	id := mailboxID(t, c, "Shared")
 
@@ -144,6 +146,8 @@ func TestACLChanges(t *testing.T) {
 		t.Fatalf("add: %d %+v", add.StatusCode(), add.JSON200)
 	}
 
+	checkAdminNotice(t, store)
+
 	stale := `"acl-0"`
 	if resp := set("bob", "k", adminapi.Add, &stale); resp.StatusCode() != http.StatusPreconditionFailed {
 		t.Fatalf("stale If-Match: %d", resp.StatusCode())
@@ -157,6 +161,29 @@ func TestACLChanges(t *testing.T) {
 	del, _ := c.DeleteACLEntryWithResponse(ctx, "alice", id, "bob", nil)
 	if del.JSON200 == nil || entry(del.JSON200, "bob") != "" || sharedPointer(t, c) {
 		t.Fatalf("delete: %d %+v", del.StatusCode(), del.JSON200)
+	}
+}
+
+// checkAdminNotice: bob is told of the change (RFC 9670 3), by nobody's
+// principal.
+func checkAdminNotice(t *testing.T, store interface {
+	User(string) (model.User, error)
+}) {
+	t.Helper()
+
+	bob, err := store.User("bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bob.Close()
+
+	l, err := sharenotice.Load(bob, "bob", sharenotice.Limits{}, time.Now())
+	if err != nil || len(l.Notices) != 1 {
+		t.Fatalf("bob's notices after the change: %+v %v", l, err)
+	}
+
+	if n := l.Notices[0]; n.Old != "lr" || n.New != "lrw" || n.By != "" || n.Owner != "alice" {
+		t.Errorf("the notice is %+v", n)
 	}
 }
 

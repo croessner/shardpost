@@ -13,6 +13,7 @@ import (
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/model"
+	"shardpost/internal/sharenotice"
 )
 
 // Provisioning and permissions (roadmap 8b, role provision). Every change
@@ -378,7 +379,14 @@ func (s *Server) changeACL(w http.ResponseWriter, r *http.Request, u model.User,
 		return
 	}
 
-	rights, _, err := mod.ModifyACL(info.Name, identifier, expect, change)
+	// The entry the change was computed from, read in the same step, for
+	// the grantee's share notification.
+	var old string
+
+	rights, _, err := mod.ModifyACL(info.Name, identifier, expect, func(cur string) string {
+		old = cur
+		return change(cur)
+	})
 	if errors.Is(err, model.ErrPointerSync) {
 		// The ACL is stored and counts; the pointer only lists the mailbox.
 		s.o.Log.Warn("admin: shared pointer not updated", "mailbox", info.Name, "identifier", identifier, "err", err)
@@ -395,6 +403,13 @@ func (s *Server) changeACL(w http.ResponseWriter, r *http.Request, u model.User,
 		s.provisionError(w, r, err)
 		return
 	}
+
+	// RFC 9670 3: the grantee learns of the change; best effort, the ACL
+	// is stored either way. An administrator is nobody's principal.
+	s.o.ShareNotices.Record(sharenotice.Change{
+		Owner: owner, MailboxID: after.ID, Mailbox: info.Name, Grantee: identifier,
+		Old: sharenotice.Effective(old, info.ACL[identAnyone]), New: model.EffectiveRights(after.ACL, identifier),
+	})
 
 	w.Header().Set("ETag", aclETag(after.ACLGen))
 	writeJSON(w, http.StatusOK, mailboxACL(owner, after))

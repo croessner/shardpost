@@ -18,6 +18,7 @@ import (
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
 	"shardpost/internal/memstore"
+	"shardpost/internal/sharenotice"
 	"shardpost/internal/model"
 )
 
@@ -71,7 +72,7 @@ func serveDiag(t *testing.T, wrap func(*memstore.Store) delivery.Store, roles ..
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: diagUsers, Log: log, Version: "test",
 		MaxMessageBytes: 4096, SocketRoles: roles, Accounts: accounts, Instance: "pod-1", StartedAt: time.Unix(1000, 0),
 		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Learning: testLearning,
-		SharedPrefix: "Shared/", PublicPrefix: "Public/"})
+		SharedPrefix: "Shared/", PublicPrefix: "Public/", ShareNotices: &sharenotice.Recorder{Store: store}})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

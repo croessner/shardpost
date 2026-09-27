@@ -25,6 +25,7 @@ import (
 	"shardpost/internal/model"
 	"shardpost/internal/prototrace"
 	"shardpost/internal/provision"
+	"shardpost/internal/sharenotice"
 	"shardpost/internal/telemetry"
 )
 
@@ -76,6 +77,9 @@ type Options struct {
 	WriteTimeout    time.Duration // backpressure: slow readers are dropped
 	// Trace bounds the per-account protocol trace (admin API).
 	Trace TraceOptions
+	// ShareNotices records the share notifications of the grantees whose
+	// rights a SETACL or DELETEACL changes (RFC 9670 3); nil records none.
+	ShareNotices *sharenotice.Recorder
 }
 
 // TraceOptions configure the protocol trace of accounts whose trace

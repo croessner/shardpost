@@ -27,6 +27,7 @@ import (
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
+	"shardpost/internal/sharenotice"
 	"shardpost/internal/telemetry"
 )
 
@@ -67,6 +68,9 @@ type Options struct {
 	// "" means that namespace is switched off.
 	SharedPrefix string
 	PublicPrefix string
+	// ShareNotices records the share notifications of the grantees whose
+	// rights an ACL change alters (RFC 9670 3); nil records none.
+	ShareNotices *sharenotice.Recorder
 	// SocketRoles are the roles of local callers on the Unix socket.
 	SocketRoles []string
 	// Clients map client certificate identities to roles (TCP listener);

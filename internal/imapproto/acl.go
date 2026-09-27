@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"shardpost/internal/model"
+	"shardpost/internal/sharenotice"
 )
 
 // Access control (RFC 4314) and the namespace of shared mailboxes.
@@ -252,10 +253,14 @@ func (c *conn) cmdSetACL(tag string, del bool) error {
 		return nil
 	}
 
+	before := c.noticeBefore(t, identifier)
+
 	if err := t.u.SetACL(t.name, identifier, rights); err != nil {
 		c.storeErr(tag, err)
 		return nil
 	}
+
+	c.recordNotice(t, identifier, before)
 
 	if del {
 		c.ok(tag, "", "DELETEACL completed")
@@ -536,4 +541,49 @@ func (c *conn) hideOrTryCreate(tag string, t *target) {
 	}
 
 	c.no(tag, "TRYCREATE", "No such mailbox")
+}
+
+// noticeBefore reads the mailbox a SETACL is about to change, for the
+// share notification of the grantee (see recordNotice); nil when no
+// notification is kept or the identifier gets none.
+func (c *conn) noticeBefore(t *target, identifier string) *model.Mailbox {
+	if c.s.o.ShareNotices == nil || !sharenotice.Notifies(identifier) {
+		return nil
+	}
+
+	mb, err := t.u.Lookup(t.name)
+	if err != nil {
+		return nil
+	}
+
+	return mb
+}
+
+// recordNotice tells the grantee of a SETACL or DELETEACL that its rights
+// changed (RFC 9670 3), from the mailbox as it was before and as it is
+// now. It is best effort: the ACL is stored, and a notification that
+// cannot be written is logged by the recorder.
+func (c *conn) recordNotice(t *target, identifier string, before *model.Mailbox) {
+	if before == nil {
+		return
+	}
+
+	after, err := t.u.Lookup(t.name)
+	if err != nil {
+		return
+	}
+
+	owner := t.owner
+
+	switch {
+	case t.public:
+		owner = model.PublicNamespace
+	case owner == "":
+		owner = c.name
+	}
+
+	c.s.o.ShareNotices.Record(sharenotice.Change{
+		Owner: owner, MailboxID: after.ID, Mailbox: t.name, Grantee: identifier, By: c.name,
+		Old: model.EffectiveRights(before.ACL, identifier), New: model.EffectiveRights(after.ACL, identifier),
+	})
 }
