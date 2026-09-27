@@ -70,8 +70,12 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 
 		if ok, shard := s.o.Shard.serves(res); !ok {
 			if shard == nil {
-				s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
-					"account", res.Account, "attribute", s.o.Shard.Attribute)
+				// Once per process: a misspelt attribute would otherwise
+				// log on every request of every account.
+				s.noShardAttr.Do(func() {
+					s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
+						"account", res.Account, "attribute", s.o.Shard.Attribute)
+				})
 			} else {
 				s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", shard)
 			}

@@ -101,10 +101,8 @@ func TestSessionProvisions(t *testing.T) {
 		o.Autocreate = []provision.Folder{{Name: "Drafts", Use: `\Drafts`, Subscribe: true}, {Name: "Sent", Use: `\Sent`}}
 	})
 
-	for range 2 {
-		if w := do(t, s, http.MethodGet, PathSession, ""); w.Code != http.StatusOK {
-			t.Fatalf("session: %d", w.Code)
-		}
+	if w := do(t, s, http.MethodGet, PathSession, ""); w.Code != http.StatusOK {
+		t.Fatalf("session: %d", w.Code)
 	}
 
 	u, err := store.User("test")
@@ -117,4 +115,43 @@ func TestSessionProvisions(t *testing.T) {
 			t.Fatalf("%s after the session: %v", name, err)
 		}
 	}
+
+	subscribed := subscriptions(t, u)
+	if !subscribed["INBOX"] || !subscribed["Drafts"] || subscribed["Sent"] {
+		t.Fatalf("subscriptions after provisioning: %v", subscribed)
+	}
+
+	// An account that unsubscribed a mailbox keeps it that way: the
+	// second session fetch creates nothing and subscribes nothing.
+	if err := u.SetSubscribed("Drafts", false); err != nil {
+		t.Fatal(err)
+	}
+
+	before := subscriptions(t, u)
+
+	if w := do(t, s, http.MethodGet, PathSession, ""); w.Code != http.StatusOK {
+		t.Fatalf("second session: %d", w.Code)
+	}
+
+	if after := subscriptions(t, u); len(after) != len(before) || after["Drafts"] {
+		t.Fatalf("the second session fetch changed the account: %v, then %v", before, after)
+	}
+}
+
+// subscriptions maps every mailbox of an account to whether it is
+// subscribed.
+func subscriptions(t *testing.T, u model.User) map[string]bool {
+	t.Helper()
+
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := map[string]bool{}
+	for _, m := range boxes {
+		out[m.Name] = m.Subscribed
+	}
+
+	return out
 }

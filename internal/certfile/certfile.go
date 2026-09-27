@@ -89,7 +89,7 @@ func (s *Source) refresh() {
 
 	keyPEM, err := os.ReadFile(s.keyFile)
 	if err != nil {
-		s.log.Warn("tls key file unreadable, keeping the loaded certificate", "cert", s.certFile, "err", err)
+		s.log.Warn("tls key file unreadable, keeping the loaded certificate", "key", s.keyFile, "err", err)
 
 		return
 	}

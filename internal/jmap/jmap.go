@@ -207,6 +207,8 @@ type Server struct {
 	// end on it, since http.Server.Shutdown waits for them otherwise.
 	closing   chan struct{}
 	closeOnce sync.Once
+	// noShardAttr logs a shard gate without its attribute once.
+	noShardAttr sync.Once
 }
 
 // New builds the server and its routes.
