@@ -675,6 +675,28 @@ request, whatever calls make them — the same address twice counts once;
 a query or a get beyond it is `requestTooLarge`, a `shareWith` beyond it
 `rateLimit`. A backend that cannot answer is `serverUnavailable` (for a
 `shareWith`, `serverFail`).
+`jmap.principal_miss_per_minute` (default 30) bounds, per account and
+across requests, the lookups that find nothing — an unknown address, an
+alias, an account of another shard — so that a user cannot use them to
+test which addresses exist: every account has a bucket of that many
+misses that refills at that rate per minute, and a lookup is made only
+while the bucket holds one. A lookup that finds a principal takes
+nothing out of it, but an empty bucket holds back every lookup, since
+the answer is not known before it is made. Beyond it no lookup is made;
+`Principal/query` and `Principal/get` answer `serverUnavailable` — RFC
+8620 has no method-level `rateLimit`, and this is the error a client
+retries later — and `shareWith` the set error `rateLimit`. The buckets
+are kept in the memory of each front-end, at most 10000 accounts (full
+buckets are dropped first, then the least recently used): a deployment
+with several front-ends grants the rate per front-end, and a restart
+refills them. Every lookup goes to Nauthilus with the client's address,
+so that its own rate limits and brute-force detection apply, and is
+logged at Info (`jmap: principal lookup`, with the account, the first
+16 hex digits of the SHA-256 of the address and the result: `found`,
+`unknown`, `alias`, `other shard`, `failed` or `refused: miss budget`);
+the address itself is logged only at Debug. The hash is unsalted: it
+tells repeated lookups of one address apart from many and can be
+compared with an address one suspects, but it is not anonymous.
 `jmap.max_principals` (default 1000) bounds the principals seen without
 a lookup; the rest, in id order, is left out and logged once, and stays
 reachable by an exact lookup. `Principal/get` without ids returns that
@@ -745,6 +767,12 @@ boolean. A change of `shareWith` needs `mayShare` (`forbidden`
 otherwise); in a shared account a user with `a` may share further,
 change its own entry, and never name the owner. A creation may carry
 `shareWith` as well. Everything is checked before anything is written.
+When the ACL of a new mailbox cannot be written after all, the mailbox
+is deleted again and the creation reported as `serverFail`, so that a
+creation is all or nothing; only if that deletion fails too is it
+reported created, with the `shareWith` actually in effect (both are
+logged). Notifications already written for a grant that was rolled back
+stay.
 
 The write is the one IMAP `SETACL` and the admin API make: one
 versioned change per identifier, computed from the entry as it is at
@@ -1466,6 +1494,7 @@ jmap:
   max_session_pointers: 8000     # pointers the session examines in all; 0 = 8 × max_shared_mailboxes
   max_principal_lookups: 5       # exact address lookups per API request (Principal/*, shareWith)
   max_principals: 1000           # principals a user sees without a lookup
+  principal_miss_per_minute: 30  # lookups that find nothing, per account and front-end
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org

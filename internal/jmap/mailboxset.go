@@ -290,7 +290,12 @@ func createShare(ctx context.Context, sess *session, given map[string]json.RawMe
 }
 
 // finishShare writes the shareWith of a new mailbox and puts what it is
-// now into the creation's answer.
+// now into the creation's answer. A creation is all or nothing (RFC 8620
+// 5.3): when the ACL cannot be written, the new mailbox is deleted again
+// and the creation reported as failed. Only if that deletion fails too is
+// the mailbox reported created, with the shareWith actually in effect,
+// so that the answer is true either way. Notifications already written
+// for a grant that was rolled back stay.
 func finishShare(sess *session, path string, edits []*shareEdit, created map[string]any) *setError {
 	mb, err := sess.user.Lookup(path)
 	if err == nil {
@@ -298,16 +303,26 @@ func finishShare(sess *session, path string, edits []*shareEdit, created map[str
 	}
 
 	if err == nil {
-		mb, err = sess.user.Lookup(path)
+		if mb, err = sess.user.Lookup(path); err == nil {
+			created[propShareWith] = shareWithOf(sess.current(), mb)
+
+			return nil
+		}
 	}
 
-	if err != nil {
-		return &setError{Type: setServerFail, Description: err.Error()}
+	sess.log.Warn("jmap: shareWith of a new mailbox not written; deleting it again", "mailbox", path, "err", err)
+
+	if derr := sess.user.DeleteMailbox(path); derr != nil {
+		sess.log.Error("jmap: a new mailbox whose shareWith failed could not be deleted", "mailbox", path, "err", derr)
+
+		if mb, lerr := sess.user.Lookup(path); lerr == nil {
+			created[propShareWith] = shareWithOf(sess.current(), mb)
+
+			return nil
+		}
 	}
 
-	created[propShareWith] = shareWithOf(sess.current(), mb)
-
-	return nil
+	return &setError{Type: setServerFail, Description: "the mailbox could not be shared: " + err.Error()}
 }
 
 // placeOf validates the name, the sort order and the role of a creation
