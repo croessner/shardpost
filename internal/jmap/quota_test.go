@@ -237,7 +237,7 @@ func hasValues(t *testing.T, what string, obj map[string]any, want map[string]an
 func TestQuotaChangesRefuses(t *testing.T) {
 	s, _ := quotaServer(t, model.Quota{Msgs: 10})
 
-	for _, bad := range []string{"", "7", "q1-x1.2.3", "q1-c1.2", "q1-c1.2.3-c1.2.3", "q2", "q1-c-1.2.3", "q1-"} {
+	for _, bad := range []string{"", "7", "q1-x1.2.3", "q1-c1.2", "q1-c1.2.3-c1.2.3", "q2", "q1-c-1.2.3", "q1-", "q1-c01.2.3", "q1-c1.02.3", "q1-c1.2.+3"} {
 		if got := quotaError(t, s, "Quota/changes", `{"accountId":"test","sinceState":"`+bad+`"}`); got != errCannotCalculateChanges {
 			t.Errorf("state %q gave %s", bad, got)
 		}
@@ -342,6 +342,13 @@ func TestQuotaState(t *testing.T) {
 	back, ok := parseQuotaState(quotaState(list))
 	if !ok || len(back) != 2 || *back[quotaCount] != *list[0] || *back[quotaOctets] != *list[1] {
 		t.Errorf("%s read back as %v", quotaState(list), back)
+	}
+
+	for _, token := range []string{"q1", "q1-c0.10.0", "q1-c1.2.0-o3.4.5"} {
+		m, ok := parseQuotaState(token)
+		if !ok || quotaState(inOrder(m)) != token {
+			t.Errorf("%s does not round-trip", token)
+		}
 	}
 
 	if w := warnLimit(1<<62, 80); w != 3689348814741910323 {

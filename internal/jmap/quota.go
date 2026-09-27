@@ -234,8 +234,10 @@ func parseQuotaState(s string) (map[string]*quotaObject, bool) {
 		var n [3]uint64
 
 		for i, f := range fields {
+			// Only the canonical form, so that a state reads back as
+			// exactly the token it was written as.
 			v, err := strconv.ParseUint(f, 10, 64)
-			if err != nil {
+			if err != nil || strconv.FormatUint(v, 10) != f {
 				return nil, false
 			}
 
