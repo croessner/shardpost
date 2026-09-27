@@ -98,8 +98,12 @@ client ──https──▶ jmap.roessner-net.de (A/AAAA .233/.234, TTL 3600)
   - NeoMutt has no JMAP.
   - A browser client would need CORS, which the server does not send.
 
+**Event source through HAProxy:** the frontend's `timeout client` is 1
+minute. `http-request set-timeout client 30m if is_jmap` gives JMAP
+requests 30 minutes; the login path keeps 1 minute. An event source
+without pings stayed open beyond 80 seconds.
+
 ## Not verified yet
 
 - Bearer (OAuth) logins with a real token: they need an interactive OIDC login with MFA.
 - A Web Push subscription up to a device.
-- The event source's lifetime through HAProxy: the frontend's `timeout client` is 1 minute. A client that asks for no ping or a ping above 60 seconds is cut; with `ping` ≤ 60 it holds.
