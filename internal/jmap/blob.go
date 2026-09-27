@@ -117,6 +117,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if isScriptBlob(blobID) {
+		s.serveScript(w, r, sess, blobID)
+
+		return
+	}
+
 	size, err := blobs.BlobSize(blobID)
 	if err != nil {
 		s.blobFailed(w, r, blobID, err)
@@ -162,6 +168,20 @@ func (s *Server) servePart(w http.ResponseWriter, r *http.Request, blobs model.B
 
 	downloadHeaders(w, r)
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
+}
+
+// serveScript serves the content of a Sieve script by its blob id, which
+// is what ManageSieve's GETSCRIPT returns (RFC 9661 2.2).
+func (s *Server) serveScript(w http.ResponseWriter, r *http.Request, sess *session, blobID string) {
+	text, err := scriptContent(sess, blobID, 0)
+	if err != nil {
+		s.blobFailed(w, r, blobID, err)
+
+		return
+	}
+
+	downloadHeaders(w, r)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(text))
 }
 
 // withinQuota reports whether the account has room for another upload.

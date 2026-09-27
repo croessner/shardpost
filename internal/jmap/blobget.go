@@ -307,14 +307,29 @@ func digestRange(h *blobHandle, algs []string, lo, hi int64, data []byte, have b
 // lookupTypes are the data types Blob/lookup answers for, with the
 // capability a request has to use for each. A message's blob belongs to
 // the message, to its thread and to the mailboxes it is in; a body part
-// belongs to what its message belongs to.
-var lookupTypes = map[string]string{typeEmail: CapMail, typeMailbox: CapMail, typeThread: CapMail}
+// belongs to what its message belongs to; a script's content to the
+// scripts that have it.
+var lookupTypes = map[string]string{typeEmail: CapMail, typeMailbox: CapMail, typeThread: CapMail, typeSieveScript: CapSieve}
+
+// lookupCapability is the capability a type name of Blob/lookup needs,
+// when this server answers for it.
+func (s *Server) lookupCapability(name string) (string, bool) {
+	capability, ok := lookupTypes[name]
+	if !ok || (capability == CapSieve && s.o.Sieve == nil) {
+		return "", false
+	}
+
+	return capability, true
+}
 
 // lookupTypeNames are the type names the blob capability lists.
 func (s *Server) lookupTypeNames() []string {
 	out := make([]string, 0, len(lookupTypes))
+
 	for name := range lookupTypes {
-		out = append(out, name)
+		if _, ok := s.lookupCapability(name); ok {
+			out = append(out, name)
+		}
 	}
 
 	sort.Strings(out)
@@ -327,6 +342,26 @@ type blobLookupRequest struct {
 	TypeNames []string `json:"typeNames"`
 	IDs       []string `json:"ids"`
 	AccountID string   `json:"accountId"`
+}
+
+// check refuses what a Blob/lookup cannot answer: a type this server
+// does not look up, or one whose capability the request did not use.
+func (req *blobLookupRequest) check(sess *session) *methodError {
+	if req.TypeNames == nil || req.IDs == nil {
+		return &methodError{Type: errInvalidArguments, Description: "Blob/lookup needs typeNames and ids"}
+	}
+
+	if len(req.IDs) > sess.limits.MaxObjectsInGet {
+		return &methodError{Type: errRequestTooLarge, Description: descTooManyIDs}
+	}
+
+	for _, name := range req.TypeNames {
+		if capability, ok := sess.srv.lookupCapability(name); !ok || !sess.using[capability] {
+			return &methodError{Type: errUnknownDataType, Description: "no lookup for the type " + name}
+		}
+	}
+
+	return nil
 }
 
 // blobInfo is one entry of a Blob/lookup response.
@@ -348,21 +383,16 @@ func blobLookup(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, merr
 	}
 
-	if req.TypeNames == nil || req.IDs == nil {
-		return nil, &methodError{Type: errInvalidArguments, Description: "Blob/lookup needs typeNames and ids"}
-	}
-
-	if len(req.IDs) > sess.limits.MaxObjectsInGet {
-		return nil, &methodError{Type: errRequestTooLarge, Description: descTooManyIDs}
-	}
-
-	for _, name := range req.TypeNames {
-		if capability, ok := lookupTypes[name]; !ok || !sess.using[capability] {
-			return nil, &methodError{Type: errUnknownDataType, Description: "no lookup for the type " + name}
-		}
+	if merr := req.check(sess); merr != nil {
+		return nil, merr
 	}
 
 	messages, merr := lookupMessages(sess, req.IDs)
+	if merr != nil {
+		return nil, merr
+	}
+
+	scripts, merr := lookupScripts(sess, req.TypeNames, req.IDs)
 	if merr != nil {
 		return nil, merr
 	}
@@ -377,6 +407,10 @@ func blobLookup(_ context.Context, sess *session, args json.RawMessage) (any, *m
 
 		if f := messages[ref]; f != nil {
 			fillMatches(matched, f)
+		}
+
+		if ids := scripts[ref]; ids != nil {
+			matched[typeSieveScript] = ids
 		}
 
 		list = append(list, blobInfo{ID: ref, MatchedIDs: matched})
@@ -460,4 +494,31 @@ func fillMatches(matched map[string][]string, f *found) {
 		sort.Strings(boxes)
 		matched[typeMailbox] = boxes
 	}
+}
+
+// lookupScripts finds the scripts whose content is one of the blobs, by
+// the blob id as the client wrote it; only when the lookup asks for them.
+func lookupScripts(sess *session, types, refs []string) (map[string][]string, *methodError) {
+	out := map[string][]string{}
+
+	if !containsString(types, typeSieveScript) {
+		return out, nil
+	}
+
+	b, err := loadScripts(sess)
+	if err != nil {
+		return nil, &methodError{Type: errServerFail, Description: err.Error()}
+	}
+
+	for _, ref := range refs {
+		id, _ := resolveCreationID(sess, ref)
+
+		for _, sc := range b.list {
+			if scriptBlobID(sc.text) == id {
+				out[ref] = append(out[ref], sc.id)
+			}
+		}
+	}
+
+	return out, nil
 }

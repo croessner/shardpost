@@ -13,7 +13,7 @@ import (
 )
 
 // maxRedirects bounds the fan-out of one script.
-const maxRedirects = 4
+const maxRedirects = sieve.MaxRedirects
 
 // maxHops is the Received-header count beyond which a message is not
 // redirected any more (like an MTA's hop limit).

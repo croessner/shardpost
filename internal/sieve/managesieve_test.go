@@ -103,3 +103,26 @@ func TestReservedScriptIsReadOnly(t *testing.T) {
 		t.Errorf("listing and reading: %s", got)
 	}
 }
+
+// TestCapabilityMatchesTheInterpreter: MAXREDIRECTS is what a run of a
+// script may take, and the SIEVE list grows with the settings.
+func TestCapabilityMatchesTheInterpreter(t *testing.T) {
+	var out bytes.Buffer
+
+	c := &conn{s: New(Options{Config: map[string]string{"imapsieve_enabled": "yes"}}), bw: bufio.NewWriter(&out)}
+	c.capabilities()
+
+	if err := c.bw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "\"MAXREDIRECTS\" \"4\"\r\n") || !strings.Contains(got, " imapsieve\"\r\n") ||
+		!strings.Contains(got, "\"IMPLEMENTATION\" \"ShardPost\"\r\n") {
+		t.Errorf("the capability is %q", got)
+	}
+
+	if opts := options(Hooks{}); opts.Interp.MaxRedirects != MaxRedirects {
+		t.Errorf("the interpreter allows %d redirects", opts.Interp.MaxRedirects)
+	}
+}

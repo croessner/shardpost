@@ -92,6 +92,9 @@ type setError struct {
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
 	NotFound    []string `json:"notFound,omitempty"`
+	// ExistingID names the object a creation or rename collided with
+	// (alreadyExists, RFC 9661 2.4).
+	ExistingID string `json:"existingId,omitempty"`
 	// The extras of the EmailSubmission set errors (RFC 8621 7.5).
 	InvalidRecipients []string `json:"invalidRecipients,omitempty"`
 	MaxRecipients     int      `json:"maxRecipients,omitempty"`

@@ -434,7 +434,7 @@ const quotaCondType = "type"
 
 // quotaFilterKeys are the properties a quota filter may have.
 var quotaFilterKeys = map[string]bool{
-	propName: true, propScope: true, propResourceType: true, quotaCondType: true, "operator": true, "conditions": true,
+	propName: true, propScope: true, propResourceType: true, quotaCondType: true, filterOperator: true, filterConditions: true,
 }
 
 // quotaSortKeys are the properties RFC 9425 4.4 allows a Quota/query to
@@ -454,14 +454,8 @@ func quotaQuery(_ context.Context, sess *session, args json.RawMessage) (any, *m
 		return nil, merr
 	}
 
-	for _, c := range req.Sort {
-		if !quotaSortKeys[c.Property] {
-			return nil, &methodError{Type: errUnsupportedSort, Description: "cannot sort by " + c.Property}
-		}
-
-		if !validCollation(c.Collation) {
-			return nil, &methodError{Type: errUnsupportedSort, Description: "cannot sort with " + c.Collation}
-		}
+	if merr := checkSort(req.Sort, quotaSortKeys); merr != nil {
+		return nil, merr
 	}
 
 	list, merr := loadQuotas(sess)
@@ -501,71 +495,23 @@ func readQuotaFilter(raw json.RawMessage) (*quotaFilter, *methodError) {
 	return &f, nil
 }
 
-// decodeQuotaFilter decodes one filter and the ones below it. A property
-// the filter does not have, or an operator that does not exist, is
-// unsupportedFilter: a condition this server ignored would widen the
-// result behind the client's back.
+// decodeQuotaFilter decodes one filter and the ones below it.
 func decodeQuotaFilter(raw json.RawMessage, f *quotaFilter) *methodError {
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &keys); err != nil {
-		return &methodError{Type: errInvalidArguments, Arguments: []string{argFilter}, Description: err.Error()}
-	}
-
-	for k := range keys {
-		if !quotaFilterKeys[k] {
-			return &methodError{Type: errUnsupportedFilter, Description: "a quota cannot be filtered by " + k}
-		}
-	}
-
-	if err := json.Unmarshal(raw, f); err != nil {
-		return &methodError{Type: errInvalidArguments, Arguments: []string{argFilter}, Description: err.Error()}
-	}
-
-	if f.Operator == "" {
-		if len(f.Conditions) > 0 {
-			return &methodError{Type: errUnsupportedFilter, Description: "conditions need an operator"}
-		}
-
-		return nil
-	}
-
-	switch f.Operator {
-	case opAND, opOR, opNOT:
-	default:
-		return &methodError{Type: errUnsupportedFilter, Description: "unknown operator " + f.Operator}
-	}
-
-	var subs []json.RawMessage
-	if err := json.Unmarshal(keys["conditions"], &subs); err != nil {
-		return &methodError{Type: errInvalidArguments, Arguments: []string{argFilter}, Description: "an operator needs conditions"}
-	}
-
-	for i, sub := range subs {
-		if merr := decodeQuotaFilter(sub, &f.Conditions[i]); merr != nil {
-			return merr
-		}
-	}
-
-	return nil
+	return decodeOpFilter(raw, f, quotaFilterKeys, "a quota", quotaChild)
 }
+
+// operator implements opFilter.
+func (f *quotaFilter) operator() string { return f.Operator }
+
+// conditionCount implements opFilter.
+func (f *quotaFilter) conditionCount() int { return len(f.Conditions) }
+
+// quotaChild is the i-th filter below an operator.
+func quotaChild(f *quotaFilter, i int) *quotaFilter { return &f.Conditions[i] }
 
 // matches evaluates the filter over one object.
 func (f *quotaFilter) matches(q *quotaObject) bool {
-	if f.Operator == "" {
-		return f.condition(q)
-	}
-
-	// AND is decided by the first condition that fails, OR and NOT by
-	// the first that holds.
-	decides := f.Operator != opAND
-
-	for i := range f.Conditions {
-		if f.Conditions[i].matches(q) == decides {
-			return f.Operator == opOR
-		}
-	}
-
-	return f.Operator != opOR
+	return matchOpFilter(f, func(c *quotaFilter) bool { return c.condition(q) }, quotaChild)
 }
 
 // condition evaluates a filter condition: every property given has to

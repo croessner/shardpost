@@ -168,6 +168,7 @@ func ParseSettings(s string) map[string]string {
 
 func options(h Hooks) gosieve.Options {
 	opts := gosieve.DefaultOptions()
+	opts.Interp.MaxRedirects = MaxRedirects
 
 	opts.Interp.Config = h.Config
 	if opts.Interp.Config == nil {

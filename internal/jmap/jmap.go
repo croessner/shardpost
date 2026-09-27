@@ -127,6 +127,9 @@ type Options struct {
 	// Autocreate are the mailboxes an account gets besides its INBOX
 	// (server.autocreate), created when a client fetches the session.
 	Autocreate []provision.Folder
+	// Sieve, when set, offers urn:ietf:params:jmap:sieve over the
+	// scripts ManageSieve manages.
+	Sieve *SieveOptions
 }
 
 // ShardGate names the backend attribute that carries an account's shard
@@ -244,6 +247,13 @@ func New(o Options) *Server {
 	o.Limits = withDefaults(o.Limits)
 	o.Push = pushDefaults(o.Push)
 	o.Submission = submissionDefaults(o.Submission, o.Limits.MaxSizeUpload)
+
+	if o.Sieve != nil && (o.Sieve.MaxScript <= 0 || o.Sieve.MaxScript > model.MaxScriptSize) {
+		// The store holds nothing larger, whatever ManageSieve says.
+		sv := *o.Sieve
+		sv.MaxScript = model.MaxScriptSize
+		o.Sieve = &sv
+	}
 
 	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
 		inEvents: map[string]int{}, closing: make(chan struct{})}

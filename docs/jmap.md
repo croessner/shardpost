@@ -19,8 +19,8 @@ behind it is `temp/08-jmap-staged-plan.md`.
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
 | 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
 | 6 | `Quota/*`, `VacationResponse/*` | built |
-| 6 | `Blob/*` | built |
-| 6 | `SieveScript/*`, sharing | planned |
+| 6 | `Blob/*`, `SieveScript/*` | built |
+| 6 | Sharing | planned |
 
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
@@ -659,9 +659,9 @@ with the same setting does not, within the seven days.
 name `jmap-vacation` in the account's script store while the vacation
 is enabled, and removes it when it is not, so that a ManageSieve client
 such as Roundcube can show the setting. Delivery never reads that copy, and a user script cannot `include` it (an include of the reserved name finds no script).
-ManageSieve and the admin API show it but refuse to store, rename,
-delete or activate it; an import of scripts that names it is refused,
-and an export, a restore or a migration leaves it out.
+ManageSieve, JMAP `SieveScript/*` and the admin API show it but refuse
+to store, rename, delete or activate it; an import of scripts that names
+it is refused, and an export, a restore or a migration leaves it out.
 
 **After the active script.** The JMAP vacation is never activated and
 never replaces the user's active script. Delivery runs the active script
@@ -689,8 +689,9 @@ off) is the knob for a deployment with such aliases.
 
 A blob is a sequence of octets the account can read: a stored message
 (its id is the GUID of the message data, the same identity IMAP reports
-as `EMAILID`), a body part of one (`<guid>_2-1`, see Messages), or an
-upload. The upload endpoint stores the request body; the download
+as `EMAILID`), a body part of one (`<guid>_2-1`, see Messages), an
+upload, or the content of a Sieve script (`S` and 40 hex digits of its
+SHA-256, see [Sieve scripts](#sieve-scripts)). The upload endpoint stores the request body; the download
 endpoint serves any of them, with HTTP ranges. Blobs live in the
 account's own namespace of the store, so a blob id of another account is
 not found rather than refused, whoever knows it.
@@ -707,8 +708,8 @@ references it.
 **The blob methods** (RFC 9404, `urn:ietf:params:jmap:blob`) are always
 offered. The capability is empty in the session; the account's says
 `maxSizeBlobSet`, `maxDataSources`, the types `Blob/lookup` answers for
-(`Email`, `Mailbox`, `Thread`) and the digests `Blob/get` computes
-(`sha-256`, `sha`).
+(`Email`, `Mailbox`, `Thread`, and `SieveScript`) and the digests
+`Blob/get` computes (`sha-256`, `sha`).
 
 - **`Blob/upload`** builds a blob from pieces: `data:asText` (UTF-8),
   `data:asBase64` (with or without padding) and ranges of other blobs
@@ -743,16 +744,123 @@ offered. The capability is empty in the session; the account's says
   and its body parts' blobs name the message, so this is a lookup in the
   locator, not a search: the result is the message, its thread and the
   mailboxes it is in. A body part is matched by its message without the
-  message being parsed. Any other blob — an upload nothing uses yet, a
+  message being parsed. A script's content names the scripts that have
+  it. Any other blob — an upload nothing uses yet, a
   blob that does not exist — gets empty lists, as RFC 9404 asks, so that
   nothing is learnt about what is not the account's. A type other than
-  the three, or one whose capability (`urn:ietf:params:jmap:mail`) the
-  request does not use, is `unknownDataType`.
+  these, or one whose capability (`urn:ietf:params:jmap:mail`,
+  `urn:ietf:params:jmap:sieve`) the request does not use, is
+  `unknownDataType`.
+
+## Sieve scripts
+
+`SieveScript/get`, `/set`, `/query`, `/queryChanges` and `/validate`
+(RFC 9661) belong to `urn:ietf:params:jmap:sieve`, which is always
+offered. The scripts are the ones ManageSieve manages, in the same store:
+a script stored over one protocol is there over the other, and the active
+script is the one delivery runs.
+
+**The capability.** The session names the implementation (`ShardPost`
+and the version). The account's lists what ManageSieve says: the
+extensions of its `SIEVE` capability, including `imapsieve` and the
+`vnd.dovecot.*` programs when they are switched on; `notificationMethods`
+`["mailto"]` for `enotify`; `externalLists` null (no `extlists`);
+`maxSizeScript` 256 KiB; `maxNumberScripts` null, since ManageSieve
+counts no scripts either; `maxNumberRedirects` 4, which is what the
+interpreter and delivery allow and what ManageSieve now advertises as
+`MAXREDIRECTS` as well (it said 5 before); and `maxSizeScriptName` 128.
+RFC 9661 asks for at least 512 octets there, room for 128 characters of
+any script; ManageSieve and the store here count 128 bytes, and JMAP
+does not promise more than they keep.
+
+**Ids.** ManageSieve knows a script by its name; JMAP wants an id that
+stays when the name changes. The ids are kept in the account's metadata,
+in the server entry `/private/vendor/shardpost/jmap/sievescripts` (a map
+from name to id, see [server-managed entries](#server-managed-metadata)),
+and written with a compare-and-swap, so two front-ends that list the
+scripts at once agree on one id. A script that has none — stored over
+ManageSieve, the admin API or an import — gets one the next time a JMAP
+client lists the scripts, and an entry whose script is gone is dropped
+then. A rename over JMAP moves the id along; a rename over ManageSieve
+does not — JMAP sees the old script destroyed and a new one created —
+and neither does an export and a restore, which do not carry the entry.
+The record is bounded like the identities' (48 KiB, some hundreds of
+scripts with long names); a creation beyond it is `overQuota`.
+
+**The content** is a blob whose id is derived from the text: `S` and 40
+hex digits of its SHA-256. A new content is therefore a new `blobId`
+under the same id, and the blob id resolves — through the download
+endpoint, `Blob/get`, `Blob/lookup` and as the source of another script
+or blob — as long as a script of the account has that content. Two
+scripts with the same text share a blob id.
+
+**`SieveScript/set`** creates a script from a blob (an upload, a
+`Blob/upload` creation, any blob the account can read), renames it,
+replaces its content, and destroys it, the way ManageSieve's
+`PUTSCRIPT`, `RENAMESCRIPT` and `DELETESCRIPT` do:
+
+- A new content is checked as `PUTSCRIPT` checks it: at most
+  `maxSizeScript` (`tooLarge`), UTF-8 text of at least one character, and
+  it has to compile with the same settings and the same `include`
+  resolution (the account's scripts, the global directory);
+  `invalidSieve` otherwise, with the compiler's message, which names the
+  line and column. A blob that is not there is `blobNotFound`.
+- A name is 1 to 128 bytes of UTF-8 without the characters RFC 9661
+  excludes (U+0000–U+001F, U+007F–U+009F, U+2028, U+2029;
+  `invalidProperties`), unique in the account (`alreadyExists` with the
+  `existingId` of the script that has it). A creation without a name, or
+  with null, is named `script-<id>`. `isActive` is the server's: a
+  creation or update that sets it to anything but its value is
+  `invalidProperties`.
+- An update writes the content before the rename, after both were
+  checked, so a rename that fails leaves the script under its old name
+  with its new content. The response names the new `blobId`, since it is
+  not the one the client sent.
+- The active script is not destroyed (`sieveIsActive`); it is
+  deactivated first, in a call of its own, as RFC 9661 asks.
+- `onSuccessDeactivateScript` and then `onSuccessActivateScript` are
+  carried out only when every creation, update and destruction of the
+  call succeeded. The activation names an id or a creation id of the
+  call; one that names no script is ignored, as the RFC asks. A script is
+  compiled for delivery before it is activated — without the IMAPSieve
+  context, as ManageSieve's `SETACTIVE` does — and one that fails (a
+  script that requires `imapsieve`) is not activated either: there is no
+  error the RFC would report it with, so the client sees it stay
+  inactive. What changed is reported with `isActive`, in `created` for a
+  script the call created and in `updated` otherwise.
+
+**State.** Script writes are not in the account change log: the state is
+a hash of every script's id, name, content and activity, so it moves with
+a change over ManageSieve too. `ifInState` is compared with it before
+anything is written; it is not held while the call writes, since the
+script store has no compare-and-swap. RFC 9661 defines no
+`SieveScript/changes`, and there is none; `SieveScript/queryChanges` is
+`cannotCalculateChanges`, and `SieveScript/query` says as much with
+`canCalculateChanges: false`.
+
+**`SieveScript/query`** filters by `name` (the name contains the text,
+without regard to ASCII case) and `isActive`, with `AND`, `OR` and
+`NOT`, and sorts by `name` (with `i;ascii-casemap` or `i;octet`) and
+`isActive` (false first); anything else is `unsupportedFilter` or
+`unsupportedSort`. **`SieveScript/validate`** is `CHECKSCRIPT`: the blob
+is checked as a new content of `/set` is, nothing is stored, and the
+answer is `error: null` or the set error — `invalidSieve`, `tooLarge`, or
+`blobNotFound` for a blob that is not there.
+
+**The vacation copy.** The script `jmap-vacation`, which shows the JMAP
+VacationResponse to ManageSieve clients, is listed like any other and is
+never active. An update or destruction of it is `forbidden`, and so is a
+creation or rename to its name; an `onSuccessActivateScript` that names
+it is refused as a whole (`forbidden`, nothing written): delivery does
+not read the copy, and making it the active script would replace the
+user's filter with it. The vacation changes through
+`VacationResponse/set` (RFC 9661 4).
 
 ## Server-managed metadata
 
-The entries under `/private/vendor/shardpost/jmap/` — the identities
-and the vacation response — are the server's. They can be read over
+The entries under `/private/vendor/shardpost/jmap/` — the identities,
+the vacation response and the ids of the Sieve scripts — are the
+server's. They can be read over
 IMAP (`GETMETADATA`), but `SETMETADATA` refuses to set or remove them
 (`NO [NOPERM]`), in any spelling of the name, and an account import
 refuses them in a mailbox's annotations (400). They change over JMAP
@@ -983,14 +1091,19 @@ authentication backend, and the relay learns the account from
   the JMAP vacation or from a vacation in the user's script: the reply
   is sent once the message is stored, and here nothing is. This is how
   every Sieve vacation of this server behaves.
-- Push has no `Identity`, `PushSubscription`, `Quota` or
-  `VacationResponse` type in its `StateChange`s: none of them is in the
-  account change log. A client
+- Push has no `Identity`, `PushSubscription`, `Quota`,
+  `VacationResponse` or `SieveScript` type in its `StateChange`s: none of
+  them is in the account change log. A client
   that shows the quota fetches it again, for example when a push names
   `Email`.
-- `Blob/lookup` answers for `Email`, `Mailbox` and `Thread` only, and
-  matches a body-part blob by its message without checking that the part
-  exists. An upload that a message was built from is not found by the
+- `SieveScript`: `maxSizeScriptName` is 128 rather than the 512 RFC
+  9661 asks for, there is no `SieveScript/changes`, a script that does
+  not compile for delivery is silently not activated, and a rename over
+  ManageSieve, or an export and restore, gives a script a new id (see
+  Sieve scripts).
+- `Blob/lookup` answers for `Email`, `Mailbox`, `Thread` and
+  `SieveScript` only, and matches a body-part blob by its message
+  without checking that the part exists. An upload that a message was built from is not found by the
   message: the message is a blob of its own. The digests of `Blob/get`
   are not rate-limited beyond `maxConcurrentRequests`; a digest reads the
   range it covers.

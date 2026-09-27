@@ -269,7 +269,7 @@ fixed in 0.11.2. [Fixes and release evidence](docs/reports/2026-09-16-sieve-conf
 
 ## Stage 6: JMAP in Full – in progress
 
-**State 2026-09-25:** the staged build-out follows
+**State 2026-09-27:** the staged build-out follows
 `temp/08-jmap-staged-plan.md`. Stage 0 of that plan (the account change
 log, the account-wide state JMAP needs and IMAP does not have), stage 1
 (Core, RFC 8620: session resource, API endpoint with batching and
@@ -279,7 +279,9 @@ stage 4 (`Email/query`, `Email/queryChanges`, `Email/set`,
 `Email/import`, `Email/parse`, `Email/copy`) and stage 5 (push with an
 event source and a Web Push worker, `Identity/*`, `EmailSubmission/*`
 as a proxy to the relay with XCLIENT; delayed sending prepared, not
-offered) are implemented; see [JMAP](docs/jmap.md) for what exists and
+offered) are implemented, and of stage 6 itself `Quota/*`,
+`VacationResponse/*`, `Blob/*` (RFC 9404) and `SieveScript/*` (RFC 9661);
+sharing is next. See [JMAP](docs/jmap.md) for what exists and
 what does not. What follows is the full
 target of the stage, unchanged.
 

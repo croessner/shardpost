@@ -81,6 +81,8 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		VacationResponse: settings.SMTP.Addr != "",
 		Autocreate:       autocreate(settings.Server.Autocreate),
 		Shard:            jmap.ShardGate{Attribute: strings.TrimSpace(settings.JMAP.ShardAttribute), Value: strings.TrimSpace(settings.JMAP.Shard)},
+		// The scripts ManageSieve manages, compiled as ManageSieve does.
+		Sieve: &jmap.SieveOptions{Config: srv.sieveConfig, GlobalScripts: settings.Sieve.GlobalDir},
 	})
 
 	if strings.TrimSpace(settings.JMAP.Shard) == "" {

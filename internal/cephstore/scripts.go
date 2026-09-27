@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ceph/go-ceph/rados"
+
+	"shardpost/internal/model"
 )
 
 // Sieve scripts live in one object per user in the index pool:
@@ -21,7 +23,7 @@ const (
 	oidSieve       = "sieve"
 	sieveKeyPrefix = "s:"
 	sieveActive    = "active"
-	MaxScriptLen   = 256 << 10
+	MaxScriptLen   = model.MaxScriptSize
 )
 
 // ListScripts returns the script names and the active one.
@@ -87,7 +89,7 @@ func (u *User) ActiveScript() (string, error) {
 
 // PutScript stores a script (validated by the caller).
 func (u *User) PutScript(name, text string) error {
-	if len(text) > MaxScriptLen || len(name) > 128 {
+	if len(text) > MaxScriptLen || len(name) > model.MaxScriptName {
 		return ErrTooLarge
 	}
 
@@ -114,7 +116,7 @@ func (u *User) DeleteScript(name string) error {
 
 // SetActiveScript activates a script ("" deactivates).
 func (u *User) SetActiveScript(name string) error {
-	if len(name) > 128 {
+	if len(name) > model.MaxScriptName {
 		return ErrTooLarge
 	}
 
@@ -147,7 +149,7 @@ func (u *User) SetActiveScript(name string) error {
 
 // RenameScript renames a script, keeping it active if it was.
 func (u *User) RenameScript(oldName, newName string) error {
-	if len(newName) > 128 || newName == "" {
+	if len(newName) > model.MaxScriptName || newName == "" {
 		return ErrTooLarge
 	}
 

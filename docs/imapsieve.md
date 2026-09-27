@@ -131,7 +131,7 @@ validation. Their values stay unchanged.
 
 ## User scripts
 
-ManageSieve PUTSCRIPT stores the script. SETMETADATA assigns it; SETACTIVE still concerns delivery only and rejects scripts with `require "imapsieve"`.
+ManageSieve PUTSCRIPT stores the script. SETMETADATA assigns it; SETACTIVE still concerns delivery only and rejects scripts with `require "imapsieve"`. JMAP `SieveScript/set` stores and activates the same way (see [JMAP](jmap.md#sieve-scripts)): a script with `require "imapsieve"` is stored, and `onSuccessActivateScript` leaves it inactive.
 
 The script name `jmap-vacation` is reserved for the JMAP VacationResponse
 (see [JMAP](jmap.md#vacation)): it is the server's copy of that setting,

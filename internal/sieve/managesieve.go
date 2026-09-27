@@ -61,7 +61,7 @@ func New(o Options) *Server {
 	}
 
 	if o.MaxScript == 0 {
-		o.MaxScript = 256 << 10
+		o.MaxScript = model.MaxScriptSize
 	}
 
 	return &Server{o: o, lns: map[net.Listener]struct{}{}, conns: map[net.Conn]struct{}{}}
@@ -186,7 +186,7 @@ func (c *conn) readLine() (string, error) {
 
 // validName bounds script names (RFC 5804: no control characters).
 func validName(n string) bool {
-	if n == "" || len(n) > 128 {
+	if n == "" || len(n) > model.MaxScriptName {
 		return false
 	}
 
@@ -206,18 +206,8 @@ func (c *conn) canAuth() bool { return c.tls || c.s.o.InsecureAuth }
 func (c *conn) printf(format string, a ...any) { _, _ = fmt.Fprintf(c.bw, format, a...) }
 
 func (c *conn) capabilities() {
-	c.printf("\"IMPLEMENTATION\" \"ShardPost\"\r\n")
-
-	extensions := Extensions
-	if c.s.o.Config["extprograms_enabled"] == settingYes {
-		extensions += " vnd.dovecot.execute vnd.dovecot.pipe vnd.dovecot.filter"
-	}
-
-	if c.s.o.Config["imapsieve_enabled"] == settingYes {
-		extensions += " imapsieve"
-	}
-
-	c.printf("\"SIEVE\" \"%s\"\r\n", extensions)
+	c.printf("\"IMPLEMENTATION\" \"%s\"\r\n", Implementation)
+	c.printf("\"SIEVE\" \"%s\"\r\n", strings.Join(ExtensionList(c.s.o.Config), " "))
 
 	if c.canAuth() {
 		c.printf("\"SASL\" \"PLAIN\"\r\n")
@@ -229,7 +219,7 @@ func (c *conn) capabilities() {
 		c.printf("\"STARTTLS\"\r\n")
 	}
 
-	c.printf("\"MAXREDIRECTS\" \"5\"\r\n")
+	c.printf("\"MAXREDIRECTS\" \"%d\"\r\n", MaxRedirects)
 	c.printf("\"VERSION\" \"1.0\"\r\n")
 }
 
@@ -619,16 +609,7 @@ func (c *conn) validForDelivery(name string) bool {
 		return false
 	}
 
-	hooks := c.hooks()
-
-	hooks.Config = make(map[string]string, len(c.s.o.Config))
-	for k, v := range c.s.o.Config {
-		hooks.Config[k] = v
-	}
-
-	delete(hooks.Config, "imapsieve_enabled")
-
-	if err := CompileWith(script, hooks); err != nil {
+	if err := CompileForDelivery(script, c.hooks()); err != nil {
 		c.no("Script is not valid for delivery")
 		return false
 	}
@@ -806,6 +787,49 @@ func (c *conn) initialResponse(args []string) (string, bool, error) {
 	}
 
 	return a[0], true, nil
+}
+
+// Implementation is the name this Sieve implementation gives itself, in
+// ManageSieve's IMPLEMENTATION and JMAP's sieve capability.
+const Implementation = "ShardPost"
+
+// MaxRedirects is how many redirect actions one run of a script may take.
+// The interpreter and delivery enforce it; ManageSieve (MAXREDIRECTS) and
+// JMAP (maxNumberRedirects) advertise it.
+const MaxRedirects = 4
+
+// ExtensionList is the SIEVE capability of this server (RFC 5804 1.7)
+// under the given settings: the extensions every script may require, and
+// the ones the settings switch on. ManageSieve and JMAP list the same.
+func ExtensionList(cfg map[string]string) []string {
+	list := strings.Fields(Extensions)
+
+	if cfg["extprograms_enabled"] == settingYes {
+		list = append(list, "vnd.dovecot.execute", "vnd.dovecot.pipe", "vnd.dovecot.filter")
+	}
+
+	if cfg["imapsieve_enabled"] == settingYes {
+		list = append(list, "imapsieve")
+	}
+
+	return list
+}
+
+// CompileForDelivery compiles a script as delivery runs it — without the
+// IMAPSieve context a user script for IMAP events may use — which is the
+// check before a script becomes the active one (SETACTIVE, JMAP
+// onSuccessActivateScript).
+func CompileForDelivery(text string, h Hooks) error {
+	cfg := make(map[string]string, len(h.Config))
+	for k, v := range h.Config {
+		cfg[k] = v
+	}
+
+	delete(cfg, "imapsieve_enabled")
+
+	h.Config = cfg
+
+	return CompileWith(text, h)
 }
 
 // Extensions is the SIEVE capability list (RFC 5804 1.7) of this server.

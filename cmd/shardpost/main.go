@@ -331,6 +331,9 @@ type servers struct {
 	jmapTLS *tls.Config
 	// jmapKV is the admin store the JMAP push subscriptions are kept in.
 	jmapKV *cephstore.AdminKV
+	// sieveConfig are the Sieve settings ManageSieve compiles with; JMAP
+	// compiles scripts with the same.
+	sieveConfig map[string]string
 	// delivery is shared by LMTP and the local delivery API.
 	delivery *delivery.Service
 	admin    *adminServers
@@ -407,7 +410,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 	insecure := settings.Server.InsecureAuth
 	manageConfig := manageSieveConfig(settings, sieveCfg, programs)
 
-	var srv servers
+	srv := servers{sieveConfig: manageConfig}
 
 	srv.imap = imapproto.New(imapproto.Options{
 		IMAPSieve: imapSieve,
