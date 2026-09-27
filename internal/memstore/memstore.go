@@ -1067,7 +1067,7 @@ func (u *User) GetACL(name string) (map[string]string, error) {
 // remove the entry. The grantee's shared pointer follows.
 func (u *User) SetACL(name, identifier, rights string) error {
 	identifier = strings.ToLower(strings.TrimSpace(identifier))
-	if identifier == "" || identifier == u.name {
+	if !model.ValidACLIdentifier(identifier) || identifier == u.name {
 		return fmt.Errorf("invalid identifier")
 	}
 
@@ -1164,7 +1164,7 @@ var _ model.ACLModifier = (*User)(nil)
 // under one lock.
 func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(old string) string) (string, uint64, error) {
 	identifier = strings.ToLower(strings.TrimSpace(identifier))
-	if identifier == "" || identifier == u.name {
+	if !model.ValidACLIdentifier(identifier) || identifier == u.name {
 		return "", 0, fmt.Errorf("invalid identifier")
 	}
 

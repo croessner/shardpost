@@ -227,24 +227,9 @@ func (c *conn) parentRights(t *target, name string) (string, error) {
 // SETACL mailbox identifier rights (rights may start with + or -)
 // DELETEACL mailbox identifier
 func (c *conn) cmdSetACL(tag string, del bool) error {
-	name, err := c.r.astring()
-	if err != nil {
+	name, identifier, rights, mod, ok, err := c.readSetACLArgs(tag, del)
+	if err != nil || !ok {
 		return err
-	}
-
-	identifier, err := c.r.astring()
-	if err != nil {
-		return err
-	}
-
-	mod := byte(0)
-	rights := ""
-
-	if !del {
-		var ok bool
-		if rights, mod, ok, err = c.readRightsArg(tag); err != nil || !ok {
-			return err
-		}
 	}
 
 	t, err := c.target(name)
@@ -279,6 +264,35 @@ func (c *conn) cmdSetACL(tag string, del bool) error {
 	}
 
 	return nil
+}
+
+// readSetACLArgs reads the arguments of SETACL (or DELETEACL) and checks
+// the identifier and the rights; ok is false after they were answered
+// with BAD.
+func (c *conn) readSetACLArgs(tag string, del bool) (name, identifier, rights string, mod byte, ok bool, err error) {
+	if name, err = c.r.astring(); err != nil {
+		return
+	}
+
+	if identifier, err = c.r.astring(); err != nil {
+		return
+	}
+
+	if !del {
+		if rights, mod, ok, err = c.readRightsArg(tag); err != nil || !ok {
+			return
+		}
+	}
+
+	// A "/" or a NUL cannot be part of an identifier: the grantee's
+	// shared pointer is keyed "<owner>/<mailbox>" in its registry.
+	if !model.ValidACLIdentifier(identifier) {
+		c.bad(tag, "Invalid identifier")
+
+		return name, identifier, rights, mod, false, nil
+	}
+
+	return name, identifier, rights, mod, true, nil
 }
 
 // readRightsArg reads the rights argument of SETACL with its optional

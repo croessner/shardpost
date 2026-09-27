@@ -57,7 +57,7 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	name = canonical(name)
 
 	identifier = canonicalIdentifier(identifier)
-	if identifier == "" || identifier == u.name {
+	if !model.ValidACLIdentifier(identifier) || identifier == u.name {
 		return fmt.Errorf("invalid identifier")
 	}
 
@@ -136,7 +136,7 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 	name = canonical(name)
 
 	identifier = canonicalIdentifier(identifier)
-	if identifier == "" || identifier == u.name {
+	if !model.ValidACLIdentifier(identifier) || identifier == u.name {
 		return "", 0, fmt.Errorf("invalid identifier")
 	}
 

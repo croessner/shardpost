@@ -1,5 +1,10 @@
 package model
 
+import (
+	"strings"
+	"unicode/utf8"
+)
+
 // SharedPager is implemented by user views that can read their shared
 // pointers (see SharedRef) a bounded number at a time. ListShared reads
 // all of them, and anybody can add pointers to a user's registry by
@@ -84,4 +89,13 @@ func nextOwner(sorted []SharedRef, after string) (string, bool, error) {
 // for stores that keep their pointers in memory.
 func NextSharedOwnerOf(sorted []SharedRef, after string) (string, bool, error) {
 	return nextOwner(sorted, after)
+}
+
+// ValidACLIdentifier reports whether an ACL identifier can be stored: not
+// empty, UTF-8, and without the bytes a shared pointer's key uses as
+// separators — a "/" would move the owner/mailbox boundary of the key, a
+// NUL end it early, and 0xff is what SharedKeyEnd relies on no key
+// holding.
+func ValidACLIdentifier(id string) bool {
+	return id != "" && utf8.ValidString(id) && !strings.ContainsAny(id, "/\x00")
 }

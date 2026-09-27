@@ -407,7 +407,7 @@ func (s *Server) checkIdentifier(w http.ResponseWriter, r *http.Request, owner, 
 		return true
 	}
 
-	if !validAccount(identifier) || strings.HasPrefix(identifier, "-") {
+	if !validAccount(identifier) || !model.ValidACLIdentifier(identifier) || strings.HasPrefix(identifier, "-") {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "invalid identifier")
 		return false
 	}

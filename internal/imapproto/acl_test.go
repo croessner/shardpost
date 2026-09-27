@@ -141,6 +141,10 @@ func TestACLSharedFolders(t *testing.T) {
 	mustHave(t, bob.ok(`MYRIGHTS "Shared/alice/Team"`), " lr")
 
 	mustHave(t, alice.cmd("SETACL Team alice lr"), "CANNOT")
+
+	// A "/" would move the boundary of the grantee's pointer key.
+	mustHave(t, alice.cmd(`SETACL Team "bob/x" lr`), "BAD")
+	mustHave(t, alice.cmd(`DELETEACL Team "bob/x"`), "BAD")
 }
 
 // TestMetadataServerManaged: the entries the JMAP front-end keeps can be

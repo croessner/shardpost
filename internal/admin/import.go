@@ -925,7 +925,7 @@ func validAccount(a string) bool {
 // "anyone" (no Dovecot pseudo identifiers).
 func validIdentifier(id string) bool {
 	switch {
-	case id == "" || len(id) > maxIdentifier || hasControl(id) || strings.ContainsAny(id, " /\\"):
+	case !model.ValidACLIdentifier(id) || len(id) > maxIdentifier || hasControl(id) || strings.ContainsAny(id, " /\\"):
 		return false
 	case id == "owner" || id == "authenticated" || strings.ContainsAny(id[:1], "$-#"):
 		return false

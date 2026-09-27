@@ -222,7 +222,10 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
   well. A malformed `If-Match` gives 400.
 - **Identifiers** are canonical accounts (Nauthilus) or `anyone`: aliases
   are rejected together with the canonical name, unknown accounts with
-  404, the owner with 400. The recipient's share pointer follows as it
+  404, the owner with 400. An identifier that is not UTF-8 or holds a
+  `/` or a NUL is refused with 400, by the store as well: the
+  recipient's share pointer is keyed `<owner>/<mailbox>`. IMAP `SETACL`
+  and `DELETEACL` answer `BAD` for such an identifier. The recipient's share pointer follows as it
   does for IMAP SETACL (there is none for `anyone`); a change with no
   effect writes none. If only the pointer write fails, the change still
   stands (the ACL is authoritative; a warning is logged, `acl explain`
