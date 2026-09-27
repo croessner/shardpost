@@ -586,7 +586,8 @@ The position is the owner's counter, and two of them would tell how
 many changes lie between two visible ones, so the token does not carry
 it in the clear: it is enciphered with a key of the namespace (32
 random bytes, created on first use and kept as a server METADATA entry
-of the namespace) into 16 hex digits after an `x`, a permutation of
+of the namespace under the accessor `~jmap`, which no account can be,
+so neither the owner nor a reader can fetch it) into 16 hex digits after an `x`, a permutation of
 the counter the user can neither read nor order. Tokens written before
 this was introduced (a plain number before the dash) no longer parse,
 and a client holding one resynchronises that account once.
