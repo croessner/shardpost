@@ -66,7 +66,11 @@ func personalAccount(login string, u model.User) *account {
 // the rights it holds on them. It is read again for every method call
 // (and by every tree a call builds), so a grant or a revocation counts
 // from the next call on.
-func (a *account) load() error {
+func (a *account) load() error { return a.loadWith(nil) }
+
+// loadWith is load with the user's pointers already read (nil reads
+// them).
+func (a *account) loadWith(refs []model.SharedRef) error {
 	if a.personal {
 		return nil
 	}
@@ -76,14 +80,15 @@ func (a *account) load() error {
 		err   error
 	)
 
-	if a.public {
+	switch {
+	case a.public:
 		boxes, err = publicBoxes(a.own, a.user, a.login)
-	} else {
-		var refs []model.SharedRef
-
+	case refs == nil:
 		if refs, err = a.own.ListShared(); err == nil {
 			boxes, err = ownerBoxes(a.own, a.user, a.login, a.owner, refs)
 		}
+	default:
+		boxes, err = ownerBoxes(a.own, a.user, a.login, a.owner, refs)
 	}
 
 	if err != nil {
@@ -672,30 +677,36 @@ func (s *Server) resolveAccount(sess *session, id string) (*account, *methodErro
 // the user's own pointers named it, so an id a client makes up opens
 // nothing.
 func (s *Server) sharedAccount(sess *session, id string) (*account, error) {
-	sh := s.o.Sharing
+	switch {
+	case id == model.PublicNamespace:
+		return s.openShared(sess, id, nil)
+	case s.o.Sharing.SharedPrefix == "" || id == "" || strings.HasPrefix(id, "~") || id == sess.account:
+		return nil, nil
+	}
 
-	var a *account
+	refs, err := sess.own.ListShared()
+	if err != nil {
+		return nil, err
+	}
+
+	return s.openShared(sess, id, refs)
+}
+
+// openShared opens a shared account with the user's pointers already
+// read (nil for the public account), or returns nil when the user sees
+// no mailbox in it.
+func (s *Server) openShared(sess *session, id string, refs []model.SharedRef) (*account, error) {
+	a := &account{id: id, owner: id, login: sess.account, own: sess.own}
 
 	switch {
 	case id == model.PublicNamespace:
-		if sh.PublicPrefix == "" {
+		if s.o.Sharing.PublicPrefix == "" {
 			return nil, nil
 		}
 
-		a = &account{id: id, owner: id, login: sess.account, own: sess.own, public: true}
-	case sh.SharedPrefix == "" || id == "" || strings.HasPrefix(id, "~") || id == sess.account:
+		a.public = true
+	case !namesOwner(refs, id):
 		return nil, nil
-	default:
-		refs, err := sess.own.ListShared()
-		if err != nil {
-			return nil, err
-		}
-
-		if !namesOwner(refs, id) {
-			return nil, nil
-		}
-
-		a = &account{id: id, owner: id, login: sess.account, own: sess.own}
 	}
 
 	u, err := sess.views.get(a.owner)
@@ -705,7 +716,7 @@ func (s *Server) sharedAccount(sess *session, id string) (*account, error) {
 
 	a.user = u
 
-	if err := a.load(); err != nil {
+	if err := a.loadWith(refs); err != nil {
 		return nil, err
 	}
 
@@ -736,12 +747,14 @@ func namesOwner(refs []model.SharedRef, owner string) bool {
 func (s *Server) sharedAccounts(sess *session) []*account {
 	var out []*account
 
-	for _, owner := range s.sharingOwners(sess) {
+	owners, refs := s.sharingOwners(sess)
+
+	for _, owner := range owners {
 		if len(out) >= s.o.Sharing.MaxAccounts {
 			break
 		}
 
-		a, err := s.sharedAccount(sess, owner)
+		a, err := s.openShared(sess, owner, refs)
 		if err != nil {
 			sess.log.Warn("jmap: shared account left out of the session", "shared", owner, "err", err)
 			continue
@@ -752,7 +765,7 @@ func (s *Server) sharedAccounts(sess *session) []*account {
 		}
 	}
 
-	a, err := s.sharedAccount(sess, model.PublicNamespace)
+	a, err := s.openShared(sess, model.PublicNamespace, nil)
 	if err != nil {
 		sess.log.Warn("jmap: public account left out of the session", "err", err)
 	} else if a != nil {
@@ -762,19 +775,20 @@ func (s *Server) sharedAccounts(sess *session) []*account {
 	return out
 }
 
-// sharingOwners are the owners the user's pointers name, sorted. A
-// pointer into the public namespace is a leftover (public folders are
-// found through their namespace) and is dropped, as IMAP LIST drops it.
-func (s *Server) sharingOwners(sess *session) []string {
+// sharingOwners are the owners the user's pointers name, sorted, and
+// the pointers. A pointer into the public namespace is a leftover (public
+// folders are found through their namespace) and is dropped, as IMAP
+// LIST drops it.
+func (s *Server) sharingOwners(sess *session) ([]string, []model.SharedRef) {
 	if s.o.Sharing.SharedPrefix == "" {
-		return nil
+		return nil, nil
 	}
 
 	refs, err := sess.own.ListShared()
 	if err != nil {
 		sess.log.Warn("jmap: shared mailboxes not read", "err", err)
 
-		return nil
+		return nil, nil
 	}
 
 	seen := map[string]bool{}
@@ -794,7 +808,7 @@ func (s *Server) sharingOwners(sess *session) []string {
 
 	sort.Strings(owners)
 
-	return owners
+	return owners, refs
 }
 
 // sharedAccountObject describes a shared account in the session: named
