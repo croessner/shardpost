@@ -12,9 +12,8 @@ import (
 	"shardpost/internal/model"
 )
 
-// Email/import, Email/copy and Email/parse (RFC 8621 4.7-4.9): messages a
-// client has as blobs, stored or only looked at, and the copy between
-// accounts that this server, with one account per session, cannot do.
+// Email/import and Email/parse (RFC 8621 4.8-4.9): messages a client has
+// as blobs, stored or only looked at. Email/copy is in emailcopy.go.
 
 // setInvalidEmail is the set error of a blob that is not a message.
 const setInvalidEmail = "invalidEmail"
@@ -164,30 +163,6 @@ func receivedTime(raw []byte) time.Time {
 	}
 
 	return time.Now()
-}
-
-// emailCopyRequest is the part of a /copy this server looks at.
-type emailCopyRequest struct {
-	FromAccountID string `json:"fromAccountId"`
-	AccountID     string `json:"accountId"`
-}
-
-// emailCopy implements Email/copy, which copies between two accounts. A
-// session here has one account, so the source is never there; a copy
-// within the account is Email/set on mailboxIds, and RFC 8620 5.4 makes
-// the same account on both sides an invalid call.
-func emailCopy(_ context.Context, sess *session, args json.RawMessage) (any, *methodError) {
-	var req emailCopyRequest
-	if merr := forAccount(sess, args, &req); merr != nil {
-		return nil, merr
-	}
-
-	if req.FromAccountID == accountID(sess.account) {
-		return nil, &methodError{Type: errInvalidArguments, Arguments: []string{"fromAccountId"},
-			Description: "fromAccountId is the account copied to; within one account, change mailboxIds with Email/set"}
-	}
-
-	return nil, &methodError{Type: errFromAccountNotFound}
 }
 
 // emailParseRequest is the argument shape of Email/parse: an Email/get

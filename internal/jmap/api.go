@@ -112,7 +112,7 @@ var methods = map[string]method{
 	"Email/query":                  {capability: CapMail, run: emailQueryRun, shared: true},
 	"Email/queryChanges":           {capability: CapMail, run: emailQueryChanges, shared: true},
 	methodEmailSet:                 {capability: CapMail, run: emailSet, shared: true},
-	"Email/copy":                   {capability: CapMail, run: emailCopy},
+	"Email/copy":                   {capability: CapMail, run: emailCopy, shared: true},
 	"Email/import":                 {capability: CapMail, run: emailImport, shared: true},
 	"Email/parse":                  {capability: CapMail, run: emailParse, shared: true},
 	"Thread/get":                   {capability: CapMail, run: threadGet, shared: true},

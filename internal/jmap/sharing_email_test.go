@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -434,5 +435,137 @@ func TestSharingBlobs(t *testing.T) {
 	res = f.mail(t, "Email/parse", `{"accountId":"alice","blobIds":`+idList(hidden.GUID, readable.GUID)+`}`)
 	if nf := strList(res["notFound"]); len(nf) != 1 || nf[0] != hidden.GUID {
 		t.Errorf("Email/parse notFound %v", nf)
+	}
+}
+
+// copyCall runs Email/copy as test and returns its response and the
+// implicit Email/set that follows it, if any.
+func (f *sharing) copyCall(t *testing.T, args string) (copied, implicit map[string]any) {
+	t.Helper()
+
+	body := `{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],"methodCalls":[["Email/copy",` + args + `,"c1"]]}`
+
+	r := httptest.NewRequest(http.MethodPost, PathAPI, strings.NewReader(body))
+	r.SetBasicAuth("test", "secret")
+
+	w := httptest.NewRecorder()
+	f.s.ServeHTTP(w, r)
+
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	list := responses(t, out)
+
+	first, _ := list[0].([]any)
+	if first[0] != "Email/copy" {
+		t.Fatalf("Email/copy answered %v: %#v", first[0], first[1])
+	}
+
+	copied, _ = first[1].(map[string]any)
+
+	if len(list) > 1 {
+		second, _ := list[1].([]any)
+		if second[0] != methodEmailSet || second[2] != "c1" {
+			t.Fatalf("the implicit call is %v under %v", second[0], second[2])
+		}
+
+		implicit, _ = second[1].(map[string]any)
+	}
+
+	return copied, implicit
+}
+
+// createdEmailID is the id a creation got.
+func createdEmailID(res map[string]any, cid string) string {
+	created, _ := res["created"].(map[string]any)
+	obj, _ := created[cid].(map[string]any)
+	id, _ := obj[propID].(string)
+
+	return id
+}
+
+// TestSharingEmailCopy: copies between the personal account and shared
+// ones in both directions, with the rights of both sides, and the
+// destruction of the original under the source's rights.
+func TestSharingEmailCopy(t *testing.T) {
+	f := newSharing(t)
+	mine, _ := f.test.Lookup("Mine")
+	drop, staff := f.id(t, "alice:Drop"), f.id(t, "~public:Staff")
+
+	plain := deliver(t, f.test, "Mine", plainMessage)
+	seen := deliver(t, f.test, "Mine", "Subject: read\r\n\r\nbody\r\n", `\Seen`)
+
+	// Personal to shared: a new message with an id of its own; $seen
+	// needs s in the destination.
+	res, _ := f.copyCall(t, `{"fromAccountId":"test","accountId":"alice","create":{"a":{"id":"`+plain.GUID+
+		`","mailboxIds":{"`+drop+`":true}},"b":{"id":"`+seen.GUID+`","mailboxIds":{"`+drop+`":true}}}}`)
+
+	if id := createdEmailID(res, "a"); id == "" || id == plain.GUID {
+		t.Errorf("the copy into alice's Drop: %#v", res)
+	}
+
+	if typ := setErrorType(res, "notCreated", "b"); typ != setForbidden {
+		t.Errorf("copying a read message into a mailbox without s gave %q", typ)
+	}
+
+	if msgs, _ := f.alice.ListMessages(drop); len(msgs) != 1 {
+		t.Errorf("alice's Drop holds %d messages, want 1", len(msgs))
+	}
+
+	// Shared to personal, destroying the original: Team has no t and e,
+	// so the copy is made and the destruction refused.
+	team := deliver(t, f.alice, "Team", plainMessage)
+
+	res, implicit := f.copyCall(t, `{"fromAccountId":"alice","accountId":"test","onSuccessDestroyOriginal":true,`+
+		`"create":{"c":{"id":"`+team.GUID+`","mailboxIds":{"`+mine.ID+`":true}}}}`)
+	if createdEmailID(res, "c") == "" || setErrorType(implicit, "notDestroyed", team.GUID) != setForbidden {
+		t.Errorf("copy out of Team: %#v, then %#v", res, implicit)
+	}
+
+	// Out of Sub, which has t and e: the original goes.
+	sub := deliver(t, f.alice, "Team/Sub", plainMessage)
+
+	_, implicit = f.copyCall(t, `{"fromAccountId":"alice","accountId":"test","onSuccessDestroyOriginal":true,`+
+		`"create":{"c":{"id":"`+sub.GUID+`","mailboxIds":{"`+mine.ID+`":true}}}}`)
+	if got := strList(implicit["destroyed"]); len(got) != 1 || flagsAndBoxes(t, f.alice, sub.GUID) != "" {
+		t.Errorf("the original in Sub was not destroyed: %#v", implicit)
+	}
+
+	// Shared to shared.
+	res, _ = f.copyCall(t, `{"fromAccountId":"alice","accountId":"~public","create":{"d":{"id":"`+team.GUID+
+		`","mailboxIds":{"`+staff+`":true}}}}`)
+	if createdEmailID(res, "d") == "" {
+		t.Errorf("copy from alice to the public folders: %#v", res)
+	}
+}
+
+// TestSharingEmailCopyRefuses: a message the user may not read is not
+// found, an account it cannot reach is not found on either side, and a
+// copy within one account is a malformed call.
+func TestSharingEmailCopyRefuses(t *testing.T) {
+	f := newSharing(t)
+	mine, _ := f.test.Lookup("Mine")
+
+	hidden := deliver(t, f.alice, "Hidden", plainMessage)
+	listed := deliver(t, f.alice, "Listed", plainMessage)
+
+	res, _ := f.copyCall(t, `{"fromAccountId":"alice","accountId":"test","create":{"h":{"id":"`+hidden.GUID+
+		`","mailboxIds":{"`+mine.ID+`":true}},"l":{"id":"`+listed.GUID+`","mailboxIds":{"`+mine.ID+`":true}}}}`)
+	if setErrorType(res, "notCreated", "h") != setNotFound || setErrorType(res, "notCreated", "l") != setNotFound {
+		t.Errorf("copying unreadable messages: %#v", res)
+	}
+
+	cases := []struct{ args, want string }{
+		{`{"fromAccountId":"bob","accountId":"test","create":{}}`, errFromAccountNotFound},
+		{`{"fromAccountId":"test","accountId":"bob","create":{}}`, errAccountNotFound},
+		{`{"fromAccountId":"alice","accountId":"alice","create":{}}`, errInvalidArguments},
+	}
+
+	for _, c := range cases {
+		if typ := f.mailErr(t, "Email/copy", c.args); typ != c.want {
+			t.Errorf("%s gave %s, want %s", c.args, typ, c.want)
+		}
 	}
 }
