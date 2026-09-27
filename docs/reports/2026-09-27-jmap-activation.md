@@ -79,13 +79,27 @@ client ──https──▶ jmap.roessner-net.de (A/AAAA .233/.234, TTL 3600)
 - **Backends:** kn1/kn2 UP; kn3 DOWN, because no ShardPost pod runs there (externalTrafficPolicy Local), as intended.
 - **Logs:** server and push worker 0 ERROR, 0 WARN. Zabbix maintenance 392 on 10478 removed; the load event 42162358 was open before it.
 
+## Client tests
+
+- **`hack/jmap-acceptance.py`** (Python, `jmapc` 0.3.0), run against the public name with `rbdpoc1`:
+  - a draft to the account itself, submitted with `EmailSubmission` through the relay's XCLIENT listener
+  - delivered to the INBOX after about 5 seconds
+  - the copy moved to Sent by `onSuccessUpdateEmail`, nothing left in Drafts
+  - a foreign From refused by ShardPost (`forbiddenFrom`)
+  - a foreign envelope sender refused by ShardPost (`forbiddenMailFrom`) before the relay is asked; the relay's own refusal (`553`) was verified at the relay's rollout
+  - every test message deleted again
+- **aerc 0.22** (terminal client with JMAP; Homebrew) is set up for `rbdpoc2` in `~/Library/Preferences/aerc/accounts.conf`:
+  - `jmap://` source and `outgoing = jmap://`
+  - the password comes from SOPS through `source-cred-cmd`
+  - It connects, lists the mailboxes, queries and fetches messages and threads, and listens for changes over the event source.
+- **Not available here:**
+  - Ltt.rs is an Android app, and there is no Android SDK on the operator's Mac.
+  - Thunderbird 156 has no JMAP.
+  - NeoMutt has no JMAP.
+  - A browser client would need CORS, which the server does not send.
+
 ## Not verified yet
 
-A graphical JMAP client could not be set up on the operator's Mac: Ltt.rs
-is an Android app and there is no Android SDK, Thunderbird 156 has no JMAP,
-and a browser client would need CORS, which the server does not send.
-
-- A real JMAP client (e.g. Ltt.rs) with Basic and with Bearer.
-- Sending: an approved test message, and the refusals of a foreign envelope sender (Postfix) and a foreign From (ShardPost).
+- Bearer (OAuth) logins with a real token: they need an interactive OIDC login with MFA.
 - A Web Push subscription up to a device.
 - The event source's lifetime through HAProxy: the frontend's `timeout client` is 1 minute. A client that asks for no ping or a ping above 60 seconds is cut; with `ping` ≤ 60 it holds.
