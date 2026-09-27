@@ -2,6 +2,35 @@
 
 Date: 2026-09-27. Status: live, healthy. Image 0.28.1, unchanged.
 
+## A test endpoint, not the lasting one
+
+`jmap.roessner-net.de` exists for testing with the test accounts on the
+ShardPost shard (`rbdpoc1`, `rbdpoc2`). No production client is pointed at
+it, and none will be. Clients connect through `mail.roessner-net.de`,
+rolled out by automx, and JMAP will follow that path once the Director
+routes JMAP per account (roadmap stage 7). Until then an account on the
+mailstack shard is refused (403, shard gate).
+
+JMAP needs no host name of its own. RFC 8620 finds the server through
+`/.well-known/jmap` on the name the client already has, and
+`mail.roessner-net.de` resolves to the same VIPs `.233`/`.234`. The switch
+to the lasting path, with the Director:
+
+| Where | Today (test) | With the Director |
+|---|---|---|
+| Name clients use | `jmap.roessner-net.de` | `mail.roessner-net.de` (automx) |
+| HAProxy `ft_nauthilus` | Host ACL `jmap.roessner-net.de` → `be_shardpost_jmap` (ShardPost directly) | Host `mail.roessner-net.de`, paths `/.well-known/jmap` and `/jmap/` → Director backend |
+| Certificate on the LBRs | SAN `jmap.roessner-net.de` on the login certificate | SAN `mail.roessner-net.de` (or its own certificate) |
+| `jmap.public_base_url` | `https://jmap.roessner-net.de` | `https://mail.roessner-net.de` |
+| Nauthilus `shardpost-introspection` resource | `https://jmap.roessner-net.de/` | `https://mail.roessner-net.de/` |
+| Shard gate | the only guard against foreign accounts | a safety net behind the Director's routing |
+| Push subscriptions | test accounts only | clients subscribe anew once the name changes |
+
+When the lasting path is live, the test name goes: its DNS records, the
+SAN, the HAProxy ACL and backend (`jmap-route.py` backup or reverse edit)
+and the cert-manager certificate `shardpost-jmap-tls`, if the Director
+terminates towards ShardPost with another name.
+
 ## Path
 
 ```text
@@ -51,6 +80,10 @@ client ──https──▶ jmap.roessner-net.de (A/AAAA .233/.234, TTL 3600)
 - **Logs:** server and push worker 0 ERROR, 0 WARN. Zabbix maintenance 392 on 10478 removed; the load event 42162358 was open before it.
 
 ## Not verified yet
+
+A graphical JMAP client could not be set up on the operator's Mac: Ltt.rs
+is an Android app and there is no Android SDK, Thunderbird 156 has no JMAP,
+and a browser client would need CORS, which the server does not send.
 
 - A real JMAP client (e.g. Ltt.rs) with Basic and with Bearer.
 - Sending: an approved test message, and the refusals of a foreign envelope sender (Postfix) and a foreign From (ShardPost).

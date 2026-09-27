@@ -199,6 +199,8 @@ jmap:
   addr: ":9443"
   tls_cert: "/tls/jmap/tls.crt"
   tls_key: "/tls/jmap/tls.key"
+  # Test name only: clients use mail.roessner-net.de, and JMAP moves there
+  # once the Director routes it (docs/reports/2026-09-27-jmap-activation.md).
   public_base_url: "https://jmap.roessner-net.de"
   # The Director does not route JMAP: every RNS account reaches this shard
   # through HAProxy, and only its own accounts may be served.
