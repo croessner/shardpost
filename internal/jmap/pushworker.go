@@ -480,60 +480,96 @@ func (w *worker) dropAccount(account string) {
 // verify sends the verifications that are waiting. A push service that
 // refuses one is not asked again (RFC 9749 6); one that could not be
 // reached is tried again, a few times.
+//
+// The queue is read, worked through, and only then are the items that
+// were handled taken out of it, in one update that keeps what the
+// front-ends queued in between: a worker that dies on the way leaves
+// the queue as it was, and its successor sends those verifications
+// (again, for the ones already sent — a second verification of the same
+// subscription carries the same code and does no harm).
 func (w *worker) verify(ctx context.Context) {
-	var items []verifyItem
-
-	err := w.o.KV.Update(pushVerifyQueue, func(cur []byte) ([]byte, error) {
-		if cur == nil {
-			return nil, errNoSuchPush
-		}
-
-		_ = json.Unmarshal(cur, &items)
-
-		return nil, nil
-	})
+	raw, err := w.o.KV.Get(pushVerifyQueue)
 	if err != nil {
-		if !errors.Is(err, errNoSuchPush) {
+		if !errors.Is(err, model.ErrNotFound) {
 			w.o.Log.Warn("push worker: read verifications", "err", err)
 		}
 
 		return
 	}
 
+	var items []verifyItem
+	if json.Unmarshal(raw, &items) != nil || len(items) == 0 {
+		return
+	}
+
 	var again []verifyItem
 
 	for _, it := range items {
-		pa, err := loadPushAccount(w.o.KV, it.Account)
-		if err != nil {
-			again = append(again, it)
-			continue
-		}
-
-		rec := pa.find(it.ID)
-		if rec == nil || rec.Verified {
-			continue
-		}
-
-		payload, _ := json.Marshal(map[string]string{
-			"@type": "PushVerification", "pushSubscriptionId": rec.ID, "verificationCode": rec.Code,
-		})
-
-		if w.send(ctx, rec, payload) == webpush.Slow && it.Attempts+1 < verifyAttempts {
+		if w.verifyOne(ctx, it) {
 			it.Attempts++
 			again = append(again, it)
 		}
 	}
 
-	for _, it := range again {
-		_ = w.o.KV.Update(pushVerifyQueue, func(cur []byte) ([]byte, error) {
-			var q []verifyItem
-			if cur != nil {
-				_ = json.Unmarshal(cur, &q)
-			}
+	err = w.o.KV.Update(pushVerifyQueue, func(cur []byte) ([]byte, error) {
+		var q []verifyItem
+		if cur != nil {
+			_ = json.Unmarshal(cur, &q)
+		}
 
-			return json.Marshal(append(q, it))
-		})
+		q = append(withoutItems(q, items), again...)
+		if len(q) == 0 {
+			return nil, nil
+		}
+
+		return json.Marshal(q)
+	})
+	if err != nil {
+		w.o.Log.Warn("push worker: update verifications", "err", err)
 	}
+}
+
+// verifyOne sends one verification and reports whether it is to be tried
+// again.
+func (w *worker) verifyOne(ctx context.Context, it verifyItem) bool {
+	pa, err := loadPushAccount(w.o.KV, it.Account)
+	if err != nil {
+		return true
+	}
+
+	rec := pa.find(it.ID)
+	if rec == nil || rec.Verified {
+		return false
+	}
+
+	payload, _ := json.Marshal(map[string]string{
+		"@type": "PushVerification", "pushSubscriptionId": rec.ID, "verificationCode": rec.Code,
+	})
+
+	return w.send(ctx, rec, payload) == webpush.Slow && it.Attempts+1 < verifyAttempts
+}
+
+// withoutItems is the queue without the items a round handled (one
+// occurrence each, as they were read).
+func withoutItems(q, handled []verifyItem) []verifyItem {
+	left := map[verifyItem]int{}
+	for _, it := range handled {
+		left[it]++
+	}
+
+	out := q[:0:0]
+
+	for _, it := range q {
+		if left[it] > 0 {
+			left[it]--
+
+			continue
+		}
+
+		out = append(out, it)
+	}
+
+	return out
 }
 
 // send posts one payload and acts on the answer.

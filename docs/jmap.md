@@ -893,11 +893,19 @@ to three times. Push URLs are capabilities and do not appear in the
 logs.
 
 A push URL is a client's to choose, and the worker posts to it, so it is
-treated as an attack vector: it has to be `https`, a front-end refuses
-one that names an internal address, and the worker refuses to connect to
-any loopback, private, link-local or shared address after name
-resolution, and follows no redirects. An in-house push service needs
-`jmap.push.allow_internal_endpoints` on both sides.
+treated as an attack vector: it has to be `https` on port 443, a
+front-end refuses one that names an internal address or another port,
+and the worker refuses to connect to any loopback, private, link-local
+or shared address after name resolution, or to any port but 443, and
+follows no redirects; such a push is not retried. An in-house push
+service needs `jmap.push.allow_internal_endpoints` on both sides, which
+lifts the port rule as well.
+
+The verification queue is emptied only of what the worker has sent,
+after it sent it, in one update that keeps what the front-ends queued
+in between: a worker that stops on the way leaves the queue whole, and
+its successor sends those verifications — some a second time, with the
+same code, which does no harm.
 
 A subscription belongs to the account, not to the credentials that made
 it (RFC 8620 7.2 ties it to them): changing the password does not end

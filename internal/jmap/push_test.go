@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,6 +253,7 @@ func TestPushSubscriptionRefuses(t *testing.T) {
 		`{"deviceClientId":"d","url":"http://push.example.net/"}`,
 		`{"deviceClientId":"d","url":"https://127.0.0.1/"}`,
 		`{"deviceClientId":"d","url":"https://localhost/"}`,
+		`{"deviceClientId":"d","url":"https://push.example.net:8443/"}`,
 		`{"deviceClientId":"d","url":"https://push.example.net/","verificationCode":"x"}`,
 		`{"deviceClientId":"d","url":"https://push.example.net/","keys":{"p256dh":"AAAA","auth":"AAAA"}}`,
 		`{"deviceClientId":"d","url":"https://push.example.net/","id":"x"}`,
@@ -531,5 +533,56 @@ func TestPushWorkerPrunes(t *testing.T) {
 
 	if _, ok := w.checked["gone@example.org"]; ok || len(w.checked) != 1 {
 		t.Fatalf("checks after prune: %v", w.checked)
+	}
+}
+
+// TestVerifyKeepsTheQueue: the verification queue is emptied only of what
+// a round handled, after it handled it; what the front-ends queue in the
+// meantime stays, and a round that dies before its update leaves the
+// queue whole.
+func TestVerifyKeepsTheQueue(t *testing.T) {
+	kv := memstore.NewAdminKV()
+
+	var sent atomic.Int32
+
+	ps := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sent.Add(1)
+		// A front-end queues another verification while the worker works.
+		_ = queueVerify(kv, "test", "later")
+
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ps.Close()
+
+	sender, _ := testSender(t)
+
+	if err := updatePushAccount(kv, "test", func(pa *pushAccount) error {
+		pa.Account = "test"
+		pa.Subs = append(pa.Subs, &pushRecord{ID: "first", Account: "test", URL: ps.URL + "/x", Code: "c",
+			Expires: time.Now().Add(time.Hour)})
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := queueVerify(kv, "test", "first"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &worker{o: workerDefaults(WorkerOptions{KV: kv, Sender: sender}), backoff: map[string]time.Time{}}
+	w.verify(context.Background())
+
+	raw, _ := kv.Get(pushVerifyQueue)
+
+	var q []verifyItem
+	_ = json.Unmarshal(raw, &q)
+
+	if sent.Load() != 1 || len(q) != 1 || q[0].ID != "later" {
+		t.Fatalf("sent %d, queue %+v; want one sent and the later one left", sent.Load(), q)
+	}
+
+	if got := withoutItems([]verifyItem{{ID: "a"}, {ID: "a"}, {ID: "b"}}, []verifyItem{{ID: "a"}}); len(got) != 2 {
+		t.Errorf("withoutItems took more than it handled: %+v", got)
 	}
 }

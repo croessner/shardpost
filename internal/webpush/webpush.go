@@ -342,6 +342,12 @@ func (s *Sender) Send(ctx context.Context, endpoint string, keys *Keys, payload 
 
 	resp, err := s.Client.Do(req)
 	if err != nil {
+		// An endpoint the client may not connect to will not become one
+		// by waiting.
+		if errors.Is(err, errInternalAddress) || errors.Is(err, errPort) {
+			return Result{Outcome: Refused}, err
+		}
+
 		return Result{Outcome: Slow}, err
 	}
 
@@ -374,28 +380,27 @@ func classify(resp *http.Response) Result {
 }
 
 // errInternalAddress refuses a connection to an address inside the
-// network.
-var errInternalAddress = errors.New("webpush: the push endpoint resolves to an internal address")
+// network, errPort one to a port other than https's.
+var (
+	errInternalAddress = errors.New("webpush: the push endpoint resolves to an internal address")
+	errPort            = errors.New("webpush: the push endpoint is not on port 443")
+)
+
+// PushPort is the one port a push endpoint may be on, unless internal
+// endpoints are allowed: push services listen on https's port, and a
+// client-chosen URL must not make the worker probe any other port of a
+// public host.
+const PushPort = "443"
 
 // NewClient is an HTTP client for push endpoints. Unless allowInternal is
 // set, it refuses to connect to loopback, private, link-local, shared and
-// unspecified addresses — checked on the address it actually dials, after
-// name resolution — and it never follows a redirect.
+// unspecified addresses and to any port but 443 — checked on the address
+// it actually dials, after name resolution — and it never follows a
+// redirect.
 func NewClient(timeout time.Duration, allowInternal bool) *http.Client {
 	dialer := &net.Dialer{Timeout: timeout}
 	if !allowInternal {
-		dialer.Control = func(_, address string, _ syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-
-			if ip := net.ParseIP(host); ip == nil || Internal(ip) {
-				return errInternalAddress
-			}
-
-			return nil
-		}
+		dialer.Control = func(_, address string, _ syscall.RawConn) error { return dialAllowed(address) }
 	}
 
 	return &http.Client{
@@ -408,6 +413,24 @@ func NewClient(timeout time.Duration, allowInternal bool) *http.Client {
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+}
+
+// dialAllowed checks an address the client is about to connect to.
+func dialAllowed(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+
+	if ip := net.ParseIP(host); ip == nil || Internal(ip) {
+		return errInternalAddress
+	}
+
+	if port != PushPort {
+		return errPort
+	}
+
+	return nil
 }
 
 // internalNets are ranges IsPrivate and its siblings leave out: shared

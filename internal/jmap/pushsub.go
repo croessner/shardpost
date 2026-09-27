@@ -482,7 +482,8 @@ func validTypes(types []string) bool {
 }
 
 // checkPushURL refuses a push URL this server will not post to: anything
-// but https, and a host that is an internal address. A name that resolves
+// but https, a host that is an internal address, and a port other than
+// 443. A name that resolves
 // to one is refused by the worker when it connects.
 func checkPushURL(raw string, allowInternal bool) *setError {
 	u, err := url.Parse(raw)
@@ -500,6 +501,12 @@ func checkPushURL(raw string, allowInternal bool) *setError {
 
 	if strings.EqualFold(u.Hostname(), "localhost") {
 		return invalidProperty(propURL, "a push URL may not point into the server's network")
+	}
+
+	// The worker connects to 443 only (webpush.NewClient); a URL it
+	// would refuse is refused here already.
+	if p := u.Port(); p != "" && p != webpush.PushPort {
+		return invalidProperty(propURL, "a push URL is on port 443")
 	}
 
 	return nil

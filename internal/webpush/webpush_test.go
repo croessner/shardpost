@@ -1,6 +1,7 @@
 package webpush
 
 import (
+	"errors"
 	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -135,8 +136,28 @@ func TestSendRefusesALoopbackEndpoint(t *testing.T) {
 	defer srv.Close()
 
 	s := &Sender{Client: NewClient(2*time.Second, false), TTL: time.Minute}
-	if _, err := s.Send(context.Background(), srv.URL, nil, []byte(`{}`)); err == nil {
+	res, err := s.Send(context.Background(), srv.URL, nil, []byte(`{}`))
+	if err == nil {
 		t.Fatal("a loopback endpoint was reached")
+	}
+
+	if res.Outcome != Refused {
+		t.Errorf("a refused endpoint is %v, not Refused: it would be retried", res.Outcome)
+	}
+}
+
+// TestDialAllowed: a public address on 443 only.
+func TestDialAllowed(t *testing.T) {
+	for addr, want := range map[string]error{
+		"93.184.216.34:443":  nil,
+		"93.184.216.34:8443": errPort,
+		"[2606:2800::1]:22":  errPort,
+		"127.0.0.1:443":      errInternalAddress,
+		"10.1.2.3:443":       errInternalAddress,
+	} {
+		if got := dialAllowed(addr); !errors.Is(got, want) || (want == nil) != (got == nil) {
+			t.Errorf("%s: %v, want %v", addr, got, want)
+		}
 	}
 }
 
