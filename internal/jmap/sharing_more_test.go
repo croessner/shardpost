@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -114,5 +115,91 @@ func TestSharingMailboxQueryAccount(t *testing.T) {
 	res := f.mail(t, "Mailbox/query", `{"accountId":"alice"}`)
 	if res["accountId"] != "alice" || len(res["ids"].([]any)) != 5 {
 		t.Errorf("Mailbox/query in alice: %#v", res)
+	}
+}
+
+// TestSharingDestroyWithHiddenChildren: a mailbox whose only children are
+// invisible is destroyed as IMAP DELETE destroys it, the children stay;
+// without r the destruction needs onDestroyRemoveEmails, so that whether
+// the mailbox is empty is never revealed.
+func TestSharingDestroyWithHiddenChildren(t *testing.T) {
+	f := newSharing(t)
+	parent := createShared(t, f.alice, "Parent", "lx")
+	createShared(t, f.alice, "Parent/Inner", "")
+
+	res := f.mail(t, "Mailbox/set", `{"accountId":"alice","destroy":["`+parent+`"]}`)
+	if typ := setErrorType(res, "notDestroyed", parent); typ != setForbidden {
+		t.Errorf("destroying without r and without onDestroyRemoveEmails gave %q", typ)
+	}
+
+	res = f.mail(t, "Mailbox/set", `{"accountId":"alice","destroy":["`+parent+`"],"onDestroyRemoveEmails":true}`)
+	if len(strList(res["destroyed"])) != 1 {
+		t.Fatalf("destroying with onDestroyRemoveEmails: %#v", res)
+	}
+
+	if _, err := f.alice.Lookup("Parent/Inner"); err != nil {
+		t.Errorf("the invisible child went with its parent: %v", err)
+	}
+}
+
+// TestSharingEmailQueryUnreadable: a text that only an unreadable
+// mailbox holds finds nothing, and inMailbox with an unreadable id is
+// empty.
+func TestSharingEmailQueryUnreadable(t *testing.T) {
+	f := newSharing(t)
+
+	deliver(t, f.alice, "Hidden", "Subject: unicorn\r\n\r\nbody\r\n")
+	deliver(t, f.alice, "Listed", "Subject: unicorn\r\n\r\nbody\r\n")
+	deliver(t, f.alice, "Team", "Subject: other\r\n\r\nbody\r\n")
+
+	for _, filter := range []string{`{"text":"unicorn"}`, `{"subject":"unicorn"}`,
+		`{"inMailbox":"` + f.id(t, "alice:Listed") + `"}`, `{"inMailbox":"` + f.id(t, "alice:Secret") + `"}`} {
+		if got := strList(f.mail(t, "Email/query", `{"accountId":"alice","filter":`+filter+`}`)["ids"]); len(got) != 0 {
+			t.Errorf("%s found %v", filter, got)
+		}
+	}
+}
+
+// TestSharingPublicKeywordRights: with w and without s a reader may flag
+// a message of a public folder but not mark it read; two readers' $seen
+// queries diverge.
+func TestSharingPublicKeywordRights(t *testing.T) {
+	f := newSharing(t)
+
+	if err := f.public.SetACL("Staff", "test", "lrwi"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.public.SetACL("News", "carol", "lrs"); err != nil {
+		t.Fatal(err)
+	}
+
+	staff := deliver(t, f.public, "Staff", plainMessage)
+	news := deliver(t, f.public, "News", plainMessage)
+
+	res := f.mail(t, "Email/set", `{"accountId":"~public","update":{"`+staff.GUID+`":{"keywords/$flagged":true},`+
+		`"`+news.GUID+`":{"keywords/$seen":true}}}`)
+	if _, ok := res["updated"].(map[string]any)[staff.GUID]; !ok {
+		t.Errorf("$flagged with w failed: %#v", res["notUpdated"])
+	}
+
+	if _, ok := res["updated"].(map[string]any)[news.GUID]; !ok {
+		t.Errorf("$seen with s failed: %#v", res["notUpdated"])
+	}
+
+	res = f.mail(t, "Email/set", `{"accountId":"~public","update":{"`+staff.GUID+`":{"keywords/$seen":true}}}`)
+	if typ := setErrorType(res, "notUpdated", staff.GUID); typ != setForbidden {
+		t.Errorf("$seen without s gave %q", typ)
+	}
+
+	query := `{"accountId":"~public","filter":{"inMailbox":"` + f.id(t, "~public:News") + `","notKeyword":"$seen"}}`
+
+	if got := strList(f.mail(t, "Email/query", query)["ids"]); len(got) != 0 {
+		t.Errorf("test's unseen News: %v", got)
+	}
+
+	name, carol := callAs(t, f.s, "carol", `,"urn:ietf:params:jmap:mail"`, "Email/query", query)
+	if got := strList(carol["ids"]); name != "Email/query" || len(got) != 1 || !strings.EqualFold(got[0], news.GUID) {
+		t.Errorf("carol's unseen News: %s %v", name, carol)
 	}
 }

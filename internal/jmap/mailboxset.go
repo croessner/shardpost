@@ -755,6 +755,15 @@ func destroyMailbox(sess *session, t *tree, mb *model.Mailbox, removeEmails bool
 	}
 
 	if !removeEmails {
+		// Whether the mailbox is empty is something only a reader may
+		// learn. Without r the destruction is refused unless the client
+		// says the messages may go — IMAP DELETE removes them anyway, and
+		// that is what onDestroyRemoveEmails asks for.
+		if !sess.current().may(mb.ID, 'r') {
+			return &setError{Type: setForbidden,
+				Description: "the messages of this mailbox cannot be read; destroy it with onDestroyRemoveEmails"}
+		}
+
 		msgs, err := sess.user.ListMessages(mb.ID)
 		if err != nil {
 			return &setError{Type: setServerFail, Description: err.Error()}

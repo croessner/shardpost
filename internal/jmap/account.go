@@ -302,8 +302,10 @@ func (a *account) myRights(mb *model.Mailbox) mailboxRights {
 }
 
 // writeRights are the rights that let a user change something in a
-// mailbox; an account without any of them on any mailbox is read-only.
-const writeRights = "iwstekx"
+// shared mailbox; an account without any of them on any mailbox is
+// read-only. k is not among them: a shared account creates no mailbox
+// (see descNoSharedCreate), so k alone lets the user do nothing there.
+const writeRights = "iwstex"
 
 // readOnly reports whether the user can change nothing in the account.
 func (a *account) readOnly() bool {
