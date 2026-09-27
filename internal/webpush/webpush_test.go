@@ -136,6 +136,7 @@ func TestSendRefusesALoopbackEndpoint(t *testing.T) {
 	defer srv.Close()
 
 	s := &Sender{Client: NewClient(2*time.Second, false), TTL: time.Minute}
+
 	res, err := s.Send(context.Background(), srv.URL, nil, []byte(`{}`))
 	if err == nil {
 		t.Fatal("a loopback endpoint was reached")

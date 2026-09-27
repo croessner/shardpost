@@ -576,6 +576,7 @@ func TestVerifyKeepsTheQueue(t *testing.T) {
 	raw, _ := kv.Get(pushVerifyQueue)
 
 	var q []verifyItem
+
 	_ = json.Unmarshal(raw, &q)
 
 	if sent.Load() != 1 || len(q) != 1 || q[0].ID != "later" {
