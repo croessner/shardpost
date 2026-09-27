@@ -673,7 +673,8 @@ func emailQueryChanges(_ context.Context, sess *session, args json.RawMessage) (
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
 	}
 
-	if now, _ := seqOf(state); since > now {
+	now, _ := sess.current().seqOf(state)
+	if since > now {
 		return nil, &methodError{Type: errCannotCalculateChanges, Description: descUnknownState}
 	}
 
@@ -691,7 +692,7 @@ func emailQueryChanges(_ context.Context, sess *session, args json.RawMessage) (
 	// the query saw had its change announced before, so it is in what is
 	// read — unless its change is still being made, and then no delta can
 	// be trusted.
-	changed, merr := changedEmails(sess, since)
+	changed, merr := changedEmails(sess, since, now)
 	if merr != nil {
 		return nil, merr
 	}
@@ -732,15 +733,21 @@ func queryDelta(sess *session, req *emailQueryChangesRequest, state string,
 }
 
 // changedEmails are the messages the log records a change of since a
-// state, up to the account's current state. A change recorded without its
+// state, up to the state the query was answered at (until): the
+// account's head, or a shared account's visible watermark, beyond which
+// nothing the user can see lies. A change recorded without its
 // messages cannot be turned into a delta, and neither can a state the log
 // no longer covers, nor a change that is announced and not yet recorded.
-func changedEmails(sess *session, since uint64) (map[string]bool, *methodError) {
+func changedEmails(sess *session, since, until uint64) (map[string]bool, *methodError) {
 	out := map[string]bool{}
 
-	until, err := sess.user.AccountState()
-	if err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
+	if sess.current().personal {
+		now, err := sess.user.AccountState()
+		if err != nil {
+			return nil, &methodError{Type: errServerFail, Description: err.Error()}
+		}
+
+		until = max(until, now)
 	}
 
 	for since < until {

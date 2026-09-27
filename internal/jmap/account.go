@@ -60,6 +60,9 @@ type account struct {
 	// locator the call read last, which blobReadable reuses.
 	srv *Server
 	loc *locator
+	// key enciphers the sequence in the state tokens of a shared account
+	// (sealSeq); nil for the personal account.
+	key []byte
 }
 
 // personalAccount is the account of the authenticated user.
@@ -379,13 +382,15 @@ func (a *account) fingerprint(emails bool) string {
 	return hex.EncodeToString(h.Sum(nil)[:6])
 }
 
-// state writes a state token of the account at a log sequence.
+// state writes a state token of the account at a log sequence. The
+// sequence of a shared account is the owner's counter, which the user
+// must not read; it is enciphered (sealSeq).
 func (a *account) state(emails bool, seq uint64) string {
 	if a.personal {
 		return stateString(seq)
 	}
 
-	return stateString(seq) + stateSep + a.fingerprint(emails)
+	return sealSeq(a.key, seq) + stateSep + a.fingerprint(emails)
 }
 
 // parseState reads a state token of the account back. A token of a
@@ -401,7 +406,21 @@ func (a *account) parseState(emails bool, s string) (uint64, bool) {
 		return 0, false
 	}
 
-	return parseState(seq)
+	return openSeq(a.key, seq)
+}
+
+// seqOf is the log sequence of a state token of the account, without
+// checking a shared account's fingerprint: a /set reads the log from its
+// own starting point, and the token it returns carries the fingerprint
+// of afterwards.
+func (a *account) seqOf(state string) (uint64, bool) {
+	if a.personal {
+		return parseState(state)
+	}
+
+	seq, _, _ := strings.Cut(state, stateSep)
+
+	return openSeq(a.key, seq)
 }
 
 // listMessages reads the messages of a mailbox the user may read, as the
@@ -805,6 +824,10 @@ func (s *Server) openSharedWith(sess *session, id string, refs []model.SharedRef
 	}
 
 	a.user = u
+
+	if a.key, err = s.stateKeyOf(u, a.owner); err != nil {
+		return nil, err
+	}
 
 	if err := a.loadWith(refs); err != nil {
 		return nil, err

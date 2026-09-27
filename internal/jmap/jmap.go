@@ -257,6 +257,8 @@ type Server struct {
 	// capLogged remembers the shared accounts already logged as cut at
 	// jmap.max_shared_mailboxes.
 	capLogged sync.Map
+	// stateKeys caches the state keys of namespaces (stateKeyOf).
+	stateKeys sync.Map
 	// watches are the watches on the account objects of shared accounts
 	// the event sources follow, one per namespace.
 	watches *watchHub

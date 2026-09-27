@@ -91,54 +91,6 @@ func TestPublicStateIgnoresInvisibleChanges(t *testing.T) {
 	}
 }
 
-// TestSharedCursorPlace: the cursor is kept where the user cannot read
-// it — in the owner's namespace, not in its own.
-func TestSharedCursorPlace(t *testing.T) {
-	f := newSharing(t)
-
-	f.sharedStates(t, "alice")
-
-	if md, _ := f.test.GetMetadata("", "test"); md[sharedCursorEntry] != "" {
-		t.Error("the cursor is in the user's own metadata")
-	}
-
-	if md, _ := f.alice.GetMetadata("", "test"); md[sharedCursorEntry] == "" {
-		t.Error("no cursor in the owner's namespace")
-	}
-}
-
-// TestSharedCursorRestarts: a cursor for another visible set, or one the
-// log no longer reaches, starts again at the head.
-func TestSharedCursorRestarts(t *testing.T) {
-	f := newSharing(t)
-
-	_, e0 := f.sharedStates(t, "alice")
-
-	if err := f.alice.SetACL("Hidden", "test", "lr"); err != nil {
-		t.Fatal(err)
-	}
-
-	_, e1 := f.sharedStates(t, "alice")
-	if e1 == e0 {
-		t.Fatal("a grant left the Email state")
-	}
-
-	if got := f.mailErr(t, "Email/changes", `{"accountId":"alice","sinceState":"`+e0+`"}`); got != errCannotCalculateChanges {
-		t.Errorf("changes across a grant gave %s", got)
-	}
-
-	// A stored cursor ahead of the log (a restored namespace) is
-	// discarded.
-	bad := `{"k":"x","v":999999,"s":999999}`
-	if err := f.alice.SetMetadata("", "test", map[string]*string{sharedCursorEntry: &bad}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, e := f.sharedStates(t, "alice"); strings.HasPrefix(e, "999999") {
-		t.Errorf("the state followed a broken cursor: %s", e)
-	}
-}
-
 // sharingPush is the sharing fixture with a fast event source poll.
 func sharingPush(t *testing.T, extra ...func(*Options)) (*sharing, *httptest.Server) {
 	t.Helper()

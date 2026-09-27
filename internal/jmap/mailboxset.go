@@ -94,7 +94,7 @@ func stateAfter(sess *session, before string, out *setResponse) string {
 		return before
 	}
 
-	since, ok := seqOf(before)
+	since, ok := sess.current().seqOf(before)
 	if !ok {
 		return before
 	}
@@ -131,16 +131,6 @@ func stateAfter(sess *session, before string, out *setResponse) string {
 	}
 
 	return a.state(stateMailboxes, last)
-}
-
-// seqOf is the log sequence of a state token of either kind of account,
-// without checking a shared account's fingerprint: a /set reads the log
-// from its own starting point, and the token it returns carries the
-// fingerprint of afterwards.
-func seqOf(state string) (uint64, bool) {
-	seq, _, _ := strings.Cut(state, stateSep)
-
-	return parseState(seq)
 }
 
 // touchedIDs are the mailboxes this /set changed.

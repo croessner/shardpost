@@ -464,16 +464,12 @@ func mailboxChanges(_ context.Context, sess *session, args json.RawMessage) (any
 		return nil, merr
 	}
 
-	entries, ok, err := sess.user.AccountChanges(since, limit)
-	if err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
+	entries, next, more, merr := a.changesWindow(since, limit)
+	if merr != nil {
+		return nil, merr
 	}
 
-	if !ok {
-		return nil, &methodError{Type: errCannotCalculateChanges, Description: descLogTrimmed}
-	}
-
-	return collectMailboxChanges(sess, req.SinceState, since, entries, len(entries) == limit, t)
+	return collectMailboxChanges(sess, req.SinceState, next, entries, more, t)
 }
 
 // changeLimit is the page size of a /changes. RFC 8620 5.2 asks for
@@ -511,7 +507,7 @@ type changeSet struct {
 // three lists of a /changes response. A change to the messages of a
 // mailbox is a change to the mailbox: its counts are properties of it,
 // and a client that is not told stays wrong until it resynchronises.
-func collectMailboxChanges(sess *session, sinceState string, since uint64,
+func collectMailboxChanges(sess *session, sinceState string, next uint64,
 	entries []model.AccountChange, full bool, t *tree,
 ) (any, *methodError) {
 	a := sess.current()
@@ -534,12 +530,7 @@ func collectMailboxChanges(sess *session, sinceState string, since uint64,
 		}
 	}
 
-	last, err := a.changesSeq(since, entries, full)
-	if err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
-	}
-
-	out.NewState = a.state(stateMailboxes, last)
+	out.NewState = a.state(stateMailboxes, next)
 	props := set.updatedProperties()
 	out.UpdatedProperties = &props
 	fill(out, set.kind, t)
@@ -548,14 +539,20 @@ func collectMailboxChanges(sess *session, sinceState string, since uint64,
 }
 
 // hidden reports whether a log entry of a shared account is about
-// something the user cannot see: a mailbox without right l, or the
-// messages of one without right r. The personal account sees
-// everything. The visible set itself cannot have changed since the
+// something the user cannot see: a mailbox without right l, the
+// messages of one without right r, or no mailbox named at all. The
+// personal account sees everything. The visible set itself cannot have changed since the
 // client's state, because the state token carries its fingerprint.
 func hidden(a *account, e *model.AccountChange) bool {
 	switch {
-	case a.personal || e.Mailbox == "":
+	case a.personal:
 		return false
+	case e.Mailbox == "":
+		// A change that names no mailbox (a Partial entry of the RADOS
+		// store) may lie in one the user cannot see; counting it would
+		// tell of it. What it may have changed of the visible set is
+		// found by the fingerprint, and push reloads on it.
+		return true
 	case e.Kind == model.KindEmail:
 		return !a.may(e.Mailbox, 'r')
 	}

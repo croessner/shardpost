@@ -207,7 +207,7 @@ func sameSet(a, b map[string]bool) bool {
 // ownState reads the log from before and returns the state after the
 // longest run of entries that touch only the given messages.
 func ownState(sess *session, before string, mine map[string]bool) string {
-	since, ok := seqOf(before)
+	since, ok := sess.current().seqOf(before)
 	if !ok || len(mine) == 0 {
 		return before
 	}

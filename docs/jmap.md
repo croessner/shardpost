@@ -576,31 +576,58 @@ fingerprint of what the user sees: for `Mailbox` the visible mailboxes
 with the user's rights and subscriptions, for `Email` and `Thread` the
 readable mailboxes. The position is the *visible watermark*: the newest
 log entry the user can see — about a visible mailbox, or about the
-messages of a readable one — not the head of the log. What the owner
-does in mailboxes the user cannot see therefore leaves the state where
-it is: a client is never told, through a state or a push, when or how
-much the owner works elsewhere. A `/changes` from the watermark reads
-the entries after it and leaves out the invisible ones, as before, and
-its `newState` is the watermark it reaches, the same token a `/get`
-answers.
+messages of a readable one — not the head of the log. An entry that
+names no mailbox (the RADOS store writes one for a change it could not
+record in full) counts as invisible: it may lie in a mailbox the user
+cannot see. What the owner does in mailboxes the user cannot see
+therefore leaves the state where it is.
+
+The position is the owner's counter, and two of them would tell how
+many changes lie between two visible ones, so the token does not carry
+it in the clear: it is enciphered with a key of the namespace (32
+random bytes, created on first use and kept as a server METADATA entry
+of the namespace) into 16 hex digits after an `x`, a permutation of
+the counter the user can neither read nor order. Tokens written before
+this was introduced (a plain number before the dash) no longer parse,
+and a client holding one resynchronises that account once.
+
+A `/changes` reads from the watermark and leaves out the invisible
+entries, however many there are: it reads on past them — at most 16
+pages of 1000 entries — until it has `maxChanges` visible entries or
+reaches the watermark, so neither the page nor the new state shows how
+many were skipped. `hasMoreChanges` is true only when visible changes
+were left for the next call; `newState` is the last visible entry it
+reports, and the watermark once there are no more — the token a `/get`
+answers. A run of more than 16000 invisible entries with no visible one
+before it is `cannotCalculateChanges`, and the client resynchronises.
+`Email/queryChanges` reads up to the watermark of its query state.
 
 Finding the watermark means reading back to the last visible entry, so
-a cursor per user and namespace records how far the log has been read:
-the watermark, the entry read up to, and the visible set both belong
-to. It is a private server METADATA entry
-(`/private/vendor/shardpost/jmap/sharedcursor`) of the user in the
-*owner's* namespace — the entry read up to is the owner's counter, which
-the user must not read, and the user's own METADATA is readable over
-IMAP. Every request and every push follower advances it from where it
-stands and writes it back when the watermark moved, when it read 256
-entries or more, or when it started again, so the log is read once
-rather than once per request. The cursor starts
-again at the head — the one case where the state moves without a
-visible change — when the visible set changes (the state changes then
-anyway), when the log no longer reaches back to the cursor
+a cursor records how far the log has been read: the watermark, the entry
+read up to, and when it was written. There is one per visible set — the
+visible mailboxes, and which of them may be read — not per user: users
+who see the same share it, and so the same states. It is a METADATA
+entry (`/private/vendor/shardpost/jmap/sharedcursor/<set>`) in the
+*owner's* namespace under the server's own accessor `~jmap`, which no
+account can be, so neither the user nor the owner reads it over IMAP.
+Every request and every push follower advances it from where it stands
+and writes it back when the watermark moved, when it read 256 entries
+or more, or when it started again, so the log is read once rather than
+once per request. A namespace keeps at most 256 cursors; the one
+written longest ago goes, and its users start again.
+
+A cursor starts again when there is none for the set yet (the first
+request, a grant or a revocation — the state changes then anyway),
+when the log no longer reaches back to it
 (`server.account_log_retention`, 10000 entries), and when more than
-16000 entries lie between the cursor and the head. Two requests that
-start it again at once agree on the one that was stored first.
+16000 entries lie between it and the head. It then reads the last 1000
+entries of the log and takes the newest visible one as the watermark,
+so the state stays where it was when that is where it stood. Only when
+those 1000 entries are all invisible does the watermark become the
+head, and the state moves without a visible change — the one case in
+which a client learns that the owner did something, not what nor how
+much. Two requests that start it again at once agree on the one that
+was stored first.
 
 The log records what happens to the owner's mailboxes, not what the user may
 see of them — a grant, a revocation, a pointer that appears or goes and
@@ -1728,15 +1755,16 @@ authentication backend, and the relay learns the account from
   the message as updated, although only one reader's `$seen` changed.
 - Push of shared accounts (see
   [Shared accounts in push](#shared-accounts-in-push)): a new shared
-  account is seen on the next poll, not at once; the visible watermark
-  starts again at the head — a state change without a visible change —
-  when the owner's log no longer reaches back to the user's cursor or
-  more than 16000 entries lie beyond it, so an owner who works that much
-  where the user cannot see, while nobody reads the account, moves the
-  state once; a cursor stays in the owner's namespace after the user
-  loses access or is deleted (a few bytes, not cleaned up); the push
-  worker keeps the shared states it pushed in one admin record per
-  account.
+  account is seen on the next poll, not at once; a cursor that starts
+  again while the last 1000 entries of the owner's log are all
+  invisible moves the state without a visible change (see
+  [Sharing](#sharing)); a change the RADOS store recorded without its
+  mailbox is invisible in shared accounts, also when it lay in a visible
+  mailbox — the client learns of it with the next visible change or
+  when it resynchronises; a cursor stays in the owner's namespace after
+  its users lose access (a few hundred bytes, pruned only by the bound
+  of 256); the push worker keeps the shared states it pushed in one
+  admin record per account.
 - Sharing (see [Sharing](#sharing)): the session lists
   shared accounts without regard to subscriptions (RFC 9670 1.4, see
   above); `Principal/changes` and the `/queryChanges` of principals and

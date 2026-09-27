@@ -161,11 +161,9 @@ type window struct {
 	fates      map[string]*emailFate
 	classes    map[string]emailClass
 	sinceState string
-	// fingerprint is what the user could read when the window was read,
-	// which the new state token of a shared account carries.
-	fingerprint string
-	last        uint64
-	full        bool
+	// last is the sequence of the new state, full that there is more.
+	last uint64
+	full bool
 }
 
 // readWindow reads the page a /changes asks for and classifies what it
@@ -190,20 +188,12 @@ func readWindow(sess *session, args json.RawMessage) (*window, *methodError) {
 		return nil, merr
 	}
 
-	entries, ok, err := sess.user.AccountChanges(since, limit)
-	if err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
+	entries, next, more, merr := a.changesWindow(since, limit)
+	if merr != nil {
+		return nil, merr
 	}
 
-	if !ok {
-		return nil, &methodError{Type: errCannotCalculateChanges, Description: descLogTrimmed}
-	}
-
-	w := &window{sinceState: req.SinceState, full: len(entries) == limit, fingerprint: a.fingerprint(stateEmails)}
-
-	if w.last, err = a.changesSeq(since, entries, w.full); err != nil {
-		return nil, &methodError{Type: errServerFail, Description: err.Error()}
-	}
+	w := &window{sinceState: req.SinceState, full: more, last: next}
 
 	if w.fates, merr = emailWindow(a, entries); merr != nil {
 		return nil, merr
@@ -213,6 +203,8 @@ func readWindow(sess *session, args json.RawMessage) (*window, *methodError) {
 	if merr != nil {
 		return nil, merr
 	}
+
+	var err error
 
 	w.classes, err = classifyEmails(w.loc, w.fates)
 	if err != nil {
@@ -227,13 +219,8 @@ type changeLists struct{ *changesResponse }
 
 // response starts the response of a window.
 func (w *window) response(sess *session) changeLists {
-	newState := stateString(w.last)
-	if a := sess.current(); !a.personal {
-		newState += stateSep + w.fingerprint
-	}
-
 	return changeLists{&changesResponse{
-		AccountID: sess.accountID(), OldState: w.sinceState, NewState: newState,
+		AccountID: sess.accountID(), OldState: w.sinceState, NewState: sess.current().state(stateEmails, w.last),
 		HasMoreChanges: w.full,
 		Created:        []string{}, Updated: []string{}, Destroyed: []string{},
 	}}

@@ -508,14 +508,14 @@ func (sp *sharedPush) advance(id string, t *sharedTrack) map[string]string {
 // behind it: a follower that is live keeps the stored cursor near the
 // head, so a method response has little to read.
 func (t *sharedTrack) save() {
-	was, raw, err := t.a.loadCursor()
+	was, raw, md, err := t.a.loadCursor()
 	if err != nil || was.Key != t.cur.Key || was.Scanned >= t.cur.Scanned {
 		t.saved = t.cur.Scanned
 
 		return
 	}
 
-	if t.a.saveCursor(t.cur, was, raw) {
+	if t.a.saveCursor(t.cur, was, raw, md) {
 		t.saved = t.cur.Scanned
 	}
 }
