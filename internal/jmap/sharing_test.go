@@ -176,7 +176,27 @@ func (f *sharing) mail(t *testing.T, name, args string) map[string]any {
 		t.Fatalf("%s answered %s: %#v", name, got, res)
 	}
 
+	checkAccountID(t, name, args, res)
+
 	return res
+}
+
+// checkAccountID: a response names the account the call named — a
+// shared call must not echo the personal account.
+func checkAccountID(t *testing.T, name, args string, res map[string]any) {
+	t.Helper()
+
+	var named struct {
+		AccountID string `json:"accountId"`
+	}
+
+	if err := json.Unmarshal([]byte(args), &named); err != nil || named.AccountID == "" {
+		return
+	}
+
+	if res["accountId"] != named.AccountID {
+		t.Errorf("%s in %s answered for account %v", name, named.AccountID, res["accountId"])
+	}
 }
 
 // mailErr is one call of test that has to fail; it returns the error

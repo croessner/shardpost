@@ -122,7 +122,7 @@ func mailboxQuery(_ context.Context, sess *session, args json.RawMessage) (any, 
 		return nil, merr
 	}
 
-	return page(accountID(sess.account), state, ids(matched), &req.paging)
+	return page(sess.accountID(), state, ids(matched), &req.paging)
 }
 
 // readFilter decodes and checks the filter of a query. A filter that is

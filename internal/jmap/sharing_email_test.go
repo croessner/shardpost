@@ -464,6 +464,7 @@ func (f *sharing) copyCall(t *testing.T, args string) (copied, implicit map[stri
 	}
 
 	copied, _ = first[1].(map[string]any)
+	checkAccountID(t, "Email/copy", args, copied)
 
 	if len(list) > 1 {
 		second, _ := list[1].([]any)
