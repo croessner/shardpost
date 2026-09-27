@@ -1033,6 +1033,8 @@ func (u *User) RenameScript(oldName, newName string) error {
 
 	delete(u.scripts, oldName)
 
+	// Under the one lock, like the single write op of the RADOS store:
+	// the active name never points at a missing script.
 	u.scripts[newName] = s
 	if u.active == oldName {
 		u.active = newName

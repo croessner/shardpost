@@ -941,6 +941,20 @@ func getOmapKeys(ioctx *rados.IOContext, oid string, keys []string) (map[string]
 // by the object version. A missing object is created exclusively; a
 // concurrent creator or writer triggers a retry.
 func casOmap(u *User, ioctx *rados.IOContext, oid string, keys []string, fn func(cur map[string][]byte) (set map[string][]byte, rm []string)) (err error) {
+	return casOmapOp(u, ioctx, oid, keys, func(cur map[string][]byte) (map[string][]byte, []string, func(*rados.WriteOp)) {
+		set, rm := fn(cur)
+
+		return set, rm, nil
+	})
+}
+
+// casOmapOp is casOmap whose change may add further steps to the same
+// write op (an xattr), which then take effect with the omap change or
+// not at all. fn runs after the version was read, so what it reads of the
+// object besides the keys is covered by the version check.
+func casOmapOp(u *User, ioctx *rados.IOContext, oid string, keys []string,
+	fn func(cur map[string][]byte) (set map[string][]byte, rm []string, extra func(*rados.WriteOp)),
+) (err error) {
 	end := u.trace(spanOmapCAS, attrOID(oid), attrCount(len(keys)))
 	defer func() { end(err) }()
 
@@ -950,7 +964,7 @@ func casOmap(u *User, ioctx *rados.IOContext, oid string, keys []string, fn func
 			return err
 		}
 
-		set, rm := fn(cur)
+		set, rm, extra := fn(cur)
 		if len(set) == 0 && len(rm) == 0 {
 			return nil
 		}
@@ -968,6 +982,10 @@ func casOmap(u *User, ioctx *rados.IOContext, oid string, keys []string, fn func
 
 		if len(rm) > 0 {
 			op.RmOmapKeys(rm)
+		}
+
+		if extra != nil {
+			extra(op)
 		}
 
 		err = op.Operate(ioctx, oid, rados.OperationNoFlag)

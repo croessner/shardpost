@@ -43,19 +43,29 @@ func (u *User) ListScripts() (names []string, active string, err error) {
 
 	sort.Strings(names)
 
-	// The xattr holds a script name, which is never longer than this.
-	var buf [model.MaxScriptName]byte
-
-	n, err := u.idx.GetXattr(oidSieve, sieveActive, buf[:])
-	switch {
-	case err == nil:
-		active = string(buf[:n])
-	case errCode(err) == syscall.ENODATA, errCode(err) == syscall.ENOENT:
-	default:
+	active, err = u.activeScript()
+	if err != nil {
 		return nil, "", err
 	}
 
 	return names, active, nil
+}
+
+// activeScript reads the name of the active script ("" for none).
+func (u *User) activeScript() (string, error) {
+	// The xattr holds a script name, which is never longer than this.
+	var buf [model.MaxScriptName]byte
+
+	n, err := u.idx.GetXattr(oidSieve, sieveActive, buf[:])
+
+	switch {
+	case err == nil:
+		return string(buf[:n]), nil
+	case errCode(err) == syscall.ENODATA, errCode(err) == syscall.ENOENT:
+		return "", nil
+	}
+
+	return "", err
 }
 
 // GetScript returns a script by name.
@@ -148,44 +158,56 @@ func (u *User) SetActiveScript(name string) error {
 	return op.Operate(u.idx, oidSieve, rados.OperationNoFlag)
 }
 
-// RenameScript renames a script, keeping it active if it was.
+// RenameScript renames a script, keeping it active if it was. The omap
+// change and the active name are one write op: there is no moment in
+// which the active name points at a script that is not there, which
+// delivery would read as "no filter".
 func (u *User) RenameScript(oldName, newName string) error {
 	if len(newName) > model.MaxScriptName || newName == "" {
 		return ErrTooLarge
 	}
 
-	text, err := u.GetScript(oldName)
+	var planErr error
+
+	err := casOmapOp(u, u.idx, oidSieve, []string{sieveKeyPrefix + oldName, sieveKeyPrefix + newName},
+		func(cur map[string][]byte) (map[string][]byte, []string, func(*rados.WriteOp)) {
+			active, err := u.activeScript()
+			if err != nil {
+				planErr = err
+
+				return nil, nil, nil
+			}
+
+			set, rm, activate, err := renamePlan(cur, active, oldName, newName)
+			planErr = err
+
+			if err != nil || !activate {
+				return set, rm, nil
+			}
+
+			return set, rm, func(op *rados.WriteOp) { op.SetXattr(sieveActive, []byte(newName)) }
+		})
 	if err != nil {
 		return err
 	}
 
-	_, active, err := u.ListScripts()
-	if err != nil {
-		return err
+	return planErr
+}
+
+// renamePlan is the omap change of a rename, and whether the active name
+// moves with it: ErrNoScript without the old script, ErrScriptExists when
+// the new name is taken.
+func renamePlan(cur map[string][]byte, active, oldName, newName string) (map[string][]byte, []string, bool, error) {
+	text, ok := cur[sieveKeyPrefix+oldName]
+	if !ok {
+		return nil, nil, false, ErrNoScript
 	}
 
-	exists := false
-
-	if err := casOmap(u, u.idx, oidSieve, []string{sieveKeyPrefix + newName}, func(cur map[string][]byte) (map[string][]byte, []string) {
-		if _, taken := cur[sieveKeyPrefix+newName]; taken {
-			exists = true
-			return nil, nil
-		}
-
-		return map[string][]byte{sieveKeyPrefix + newName: []byte(text)}, []string{sieveKeyPrefix + oldName}
-	}); err != nil {
-		return err
+	if _, taken := cur[sieveKeyPrefix+newName]; taken {
+		return nil, nil, false, ErrScriptExists
 	}
 
-	if exists {
-		return ErrScriptExists
-	}
-
-	if active == oldName {
-		return u.SetActiveScript(newName)
-	}
-
-	return nil
+	return map[string][]byte{sieveKeyPrefix + newName: text}, []string{sieveKeyPrefix + oldName}, active == oldName, nil
 }
 
 // vacationPrefix keys the auto-reply suppression records on the sieve
