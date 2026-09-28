@@ -3,7 +3,7 @@
 
 Usage: jmap-acceptance.py [account-index]   (pip install jmapc==0.3.0 pyyaml)
 
-Environment: JMAP_HOST (default jmap.roessner-net.de), JMAP_ACCOUNTS (a
+Environment: JMAP_HOST (default mail.roessner-net.de), JMAP_ACCOUNTS (a
 SOPS file with accounts[].login/password, default the rns-server test
 accounts). Prints outcomes only: no credentials, no message content beyond
 the test subject token. Sends exactly one message, from the test account to
@@ -23,7 +23,7 @@ from jmapc.methods import (EmailGet, EmailQuery, EmailSet, EmailSubmissionSet,
 from jmapc.models import (Email, EmailAddress, EmailBodyPart, EmailBodyValue,
                           EmailSubmission, Envelope, Address)
 
-HOST = os.environ.get("JMAP_HOST", "jmap.roessner-net.de")
+HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 SOPS = os.environ.get("JMAP_ACCOUNTS", os.path.expanduser("~/src/rns-server/secrets/mail-test-accounts/shardpost.sops.yaml"))
 index = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 

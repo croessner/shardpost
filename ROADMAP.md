@@ -287,7 +287,9 @@ enforces them, and `Email/copy` between accounts) and its second part
 (6c-2: `Principal/*`, `Mailbox.shareWith` and `ShareNotification`, RFC
 9670) and its third (6c-3: push for shared accounts and share
 notifications, with state tokens of shared accounts that move only with
-what the user can see). See
+what the user can see). Since 2026-09-28 JMAP runs behind
+nauthilus-director on `mail.roessner-net.de` (Director v1.1.1, routed by
+`mailShard`); the test name `jmap.roessner-net.de` is gone. See
 [JMAP](docs/jmap.md) for what exists and what does not. What follows is the full
 target of the stage, unchanged.
 
@@ -389,9 +391,9 @@ Thunderbird against the Director, analogous to `hack/conformance.md`.
 model. It is a third frontend layer alongside IMAP and POP3, and it
 should be built in its own package `internal/jmap` with its own test coverage.
 
-**Director contract (requirement from `nauthilus-director/docs/FUTURE_JMAP.md`):**
-The Director cannot do JMAP today. Its design note specifies that
-it will later carry JMAP exclusively as a JMAP-to-JMAP proxy: its own
+**Director contract (now `nauthilus-director/docs/operations/jmap.md`,
+implemented in Director v1.1.0 on 2026-09-27):** the Director carries JMAP
+exclusively as a JMAP-to-JMAP proxy: its own
 HTTPS listener, authentication through Nauthilus, routing over the same
 routing facts and shard tags as IMAP, reverse proxy to a backend
 that speaks JMAP; no translation to IMAP, no mailbox semantics in the
@@ -408,10 +410,9 @@ stage 6:
   the server nevertheless verifies it itself too (Bearer over the gRPC
   backchannel, Basic over `Authenticate`), so that it is correct without a
   Director as well.
-  Open and to be clarified with the Director owner: whether the Director
-  additionally signals an already verified identity to the backend (a master
-  user analogy to IMAP, only over mTLS), or whether verification happens twice.
-  Both variants are meant to work; the second is the default.
+  Decided with Director v1.1.0: verification happens twice; the Director
+  forwards `Authorization` unchanged, and both introspect Bearer tokens
+  with the same Nauthilus client.
 * **Backend TLS with server name:** the Director always verifies backend TLS;
   the certificate from `shardpost-ca` must carry the service name
   configured in the Director as `tls.server_name` (currently

@@ -3,7 +3,7 @@
 
 Usage: jmap-acceptance-stage6c2.py   (pip install requests pyyaml)
 
-Environment: JMAP_HOST (default jmap.roessner-net.de), JMAP_ACCOUNTS (a SOPS
+Environment: JMAP_HOST (default mail.roessner-net.de), JMAP_ACCOUNTS (a SOPS
 file with accounts[0] and accounts[1], login/password; default the rns-server
 test accounts).
 
@@ -20,7 +20,7 @@ import uuid
 import requests
 import yaml
 
-HOST = os.environ.get("JMAP_HOST", "jmap.roessner-net.de")
+HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 SOPS = os.environ.get("JMAP_ACCOUNTS",
                       os.path.expanduser("~/src/rns-server/secrets/mail-test-accounts/shardpost.sops.yaml"))
 CORE, MAIL = "urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"

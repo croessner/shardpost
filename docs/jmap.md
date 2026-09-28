@@ -6,7 +6,8 @@ JMAP is roadmap stage 6: a third front-end beside IMAP and POP3, on the
 same store. It is a protocol layer on top of `model.User`, not a second
 data store — everything it answers comes from the same index, the same
 blobs and the same account change log that IMAP reads. The staged plan
-behind it is `temp/08-jmap-staged-plan.md`.
+behind it is `temp/08-jmap-staged-plan.md`. [JMAP by
+example](jmap-examples.md) shows a recorded send and receive as JSON.
 
 ## What exists
 
@@ -1572,6 +1573,18 @@ of the token. Authentication on a plaintext connection is refused unless
 
 ## Configuration
 
+**Behind nauthilus-director.** The lasting deployment puts JMAP behind
+the Director (v1.1.0 and later, `protocol: jmap`): it authenticates every
+request against Nauthilus, routes it by the account's `mailShard` to this
+shard's JMAP listener and connects with PROXY v2 and TLS; ShardPost
+authenticates the request again. `jmap.public_base_url` is the Director's
+public URL, so the session resource names the Director in every URL and
+nothing is rewritten on the way. Bearer tokens are introspected by both
+with the same Nauthilus client, because they form one resource server and
+an RFC 8707 resource has exactly one owner. See the Director's
+`docs/operations/jmap.md`, and [JMAP by example](jmap-examples.md) for the
+traffic.
+
 **One shard behind a proxy.** A proxy that does not route JMAP per
 account — a load balancer in front of one ShardPost shard — lets every
 account of the deployment reach this server. An account whose mail
@@ -1617,7 +1630,7 @@ jmap:
   addr: ':8443'
   tls_cert: /tls/jmap/tls.crt
   tls_key: /tls/jmap/tls.key
-  public_base_url: https://jmap.example.org
+  public_base_url: https://mail.example.org   # the Director's public URL
   shard_attribute: mailShard
   shard: shardpost
   max_size_upload: 52428800

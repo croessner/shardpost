@@ -3,7 +3,7 @@
 
 Usage: jmap-acceptance-stage6b.py [account-index]   (pip install requests pyyaml)
 
-Environment: JMAP_HOST (default jmap.roessner-net.de), JMAP_ACCOUNTS (SOPS file
+Environment: JMAP_HOST (default mail.roessner-net.de), JMAP_ACCOUNTS (SOPS file
 with accounts[].login/password; default the rns-server test accounts).
 Leaves the account's active Sieve script alone: the test script is created
 inactive and destroyed again. Prints outcomes only.
@@ -18,7 +18,7 @@ import uuid
 import requests
 import yaml
 
-HOST = os.environ.get("JMAP_HOST", "jmap.roessner-net.de")
+HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 SOPS = os.environ.get("JMAP_ACCOUNTS",
                       os.path.expanduser("~/src/rns-server/secrets/mail-test-accounts/shardpost.sops.yaml"))
 CORE, MAIL = "urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"
