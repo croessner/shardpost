@@ -2,6 +2,11 @@
 
 Date: 2026-09-27. Status: live, healthy. Image 0.28.1, unchanged.
 
+> **Superseded on 2026-09-28:** JMAP runs through nauthilus-director on
+> `mail.roessner-net.de`, and everything this report set up for the test
+> name has been removed; see
+> [JMAP through nauthilus-director](2026-09-28-jmap-director-cutover.md).
+
 ## A test endpoint, not the lasting one
 
 `jmap.roessner-net.de` exists for testing with the test accounts on the
