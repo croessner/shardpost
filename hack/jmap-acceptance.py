@@ -9,6 +9,9 @@ accounts). Prints outcomes only: no credentials, no message content beyond
 the test subject token. Sends exactly one message, from the test account to
 itself, checks delivery, the Sent copy, a foreign From and a foreign
 envelope sender, and deletes every message it made.
+
+The public endpoint accepts OAuth only; these password logins run through
+kubectl port-forward with JMAP_BASE (see hack/jmapbase.py).
 """
 import os
 import subprocess
@@ -17,6 +20,8 @@ import time
 import uuid
 
 import yaml
+
+import jmapbase  # noqa: F401  JMAP_BASE: password logins through a port-forward
 from jmapc import Client, EmailQueryFilterCondition, Ref
 from jmapc.methods import (EmailGet, EmailQuery, EmailSet, EmailSubmissionSet,
                            IdentityGet, MailboxGet)

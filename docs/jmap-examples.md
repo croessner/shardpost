@@ -8,8 +8,10 @@ wire, pretty-printed; the message itself was deleted afterwards. The
 German message text is the literal test data. For what each method
 supports see [JMAP](jmap.md).
 
-Every call is one `POST /jmap/api/` with HTTP authentication (Basic here,
-or `Authorization: Bearer`). The body names the capabilities it uses in
+Every call is one `POST /jmap/api/` with HTTP authentication. The
+recording used Basic; since the same day the public endpoint takes only
+`Authorization: Bearer` (OAuth), and password logins run through a
+port-forward to ShardPost (`hack/jmapbase.py`). The body names the capabilities it uses in
 `using` and carries a list of method calls, each a triple of method
 name, arguments and a call id that the matching response repeats. The
 account id is the account name, the mailbox and identity ids come from

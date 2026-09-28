@@ -7,6 +7,9 @@ Environment: JMAP_HOST (default mail.roessner-net.de), JMAP_ACCOUNTS (SOPS file
 with accounts[].login/password; default the rns-server test accounts).
 Leaves the account's active Sieve script alone: the test script is created
 inactive and destroyed again. Prints outcomes only.
+
+The public endpoint accepts OAuth only; these password logins run through
+kubectl port-forward with JMAP_BASE (see hack/jmapbase.py).
 """
 import base64
 import hashlib
@@ -17,6 +20,8 @@ import uuid
 
 import requests
 import yaml
+
+import jmapbase  # noqa: F401  JMAP_BASE: password logins through a port-forward
 
 HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 SOPS = os.environ.get("JMAP_ACCOUNTS",

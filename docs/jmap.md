@@ -1579,7 +1579,12 @@ request against Nauthilus, routes it by the account's `mailShard` to this
 shard's JMAP listener and connects with PROXY v2 and TLS; ShardPost
 authenticates the request again. `jmap.public_base_url` is the Director's
 public URL, so the session resource names the Director in every URL and
-nothing is rewritten on the way. Bearer tokens are introspected by both
+nothing is rewritten on the way. The public listener takes OAuth Bearer
+tokens only (`jmap.auth.basic.enabled: false` in the Director): a password
+login there would tell a guesser whether a password is right past MFA and
+`delayed_response` of the OIDC login. ShardPost itself still takes Basic,
+which only the Director and `kubectl port-forward` reach (the acceptance
+scripts use it, see `hack/jmapbase.py`). Bearer tokens are introspected by both
 with the same Nauthilus client, because they form one resource server and
 an RFC 8707 resource has exactly one owner. See the Director's
 `docs/operations/jmap.md`, and [JMAP by example](jmap-examples.md) for the

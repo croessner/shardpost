@@ -8,6 +8,9 @@ file with accounts[0] and accounts[1], login/password; default the rns-server
 test accounts). Account 1 gets a vacation, account 0 writes to it and must
 receive exactly one automatic reply; the vacation is switched off and every
 test message deleted afterwards. Prints outcomes only.
+
+The public endpoint accepts OAuth only; these password logins run through
+kubectl port-forward with JMAP_BASE (see hack/jmapbase.py).
 """
 import os
 import subprocess
@@ -16,6 +19,8 @@ import uuid
 
 import requests
 import yaml
+
+import jmapbase  # noqa: F401  JMAP_BASE: password logins through a port-forward
 
 HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 SOPS = os.environ.get("JMAP_ACCOUNTS",

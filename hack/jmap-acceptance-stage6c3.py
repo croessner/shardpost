@@ -13,6 +13,9 @@ in the shared mailbox must be pushed for that account; a message stored in a
 mailbox account 1 cannot see must not move the shared account's state or be
 pushed for it. After the revocation the account is pushed as "revoked".
 Everything the test made is destroyed. Prints outcomes only.
+
+The public endpoint accepts OAuth only; these password logins run through
+kubectl port-forward with JMAP_BASE (see hack/jmapbase.py).
 """
 import imaplib
 import json
@@ -24,6 +27,8 @@ import uuid
 
 import requests
 import yaml
+
+import jmapbase  # noqa: F401  JMAP_BASE: password logins through a port-forward
 
 HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 IMAP = os.environ.get("IMAP_HOST", "mail.roessner-net.de")

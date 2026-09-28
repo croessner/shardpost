@@ -12,6 +12,9 @@ mailbox shared with it through shareWith, widens and removes the share.
 Account 1 must see the shared account appear and go, and one notification
 for the grant, coalesced with the widening; grant and revocation cancel out. The mailbox and the notifications the test caused are destroyed.
 Prints outcomes only.
+
+The public endpoint accepts OAuth only; these password logins run through
+kubectl port-forward with JMAP_BASE (see hack/jmapbase.py).
 """
 import os
 import subprocess
@@ -19,6 +22,8 @@ import uuid
 
 import requests
 import yaml
+
+import jmapbase  # noqa: F401  JMAP_BASE: password logins through a port-forward
 
 HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 SOPS = os.environ.get("JMAP_ACCOUNTS",

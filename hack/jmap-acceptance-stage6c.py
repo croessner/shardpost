@@ -12,6 +12,9 @@ rights on it over IMAP SETACL. Account 1 must then see a shared JMAP account
 with that mailbox, the rights mapped to myRights, writes refused or allowed
 by the rights, Email/copy into its own INBOX, and the account gone after the
 grant is removed. Everything the test made is destroyed. Prints outcomes only.
+
+The public endpoint accepts OAuth only; these password logins run through
+kubectl port-forward with JMAP_BASE (see hack/jmapbase.py).
 """
 import imaplib
 import os
@@ -20,6 +23,8 @@ import uuid
 
 import requests
 import yaml
+
+import jmapbase  # noqa: F401  JMAP_BASE: password logins through a port-forward
 
 HOST = os.environ.get("JMAP_HOST", "mail.roessner-net.de")
 IMAP = os.environ.get("IMAP_HOST", "mail.roessner-net.de")

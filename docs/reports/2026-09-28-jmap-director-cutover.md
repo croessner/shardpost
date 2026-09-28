@@ -130,6 +130,15 @@ Postchecks after the rollout:
 
 Report: node1-maint `reports/2026-09-28-automx-jmap.md`.
 
+## Follow-up: JMAP OAuth-only, brute force for ManageSieve and POP3
+
+- **OAuth only (owner decision).** A password login at the public JMAP endpoint would be one more oracle for guessed passwords, past MFA and `delayed_response` of the OIDC login.
+  - The Director's JMAP listener now has `basic.enabled: false`. Without credentials, with a correct or a wrong password, the answer is the same 401 with only a Bearer challenge.
+  - automx advertises `OAuth2` only for JMAP. The PACC document carries no authentication methods, so the UAAC1 digests stayed valid (130/130 PASS).
+  - ShardPost keeps Basic for the acceptance scripts, reachable only from the Director and through `kubectl port-forward`. `JMAP_BASE` with `hack/jmapbase.py` points the scripts there.
+- **Brute force.** `sieve`, `pop3` and `pop3s` were missing from Nauthilus's brute-force protocols, although ManageSieve is public through the Director (nauthilus-tests `8557f43`). Two wrong logins from outside the allowlist (ns2) are now recorded for `sieve` exactly as for `imap`.
+- JMAP Basic was already covered: `jmap` is in the per-minute mail buckets, and the client IP arrives through PROXY v2.
+
 ## Open
 
 - A real OAuth login with MFA (Thunderbird via DCR) over IMAP and JMAP, and Web Push to a real device, still need the owner.
