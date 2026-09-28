@@ -88,8 +88,48 @@ After the switch to the internal certificate, the session and `Mailbox/get` were
 
 After every step: pods ready, no restarts, no ERROR/WARN in ShardPost, the Director or Nauthilus. IMAP logins through `mail.roessner-net.de` kept working.
 
+## Follow-up the same day: Director v1.1.2 and automx
+
+**Bearer routing.** IMAP, POP3 and Sieve Bearer logins used to route only on the introspection claims. The token names the canonical account but carries no `mailShard`, so the Director fell back to the rendezvous hash across mailstack and shardpost.
+
+In the 24 hours before the fix no Bearer login went through the Director; all 264 IMAP logins used passwords and routed by `mailShard`.
+
+v1.1.2:
+- looks up the token's account after introspection (`recipient_lookup`) and routes on the lookup's `mailShard`;
+- a failed lookup is a tempfail;
+- an account that differs from the token's is refused, on JMAP as well.
+
+In Nauthilus, the Dovecot-group search now also matches `rnsMSDovecotUser`, the value of the `dovecot_account` claim (nauthilus-tests `caf7cca`).
+
+**Token binding.** The IMAP listener accepted only tokens whose audience was Roundcube. Native clients register through DCR and have their own client id as the audience, and automx cannot make them request an RFC 8707 resource. So OAuth, which automx advertises, was unusable for them.
+
+The owner decided to switch `imaps`, `sieve` and `jmap` to `token_binding: introspection_allowlist`:
+- the IdP binds the token through the allowlist of `shardpost-introspection` (`roundcube-app`, DCR profile `mail-client-v1`);
+- resources are recognised in `aud`, which is where Nauthilus puts them;
+- the scope `mail:account:read` stays mandatory.
+
+Two review rounds, no blocker. Before the tag, these were fixed:
+- validation against the authority's own client;
+- resource matching in `aud`;
+- routing attributes taken only from the lookup;
+- generic IMAP refusal text;
+- the documented requirement that the introspection client has no interactive grants.
+
+Postchecks after the rollout:
+- IMAP and Sieve password logins OK;
+- a bogus XOAUTH2 token got `NO [AUTHENTICATIONFAILED]`;
+- a bogus JMAP Bearer got 401;
+- JMAP sending and push through the Director green;
+- HAProxy servers UP;
+- `make test` and `make mail-flow` PASS.
+
+**automx** offers JMAP for all 26 domains:
+- `incomingServer type="jmap"` in Autoconfig and `protocols.jmap` in PACC, with the session URL and `OAuth2`/`password-cleartext`;
+- the UAAC1 TXT records `_ua-auto-config.<domain>` were already stale for all 26 domains before the change, and were set to the new digest through the PowerDNS API;
+- `automx dns check` passes 130 of 130 checks on ns1 and ns2.
+
+Report: node1-maint `reports/2026-09-28-automx-jmap.md`.
+
 ## Open
 
-- Bearer logins with a real MFA login and Web Push to a real device still need the owner.
-- IMAP, POP3 and Sieve Bearer logins in the Director still fall back to the rendezvous hash when the token carries no `mailShard`. This is recorded as an open decision in the Director's architecture document (§23), with two proposals: an identity lookup after introspection, or refusing such logins.
-- JMAP clients do not learn the URL through automx yet.
+- A real OAuth login with MFA (Thunderbird via DCR) over IMAP and JMAP, and Web Push to a real device, still need the owner.
