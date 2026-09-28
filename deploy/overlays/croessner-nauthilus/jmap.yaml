@@ -1,37 +1,17 @@
-# JMAP on its public name. HAProxy on lbr1/lbr2 terminates TLS for
-# jmap.roessner-net.de and re-encrypts to this NodePort with PROXY v2;
-# externalTrafficPolicy Local keeps the LBR address as the peer, so the
-# PROXY header is trusted (server.proxy_protocol_trusted_cidrs) and the
-# network policy admits only the LBRs.
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: shardpost-jmap-tls
-  namespace: shardpost
-spec:
-  secretName: shardpost-jmap-tls
-  dnsNames:
-    - jmap.roessner-net.de
-  issuerRef:
-    kind: ClusterIssuer
-    name: letsencrypt-prod
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-    rotationPolicy: Always
----
+# JMAP behind nauthilus-director. HAProxy on lbr1/lbr2 sends
+# mail.roessner-net.de /jmap/ and /.well-known/jmap to the director, which
+# authenticates, routes by mailShard and connects here with PROXY v2 and TLS
+# (internal CA, shardpost.shardpost.svc.cluster.local, as for IMAP).
 apiVersion: v1
 kind: Service
 metadata:
   name: shardpost-jmap
   namespace: shardpost
 spec:
-  type: NodePort
-  externalTrafficPolicy: Local
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: shardpost-server
   ports:
     - name: jmap
       port: 9443
       targetPort: jmap
-      nodePort: 30443

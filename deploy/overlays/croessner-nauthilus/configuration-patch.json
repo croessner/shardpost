@@ -142,7 +142,7 @@
           {
             "name": "jmap-tls",
             "secret": {
-              "secretName": "shardpost-jmap-tls",
+              "secretName": "shardpost-tls",
               "defaultMode": 288
             }
           }

@@ -9,9 +9,8 @@ server:
   # large-omap warning at 200000 keys. Mailboxes created with the former
   # POC value 20 keep it.
   mbox_shard_size: 100000
-  # The Calico pod network (Director, test pods) and the VLAN addresses of
-  # lbr1/lbr2, from which HAProxy reaches the JMAP NodePort.
-  proxy_protocol_trusted_cidrs: "172.16.0.0/12,192.168.0.5/32,192.168.0.6/32"
+  # The Calico pod network: the Director and the operator's test pods.
+  proxy_protocol_trusted_cidrs: "172.16.0.0/12"
   imap_addr: ":1143"
   lmtp_addr: ":2424"
   http_addr: ":8080"
@@ -199,11 +198,10 @@ jmap:
   addr: ":9443"
   tls_cert: "/tls/jmap/tls.crt"
   tls_key: "/tls/jmap/tls.key"
-  # Test name only: clients use mail.roessner-net.de, and JMAP moves there
-  # once the Director routes it (docs/reports/2026-09-27-jmap-activation.md).
-  public_base_url: "https://jmap.roessner-net.de"
-  # The Director does not route JMAP: every RNS account reaches this shard
-  # through HAProxy, and only its own accounts may be served.
+  # Clients reach JMAP on mail.roessner-net.de: HAProxy sends /jmap/ and
+  # /.well-known/jmap to nauthilus-director, which routes by mailShard.
+  public_base_url: "https://mail.roessner-net.de"
+  # Second check behind the director: only this shard's accounts are served.
   shard_attribute: "mailShard"
   shard: "shardpost"
   push:
