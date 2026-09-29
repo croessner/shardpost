@@ -236,5 +236,15 @@ func clientIP(r *http.Request) string {
 // addr adapts a string address to net.Addr.
 type addr struct{ s string }
 
+// clientAddr is the session's client address for backend lookups, or nil
+// when the session has none (such as the push worker's own lookups).
+func (s *session) clientAddr() net.Addr {
+	if s == nil || s.remote == "" {
+		return nil
+	}
+
+	return &addr{s: s.remote}
+}
+
 func (a *addr) Network() string { return "tcp" }
 func (a *addr) String() string  { return a.s }

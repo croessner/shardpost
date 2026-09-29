@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -340,12 +339,7 @@ func (s *Server) lookupPrincipal(ctx context.Context, sess *session, id string) 
 	ctx, cancel := context.WithTimeout(ctx, principalLookupTimeout)
 	defer cancel()
 
-	var client net.Addr
-	if sess.remote != "" {
-		client = &addr{s: sess.remote}
-	}
-
-	res, err := s.o.Auth.Lookup(ctx, id, "jmap", client)
+	res, err := s.o.Auth.Lookup(ctx, id, "jmap", sess.clientAddr())
 
 	result := s.lookupResult(id, res, err)
 	if result == lookupFailed {

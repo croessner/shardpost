@@ -14,9 +14,18 @@ import (
 type identityAuth struct {
 	auth.Static
 	attrs map[string][]string
+	// client records the client address of the last lookup.
+	client *string
 }
 
-func (a identityAuth) Lookup(_ context.Context, address, _ string, _ net.Addr) (*auth.Result, error) {
+func (a identityAuth) Lookup(_ context.Context, address, _ string, client net.Addr) (*auth.Result, error) {
+	if a.client != nil {
+		*a.client = ""
+		if client != nil {
+			*a.client = client.String()
+		}
+	}
+
 	return &auth.Result{Account: address, Attributes: a.attrs, DisplayName: "Test User"}, nil
 }
 
@@ -24,11 +33,18 @@ func (a identityAuth) Lookup(_ context.Context, address, _ string, _ net.Addr) (
 func identityServer(t *testing.T) *Server {
 	t.Helper()
 
+	return identityServerRecording(t, nil)
+}
+
+// identityServerRecording is identityServer whose lookups record the client address in client.
+func identityServerRecording(t *testing.T, client *string) *Server {
+	t.Helper()
+
 	store := memstore.New()
 
 	return newTestServer(t, func(o *Options) {
 		o.Store = store
-		o.Auth = identityAuth{Static: auth.Static{"test": "secret"},
+		o.Auth = identityAuth{Static: auth.Static{"test": "secret"}, client: client,
 			attrs: map[string][]string{"mail": {"test@example.org"}, "alias": {"t@example.org", "no-address", "TEST@example.org", "@example.org", "a@b@example.org"}}}
 		o.Submission = &SubmissionOptions{AddressAttributes: []string{"mail", "alias"}}
 	})
@@ -92,6 +108,28 @@ func TestIdentities(t *testing.T) {
 	res = submissionCall(t, s, "Identity/set", `{"accountId":"test","destroy":["`+created[propID].(string)+`"]}`)
 	if d, _ := res["destroyed"].([]any); len(d) != 1 {
 		t.Errorf("destroying an added identity gave %#v", res)
+	}
+}
+
+// TestIdentityLookupCarriesClientAddress: the identity lookup names the
+// JMAP client, like every other lookup of a session, so the backend's
+// policy sees the client's address instead of none.
+func TestIdentityLookupCarriesClientAddress(t *testing.T) {
+	var client string
+
+	s := identityServerRecording(t, &client)
+
+	res := submissionCall(t, s, "Identity/get", `{"accountId":"test"}`)
+	if list, _ := res["list"].([]any); len(list) == 0 {
+		t.Fatalf("identities %#v", res)
+	}
+
+	if client == "" {
+		t.Fatal("the identity lookup carried no client address")
+	}
+
+	if ip := net.ParseIP(client); ip == nil {
+		t.Errorf("the identity lookup carried %q, want the client's IP address", client)
 	}
 }
 

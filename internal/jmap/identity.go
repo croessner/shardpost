@@ -163,7 +163,7 @@ func loadIdentities(ctx context.Context, sess *session) (*identityBook, *methodE
 		return nil, merr
 	}
 
-	res, err := sess.srv.o.Auth.Lookup(ctx, sess.account, "jmap", nil)
+	res, err := sess.srv.o.Auth.Lookup(ctx, sess.account, "jmap", sess.clientAddr())
 
 	switch {
 	case errors.Is(err, auth.ErrInvalid):
