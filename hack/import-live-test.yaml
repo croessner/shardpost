@@ -36,7 +36,7 @@ data:
       socket: "/run/shardpost/admin.sock"
       socket_roles: [diagnose, import]
       import:
-        shard_size: 100
+        shard_size: 100000
 ---
 apiVersion: v1
 kind: Pod
