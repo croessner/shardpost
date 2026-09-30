@@ -126,10 +126,10 @@ func (u *User) ftsIndex(guid string, raw []byte) error {
 
 // ftsIndexDocs indexes several messages at once. Indexing a message
 // costs round trips — the id map, a read and a compare-and-swap per
-// posting shard, the dictionary — and rewrites the posting list of each
-// of its terms, so a batch of an import that pays both once per term
-// instead of once per message and term is much cheaper (see eachShard
-// for what bounds its memory).
+// posting shard — and rewrites the dictionary entry of every trigram of
+// its new terms, so a batch of an import that pays all this once instead
+// of once per message is much cheaper (see dictChunk for what bounds
+// its memory).
 func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 	if len(docs) == 0 {
 		return nil
@@ -169,40 +169,48 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		return nil
 	}
 
-	if err := eachShard(groupBy(terms, u.ftsShardOID), len(docs) > 1, add); err != nil {
+	if err := parallel(groupBy(terms, u.ftsShardOID), add); err != nil {
 		return err
 	}
 
 	return u.dictUpdate(newTerms, true)
 }
 
-// ftsChunkTerms bounds the terms of one posting update of a batch. A
-// posting list is one omap value that is read and written whole, and the
-// list of a common word holds an id for most messages of the account:
-// every list a batch touches passes through memory, in the client
-// library as well as here. A batch of an import touches a large part of
-// the vocabulary, so it goes through in pieces of this many terms, one
-// piece at a time.
-const ftsChunkTerms = 256
+// dictChunk bounds the trigrams of one dictionary write of a large
+// update, dictParallelMax is how many trigrams an update may touch and
+// still take all shards at once.
+//
+// A trigram's entry lists up to dictCap terms and is read and written
+// whole; the entries of an account with 20000 messages came to some
+// 20 MiB per shard. The new terms of one message touch a few hundred
+// trigrams. Those of an import batch touch most of the dictionary, and
+// taking all shards at once then put all of it into memory at the same
+// time, in the client library as well as here: the resident size went
+// from 60 MiB to over 1 GiB within seconds. A large update therefore
+// takes one shard after the other in pieces of dictChunk trigrams.
+// Posting lists are small by comparison and stay parallel.
+const (
+	dictChunk       = 256
+	dictParallelMax = 16 * dictChunk
+)
 
-// eachShard runs fn for the terms of every shard. A single message has
-// few terms per shard and takes all shards at once; a batch (bounded
-// true) takes one shard after the other in pieces of ftsChunkTerms, so
-// what it holds in memory does not grow with the size of the index.
-func eachShard(groups map[string][]string, bounded bool, fn func(oid string, terms []string) error) error {
+// eachShard runs fn for the keys of every shard: all shards at once, or
+// (bounded) one shard after the other in pieces of dictChunk keys, so
+// that what is held in memory does not grow with the size of the index.
+func eachShard(groups map[string][]string, bounded bool, fn func(oid string, keys []string) error) error {
 	if !bounded {
 		return parallel(groups, fn)
 	}
 
-	for oid, terms := range groups {
-		for len(terms) > 0 {
-			n := min(len(terms), ftsChunkTerms)
+	for oid, keys := range groups {
+		for len(keys) > 0 {
+			n := min(len(keys), dictChunk)
 
-			if err := fn(oid, terms[:n]); err != nil {
+			if err := fn(oid, keys[:n]); err != nil {
 				return err
 			}
 
-			terms = terms[n:]
+			keys = keys[n:]
 		}
 	}
 
@@ -600,7 +608,9 @@ func (u *User) dictUpdate(terms []string, add bool) error {
 		tris = append(tris, tri)
 	}
 
-	return parallel(groupBy(tris, u.dictShardOID), func(oid string, tris []string) error {
+	// The new terms of a batch touch most of the dictionary, which must
+	// not pass through memory at once (see dictChunk).
+	return eachShard(groupBy(tris, u.dictShardOID), len(tris) > dictParallelMax, func(oid string, tris []string) error {
 		err := casOmap(u, u.idx, oid, tris, func(cur map[string][]byte) (map[string][]byte, []string) {
 			set := map[string][]byte{}
 
