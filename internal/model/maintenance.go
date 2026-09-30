@@ -49,6 +49,28 @@ type FTSRebuilder interface {
 	RebuildFTS(fence func() error, progress func(done, total int)) error
 }
 
+// FTSDictReport is what a conversion of the substring dictionary did.
+type FTSDictReport struct {
+	// Terms counts the terms of the posting lists by field.
+	Terms map[string]int64 `json:"terms"`
+	// Entries is the number of dictionary entries written for them.
+	Entries int64 `json:"entries"`
+	// LegacyObjects is the number of objects of the old layout removed.
+	LegacyObjects int `json:"legacy_objects"`
+}
+
+// FTSDictConverter is implemented by user views whose substring
+// dictionary has an older layout to convert from. LegacyFTSDict reports
+// how many objects of that layout the account still has. ConvertFTSDict
+// writes the dictionary again from the posting lists and removes them; it
+// may run beside deliveries and searches, and running it again is
+// harmless. fence is called before every batch of writes, progress after
+// each posting shard.
+type FTSDictConverter interface {
+	LegacyFTSDict() (int, error)
+	ConvertFTSDict(fence func() error, progress func(done, total int)) (FTSDictReport, error)
+}
+
 // NamespacePurger is implemented by user views that can remove every
 // object of the account (index and data); fence is called before every
 // batch of deletes. It returns the number of objects removed.

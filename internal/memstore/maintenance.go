@@ -1,14 +1,19 @@
 package memstore
 
-import "shardpost/internal/model"
+import (
+	"strings"
+
+	"shardpost/internal/model"
+)
 
 // Maintenance operations mirroring cephstore for the job tests.
 
 var (
-	_ model.Scrubber        = (*User)(nil)
-	_ model.QuotaRecounter  = (*User)(nil)
-	_ model.FTSRebuilder    = (*User)(nil)
-	_ model.NamespacePurger = (*User)(nil)
+	_ model.Scrubber         = (*User)(nil)
+	_ model.QuotaRecounter   = (*User)(nil)
+	_ model.FTSRebuilder     = (*User)(nil)
+	_ model.FTSDictConverter = (*User)(nil)
+	_ model.NamespacePurger  = (*User)(nil)
 )
 
 // ScrubReport is the memstore scrub report (nothing to repair).
@@ -70,6 +75,31 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 	}
 
 	return nil
+}
+
+// LegacyFTSDict implements model.FTSDictConverter; this store has no
+// dictionary and so never one to convert.
+func (u *User) LegacyFTSDict() (int, error) { return 0, nil }
+
+// ConvertFTSDict implements model.FTSDictConverter: it counts the terms.
+func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)) (model.FTSDictReport, error) {
+	rep := model.FTSDictReport{Terms: map[string]int64{}}
+
+	if err := fence(); err != nil {
+		return rep, err
+	}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	for term := range u.terms {
+		field, _, _ := strings.Cut(term, ":")
+		rep.Terms[field]++
+	}
+
+	progress(1, 1)
+
+	return rep, nil
 }
 
 // PurgeNamespace implements model.NamespacePurger.

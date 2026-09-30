@@ -265,6 +265,7 @@ shardpostctl plan scrub -classes refs,orphans user@example.org
 shardpostctl plan quota_recalc user@example.org
 shardpostctl plan acl_reconcile user@example.org
 shardpostctl plan fts_rebuild user@example.org
+shardpostctl plan fts_dict_convert user@example.org        # dictionary layout of 0.35.0
 shardpostctl plan -mailbox "Archiv/2019" mailbox_delete user@example.org
 shardpostctl plan purge user@example.org
 shardpostctl apply -wait <plan-id>
@@ -289,6 +290,7 @@ only the repairs that were planned and are still needed.
 | `quota_recalc` | `repair` | yes | recount the usage from the index and set it |
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index and rebuild it from all messages |
+| `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account |
 | `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
 | `expunge` | `delete` | no | permanently remove messages of a mailbox: `uids` or `deleted: true` (all with `\Deleted`) |
 | `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account |
@@ -313,7 +315,8 @@ only the repairs that were planned and are still needed.
   checks its lease (fencing). If the server dies, another one takes over
   once the lease has expired and continues from the last checkpoint. On an
   orderly shutdown the server gives up running jobs immediately.
-  `fts_rebuild` has no checkpoint and starts over after a takeover.
+  `fts_rebuild` and `fts_dict_convert` have no checkpoint and start over
+  after a takeover.
   Leases compare the clocks of different servers, so those clocks have to
   be kept in sync with NTP. A deviation well below `jobs.lease_seconds` is
   harmless.

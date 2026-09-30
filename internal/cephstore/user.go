@@ -40,7 +40,7 @@ import (
 //	                          "v:<modseq>" -> [uids] expunged (QRESYNC VANISHED)
 //	                          "m:<uid>"    -> Meta JSON (entries of shard 0)
 //	  "mbox/<id>/<n>"      shard n >= 1: "m:<uid>" entries only
-//	  "fts/<shard>", "ftsd/<shard>"   full-text index, see fts.go
+//	  "fts/<shard>", "ftst/<shard>"   full-text index, see fts.go
 //	data pool:
 //	  "msg/<guid>/<n>"     chunk n of the raw RFC 5322 message, see blob.go
 //
@@ -133,6 +133,9 @@ type User struct {
 	log           *slog.Logger
 	chunkSize     int64
 	ftsShards     int
+	// legacyDict caches whether the account still has the dictionary
+	// objects of the layout before 0.35.0 (see legacyDictMatches).
+	legacyDict int
 	acctRetention int
 	shardSize     uint32
 	limit         QuotaLimit
@@ -1907,6 +1910,9 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 	}
 
 	if err := u.ftsIndex(guid, raw); err != nil {
+		// What was indexed before the failure goes again; the blob is
+		// still there for that.
+		_ = u.ftsRemove(&Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks})
 		u.deleteBlob(guid, chunks)
 		release()
 

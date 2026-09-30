@@ -40,28 +40,55 @@ import (
 // Stemming: Terms() indexes every token together with its Snowball stems,
 // and queries are expanded the same way.
 //
-// Substrings: a second set of shard objects "ftsd/<shard>" is the term
-// dictionary. Its omap maps a trigram to the newline separated list of
-// terms containing it. A substring query intersects the term lists of its
-// trigrams, keeps the terms that really contain the substring, and then
-// reads only those postings. No message is ever read for a search, and the
-// dictionary grows with the user's vocabulary, not with the mail count.
-// This is the RADOS counterpart of Xapian's term database that flatcurve
-// uses for wildcard matching.
+// Substrings: a second set of shard objects "ftst/<shard>" is the term
+// dictionary. Its omap has one key per (trigram, term) pair,
+// "<trigram>:<term>" (for example "voi:s:invoice"), with an empty value;
+// the shard is fnv1a(trigram) mod dictShards, so the terms of a trigram
+// are one key range of one object. A new term costs one key per trigram
+// of its token, written without reading anything: the keys are set, and
+// setting one twice changes nothing, so the update needs no
+// compare-and-swap either. What a delivery writes therefore depends on
+// the message, not on the size of the vocabulary.
+//
+// A substring query scans the key range "<trigram>:<field>:" of the
+// token's trigrams, a page of each at a time, until the first range is
+// exhausted; the terms of that range which contain the token are the
+// answer, and only their postings are read. No message is ever read for
+// a search. This is the RADOS counterpart of Xapian's term database that
+// flatcurve uses for wildcard matching.
+//
+// The terms of the field "h" (every header value) are not in the
+// dictionary, see fts.Substring.
+//
+// Until 0.34.6 the dictionary was "ftsd/<shard>" with one key per trigram
+// and the newline separated list of all its terms as the value, which
+// was read and rewritten whole for every new term. Nothing writes that
+// layout any more; it is still read, in addition to the new one, until
+// ConvertFTSDict has rebuilt the dictionary of the account from its
+// posting lists and removed the old objects.
 const (
 	ftsPrefix        = "fts/"
-	dictPrefix       = "ftsd/"
+	dictPrefix       = "ftst/"
+	legacyDictPrefix = "ftsd/"
 	oidFTSMap        = "ftsmap"
 	DefaultFTSShards = 16
 	guidBytes        = 16
 	maxCandidates    = 4096 // terms per query token after substring filtering
 	prefixScanMax    = 64   // terms per shard for the < 3 rune prefix fallback
-	// dictCap bounds the term list of one trigram. Very common trigrams
-	// ("ing", "sch") would otherwise grow with the whole vocabulary and
-	// contribute nothing to the intersection; above the cap the list is
-	// replaced by a marker and the trigram is skipped in queries.
-	dictCap    = 2000
-	dictCapped = "\x00capped"
+	// dictShards is the number of dictionary objects of an account. It
+	// keeps an object below the key count at which Ceph warns about large
+	// omap objects for a dictionary of tens of millions of pairs, and it is
+	// fixed for good: changing it would move every key.
+	dictShards = 256
+	dictSep    = ":"
+	// dictWriteChunk bounds the keys of one dictionary write, dictWriters
+	// the writes in flight; together they bound what an update of any size
+	// holds in the client library at a time.
+	dictWriteChunk = 2048
+	dictWriters    = 8
+	// legacyDictCapped is the value the old layout stored in place of a
+	// term list of more than 2000 terms; such a trigram is skipped.
+	legacyDictCapped = "\x00capped"
 )
 
 func shardNo(s string, n int) int {
@@ -75,8 +102,12 @@ func (u *User) ftsShardOID(term string) string {
 	return fmt.Sprintf("%s%02d", ftsPrefix, shardNo(term, u.ftsShards))
 }
 
-func (u *User) dictShardOID(tri string) string {
-	return fmt.Sprintf("%s%02d", dictPrefix, shardNo(tri, u.ftsShards))
+func dictShardOID(tri string) string {
+	return fmt.Sprintf("%s%03d", dictPrefix, shardNo(tri, dictShards))
+}
+
+func (u *User) legacyDictShardOID(tri string) string {
+	return fmt.Sprintf("%s%02d", legacyDictPrefix, shardNo(tri, u.ftsShards))
 }
 
 func groupBy(items []string, oidOf func(string) string) map[string][]string {
@@ -92,13 +123,24 @@ func groupBy(items []string, oidOf func(string) string) map[string][]string {
 
 // parallel runs fn for every group concurrently and returns the first error.
 func parallel(groups map[string][]string, fn func(oid string, items []string) error) error {
+	return parallelN(groups, len(groups), fn)
+}
+
+// parallelN is parallel with at most n groups in flight.
+func parallelN(groups map[string][]string, n int, fn func(oid string, items []string) error) error {
 	var wg sync.WaitGroup
 
 	errs := make(chan error, len(groups))
+	sem := make(chan struct{}, max(n, 1))
+
 	for oid, items := range groups {
 		wg.Add(1)
+
+		sem <- struct{}{}
+
 		go func(oid string, items []string) {
 			defer wg.Done()
+			defer func() { <-sem }()
 
 			if err := fn(oid, items); err != nil {
 				errs <- err
@@ -126,10 +168,9 @@ func (u *User) ftsIndex(guid string, raw []byte) error {
 
 // ftsIndexDocs indexes several messages at once. Indexing a message
 // costs round trips — the id map, a read and a compare-and-swap per
-// posting shard — and rewrites the dictionary entry of every trigram of
-// its new terms, so a batch of an import that pays all this once instead
-// of once per message is much cheaper (see dictChunk for what bounds
-// its memory).
+// posting shard, a write per dictionary shard its new terms touch — so a
+// batch of an import that pays them once instead of once per message is
+// much cheaper.
 func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 	if len(docs) == 0 {
 		return nil
@@ -174,48 +215,6 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 	}
 
 	return u.dictUpdate(newTerms, true)
-}
-
-// dictChunk bounds the trigrams of one dictionary write of a large
-// update, dictParallelMax is how many trigrams an update may touch and
-// still take all shards at once.
-//
-// A trigram's entry lists up to dictCap terms and is read and written
-// whole; the entries of an account with 20000 messages came to some
-// 20 MiB per shard. The new terms of one message touch a few hundred
-// trigrams. Those of an import batch touch most of the dictionary, and
-// taking all shards at once then put all of it into memory at the same
-// time, in the client library as well as here: the resident size went
-// from 60 MiB to over 800 MiB within seconds, and the container was
-// killed at its limit of 1 GiB. A large update therefore
-// takes one shard after the other in pieces of dictChunk trigrams.
-// Posting lists are small by comparison and stay parallel.
-const (
-	dictChunk       = 256
-	dictParallelMax = 16 * dictChunk
-)
-
-// eachShard runs fn for the keys of every shard: all shards at once, or
-// (bounded) one shard after the other in pieces of dictChunk keys, so
-// that what is held in memory does not grow with the size of the index.
-func eachShard(groups map[string][]string, bounded bool, fn func(oid string, keys []string) error) error {
-	if !bounded {
-		return parallel(groups, fn)
-	}
-
-	for oid, keys := range groups {
-		for len(keys) > 0 {
-			n := min(len(keys), dictChunk)
-
-			if err := fn(oid, keys[:n]); err != nil {
-				return err
-			}
-
-			keys = keys[n:]
-		}
-	}
-
-	return nil
 }
 
 // addPostings adds the ids of docsOf to the posting lists of the terms
@@ -612,87 +611,95 @@ func (u *User) resolveDocIDs(ids map[uint64]bool) (map[string]bool, error) {
 	return out, nil
 }
 
-// dictUpdate adds or removes terms in the trigram dictionary.
+// dictUpdate adds the terms to the trigram dictionary or removes them.
+//
+// The posting lists say which terms are new or gone, and the dictionary
+// follows in a second step. A term that one writer removes while another
+// adds it again can therefore end up with postings and without its
+// dictionary keys (it is then found by the exact word and its stems
+// only, until ConvertFTSDict or a rebuild lists it again); a key without
+// postings costs a lookup that finds nothing.
 func (u *User) dictUpdate(terms []string, add bool) error {
-	if len(terms) == 0 {
-		return nil
-	}
-	// trigram -> terms
-	byTri := map[string][]string{}
+	_, err := u.dictApply(terms, add)
 
-	for _, t := range terms {
-		_, tok, _ := strings.Cut(t, ":")
-		for _, tri := range fts.Trigrams(tok) {
-			byTri[tri] = append(byTri[tri], t)
-		}
-	}
+	return err
+}
 
-	tris := make([]string, 0, len(byTri))
-	for tri := range byTri {
-		tris = append(tris, tri)
+// dictApply is dictUpdate that also returns the number of entries.
+func (u *User) dictApply(terms []string, add bool) (n int, err error) {
+	byShard, n := dictEntries(terms)
+	if n == 0 {
+		return 0, nil
 	}
 
-	// The new terms of a batch touch most of the dictionary, which must
-	// not pass through memory at once (see dictChunk).
-	return eachShard(groupBy(tris, u.dictShardOID), len(tris) > dictParallelMax, func(oid string, tris []string) error {
-		err := casOmap(u, u.idx, oid, tris, func(cur map[string][]byte) (map[string][]byte, []string) {
-			set := map[string][]byte{}
+	end := u.trace(spanFTSDict, attrCount(n))
+	defer func() { end(err) }()
 
-			var rm []string
+	return n, parallelN(byShard, dictWriters, func(oid string, keys []string) error {
+		for len(keys) > 0 {
+			n := min(len(keys), dictWriteChunk)
 
-			for _, tri := range tris {
-				if string(cur[tri]) == dictCapped {
-					continue
-				}
-
-				list := splitTerms(cur[tri])
-				changed := editTermList(list, byTri[tri], add)
-
-				if !changed {
-					continue
-				}
-
-				switch {
-				case len(list) == 0:
-					rm = append(rm, tri)
-				case len(list) > dictCap:
-					set[tri] = []byte(dictCapped)
-				default:
-					set[tri] = joinTerms(list)
-				}
+			if err := dictWrite(u.idx, oid, keys[:n], add); err != nil {
+				return fmt.Errorf("fts dictionary shard %s: %w", oid, err)
 			}
 
-			return set, rm
-		})
-		if err != nil {
-			return fmt.Errorf("fts dictionary shard %s: %w", oid, err)
+			keys = keys[n:]
 		}
 
 		return nil
 	})
 }
 
-// editTermList adds terms to (add) or removes them from list and reports
-// whether list changed.
-func editTermList(list map[string]struct{}, terms []string, add bool) bool {
-	changed := false
+// dictEntries returns the dictionary keys of the terms by shard object,
+// and their number. Terms of fields without substring matching have none.
+func dictEntries(terms []string) (map[string][]string, int) {
+	byShard := map[string][]string{}
+	n := 0
 
 	for _, t := range terms {
-		if add {
-			if _, ok := list[t]; !ok {
-				list[t] = struct{}{}
-				changed = true
-			}
-		} else if _, ok := list[t]; ok {
-			delete(list, t)
+		field, tok, _ := strings.Cut(t, ":")
+		if !fts.Substring(field) {
+			continue
+		}
 
-			changed = true
+		for _, tri := range fts.Trigrams(tok) {
+			oid := dictShardOID(tri)
+			byShard[oid] = append(byShard[oid], tri+dictSep+t)
+			n++
 		}
 	}
 
-	return changed
+	return byShard, n
 }
 
+// dictWrite sets or removes dictionary keys of one shard object. Neither
+// depends on what the object holds, so there is nothing to read first
+// and nothing to retry.
+func dictWrite(ioctx *rados.IOContext, oid string, keys []string, add bool) error {
+	op := rados.CreateWriteOp()
+	defer op.Release()
+
+	if add {
+		set := make(map[string][]byte, len(keys))
+		for _, k := range keys {
+			set[k] = nil
+		}
+
+		op.SetOmap(set)
+	} else {
+		op.RmOmapKeys(keys)
+	}
+
+	err := op.Operate(ioctx, oid, rados.OperationNoFlag)
+	if !add && errCode(err) == syscall.ENOENT {
+		return nil
+	}
+
+	return err
+}
+
+// splitTerms returns the terms of a term list of the old dictionary
+// layout.
 func splitTerms(v []byte) map[string]struct{} {
 	out := map[string]struct{}{}
 	if len(v) == 0 {
@@ -706,17 +713,6 @@ func splitTerms(v []byte) map[string]struct{} {
 	}
 
 	return out
-}
-
-func joinTerms(set map[string]struct{}) []byte {
-	l := make([]string, 0, len(set))
-	for t := range set {
-		l = append(l, t)
-	}
-
-	sort.Strings(l)
-
-	return []byte(strings.Join(l, "\n"))
 }
 
 // --- queries ----------------------------------------------------------------
@@ -786,8 +782,11 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 	}
 
 	tris := fts.Trigrams(tok)
-	if len(tris) == 0 {
-		// Too short for the dictionary: prefix scan on the sorted omap.
+	sub := []string{field}
+
+	if len(tris) == 0 || !fts.Substring(field) {
+		// Too short for the dictionary, or a field that is not in it:
+		// prefix scan on the sorted omap.
 		terms, err := u.prefixTerms(field + ":" + tok)
 		if err != nil {
 			return nil, err
@@ -797,12 +796,196 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 			set[t] = struct{}{}
 		}
 
-		return keys(set), nil
+		sub = nil
+		if len(tris) > 0 {
+			sub = fts.HeaderSubstringFields
+		}
 	}
 
-	inter, capped, err := u.dictIntersect(tris)
+	for _, f := range sub {
+		if err := u.substringTerms(set, f, tok, tris); err != nil {
+			return nil, err
+		}
+	}
+
+	return keys(set), nil
+}
+
+// substringTerms adds the terms of field that contain tok to set.
+func (u *User) substringTerms(set map[string]struct{}, field, tok string, tris []string) error {
+	terms, err := u.dictMatches(field, tok, tris)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	for _, t := range terms {
+		set[t] = struct{}{}
+	}
+
+	return u.legacyDictMatches(set, field, tok, tris)
+}
+
+// dictScan is the scan of one trigram's key range for the terms of a
+// field that contain a token.
+type dictScan struct {
+	oid    string
+	prefix string // "<trigram>:<field>:"
+	skip   int    // length of "<trigram>:", what precedes the term in a key
+	after  string
+	found  []string
+	done   bool
+}
+
+func newDictScan(tri, field string) *dictScan {
+	return &dictScan{oid: dictShardOID(tri), prefix: tri + dictSep + field + ":", skip: len(tri) + len(dictSep)}
+}
+
+// take looks at the next key of the range.
+func (s *dictScan) take(key, tok string) {
+	s.after = key
+
+	if strings.Contains(key[len(s.prefix):], tok) {
+		s.found = append(s.found, key[s.skip:])
+	}
+}
+
+// page reads the next page of the range.
+func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
+	more, err := listOmapKeys(ioctx, s.oid, s.after, s.prefix, omapPageSize, func(key string) { s.take(key, tok) })
+	if err != nil {
+		return fmt.Errorf("fts dictionary shard %s: %w", s.oid, err)
+	}
+
+	s.done = !more
+
+	return nil
+}
+
+// dictMatches returns the terms of field that contain tok, at most about
+// maxCandidates of them.
+//
+// Every such term is listed under each trigram of tok, so the key range
+// of any one trigram, read to its end and filtered, is the whole answer.
+// Which range is the short one is not known beforehand: all of them are
+// read a page at a time until the first is exhausted, which costs at
+// most the shortest range times the number of trigrams. That is one
+// round for a token with any trigram that is not among the most common
+// ones.
+func (u *User) dictMatches(field, tok string, tris []string) ([]string, error) {
+	scans := make([]*dictScan, len(tris))
+	for i, tri := range tris {
+		scans[i] = newDictScan(tri, field)
+	}
+
+	for {
+		var wg sync.WaitGroup
+
+		errs := make([]error, len(scans))
+
+		for i, s := range scans {
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				errs[i] = s.page(u.idx, tok)
+			}()
+		}
+
+		wg.Wait()
+
+		for _, err := range errs {
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		if s := finishedScan(scans); s != nil {
+			return s.found, nil
+		}
+	}
+}
+
+// finishedScan returns a scan that has the answer: one that reached the
+// end of its range, else one that has collected maxCandidates terms.
+func finishedScan(scans []*dictScan) *dictScan {
+	var full *dictScan
+
+	for _, s := range scans {
+		if s.done {
+			return s
+		}
+
+		if len(s.found) >= maxCandidates {
+			full = s
+		}
+	}
+
+	return full
+}
+
+// listOmapKeys calls fn for up to limit keys of the object that start
+// with prefix and sort after the key after, and reports whether there
+// are more. A missing object has none.
+func listOmapKeys(ioctx *rados.IOContext, oid, after, prefix string, limit uint64, fn func(key string)) (bool, error) {
+	op := rados.CreateReadOp()
+	defer op.Release()
+
+	step := op.GetOmapValues(after, prefix, limit)
+	if err := op.Operate(ioctx, oid, rados.OperationNoFlag); err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	for {
+		kv, err := step.Next()
+		if err != nil {
+			return false, err
+		}
+
+		if kv == nil {
+			return step.More(), nil
+		}
+
+		fn(kv.Key)
+	}
+}
+
+// Whether the account still has objects of the old dictionary layout.
+const (
+	legacyDictUnknown = iota
+	legacyDictPresent
+	legacyDictAbsent
+)
+
+// legacyDictMatches adds the terms of field that contain tok and are
+// listed in the old dictionary layout to set. An account without the
+// old objects has none.
+func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tris []string) error {
+	// Looked up once per view: a converted account must not pay sixteen
+	// reads of objects that are gone for every token of every query.
+	if u.legacyDict == legacyDictUnknown {
+		n, err := u.LegacyFTSDict()
+		if err != nil {
+			return err
+		}
+
+		u.legacyDict = legacyDictAbsent
+		if n > 0 {
+			u.legacyDict = legacyDictPresent
+		}
+	}
+
+	if u.legacyDict == legacyDictAbsent {
+		return nil
+	}
+
+	inter, capped, err := u.legacyDictIntersect(tris)
+	if err != nil {
+		return err
 	}
 
 	if inter == nil && capped > 0 {
@@ -810,7 +993,7 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 		// the field's terms instead (bounded by the user's vocabulary).
 		terms, err := u.prefixTermsN(field+":", omapPageSize)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		inter = map[string]struct{}{}
@@ -821,13 +1004,13 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 
 	addSubstringTerms(set, inter, field, tok)
 
-	return keys(set), nil
+	return nil
 }
 
-// dictIntersect intersects the dictionary term lists of the trigrams.
-// Capped trigrams are skipped and counted; inter stays nil if every
-// trigram was capped.
-func (u *User) dictIntersect(tris []string) (map[string]struct{}, int, error) {
+// legacyDictIntersect intersects the term lists of the trigrams in the
+// old dictionary layout. Capped trigrams are skipped and counted; inter
+// stays nil if every trigram was capped.
+func (u *User) legacyDictIntersect(tris []string) (map[string]struct{}, int, error) {
 	var (
 		mu    sync.Mutex
 		inter map[string]struct{}
@@ -835,7 +1018,7 @@ func (u *User) dictIntersect(tris []string) (map[string]struct{}, int, error) {
 
 	capped := 0
 
-	err := parallel(groupBy(tris, u.dictShardOID), func(oid string, tris []string) error {
+	err := parallel(groupBy(tris, u.legacyDictShardOID), func(oid string, tris []string) error {
 		vals, err := getOmapKeys(u.idx, oid, tris)
 		if err != nil {
 			return fmt.Errorf("fts dictionary shard %s: %w", oid, err)
@@ -845,7 +1028,7 @@ func (u *User) dictIntersect(tris []string) (map[string]struct{}, int, error) {
 		defer mu.Unlock()
 
 		for _, tri := range tris {
-			if string(vals[tri]) == dictCapped {
+			if string(vals[tri]) == legacyDictCapped {
 				capped++
 				continue
 			}
@@ -887,8 +1070,9 @@ func addSubstringTerms(set, inter map[string]struct{}, field, tok string) {
 }
 
 // prefixTerms lists terms starting with prefix across all index shards
-// (at most prefixScanMax per shard for short-token fallbacks, unbounded
-// for the capped-trigram fallback which needs the field's vocabulary).
+// (at most prefixScanMax per shard for the fallbacks of short tokens and
+// of fields outside the dictionary, unbounded for the capped-trigram
+// fallback of the old dictionary, which needs the field's vocabulary).
 func (u *User) prefixTerms(prefix string) ([]string, error) {
 	return u.prefixTermsN(prefix, prefixScanMax)
 }
@@ -992,22 +1176,36 @@ func keys(set map[string]struct{}) []string {
 	return out
 }
 
-// DeleteFTS removes all index and dictionary shard objects and the id map.
+// DeleteFTS removes all index and dictionary shard objects (of both
+// dictionary layouts) and the id map.
 func (u *User) DeleteFTS() error {
+	oids := u.legacyDictOIDs()
+
 	for i := 0; i < u.ftsShards; i++ {
-		for _, p := range []string{ftsPrefix, dictPrefix} {
-			oid := fmt.Sprintf("%s%02d", p, i)
-			if err := u.idx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
-				return err
-			}
+		oids = append(oids, fmt.Sprintf("%s%02d", ftsPrefix, i))
+	}
+
+	for i := 0; i < dictShards; i++ {
+		oids = append(oids, fmt.Sprintf("%s%03d", dictPrefix, i))
+	}
+
+	for _, oid := range append(oids, oidFTSMap) {
+		if err := u.idx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
+			return err
 		}
 	}
 
-	if err := u.idx.Delete(oidFTSMap); err != nil && errCode(err) != syscall.ENOENT {
-		return err
+	return nil
+}
+
+// legacyDictOIDs are the objects of the old dictionary layout.
+func (u *User) legacyDictOIDs() []string {
+	oids := make([]string, 0, u.ftsShards)
+	for i := 0; i < u.ftsShards; i++ {
+		oids = append(oids, fmt.Sprintf("%s%02d", legacyDictPrefix, i))
 	}
 
-	return nil
+	return oids
 }
 
 // removeLegacyPosting removes a GUID from a legacy (raw GUID) list.

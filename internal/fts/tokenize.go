@@ -27,6 +27,20 @@ const (
 	FieldBody    = "b" // decoded text/* parts
 )
 
+// HeaderSubstringFields are the header fields whose terms the stores list
+// for substring matching; a substring query on FieldHeader is answered
+// from them.
+var HeaderSubstringFields = []string{FieldSubject, FieldFrom, FieldTo}
+
+// Substring reports whether a query token matches the terms of field by
+// substring. All fields do except FieldHeader: most of its vocabulary is
+// message ids, timestamps and other tokens that occur once, so a
+// substring index over it grows with the number of messages instead of
+// with the words in them. A token queried on FieldHeader matches a term
+// exactly, by stem or as a prefix, and by substring where the term also
+// belongs to one of HeaderSubstringFields.
+func Substring(field string) bool { return field != FieldHeader }
+
 const (
 	minToken = 2
 	maxToken = 40

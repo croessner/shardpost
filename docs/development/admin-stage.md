@@ -17,7 +17,8 @@ create, rename and subscribe mailboxes and change ACLs with version checks
 **8c** (0.21.0): durable jobs with lease, fencing, checkpoints and takeover,
 plan → apply with a drift check, idempotency key, job status (the rest
 of 8a); kinds `index_check`, `scrub` (classes), `quota_recalc`,
-`acl_reconcile`, `fts_rebuild` (maintenance mode), `mailbox_delete`, `purge`
+`acl_reconcile`, `fts_rebuild` (maintenance mode), `fts_dict_convert`
+(0.35.0), `mailbox_delete`, `purge`
 (roles `repair`, `delete`), see [Admin API: maintenance jobs](../admin-api.md#maintenance-jobs-stage-8c).
 The periodic scrub CronJob remains separate; the shared coordination point is
 the account lock, which it respects. **8d** (0.22.0):

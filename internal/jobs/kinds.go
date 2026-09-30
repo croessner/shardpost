@@ -29,6 +29,7 @@ const (
 	KindQuotaRecalc   = "quota_recalc"
 	KindACLReconcile  = "acl_reconcile"
 	KindFTSRebuild    = "fts_rebuild"
+	KindFTSDict       = "fts_dict_convert"
 	KindMailboxDelete = "mailbox_delete"
 	KindExpunge       = "expunge"
 	KindPurge         = "purge"
@@ -64,6 +65,7 @@ func Kinds(grace time.Duration) []Kind {
 		&quotaRecalc{kindBase{KindQuotaRecalc, RoleRepair, true, true}},
 		&aclReconcile{kindBase{KindACLReconcile, RoleRepair, true, false}},
 		&ftsRebuild{kindBase{KindFTSRebuild, RoleRepair, true, true}},
+		&ftsDictConvert{kindBase{KindFTSDict, RoleRepair, true, false}},
 		&mailboxDelete{kindBase{KindMailboxDelete, RoleDelete, true, true}},
 		&expunge{kindBase{KindExpunge, RoleDelete, true, false}},
 		&purge{kindBase{KindPurge, RoleDelete, true, true}},
@@ -468,6 +470,59 @@ func (k *ftsRebuild) Run(_ context.Context, run *Run) (any, error) {
 	})
 
 	return map[string]int{"indexed": indexed}, err
+}
+
+// --- fts_dict_convert ------------------------------------------------------
+
+// ftsDictConvert writes the substring dictionary of the full-text index
+// again from the posting lists and removes the objects of the old
+// layout. It reads no message and needs no lock: deliveries and searches
+// go on beside it. It stops when an import or another job locks the
+// account.
+type ftsDictConvert struct{ kindBase }
+
+type ftsDictSummary struct {
+	LegacyObjects int `json:"legacy_objects"`
+}
+
+func (k *ftsDictConvert) Plan(_ context.Context, _ *Env, u model.User, _ string, _ json.RawMessage) (any, string, error) {
+	cv, err := capability[model.FTSDictConverter](u, "convert the full-text dictionary")
+	if err != nil {
+		return nil, "", err
+	}
+
+	n, err := cv.LegacyFTSDict()
+
+	return ftsDictSummary{LegacyObjects: n}, "", err
+}
+
+func (k *ftsDictConvert) Run(_ context.Context, run *Run) (any, error) {
+	cv, err := capability[model.FTSDictConverter](run.User, "convert the full-text dictionary")
+	if err != nil {
+		return nil, err
+	}
+
+	// It takes no lock, but it must not write into an account another
+	// job holds: a purge would find its namespace refilled behind it.
+	fence := func() error {
+		if err := run.Fence(); err != nil {
+			return err
+		}
+
+		if errors.Is(model.RefuseDuringImport(run.User), model.ErrImportLocked) {
+			return errors.New("the account is locked by an import or another job; run the conversion again afterwards")
+		}
+
+		return nil
+	}
+
+	if err := fence(); err != nil {
+		return nil, err
+	}
+
+	return cv.ConvertFTSDict(fence, func(done, total int) {
+		_ = run.Progress("dictionary", int64(done), int64(total))
+	})
 }
 
 // --- mailbox_delete --------------------------------------------------------

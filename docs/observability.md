@@ -60,7 +60,8 @@ imap.FETCH
 ```
 
 Store spans: `store.deliver`, `store.blob_read`, `store.blob_write`,
-`store.fts_index`, `store.fts_search`, `store.header_read`,
+`store.fts_index`, `store.fts_search`, `store.fts_dict` (the dictionary
+keys of new or vanished terms, with their number), `store.header_read`,
 `store.header_cas`, `store.list_entries`, `store.get_entries`,
 `store.flags`, `store.copy`, `store.move`, `store.expunge`, and
 `rados.omap_cas` for the central compare-and-swap loop (the one behind

@@ -829,6 +829,25 @@ func (u *User) Move(src string, metas []model.Meta, dest string) ([]model.Meta, 
 	return out, nil
 }
 
+// termMatches reports whether an index term answers a query token on a
+// field, by the rules of the cephstore index: the token is a substring
+// of the term, except on a field without substring matching
+// (fts.Substring), where it is a prefix of the term or a substring of a
+// term of one of the fields that stand in for it.
+func termMatches(field, tok, term string) bool {
+	fld, t, _ := strings.Cut(term, ":")
+
+	if fld == field {
+		if fts.Substring(field) {
+			return strings.Contains(t, tok)
+		}
+
+		return strings.HasPrefix(t, tok)
+	}
+
+	return !fts.Substring(field) && slices.Contains(fts.HeaderSubstringFields, fld) && strings.Contains(t, tok)
+}
+
 // SearchFields returns the GUIDs whose fields contain every query token
 // (OR between fields, AND between tokens).
 func (u *User) SearchFields(fields []string, query string) (map[string]bool, error) {
@@ -842,8 +861,7 @@ func (u *User) SearchFields(fields []string, query string) (map[string]bool, err
 
 		for _, f := range fields {
 			for term, guids := range u.terms {
-				fld, t, _ := strings.Cut(term, ":")
-				if fld == f && strings.Contains(t, tok) {
+				if termMatches(f, tok, term) {
 					for g := range guids {
 						hits[g] = true
 					}

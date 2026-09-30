@@ -338,8 +338,8 @@ paths:
       description: |
         Computes what the job would do (target set, effects) and stores the
         plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
-        and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`
-        (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+        and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
+        `fts_dict_convert` (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
         `delete`). A plan
         that changes other accounts (ACL repairs, purge) needs them in the
         client scope. The account must be canonical.
@@ -2019,7 +2019,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, mailbox_delete, expunge, purge]
+          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, mailbox_delete, expunge, purge]
         params:
           type: object
           additionalProperties: true

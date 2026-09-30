@@ -132,9 +132,10 @@ Ports 110 with STLS and 995 implicit.
   a poll reads only the header, the log and the affected entries; a complete
   reload happens only when `h:logstart` no longer covers the session's position
   (metric `commands_total{command="poll",outcome="incremental|reload"}`).
-* **Registry cache** (2 s TTL) and **trigram cap** (2000 terms, after which
-  a marker is set and the term is omitted from the query, with a fallback to a
-  vocabulary scan) are in place.
+* **Registry cache** (2 s TTL) is in place. The **trigram cap** (2000
+  terms per trigram, then a marker and a vocabulary scan) went with the
+  dictionary layout of 0.35.0, which has one key per trigram and term
+  and needs none (see [storage](docs/architecture/storage.md#notifications-and-search)).
 * **Posting compaction** is in place: document IDs per user
   (`ftsmap`), posting lists as sorted delta varints
   (`internal/postings`); old lists are converted on the first write.

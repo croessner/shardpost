@@ -91,6 +91,7 @@ const (
 	spanBlobRead    = "store.blob_read"
 	spanFTSIndex    = "store.fts_index"
 	spanFTSSearch   = "store.fts_search"
+	spanFTSDict     = "store.fts_dict"
 	spanFlags       = "store.flags"
 	spanTouchModSeq = "store.touch_modseq"
 	spanCopy        = "store.copy"

@@ -20,7 +20,7 @@ user namespaces.
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
 | `mbox/<id>/<n>` | Further message entries | [user.go](../../internal/cephstore/user.go) |
 | `msg/<guid>/<n>` | Immutable payload chunks; chunk 0 carries `refs` | [blob.go](../../internal/cephstore/blob.go) |
-| `fts/<shard>`, `ftsd/<shard>`, `ftsmap` | Posting lists, trigram dictionary, GUID/doc ID mapping | [fts.go](../../internal/cephstore/fts.go) |
+| `fts/<shard>`, `ftst/<shard>`, `ftsmap` | Posting lists, trigram dictionary, GUID/doc ID mapping; `ftsd/<shard>` is the dictionary layout before 0.35.0 | [fts.go](../../internal/cephstore/fts.go) |
 | Script/metadata objects | Sieve texts, the active script, private/shared metadata | [scripts.go](../../internal/cephstore/scripts.go), [metadata.go](../../internal/cephstore/metadata.go) |
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
@@ -188,6 +188,51 @@ must be stopped before their store view is closed.
 
 The full-text index works per GUID. Field terms and DE/EN stemming are stored
 in posting lists; a trigram dictionary supports substring searches.
+
+| Object | omap key | Value |
+|---|---|---|
+| `fts/<nn>`, `server.fts_shards` of them (16), shard = fnv1a(term) | term, `<field>:<token>` (`s:invoice`) | posting list: document IDs, sorted, delta-varint |
+| `ftst/<nnn>`, 256 of them, shard = fnv1a(trigram) | `<trigram>:<term>` (`voi:s:invoice`), one key per trigram of the token | empty |
+| `ftsmap` | `g:<guid>`, `i:<id>`, `n` | document ID, GUID, next ID |
+
+A term that is new for the account costs one dictionary key per trigram
+of its token (at most 38, a token has at most 40 characters). The keys
+are set without reading the object and without a version check, because
+setting a key twice changes nothing; what a delivery or an import batch
+writes to the dictionary therefore depends on its new terms and not on
+the size of the vocabulary. The 256 shards are fixed for good, like
+those of `ix/`, and keep an object below the key count at which Ceph
+warns for a dictionary of tens of millions of keys.
+
+A query token of three or more characters is looked up by scanning the
+key range `<trigram>:<field>:` of each of its trigrams, a page of 1024
+keys of every range at a time, until the first range ends: every term
+that contains the token is listed under each of its trigrams, so one
+complete range, filtered for the token, is the whole answer. A shorter
+token is looked up as a prefix in the posting shards.
+
+The field `h` (every header value) has posting lists but no dictionary
+keys. Most of its vocabulary occurs once — message IDs, timestamps,
+queue IDs — and a substring index over it would grow with the number of
+messages rather than with their words. A token searched in `h` (IMAP
+`TEXT` and `HEADER <other name>`, the JMAP `header` filter, the admin
+`text` search) matches a header word exactly, by its stem or as a
+prefix (a prefix lookup reads at most 64 terms per posting shard), and as a substring where the word is in the subject or an
+address (`s`, `f`, `t`), which have dictionary keys. Subject, addresses
+and body match by substring as before.
+
+Up to 0.34.6 the dictionary was `ftsd/<nn>` (as many shards as `fts/`)
+with one key per trigram and the newline-separated list of its terms as
+the value, capped at 2000 terms. A value was read and rewritten whole
+for every term added to it, which made the cost of a new term grow with
+the vocabulary ([report](../reports/2026-09-30-shardpost-0.34.5.md)).
+Nothing writes this layout any more. It is still read in addition to
+the new one, so an account finds its older terms by substring until the
+job `fts_dict_convert` has written the dictionary again from the posting
+lists and deleted the old objects; `fts_rebuild` does the same from the
+messages. A server older than 0.35.0 does not read `ftst/`: after a
+downgrade, substring search needs an `fts_rebuild`.
+
 Not every SEARCH combination can be answered completely from this
 index. The protocol layer can read message data on demand; the
 historical claim "no mail is read for a search" is too sweeping.

@@ -44,3 +44,24 @@ func TestTerms(t *testing.T) {
 		}
 	}
 }
+
+// TestSubstringFields: every field matches by substring except the one
+// that holds all header values; the fields that stand in for it are
+// header fields with substring matching.
+func TestSubstringFields(t *testing.T) {
+	for _, f := range []string{FieldSubject, FieldFrom, FieldTo, FieldBody} {
+		if !Substring(f) {
+			t.Errorf("field %q has no substring matching", f)
+		}
+	}
+
+	if Substring(FieldHeader) {
+		t.Error("the header field has substring matching")
+	}
+
+	for _, f := range HeaderSubstringFields {
+		if !Substring(f) || f == FieldBody {
+			t.Errorf("field %q cannot stand in for the header field", f)
+		}
+	}
+}

@@ -483,19 +483,9 @@ func TestReimportAfterUIDValidityChange(t *testing.T) {
 	sameMailboxes(t, src, user(t, e.tgt))
 }
 
-func TestNamespaces(t *testing.T) {
-	r := &response{text: `* NAMESPACE (("INBOX." ".")) (("Other Users." ".")) (("Shared." "."))`}
-	ns := parseNamespaces([]*response{r})
-
-	if ns.prefix != "INBOX." || ns.delim != "." || len(ns.others) != 2 {
-		t.Fatalf("%+v", ns)
-	}
-
-	flat := namespaces{others: []string{"Shared/"}}
-	if !flat.foreign("Shared/team") || flat.foreign("Sent") {
-		t.Fatal("foreign")
-	}
-
+// TestNamespaceRoots: the mailbox another namespace is rooted in belongs
+// to that namespace.
+func TestNamespaceRoots(t *testing.T) {
 	// A namespace that is rooted in a mailbox of its own (Dovecot lists
 	// "Zabbix" for the public namespace "Zabbix/" in the personal LIST).
 	dovecot := parseNamespaces([]*response{{text: `* NAMESPACE (("" "/")) (("Shared/" "/")) (("Mailinglists/" "/")("Zabbix/" "/"))`}})
@@ -507,6 +497,20 @@ func TestNamespaces(t *testing.T) {
 
 	if !dovecot.root("Zabbix") || dovecot.root("Zabbix/2026") || dovecot.root("Sent") {
 		t.Error("root")
+	}
+}
+
+func TestNamespaces(t *testing.T) {
+	r := &response{text: `* NAMESPACE (("INBOX." ".")) (("Other Users." ".")) (("Shared." "."))`}
+	ns := parseNamespaces([]*response{r})
+
+	if ns.prefix != "INBOX." || ns.delim != "." || len(ns.others) != 2 {
+		t.Fatalf("%+v", ns)
+	}
+
+	flat := namespaces{others: []string{"Shared/"}}
+	if !flat.foreign("Shared/team") || flat.foreign("Sent") {
+		t.Fatal("foreign")
 	}
 
 	for raw, want := range map[string]string{"INBOX": "INBOX", "INBOX.Sent": "Sent", "INBOX.a.b": "a/b"} {

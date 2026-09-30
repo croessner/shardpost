@@ -159,6 +159,19 @@ Role
 locks the account. Drops the full-text index and builds it again from
 every message. It has no checkpoint: after a takeover it starts over.
 .TP
+.B fts_dict_convert
+Role
+.BR repair .
+Writes the substring dictionary of the full-text index again from the
+posting lists and removes the objects of the layout used before 0.35.0.
+It reads no message and does not lock the account; it stops when an
+import or another job locks the account, and is then run again. The plan
+shows how many objects of the old layout are left; the result counts the
+terms by field, the dictionary entries written and the old objects
+removed. Running it again is harmless, and it is also the repair for a
+term that lost its dictionary entries (it is then found as a whole word
+but not as a part of one). It has no checkpoint.
+.TP
 .B mailbox_delete
 Role
 .BR delete ,
@@ -302,6 +315,17 @@ account is locked while this runs, so do it in a quiet window.
 .nf
 .RS
 shardpostctl plan fts_rebuild user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+After the upgrade to 0.35.0, move an account to the new dictionary
+layout. Search works before and after; the old objects take space until
+this has run.
+.PP
+.nf
+.RS
+shardpostctl plan fts_dict_convert user@example.org
 shardpostctl apply -wait <plan-id>
 .RE
 .fi

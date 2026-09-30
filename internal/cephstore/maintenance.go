@@ -2,6 +2,7 @@ package cephstore
 
 import (
 	"fmt"
+	"strings"
 	"syscall"
 
 	"github.com/ceph/go-ceph/rados"
@@ -12,10 +13,11 @@ import (
 // Maintenance operations for the admin jobs (roadmap 8c).
 
 var (
-	_ model.Scrubber        = (*User)(nil)
-	_ model.QuotaRecounter  = (*User)(nil)
-	_ model.FTSRebuilder    = (*User)(nil)
-	_ model.NamespacePurger = (*User)(nil)
+	_ model.Scrubber         = (*User)(nil)
+	_ model.QuotaRecounter   = (*User)(nil)
+	_ model.FTSRebuilder     = (*User)(nil)
+	_ model.FTSDictConverter = (*User)(nil)
+	_ model.NamespacePurger  = (*User)(nil)
 )
 
 // RunScrub implements model.Scrubber.
@@ -158,6 +160,100 @@ const (
 	rebuildBatchDocs  = 200
 	rebuildBatchBytes = 8 << 20
 )
+
+// convertBatch is how many posting terms ConvertFTSDict collects before
+// it writes their dictionary entries.
+const convertBatch = 8 * omapPageSize
+
+// LegacyFTSDict implements model.FTSDictConverter.
+func (u *User) LegacyFTSDict() (int, error) {
+	n := 0
+
+	for _, oid := range u.legacyDictOIDs() {
+		if _, err := u.idx.Stat(oid); err == nil {
+			n++
+		} else if errCode(err) != syscall.ENOENT {
+			return n, err
+		}
+	}
+
+	return n, nil
+}
+
+// ConvertFTSDict implements model.FTSDictConverter: the terms are the
+// keys of the posting shards, so the dictionary is written from them
+// without reading a message, and the objects of the old layout go last.
+// Setting a dictionary key that is already there changes nothing, which
+// is why this needs no lock against deliveries and may be repeated.
+func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)) (model.FTSDictReport, error) {
+	rep := model.FTSDictReport{Terms: map[string]int64{}}
+
+	flush := func(terms []string) error {
+		if err := fence(); err != nil {
+			return err
+		}
+
+		n, err := u.dictApply(terms, true)
+		rep.Entries += int64(n)
+
+		return err
+	}
+
+	for i := 0; i < u.ftsShards; i++ {
+		if err := u.convertShard(fmt.Sprintf("%s%02d", ftsPrefix, i), &rep, flush); err != nil {
+			return rep, err
+		}
+
+		progress(i+1, u.ftsShards)
+	}
+
+	if err := fence(); err != nil {
+		return rep, err
+	}
+
+	for _, oid := range u.legacyDictOIDs() {
+		switch err := u.idx.Delete(oid); {
+		case err == nil:
+			rep.LegacyObjects++
+		case errCode(err) != syscall.ENOENT:
+			return rep, err
+		}
+	}
+
+	return rep, nil
+}
+
+// convertShard hands the terms of one posting shard to flush, in batches.
+func (u *User) convertShard(oid string, rep *model.FTSDictReport, flush func([]string) error) error {
+	var terms []string
+
+	after := ""
+
+	for {
+		more, err := listOmapKeys(u.idx, oid, after, "", omapPageSize, func(key string) {
+			field, _, _ := strings.Cut(key, ":")
+			rep.Terms[field]++
+
+			terms = append(terms, key)
+			after = key
+		})
+		if err != nil {
+			return fmt.Errorf("fts shard %s: %w", oid, err)
+		}
+
+		if len(terms) >= convertBatch || !more {
+			if err := flush(terms); err != nil {
+				return err
+			}
+
+			terms = terms[:0]
+		}
+
+		if !more {
+			return nil
+		}
+	}
+}
 
 // PurgeNamespace implements model.NamespacePurger: every object of the
 // account's namespaces in the data and index pools is deleted, the

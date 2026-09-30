@@ -239,6 +239,17 @@ func TestPurge(t *testing.T) {
 	}
 }
 
+// TestFTSDictConvert: the conversion of the dictionary plans what is left
+// of the old layout and reports the terms it listed.
+func TestFTSDictConvert(t *testing.T) {
+	m, _ := kindsSetup(t)
+
+	p, j := planAndApply(t, m, KindFTSDict, "alice", nil)
+	if string(p.Summary) != `{"legacy_objects":0}` || !strings.Contains(string(j.Result), `"terms":{"b":`) || j.Progress.Done != j.Progress.Total {
+		t.Fatalf("fts dictionary: %s %+v", p.Summary, j)
+	}
+}
+
 func TestQuotaRecalcFTSScrubAndCheck(t *testing.T) {
 	m, _ := kindsSetup(t)
 
