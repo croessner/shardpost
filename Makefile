@@ -1,6 +1,6 @@
 IMAGE      ?= docker.io/chrroessner/shardpost
 TOOLS      ?= docker.io/chrroessner/shardpost-tools
-TAG        ?= 0.34.4
+TAG        ?= 0.34.5
 TOOLS_TAG  ?= 0.13.0
 CONTEXT    ?= croessner
 OVERLAY    ?= deploy/overlays/croessner-nauthilus
