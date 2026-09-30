@@ -505,6 +505,10 @@ func TestNamespaces(t *testing.T) {
 		}
 	}
 
+	if !dovecot.root("Zabbix") || dovecot.root("Zabbix/2026") || dovecot.root("Sent") {
+		t.Error("root")
+	}
+
 	for raw, want := range map[string]string{"INBOX": "INBOX", "INBOX.Sent": "Sent", "INBOX.a.b": "a/b"} {
 		if got, err := mapName(raw, "INBOX.", "."); err != nil || got != want {
 			t.Errorf("%s: %q %v", raw, got, err)

@@ -234,6 +234,10 @@ func (r *run) list() ([]srcMailbox, error) {
 
 	mailboxes, err := r.src.listMailboxes()
 
+	for _, root := range r.src.skippedRoots {
+		r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("%q is the root of another namespace of the source, not a mailbox of the account: not imported", root))
+	}
+
 	for _, p := range r.src.skippedNamespaces {
 		r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("personal namespace %q is not imported", p))
 	}

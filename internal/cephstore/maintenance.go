@@ -65,13 +65,12 @@ func (u *User) RecountQuota(apply bool) (Quota, Quota, error) {
 	return counted, stored, nil
 }
 
-// RebuildFTS implements model.FTSRebuilder: the index is deleted and
-// every stored message (each blob once) indexed again. A rebuild that
-// stops midway is started over.
-func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) error {
+// storedMessages returns every stored message of the account, each blob
+// once.
+func (u *User) storedMessages() ([]Meta, error) {
 	boxes, err := u.ListMailboxes()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	seen := map[string]bool{}
@@ -81,7 +80,7 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 	for i := range boxes {
 		msgs, err := u.ListMessages(boxes[i].ID)
 		if err != nil {
-			return fmt.Errorf("mailbox %q: %w", boxes[i].Name, err)
+			return nil, fmt.Errorf("mailbox %q: %w", boxes[i].Name, err)
 		}
 
 		for j := range msgs {
@@ -92,12 +91,42 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 		}
 	}
 
+	return metas, nil
+}
+
+// RebuildFTS implements model.FTSRebuilder: the index is deleted and
+// every stored message (each blob once) indexed again. A rebuild that
+// stops midway is started over.
+func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) error {
+	metas, err := u.storedMessages()
+	if err != nil {
+		return err
+	}
+
 	if err := fence(); err != nil {
 		return err
 	}
 
 	if err := u.DeleteFTS(); err != nil {
 		return err
+	}
+
+	// Indexed in batches, as an import does: see ftsIndexDocs.
+	var (
+		docs []ftsDoc
+		size int
+	)
+
+	flush := func(done int) error {
+		if err := u.ftsIndexDocs(docs); err != nil {
+			return fmt.Errorf("index: %w", err)
+		}
+
+		docs, size = docs[:0], 0
+
+		progress(done, len(metas))
+
+		return nil
 	}
 
 	for i := range metas {
@@ -110,15 +139,25 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 			return fmt.Errorf("read %s: %w", metas[i].GUID, err)
 		}
 
-		if err := u.ftsIndex(metas[i].GUID, raw); err != nil {
-			return fmt.Errorf("index %s: %w", metas[i].GUID, err)
-		}
+		docs = append(docs, ftsDoc{guid: metas[i].GUID, raw: raw})
+		size += len(raw)
 
-		progress(i+1, len(metas))
+		if len(docs) >= rebuildBatchDocs || size >= rebuildBatchBytes {
+			if err := flush(i + 1); err != nil {
+				return err
+			}
+		}
 	}
 
-	return nil
+	return flush(len(metas))
 }
+
+// A rebuild indexes this many messages, or this many bytes of them, at
+// once.
+const (
+	rebuildBatchDocs  = 200
+	rebuildBatchBytes = 8 << 20
+)
 
 // PurgeNamespace implements model.NamespacePurger: every object of the
 // account's namespaces in the data and index pools is deleted, the

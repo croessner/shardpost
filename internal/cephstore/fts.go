@@ -186,7 +186,8 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 // trigrams. Those of an import batch touch most of the dictionary, and
 // taking all shards at once then put all of it into memory at the same
 // time, in the client library as well as here: the resident size went
-// from 60 MiB to over 1 GiB within seconds. A large update therefore
+// from 60 MiB to over 800 MiB within seconds, and the container was
+// killed at its limit of 1 GiB. A large update therefore
 // takes one shard after the other in pieces of dictChunk trigrams.
 // Posting lists are small by comparison and stay parallel.
 const (
@@ -218,8 +219,31 @@ func eachShard(groups map[string][]string, bounded bool, fn func(oid string, key
 }
 
 // addPostings adds the ids of docsOf to the posting lists of the terms
-// of one shard and returns the terms that had no list yet.
+// of one shard and returns the terms that had no list yet. A term the
+// read does not return counts as new and its list is written afresh, so
+// the read must be complete: the terms go through in pieces of
+// omapPageSize, as every other read by keys here does (resolveDocIDs),
+// rather than relying on the OSD to answer any number of keys at once.
 func (u *User) addPostings(oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
+	var fresh []string
+
+	for len(terms) > 0 {
+		n := min(len(terms), omapPageSize)
+
+		part, err := u.addPostingsPage(oid, terms[:n], docsOf)
+		if err != nil {
+			return nil, err
+		}
+
+		fresh = append(fresh, part...)
+		terms = terms[n:]
+	}
+
+	return fresh, nil
+}
+
+// addPostingsPage is addPostings for at most omapPageSize terms.
+func (u *User) addPostingsPage(oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
 	var fresh []string
 
 	err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool) {

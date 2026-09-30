@@ -686,8 +686,11 @@ func checkFlags(uid uint32, flags []string) error {
 
 // prepareImport writes (or shares) the blobs and FTS postings of the
 // messages and builds their entries; on error everything it did is
-// undone. The new blobs are indexed together, once for the batch (see
-// ftsIndexDocs).
+// undone. The blobs are indexed together, once for the batch (see
+// ftsIndexDocs) — the shared ones as well: that a blob exists does not
+// say that it is indexed. A run that was killed between the blob writes
+// and the indexing leaves blobs the next run finds and shares, and
+// indexing a message that is indexed already changes nothing.
 func (u *User) prepareImport(msgs []model.ImportMessage) ([]preparedImport, error) {
 	out := make([]preparedImport, 0, len(msgs))
 
@@ -702,9 +705,7 @@ func (u *User) prepareImport(msgs []model.ImportMessage) ([]preparedImport, erro
 
 		out = append(out, p)
 
-		if !p.shared {
-			docs = append(docs, ftsDoc{guid: p.meta.GUID, raw: msgs[i].Raw})
-		}
+		docs = append(docs, ftsDoc{guid: p.meta.GUID, raw: msgs[i].Raw})
 	}
 
 	if err := u.ftsIndexDocs(docs); err != nil {
@@ -740,8 +741,8 @@ func (u *User) prepareOne(m *model.ImportMessage) (preparedImport, error) {
 
 // importBlob stores the blob of m: a source GUID whose blob already
 // exists with the same size is shared (one more reference), otherwise a
-// new blob is written under the source GUID (or a fresh one); the caller
-// indexes it.
+// new blob is written under the source GUID (or a fresh one). The caller
+// indexes the blob in both cases.
 func (u *User) importBlob(m *model.ImportMessage) (guid string, shared bool, err error) {
 	guid = m.GUID
 	if !model.ValidGUID(guid) {
@@ -1192,9 +1193,10 @@ func (u *User) entryRange(id string) (uint64, uint32, error) {
 
 // entriesAfter reads up to limit entries of one shard with a UID above
 // after and below uidNext, in UID order. One omap read returns at most
-// what the OSD allows per request (osd_max_omap_entries_per_request,
-// 1024 by default) however much is asked for, so the shard is read in
-// pages until a page comes back short.
+// what the OSD allows per request (osd_max_omap_entries_per_request and
+// osd_max_omap_bytes_per_request) however much is asked for, so a short
+// page does not mean the end: the shard is read until a page comes back
+// empty.
 func (u *User) entriesAfter(oid string, after uint32, uidNext uint64, limit int) ([]Meta, error) {
 	var out []Meta
 
@@ -1211,6 +1213,7 @@ func (u *User) entriesAfter(oid string, after uint32, uidNext uint64, limit int)
 		}
 
 		page := make([]Meta, 0, len(vals))
+		next := start
 
 		for k, v := range vals {
 			var m Meta
@@ -1218,7 +1221,7 @@ func (u *User) entriesAfter(oid string, after uint32, uidNext uint64, limit int)
 				return nil, fmt.Errorf("corrupt index record %s in %s", k, oid)
 			}
 
-			start = max(start, m.UID)
+			next = max(next, m.UID)
 
 			if m.UID > after && uint64(m.UID) < uidNext {
 				page = append(page, m)
@@ -1228,9 +1231,14 @@ func (u *User) entriesAfter(oid string, after uint32, uidNext uint64, limit int)
 		sort.Slice(page, func(i, j int) bool { return page[i].UID < page[j].UID })
 		out = append(out, page...)
 
-		if len(vals) < want {
+		// An empty page is the end; a page that does not get past its
+		// start (a record that contradicts its key) must not be read
+		// again and again.
+		if next <= start {
 			break
 		}
+
+		start = next
 	}
 
 	return out, nil

@@ -167,6 +167,9 @@ type imapClient struct {
 	lr   *lineReader
 	tag  int
 	caps map[string]bool
+	// skippedRoots are mailboxes the personal listing returned that are
+	// the root of another namespace; they are not imported.
+	skippedRoots []string
 	// skippedNamespaces are personal namespaces besides the first,
 	// which listMailboxes does not return.
 	skippedNamespaces []string
@@ -335,7 +338,19 @@ func (c *imapClient) listMailboxes() ([]srcMailbox, error) {
 
 	for _, r := range rs {
 		e, ok := parseList(r)
-		if !ok || ns.foreign(e.raw) {
+		if !ok {
+			continue
+		}
+
+		if ns.foreign(e.raw) {
+			// A root that holds messages is worth a word; a mere
+			// node of the hierarchy is not.
+			if probe := (srcMailbox{Selectable: true}); ns.root(e.raw) {
+				if probe.applyAttrs(e.attrs); probe.Selectable {
+					c.skippedRoots = append(c.skippedRoots, e.raw)
+				}
+			}
+
 			continue
 		}
 
@@ -549,6 +564,17 @@ func (ns namespaces) foreign(raw string) bool {
 		}
 
 		if root := strings.TrimSuffix(p, ns.delims[p]); strings.HasPrefix(raw, p) || (root != p && raw == root) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// root reports whether raw is the mailbox another namespace is rooted in.
+func (ns namespaces) root(raw string) bool {
+	for _, p := range ns.others {
+		if root := strings.TrimSuffix(p, ns.delims[p]); p != "" && root != p && raw == root {
 			return true
 		}
 	}
