@@ -124,10 +124,12 @@ func (u *User) ftsIndex(guid string, raw []byte) error {
 	return u.ftsIndexDocs([]ftsDoc{{guid: guid, raw: raw}})
 }
 
-// ftsIndexDocs indexes several messages at once. The cost of indexing is
-// the round trips — the id map, one read and one compare-and-swap per
-// posting shard, the dictionary — not the amount of text, so a batch of
-// an import pays them once instead of once per message.
+// ftsIndexDocs indexes several messages at once. Indexing a message
+// costs round trips — the id map, a read and a compare-and-swap per
+// posting shard, the dictionary — and rewrites the posting list of each
+// of its terms, so a batch of an import that pays both once per term
+// instead of once per message and term is much cheaper (see eachShard
+// for what bounds its memory).
 func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 	if len(docs) == 0 {
 		return nil
@@ -153,7 +155,7 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		newTerms []string
 	)
 
-	err = parallel(groupBy(terms, u.ftsShardOID), func(oid string, terms []string) error {
+	add := func(oid string, terms []string) error {
 		fresh, err := u.addPostings(oid, terms, docsOf)
 		if err != nil {
 			return fmt.Errorf("fts index shard %s: %w", oid, err)
@@ -165,12 +167,46 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		mu.Unlock()
 
 		return nil
-	})
-	if err != nil {
+	}
+
+	if err := eachShard(groupBy(terms, u.ftsShardOID), len(docs) > 1, add); err != nil {
 		return err
 	}
 
 	return u.dictUpdate(newTerms, true)
+}
+
+// ftsChunkTerms bounds the terms of one posting update of a batch. A
+// posting list is one omap value that is read and written whole, and the
+// list of a common word holds an id for most messages of the account:
+// every list a batch touches passes through memory, in the client
+// library as well as here. A batch of an import touches a large part of
+// the vocabulary, so it goes through in pieces of this many terms, one
+// piece at a time.
+const ftsChunkTerms = 256
+
+// eachShard runs fn for the terms of every shard. A single message has
+// few terms per shard and takes all shards at once; a batch (bounded
+// true) takes one shard after the other in pieces of ftsChunkTerms, so
+// what it holds in memory does not grow with the size of the index.
+func eachShard(groups map[string][]string, bounded bool, fn func(oid string, terms []string) error) error {
+	if !bounded {
+		return parallel(groups, fn)
+	}
+
+	for oid, terms := range groups {
+		for len(terms) > 0 {
+			n := min(len(terms), ftsChunkTerms)
+
+			if err := fn(oid, terms[:n]); err != nil {
+				return err
+			}
+
+			terms = terms[n:]
+		}
+	}
+
+	return nil
 }
 
 // addPostings adds the ids of docsOf to the posting lists of the terms
