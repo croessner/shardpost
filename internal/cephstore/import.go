@@ -1191,31 +1191,47 @@ func (u *User) entryRange(id string) (uint64, uint32, error) {
 }
 
 // entriesAfter reads up to limit entries of one shard with a UID above
-// after and below uidNext, in UID order.
+// after and below uidNext, in UID order. One omap read returns at most
+// what the OSD allows per request (osd_max_omap_entries_per_request,
+// 1024 by default) however much is asked for, so the shard is read in
+// pages until a page comes back short.
 func (u *User) entriesAfter(oid string, after uint32, uidNext uint64, limit int) ([]Meta, error) {
-	vals, err := u.idx.GetOmapValues(oid, uidKey(after), keyMsgPrefix, int64(limit))
-	if err != nil {
-		if errCode(err) == syscall.ENOENT {
-			return nil, nil
+	var out []Meta
+
+	for start := after; len(out) < limit; {
+		want := min(limit-len(out), omapPageSize)
+
+		vals, err := u.idx.GetOmapValues(oid, uidKey(start), keyMsgPrefix, int64(want))
+		if err != nil {
+			if errCode(err) == syscall.ENOENT {
+				break
+			}
+
+			return nil, err
 		}
 
-		return nil, err
+		page := make([]Meta, 0, len(vals))
+
+		for k, v := range vals {
+			var m Meta
+			if err := json.Unmarshal(v, &m); err != nil {
+				return nil, fmt.Errorf("corrupt index record %s in %s", k, oid)
+			}
+
+			start = max(start, m.UID)
+
+			if m.UID > after && uint64(m.UID) < uidNext {
+				page = append(page, m)
+			}
+		}
+
+		sort.Slice(page, func(i, j int) bool { return page[i].UID < page[j].UID })
+		out = append(out, page...)
+
+		if len(vals) < want {
+			break
+		}
 	}
 
-	page := make([]Meta, 0, len(vals))
-
-	for k, v := range vals {
-		var m Meta
-		if err := json.Unmarshal(v, &m); err != nil {
-			return nil, fmt.Errorf("corrupt index record %s in %s", k, oid)
-		}
-
-		if m.UID > after && uint64(m.UID) < uidNext {
-			page = append(page, m)
-		}
-	}
-
-	sort.Slice(page, func(i, j int) bool { return page[i].UID < page[j].UID })
-
-	return page, nil
+	return out, nil
 }
