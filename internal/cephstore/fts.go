@@ -112,50 +112,49 @@ func parallel(groups map[string][]string, fn func(oid string, items []string) er
 	return <-errs
 }
 
+// ftsDoc is a stored message to index: its blob id and its text.
+type ftsDoc struct {
+	guid string
+	raw  []byte
+}
+
 // ftsIndex adds the message's GUID to the posting list of every term and
 // registers terms that are new for this user in the dictionary.
-func (u *User) ftsIndex(guid string, raw []byte) (err error) {
-	end := u.trace(spanFTSIndex, attrGUID(guid), attrBytes(len(raw)))
-	defer func() { end(err) }()
+func (u *User) ftsIndex(guid string, raw []byte) error {
+	return u.ftsIndexDocs([]ftsDoc{{guid: guid, raw: raw}})
+}
 
-	if g, err := hex.DecodeString(guid); err != nil || len(g) != guidBytes {
-		return fmt.Errorf("bad guid %q", guid)
+// ftsIndexDocs indexes several messages at once. The cost of indexing is
+// the round trips — the id map, one read and one compare-and-swap per
+// posting shard, the dictionary — not the amount of text, so a batch of
+// an import pays them once instead of once per message.
+func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
+	if len(docs) == 0 {
+		return nil
 	}
 
-	ids, err := u.ensureDocIDs([]string{guid})
+	guids, size, err := docGUIDs(docs)
 	if err != nil {
 		return err
 	}
 
-	id := ids[guid]
+	end := u.trace(spanFTSIndex, attrGUID(docs[0].guid), attrCount(len(docs)), attrBytes(size))
+	defer func() { end(err) }()
+
+	ids, err := u.ensureDocIDs(guids)
+	if err != nil {
+		return err
+	}
+
+	docsOf, terms := termDocs(docs, ids)
 
 	var (
 		mu       sync.Mutex
 		newTerms []string
 	)
 
-	err = parallel(groupBy(fts.Terms(raw), u.ftsShardOID), func(oid string, terms []string) error {
-		var fresh []string
-
-		err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool) {
-			fresh = fresh[:0]
-			set := map[string][]byte{}
-
-			for _, t := range terms {
-				p, ok := cur[t]
-				if !ok {
-					fresh = append(fresh, t)
-				}
-
-				if p, ok = conv(p); !ok {
-					return nil, nil, false
-				}
-
-				set[t] = postings.Add(p, id)
-			}
-
-			return set, nil, true
-		})
+	err = parallel(groupBy(terms, u.ftsShardOID), func(oid string, terms []string) error {
+		fresh, err := u.addPostings(oid, terms, docsOf)
 		if err != nil {
 			return fmt.Errorf("fts index shard %s: %w", oid, err)
 		}
@@ -172,6 +171,68 @@ func (u *User) ftsIndex(guid string, raw []byte) (err error) {
 	}
 
 	return u.dictUpdate(newTerms, true)
+}
+
+// addPostings adds the ids of docsOf to the posting lists of the terms
+// of one shard and returns the terms that had no list yet.
+func (u *User) addPostings(oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
+	var fresh []string
+
+	err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool) {
+		fresh = fresh[:0]
+		set := map[string][]byte{}
+
+		for _, t := range terms {
+			p, ok := cur[t]
+			if !ok {
+				fresh = append(fresh, t)
+			}
+
+			if p, ok = conv(p); !ok {
+				return nil, nil, false
+			}
+
+			set[t] = postings.AddAll(p, docsOf[t])
+		}
+
+		return set, nil, true
+	})
+
+	return fresh, err
+}
+
+// docGUIDs returns the blob ids of the messages and their total size; an
+// id that is not a GUID is an error.
+func docGUIDs(docs []ftsDoc) (guids []string, size int, err error) {
+	for _, d := range docs {
+		if g, err := hex.DecodeString(d.guid); err != nil || len(g) != guidBytes {
+			return nil, 0, fmt.Errorf("bad guid %q", d.guid)
+		}
+
+		size += len(d.raw)
+		guids = append(guids, d.guid)
+	}
+
+	return guids, size, nil
+}
+
+// termDocs tokenizes the messages and returns, for every term, the ids
+// of the messages that contain it, and the terms.
+func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []string) {
+	docsOf := map[string][]uint64{}
+
+	for _, d := range docs {
+		for _, t := range fts.Terms(d.raw) {
+			docsOf[t] = append(docsOf[t], ids[d.guid])
+		}
+	}
+
+	terms := make([]string, 0, len(docsOf))
+	for t := range docsOf {
+		terms = append(terms, t)
+	}
+
+	return docsOf, terms
 }
 
 // casPostings is casOmap over posting lists with legacy conversion: fn

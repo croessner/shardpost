@@ -113,6 +113,37 @@ func Add(p []byte, id uint64) []byte {
 	return Encode(append(ids, id))
 }
 
+// AddAll returns the list with every id of add included. It decodes the
+// list once, so adding many ids to a long list costs one pass, not one
+// per id.
+func AddAll(p []byte, add []uint64) []byte {
+	if len(add) == 1 {
+		return Add(p, add[0])
+	}
+
+	ids, _ := Decode(p)
+	have := make(map[uint64]struct{}, len(ids)+len(add))
+
+	for _, v := range ids {
+		have[v] = struct{}{}
+	}
+
+	n := len(ids)
+
+	for _, id := range add {
+		if _, ok := have[id]; !ok {
+			have[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+
+	if len(ids) == n {
+		return p
+	}
+
+	return Encode(ids)
+}
+
 // Remove returns the list without id (nil when it becomes empty).
 func Remove(p []byte, id uint64) []byte {
 	ids, ok := Decode(p)

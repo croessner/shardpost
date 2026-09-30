@@ -82,3 +82,24 @@ func TestLegacy(t *testing.T) {
 		t.Fatalf("legacy guids: %d", len(gs))
 	}
 }
+
+func TestAddAll(t *testing.T) {
+	p := Encode([]uint64{3, 9})
+
+	got, ok := Decode(AddAll(p, []uint64{9, 1, 12, 1}))
+	if !ok || len(got) != 4 || got[0] != 1 || got[1] != 3 || got[2] != 9 || got[3] != 12 {
+		t.Fatalf("got %v", got)
+	}
+
+	if same := AddAll(p, []uint64{3, 9}); string(same) != string(p) {
+		t.Fatal("a list that holds every id changed")
+	}
+
+	if got, _ := Decode(AddAll(nil, []uint64{5})); len(got) != 1 || got[0] != 5 {
+		t.Fatalf("single id into an empty list: %v", got)
+	}
+
+	if got, _ := Decode(AddAll(nil, []uint64{7, 5})); len(got) != 2 || got[0] != 5 {
+		t.Fatalf("two ids into an empty list: %v", got)
+	}
+}

@@ -686,9 +686,12 @@ func checkFlags(uid uint32, flags []string) error {
 
 // prepareImport writes (or shares) the blobs and FTS postings of the
 // messages and builds their entries; on error everything it did is
-// undone.
+// undone. The new blobs are indexed together, once for the batch (see
+// ftsIndexDocs).
 func (u *User) prepareImport(msgs []model.ImportMessage) ([]preparedImport, error) {
 	out := make([]preparedImport, 0, len(msgs))
+
+	var docs []ftsDoc
 
 	for i := range msgs {
 		p, err := u.prepareOne(&msgs[i])
@@ -698,6 +701,15 @@ func (u *User) prepareImport(msgs []model.ImportMessage) ([]preparedImport, erro
 		}
 
 		out = append(out, p)
+
+		if !p.shared {
+			docs = append(docs, ftsDoc{guid: p.meta.GUID, raw: msgs[i].Raw})
+		}
+	}
+
+	if err := u.ftsIndexDocs(docs); err != nil {
+		u.unprepare(out)
+		return nil, err
 	}
 
 	return out, nil
@@ -728,8 +740,8 @@ func (u *User) prepareOne(m *model.ImportMessage) (preparedImport, error) {
 
 // importBlob stores the blob of m: a source GUID whose blob already
 // exists with the same size is shared (one more reference), otherwise a
-// new blob with FTS postings is written under the source GUID (or a
-// fresh one).
+// new blob is written under the source GUID (or a fresh one); the caller
+// indexes it.
 func (u *User) importBlob(m *model.ImportMessage) (guid string, shared bool, err error) {
 	guid = m.GUID
 	if !model.ValidGUID(guid) {
@@ -763,11 +775,6 @@ func (u *User) importBlob(m *model.ImportMessage) (guid string, shared bool, err
 		if _, err := u.writeBlob(guid, m.Raw); err != nil {
 			return "", false, fmt.Errorf("write blob: %w", err)
 		}
-	}
-
-	if err := u.ftsIndex(guid, m.Raw); err != nil {
-		u.deleteBlob(guid, u.chunkCount(int64(len(m.Raw))))
-		return "", false, err
 	}
 
 	return guid, false, nil
