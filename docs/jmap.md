@@ -1553,8 +1553,14 @@ say whose it is: ShardPost asks the OIDC introspection endpoint
 claims (`nauthilus.account_claims`), then looks it up in Nauthilus
 without a password. It does that in either `nauthilus.bearer_mode`: in
 `password` mode only for a token without a user name — a JMAP Bearer —
-while an IMAP XOAUTH2 or OAUTHBEARER token, which carries one, still
-goes to Nauthilus as before; in `introspect` mode for every token.
+while an XOAUTH2 or OAUTHBEARER token of IMAP or ManageSieve, which
+carries one, still goes to Nauthilus as before; in `introspect` mode
+for every token. ManageSieve offers the two mechanisms since 0.35.1;
+a failed token gets NO at once, without the error challenge of
+RFC 7628, which neither the director nor webmail clients read. A webmail that
+logged its user in with OIDC reaches the Sieve scripts that way, and so
+does the director, which authenticates to the backend with the
+mechanism the client used.
 A user name that comes with an introspected token — SASL XOAUTH2 and
 OAUTHBEARER carry one, often an alias or an address rather than the
 canonical account — counts when it names the token's account or

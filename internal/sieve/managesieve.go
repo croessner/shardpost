@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"net"
 	"runtime/debug"
 	"shardpost/internal/logging"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -210,7 +210,7 @@ func (c *conn) capabilities() {
 	c.printf("\"SIEVE\" \"%s\"\r\n", strings.Join(ExtensionList(c.s.o.Config), " "))
 
 	if c.canAuth() {
-		c.printf("\"SASL\" \"PLAIN\"\r\n")
+		c.printf("\"SASL\" \"%s\"\r\n", strings.Join(saslMechanisms, " "))
 	} else {
 		c.printf("\"SASL\" \"\"\r\n")
 	}
@@ -687,8 +687,28 @@ func (c *conn) cmdCheckScript(args []string) {
 	c.ok("Script is valid")
 }
 
+// SASL mechanisms of ManageSieve: PLAIN, and the two that carry an
+// OAuth 2.0 bearer token (a webmail that logged its user in with OIDC,
+// and the director, which authenticates to the backend the way the client
+// authenticated to it). IMAP offers the same.
+const (
+	mechPlain       = "PLAIN"
+	mechXOAuth2     = "XOAUTH2"
+	mechOAuthBearer = "OAUTHBEARER"
+)
+
+var saslMechanisms = []string{mechPlain, mechXOAuth2, mechOAuthBearer}
+
+// authTimeout bounds one authentication, as it does for IMAP.
+const authTimeout = 15 * time.Second
+
 func (c *conn) authenticate(args []string) error {
-	if len(args) < 1 || !strings.EqualFold(args[0], "PLAIN") {
+	mech := ""
+	if len(args) > 0 {
+		mech = strings.ToUpper(args[0])
+	}
+
+	if !slices.Contains(saslMechanisms, mech) {
 		c.no("Unsupported mechanism")
 		return nil
 	}
@@ -703,47 +723,52 @@ func (c *conn) authenticate(args []string) error {
 		return err
 	}
 
-	raw, err := base64.StdEncoding.DecodeString(ir)
+	req := auth.Request{Mechanism: mech, Protocol: "sieve", Client: c.nc.RemoteAddr(), Local: c.nc.LocalAddr(), TLS: c.tls}
+
+	switch mech {
+	case mechPlain:
+		req.Username, req.Password, err = auth.ParsePlain(ir)
+	case mechXOAuth2:
+		req.Username, req.Token, err = auth.ParseXOAUTH2(ir)
+	default:
+		req.Username, req.Token, err = auth.ParseOAuthBearer(ir)
+	}
+
 	if err != nil {
-		c.no("Invalid base64")
+		c.no("Bad " + mech + " response")
 		return nil
 	}
 
-	parts := strings.Split(string(raw), "\x00")
-	if len(parts) != 3 {
-		c.no("Bad PLAIN response")
-		return nil
-	}
-
-	c.login(parts[1], parts[2])
-
-	return nil
+	return c.login(req)
 }
 
-// login checks the PLAIN credentials and opens the account; every
-// outcome is answered to the client.
-func (c *conn) login(username, password string) {
-	res, err := c.s.o.Auth.Authenticate(context.Background(), auth.Request{
-		Username: username, Password: password, Mechanism: "PLAIN", Protocol: "sieve",
-		Client: c.nc.RemoteAddr(), Local: c.nc.LocalAddr(), TLS: c.tls,
-	})
+// login checks the credentials and opens the account; every outcome is
+// answered to the client. A failed token login is answered with NO right
+// away, without the error challenge of RFC 7628 3.2.2: neither the
+// director nor the webmail clients read a challenge there, they would
+// wait for the NO until their timeout.
+func (c *conn) login(req auth.Request) error {
+	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
+	defer cancel()
+
+	res, err := c.s.o.Auth.Authenticate(ctx, req)
 	if errors.Is(err, auth.ErrTemporary) {
 		c.log.Warn("authentication unavailable", "event", "auth_unavailable")
 		c.printf("NO (TRYLATER) \"Authentication temporarily unavailable\"\r\n")
 
-		return
+		return nil
 	}
 
 	if err != nil {
-		c.log.Info("authentication failed", "event", "auth_failed", "mechanism", "PLAIN")
+		c.log.Info("authentication failed", "event", "auth_failed", "mechanism", req.Mechanism)
 		c.no("Authentication failed")
 
-		return
+		return nil
 	}
 
 	account := res.Account
 	if account == "" {
-		account = username
+		account = req.Username
 	}
 
 	u, err := c.s.o.Store.User(account)
@@ -751,19 +776,22 @@ func (c *conn) login(username, password string) {
 		c.log.Error("storage unavailable", "event", "storage_error")
 		c.no("Storage unavailable")
 
-		return
+		return nil
 	}
 
 	provision.Apply(u, res, c.s.o.Log)
 	c.user, c.name = u, account
 	c.log = c.log.With("user", account)
-	c.log.Info("authentication succeeded", "event", "auth_success", "mechanism", "PLAIN", "tls", c.tls)
+	c.log.Info("authentication succeeded", "event", "auth_success", "mechanism", req.Mechanism, "tls", c.tls)
 	c.ok("Logged in")
+
+	return nil
 }
 
-// initialResponse returns the SASL PLAIN response: the initial response
+// initialResponse returns the SASL client response: the initial response
 // argument, or one requested with an empty challenge. ok is false when
-// the client's answer was answered with NO already.
+// the client's answer was answered with NO already (also when it
+// cancelled with "*", RFC 5804 2.1).
 func (c *conn) initialResponse(args []string) (string, bool, error) {
 	if len(args) > 1 {
 		return args[1], true, nil
@@ -783,6 +811,11 @@ func (c *conn) initialResponse(args []string) (string, bool, error) {
 	a, err := c.args(line)
 	if err != nil || len(a) == 0 {
 		c.no("Bad response")
+		return "", false, nil
+	}
+
+	if a[0] == "*" {
+		c.no("Authentication cancelled")
 		return "", false, nil
 	}
 
