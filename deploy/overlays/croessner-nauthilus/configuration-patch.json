@@ -41,6 +41,10 @@
                 "value": "700MiB"
               },
               {
+                "name": "MALLOC_ARENA_MAX",
+                "value": "2"
+              },
+              {
                 "name": "SHARDPOST_CONFIG",
                 "value": "/etc/shardpost/server.yaml"
               }
