@@ -296,7 +296,7 @@ func (s *Server) CheckSieve(w http.ResponseWriter, r *http.Request, account admi
 	}
 	defer u.Close()
 
-	name, text, err := checkedScript(u, req)
+	name, text, err := s.checkedScript(u, req)
 	if err != nil {
 		s.sieveError(w, r, err)
 		return
@@ -329,9 +329,25 @@ func (s *Server) CheckSieve(w http.ResponseWriter, r *http.Request, account admi
 	writeJSON(w, http.StatusOK, out)
 }
 
+// errNoActiveScript is model.ErrNoScript for a check of the active
+// script of an account that has none.
+var errNoActiveScript = fmt.Errorf("%w: no active script", model.ErrNoScript)
+
 // checkedScript returns the script to check: the given text, the stored
-// script name, or the active script.
-func checkedScript(u model.User, req adminapi.SieveCheck) (string, string, error) {
+// script name, or the active script — an empty one for an account
+// without an active script when global scripts run for it anyway.
+func (s *Server) checkedScript(u model.User, req adminapi.SieveCheck) (string, string, error) {
+	name, text, err := storedScript(u, req)
+	if errors.Is(err, errNoActiveScript) && s.o.Delivery != nil && s.o.Delivery.HasGlobalScripts() {
+		// Without a script of its own the account still runs the global
+		// ones: check what a delivery does.
+		return "", "", nil
+	}
+
+	return name, text, err
+}
+
+func storedScript(u model.User, req adminapi.SieveCheck) (string, string, error) {
 	name := deref(req.Name)
 	if req.Script != nil {
 		return name, *req.Script, nil
@@ -344,7 +360,7 @@ func checkedScript(u model.User, req adminapi.SieveCheck) (string, string, error
 		}
 
 		if active == "" {
-			return "", "", model.ErrNoScript
+			return "", "", errNoActiveScript
 		}
 
 		name = active
@@ -426,9 +442,25 @@ func (s *Server) dryRun(ctx context.Context, u model.User, account, text, name s
 		to = account
 	}
 
-	d, err := sieve.RunWithHooks(ctx, text, deref(req.EnvelopeFrom), to, account, raw, hooks)
-	if err != nil {
-		return acts, err
+	// What a delivery runs: the global scripts around the checked one.
+	scripts := []sieve.Script{{Name: sieve.PersonalScript, Text: text}}
+	if s.o.Delivery != nil {
+		scripts = s.o.Delivery.Sequence(text, s.o.Log)
+	}
+
+	d, failed := sieve.RunSequence(ctx, scripts, deref(req.EnvelopeFrom), to, account, raw, hooks)
+
+	for _, f := range failed {
+		if f.Script == sieve.PersonalScript {
+			return acts, f.Err
+		}
+
+		skipped := append(derefSlice(acts.FailedScripts), f.Error())
+		acts.FailedScripts = &skipped
+	}
+
+	if len(scripts) > 1 {
+		acts.Scripts = &d.Scripts
 	}
 
 	describeDelivery(acts, d, raw)

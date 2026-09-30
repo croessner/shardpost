@@ -53,7 +53,7 @@ func newEnv(t *testing.T) *env {
 
 	e.addr = ln.Addr().String()
 
-	a := admin.New(admin.Options{Delivery: &delivery.Service{Store: e.tgt, Log: log}, Auth: auth.Static{"alice": "pw"}, Log: log,
+	a := admin.New(admin.Options{Delivery: &delivery.Service{Store: e.tgt, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw"}, Log: log,
 		MaxMessageBytes: 1 << 20, SocketRoles: []string{admin.RoleImport}, Import: e.tgt, ImportMaxBatchMessages: 3})
 
 	dir, err := os.MkdirTemp("", "spmig")

@@ -1,7 +1,7 @@
 # Public folders
 
 Status: package A live with 0.25.0, package B live with 0.26.0
-(2026-09-20).
+(2026-09-20), migration of a public namespace with 0.34.0 (2026-09-30).
 Decided with the owner; a review and a rollout for each package.
 
 Shared folders exist: a mailbox of an account, opened by someone else
@@ -103,7 +103,25 @@ the new state.
     `shardpostctl` address `~public` like an account, so provisioning,
     ACL, quota, diagnosis, export, restore and maintenance jobs work
     unchanged. The API accepts the reserved name without a user database
-    lookup; delivery and import sessions refuse it.
+    lookup; delivery refuses it. An import session on it locks the
+    namespace like an account: while it is held IMAP answers
+    `NO [UNAVAILABLE]` for LIST and for public folders, and a session
+    that opened the namespace before notices within
+    `model.LockCheckInterval`.
+12. **Migration** (0.34.0). A public namespace of another server is
+    imported with `shardpostctl migrate -source-namespace` into
+    `~public`, with the identities an account import keeps. The messages
+    carry the `\Seen` of the source user the namespace is read as — the
+    shared default of decision 6 — and for every account named as a
+    reader the import writes private marks where its state at the source
+    differs, each batch under a new MODSEQ of the mailbox, exactly as a
+    STORE by that account would. That moves HIGHESTMODSEQ past the
+    source and makes a reader's state exactly the source's, so the import
+    is for folders that are not in use here yet; the last run comes
+    before clients do. Rights are not copied: Dovecot keeps
+    them in its configuration and in groups, which do not exist here.
+    What a global `sieve_after` script did there is done by
+    `sieve.after_dir`.
 
 ## Package A — the namespace
 

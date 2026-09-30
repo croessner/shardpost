@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-MIGRATE 1 "2026-09-27" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-MIGRATE 1 "2026-09-30" "ShardPost 0.34.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-migrate \- copy an account from another IMAP server, keeping its identities
 .SH SYNOPSIS
@@ -11,6 +11,16 @@ shardpostctl-migrate \- copy an account from another IMAP server, keeping its id
 .IR host:port ]
 .RI [ options ]
 .I account
+.br
+.B shardpostctl migrate
+.RI [ options ]
+.BI \-source-user " name"
+.BI \-source-namespace " prefix"
+.RB [ \-target-prefix
+.IR name/ ]
+.RB [ \-readers
+.IR account,... ]
+.B '~public'
 .SH DESCRIPTION
 Reads an account from another IMAP server and writes it into ShardPost
 through the import API, keeping what clients care about: UIDVALIDITY,
@@ -38,6 +48,62 @@ vacation response, and the target refuses it.
 While a run is in progress, the account is locked: IMAP, POP3 and LMTP
 refuse it. Role:
 .BR import .
+.SS Public folders
+The second form imports a namespace of the source other than the
+personal one \(em a public namespace of Dovecot, as a rule \(em into the
+public folders. The account is
+.B ~public
+(quote it: a shell expands the tilde),
+.B \-source-user
+is the source account whose view is read, and
+.B \-source-namespace
+is the prefix of the namespace there. The folders land below
+.BR \-target-prefix ;
+the namespace's own mailbox, if it has one
+.RI ( Zabbix
+of the namespace
+.IR Zabbix/ ),
+takes the name of the prefix. The identities are kept exactly as for an
+account.
+.PP
+What differs from an account:
+.IP \(bu 2
+.B Rights are not copied.
+A public namespace of Dovecot takes its rights from the configuration and
+from groups, which have no counterpart here. Grant them with
+.BR shardpostctl-acl (1);
+an imported folder without an entry is visible to nobody.
+.IP \(bu 2
+.B \eSeen is private per account.
+The messages carry the \eSeen of the source user, and that is what every
+account without a state of its own starts from. For each account named
+with
+.B \-readers
+the migrator logs in at the source as that account and records where its
+\eSeen differs, and its subscriptions of these folders. A folder the
+account does not see at the source is left alone. The source user itself
+needs no entry for \eSeen, only for its subscriptions.
+.IP \(bu 2
+.B Pruning stays below the target prefix.
+Public folders outside it are never removed, the folder the prefix itself
+names stays, and without a prefix nothing is pruned.
+.IP \(bu 2
+.B No Sieve scripts.
+They belong to accounts.
+.PP
+While such a run is in progress the public namespace is locked: a client
+gets NO [UNAVAILABLE] for LIST and for every public folder, a session
+that has a public folder selected is closed within a few seconds, and a
+delivery that files into a public folder is deferred. The first copy of
+a large namespace therefore belongs into a quiet hour.
+.PP
+Import into folders nobody uses here yet. A later run makes the target
+what the source is: a reader's \eSeen becomes exactly the source's, so
+what that account read here in the meantime is unread again, and the
+reader marks of an earlier run have moved HIGHESTMODSEQ past the source,
+so a client that synchronized such a folder here between two runs can
+miss flag changes of the second. Grant the rights after the last run, or
+keep clients away until then.
 .SH OPTIONS
 .SS Source
 .TP
@@ -64,7 +130,8 @@ Timeout per source command. Default:
 .SS Login
 .TP
 .BI \-source-user " name"
-Login name at the source. Default: the account.
+Login name at the source. Default: the account. Required for
+.BR ~public .
 .TP
 .BI \-master-user " name"
 Master user of the source. Without it, the migrator logs in as the user.
@@ -89,6 +156,27 @@ Certificate name to expect for ManageSieve.
 .TP
 .B \-sieve-proxy
 Send a PROXY v1 header to ManageSieve.
+.SS Public folders
+.TP
+.BI \-source-namespace " prefix"
+Import this namespace of the source instead of the personal one, for
+example
+.IR Mailinglists/ .
+The prefix is the one the source reports in NAMESPACE.
+.TP
+.BI \-target-prefix " name/"
+Put this in front of the imported names. Empty, or a mailbox name ending
+in a slash.
+.TP
+.BI \-readers " account,..."
+Accounts whose own \eSeen and subscriptions are carried over. Only with
+the account
+.BR ~public .
+Each of them is logged in at the source under its account name, with the
+same master login; an account that is called something else there cannot
+be a reader. A folder the account can list but not open is skipped with
+a warning. A client with a scope needs the readers in it, not only
+.BR ~public .
 .SS Run
 .TP
 .BI \-session " id"
@@ -98,7 +186,7 @@ Resume this import session instead of opening a new one.
 Keep target mailboxes the source no longer has.
 .TP
 .B \-no-acl
-Do not copy mailbox ACLs.
+Do not copy mailbox ACLs. A namespace import never copies them.
 .TP
 .B \-reimport
 Replace target mailboxes whose UIDVALIDITY no longer matches the source.
@@ -235,6 +323,37 @@ shardpostctl migrate -pop3-uidl-format '%08Xu%08Xv' \\
 .RE
 .fi
 .PP
+The public namespace
+.I Mailinglists/
+of a Dovecot server, as lists@example.org sees it, into
+.IR Public/Mailinglists/... ,
+with the reading state of a second account; then the rights, which the
+import does not copy:
+.PP
+.nf
+.RS
+shardpostctl -timeout 10m migrate \\
+    -source-user lists@example.org \\
+    -source-namespace Mailinglists/ -target-prefix Mailinglists/ \\
+    -readers lists@example.org,user@example.org '~public'
+shardpostctl acl set '~public' Mailinglists/Dovecot \\
+    user@example.org lrswipkxte
+.RE
+.fi
+.PP
+A namespace that is a single mailbox
+.RI ( Zabbix/
+with the mailbox
+.IR Zabbix )
+becomes the folder the prefix names:
+.PP
+.nf
+.RS
+shardpostctl migrate -source-user lists@example.org \\
+    -source-namespace Zabbix/ -target-prefix Zabbix/ '~public'
+.RE
+.fi
+.PP
 The cutover, once the copy is close: hold the account, kick its sessions,
 run the last delta, then move it.
 .PP
@@ -261,13 +380,15 @@ Parts failed. Run the command again; it continues where it left off.
 Usage error, for example a missing
 .B \-source-addr
 or
-.BR \-password-file .
+.BR \-password-file ,
+or options of a namespace import that do not fit together.
 .TP
 .B 69
 The run was aborted.
 .SH SEE ALSO
 .BR shardpostctl (1),
 .BR shardpostctl-export (1),
+.BR shardpostctl-acl (1),
 .BR shardpostctl-account (1)
 .PP
 The import semantics and the migration procedure are described in

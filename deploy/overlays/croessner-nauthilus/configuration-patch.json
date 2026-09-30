@@ -79,6 +79,11 @@
                 "name": "jmap-tls",
                 "mountPath": "/tls/jmap",
                 "readOnly": true
+              },
+              {
+                "name": "sieve-after",
+                "mountPath": "/etc/sieve/after",
+                "readOnly": true
               }
             ],
             "ports": [
@@ -144,6 +149,12 @@
             "secret": {
               "secretName": "shardpost-tls",
               "defaultMode": 288
+            }
+          },
+          {
+            "name": "sieve-after",
+            "configMap": {
+              "name": "shardpost-sieve-after"
             }
           }
         ]

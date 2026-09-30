@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
@@ -147,6 +148,37 @@ func (c *conn) other(owner string) (model.User, error) {
 	model.UseRequest(c.requestContext(), u)
 
 	return u, nil
+}
+
+// lockedOther looks, at most every model.LockCheckInterval, whether a
+// namespace this session opened besides its own — the public folders, a
+// sharing account — was locked for an import or a maintenance job after
+// the session opened it. Such a view is closed, so the next command that
+// needs it is refused like that of a new session. It reports true when
+// the selected mailbox lies in a locked namespace: the session then ends
+// the way it does when its own account is locked.
+func (c *conn) lockedOther() bool {
+	now := time.Now()
+	if len(c.others) == 0 || now.Before(c.othersProbe) {
+		return false
+	}
+
+	c.othersProbe = now.Add(model.LockCheckInterval)
+
+	for owner, u := range c.others {
+		if !errors.Is(model.RefuseDuringImport(u), model.ErrImportLocked) {
+			continue
+		}
+
+		if c.mu == u {
+			return true
+		}
+
+		u.Close()
+		delete(c.others, owner)
+	}
+
+	return false
 }
 
 func (c *conn) closeOthers() {

@@ -63,6 +63,11 @@ type Service struct {
 	Relay *outbound.Relay
 	// GlobalScripts is the directory of "include :global" scripts.
 	GlobalScripts string
+	// ScriptsBefore and ScriptsAfter are directories of scripts that run
+	// for every delivery before and after the account's active script
+	// (see sieve.RunSequence); "" has none.
+	ScriptsBefore string
+	ScriptsAfter  string
 	// Programs runs external programs (nil: extensions unavailable).
 	Programs *extprograms.Runner
 	// SieveConfig are the Sieve settings.

@@ -39,6 +39,27 @@ type Options struct {
 	// Sieve, if set, copies the Sieve scripts over ManageSieve.
 	Sieve *Endpoint
 
+	// Namespace, if set, imports this namespace of the source (its
+	// prefix, "Mailinglists/") as SourceUser sees it, instead of the
+	// personal one: the way a public namespace reaches the public
+	// folders here. The names land below TargetPrefix. ACLs and Sieve
+	// scripts are not copied then (a public namespace of Dovecot takes
+	// its rights from the configuration, and scripts belong to accounts),
+	// and Prune only looks below a non-empty TargetPrefix.
+	Namespace string
+	// TargetPrefix is put in front of the names of a Namespace import
+	// ("" or ending in "/"); the namespace's own root mailbox takes its
+	// name.
+	TargetPrefix string
+	// Readers are accounts whose own reading state of an imported public
+	// namespace is carried over: \Seen as each of them has it at the
+	// source, and their subscriptions. The messages themselves carry the
+	// \Seen of SourceUser, which is what everyone else starts from. A
+	// reader logs in at the source under its account name. Its state
+	// becomes exactly the source's, so a run is for folders that are not
+	// in use here yet (see docs/admin-api.md).
+	Readers []string
+
 	// Session resumes an import session ("" = a new one).
 	Session string
 	// Prune deletes target mailboxes the source no longer has.
@@ -65,6 +86,7 @@ type Report struct {
 	Account   string          `json:"account"`
 	Session   string          `json:"session"`
 	Mailboxes []MailboxReport `json:"mailboxes"`
+	Readers   []ReaderReport  `json:"readers,omitempty"`
 	Pruned    []string        `json:"pruned,omitempty"`
 	Sieve     string          `json:"sieve,omitempty"`
 	Warnings  []string        `json:"warnings,omitempty"`
@@ -89,6 +111,20 @@ type MailboxReport struct {
 	Skipped       int    `json:"skipped,omitempty"` // messages the target refused as too large
 	Verified      bool   `json:"verified"`
 	Error         string `json:"error,omitempty"`
+}
+
+// ReaderReport is the result for one account of Options.Readers.
+type ReaderReport struct {
+	Account string `json:"account"`
+	// Mailboxes is how many of the imported folders the account's state
+	// was carried over for (those it can open at the source), Subscribed
+	// how many of those it has subscribed.
+	Mailboxes  int `json:"mailboxes"`
+	Subscribed int `json:"subscribed"`
+	// Changed counts the messages whose \Seen changed for the account
+	// (set or cleared).
+	Changed int    `json:"changed"`
+	Error   string `json:"error,omitempty"`
 }
 
 // ErrPartial means the run finished but some parts failed (see Report).
@@ -153,13 +189,9 @@ func (r *run) all(ctx context.Context) error {
 		r.rep.Warnings = append(r.rep.Warnings, "source has no CONDSTORE: modseqs are assigned by the target")
 	}
 
-	mailboxes, err := r.src.listMailboxes()
+	mailboxes, err := r.list()
 	if err != nil {
 		return fmt.Errorf("list source mailboxes: %w", err)
-	}
-
-	for _, p := range r.src.skippedNamespaces {
-		r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("personal namespace %q is not imported", p))
 	}
 
 	keep, err := r.mailboxes(ctx, mailboxes)
@@ -171,11 +203,42 @@ func (r *run) all(ctx context.Context) error {
 		r.prune(ctx, keep)
 	}
 
+	for _, reader := range r.o.Readers {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		r.reader(ctx, reader)
+	}
+
 	if r.o.Sieve != nil {
 		r.sieve(ctx)
 	}
 
 	return nil
+}
+
+// list returns the source mailboxes to import: the personal namespace,
+// or the namespace the options name.
+func (r *run) list() ([]srcMailbox, error) {
+	if r.o.Namespace != "" {
+		mailboxes, err := r.src.listNamespace(r.o.Namespace, r.o.TargetPrefix)
+
+		// Subscriptions of a public folder belong to its readers.
+		for i := range mailboxes {
+			mailboxes[i].Subscribed = mailboxes[i].Subscribed && !model.IsPublic(r.o.Account)
+		}
+
+		return mailboxes, err
+	}
+
+	mailboxes, err := r.src.listMailboxes()
+
+	for _, p := range r.src.skippedNamespaces {
+		r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("personal namespace %q is not imported", p))
+	}
+
+	return mailboxes, err
 }
 
 // mailboxes migrates the selectable mailboxes and returns the target ids
@@ -198,6 +261,10 @@ func (r *run) mailboxes(ctx context.Context, mailboxes []srcMailbox) (map[string
 		default:
 			mr = r.mailbox(ctx, mb)
 			keep[mr.ID] = mr.ID != ""
+
+			if mr.Error == "" {
+				r.done = append(r.done, imported{raw: mb.Raw, name: mr.Name, id: mr.ID, uidValidity: mr.UIDValidity})
+			}
 		}
 
 		if mr.Error != "" {
@@ -210,10 +277,18 @@ func (r *run) mailboxes(ctx context.Context, mailboxes []srcMailbox) (map[string
 	return keep, nil
 }
 
+// Check reports what is wrong with the options, before a run touches
+// anything (it fills in the defaults as Run does).
+func (o *Options) Check() error { return o.defaults() }
+
 // defaults fills in and checks the options.
 func (o *Options) defaults() error {
 	if o.Account == "" || o.IMAP.Addr == "" {
 		return errors.New("account and source address are required")
+	}
+
+	if err := o.namespaceDefaults(); err != nil {
+		return err
 	}
 
 	o.SourceUser = cmp.Or(o.SourceUser, o.Account)
@@ -239,6 +314,45 @@ func (o *Options) defaults() error {
 	return nil
 }
 
+// namespaceDefaults checks the options of a namespace import and
+// switches off what it does not copy.
+func (o *Options) namespaceDefaults() error {
+	public := model.IsPublic(o.Account)
+
+	switch {
+	case public && (o.Namespace == "" || o.SourceUser == ""):
+		return errors.New("the public namespace is imported from a source namespace as a source user sees it (both are required)")
+	case o.Namespace == "" && (o.TargetPrefix != "" || len(o.Readers) > 0):
+		return errors.New("a target prefix and readers need a source namespace")
+	case !public && len(o.Readers) > 0:
+		return errors.New("readers belong to an import into the public namespace")
+	case !validTargetPrefix(o.TargetPrefix):
+		return fmt.Errorf("target prefix %q (a mailbox name ending in \"/\")", o.TargetPrefix)
+	}
+
+	if o.Namespace != "" {
+		o.ACL, o.Sieve = false, nil
+	}
+
+	return checkReaders(o.Readers)
+}
+
+// checkReaders refuses a reader that cannot be an account.
+func checkReaders(readers []string) error {
+	for _, reader := range readers {
+		if reader == "" || model.ReservedNamespace(reader) {
+			return fmt.Errorf("reader %q is not an account", reader)
+		}
+	}
+
+	return nil
+}
+
+// validTargetPrefix accepts "" or a mailbox name followed by "/".
+func validTargetPrefix(p string) bool {
+	return p == "" || (strings.HasSuffix(p, "/") && !strings.HasPrefix(p, "/") && !strings.Contains(p, "//"))
+}
+
 func sieveTLS(e *Endpoint) string {
 	if e == nil {
 		return TLSNone
@@ -248,12 +362,15 @@ func sieveTLS(e *Endpoint) string {
 }
 
 // login is the source login name.
-func (o *Options) login() string {
+func (o *Options) login() string { return o.loginAs(o.SourceUser) }
+
+// loginAs is the source login name of user.
+func (o *Options) loginAs(user string) string {
 	if o.MasterUser == "" {
-		return o.SourceUser
+		return user
 	}
 
-	return strings.NewReplacer("{user}", o.SourceUser, "{master}", o.MasterUser).Replace(o.UserFormat)
+	return strings.NewReplacer("{user}", user, "{master}", o.MasterUser).Replace(o.UserFormat)
 }
 
 // run is the state of one migration run.
@@ -263,6 +380,15 @@ type run struct {
 	tgt  Target
 	rep  *Report
 	uidl uidlFormat
+	// done are the mailboxes this run imported without an error.
+	done []imported
+}
+
+// imported is a mailbox the run imported: its source name and its
+// identity at the target.
+type imported struct {
+	raw, name, id string
+	uidValidity   uint32
 }
 
 // mailbox migrates one mailbox; errors end up in the report.
@@ -559,7 +685,7 @@ func (r *run) meta(mb srcMailbox, st *srcStatus, m srcMessage) adminapi.ImportMe
 		meta.GUID = g
 	}
 
-	if mb.Name == inboxName && r.uidl != nil {
+	if mb.Name == inboxName && r.uidl != nil && r.o.Namespace == "" {
 		meta.POP3UIDL = r.uidl.format(m.UID, st.UIDValidity, m.GUID)
 	}
 
@@ -632,7 +758,7 @@ func (r *run) prune(ctx context.Context, keep map[string]bool) {
 	}
 
 	for _, mb := range all {
-		if keep[mb.Id] || mb.Name == inboxName {
+		if keep[mb.Id] || mb.Name == inboxName || !r.prunable(mb.Name) {
 			continue
 		}
 
@@ -643,6 +769,110 @@ func (r *run) prune(ctx context.Context, keep map[string]bool) {
 
 		r.rep.Pruned = append(r.rep.Pruned, mb.Name)
 	}
+}
+
+// prunable reports whether a target mailbox the source does not have
+// may go. A namespace import owns only what lies below its target
+// prefix; without one it cannot tell its own mailboxes from the others
+// and prunes nothing. The mailbox the prefix itself names stays: it may
+// be the namespace's root, or somebody's own folder.
+func (r *run) prunable(name string) bool {
+	if r.o.Namespace == "" {
+		return true
+	}
+
+	return r.o.TargetPrefix != "" && strings.HasPrefix(name, r.o.TargetPrefix)
+}
+
+// reader carries the reading state of one account over: for every
+// imported folder the account sees at the source, its \Seen and its
+// subscription. A folder it does not see is left alone.
+func (r *run) reader(ctx context.Context, account string) {
+	rr := ReaderReport{Account: account}
+
+	if err := r.readerState(ctx, account, &rr); err != nil {
+		rr.Error = err.Error()
+		r.rep.Failed++
+
+		r.o.Log.Error("reader failed", "reader", account, "err", err)
+	} else {
+		r.o.Log.Info("reader done", "reader", account, "mailboxes", rr.Mailboxes, "subscribed", rr.Subscribed, "changed", rr.Changed)
+	}
+
+	r.rep.Readers = append(r.rep.Readers, rr)
+}
+
+func (r *run) readerState(ctx context.Context, account string, rr *ReaderReport) error {
+	tgt, ok := r.tgt.(ReaderTarget)
+	if !ok {
+		return errors.New("the target takes no reader state")
+	}
+
+	src, err := dialIMAP(ctx, r.o.IMAP)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	if err := src.login(r.o.loginAs(account), r.o.Password); err != nil {
+		return err
+	}
+
+	visible, err := src.listNamespace(r.o.Namespace, r.o.TargetPrefix)
+	if err != nil {
+		return fmt.Errorf("list source mailboxes: %w", err)
+	}
+
+	// What the account sees, with its subscription.
+	subscribed := map[string]bool{}
+
+	for _, mb := range visible {
+		if mb.Selectable {
+			subscribed[mb.Raw] = mb.Subscribed
+		}
+	}
+
+	for _, mb := range r.done {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		if sub, sees := subscribed[mb.raw]; sees {
+			if err := r.readerMailbox(ctx, src, tgt, mb, account, sub, rr); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// readerMailbox carries the state of one folder over.
+func (r *run) readerMailbox(ctx context.Context, src *imapClient, tgt ReaderTarget, mb imported, account string, sub bool, rr *ReaderReport) error {
+	seen, err := src.seenUIDs(mb.raw)
+	if errors.Is(err, errNoAccess) {
+		// Listed, but not readable for this account (the right l without r).
+		r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("%s: %s cannot open it at the source, skipped: %v", mb.name, account, err))
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("%s: source: %w", mb.name, err)
+	}
+
+	changed, err := tgt.PutReader(ctx, mb.id, account, mb.uidValidity, seen, sub)
+	if err != nil {
+		return fmt.Errorf("%s: %w", mb.name, err)
+	}
+
+	rr.Mailboxes++
+	rr.Changed += changed
+
+	if sub {
+		rr.Subscribed++
+	}
+
+	return nil
 }
 
 // sieve copies the scripts and the active one.

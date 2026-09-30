@@ -321,14 +321,17 @@ const (
 
 // conn is one client connection.
 type conn struct {
-	s          *Server
-	nc         net.Conn
-	wmu        sync.Mutex // serialises writes from the command loop and bye()
-	lockProbe  model.LockProbe
-	r          *reader
-	w          *writer
-	log        *slog.Logger
-	sessionLog *slog.Logger
+	s         *Server
+	nc        net.Conn
+	wmu       sync.Mutex // serialises writes from the command loop and bye()
+	lockProbe model.LockProbe
+	// othersProbe is when the views of other namespaces (see other) are
+	// next checked for a lock.
+	othersProbe time.Time
+	r           *reader
+	w           *writer
+	log         *slog.Logger
+	sessionLog  *slog.Logger
 	// trace wraps the connection's byte stream; a trace is attached when
 	// the account's trace switch is on (traceRead: last read of it).
 	// traceSeen keeps re-reading the switch of a session that was traced,
@@ -644,6 +647,11 @@ func (c *conn) storeErr(tag string, err error) {
 		c.no(tag, "LIMIT", "Message too large")
 	case errors.Is(err, model.ErrOverQuota):
 		c.no(tag, "OVERQUOTA", "Quota exceeded")
+	case errors.Is(err, model.ErrImportLocked):
+		// Another namespace the command needs — the public folders, a
+		// sharing account — is being imported or maintained.
+		c.log.Info("command refused, a namespace it needs is locked (import or maintenance)")
+		c.no(tag, "UNAVAILABLE", "Mailbox maintenance in progress, try again later")
 	default:
 		c.log.Error("storage error", "err", err)
 		c.no(tag, "SERVERBUG", "Storage error")
@@ -812,7 +820,7 @@ func (c *conn) dispatch(tag, name string, uid bool) error {
 		return nil
 	}
 
-	if c.lockProbe.Locked(c.user) {
+	if c.lockProbe.Locked(c.user) || c.lockedOther() {
 		c.log.Info("session closed, account locked (import or maintenance)")
 		c.w.untagged("BYE [UNAVAILABLE] Mailbox maintenance in progress, try again later")
 		c.state = stateLogout

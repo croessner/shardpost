@@ -236,6 +236,34 @@ func (t *APITarget) PutMetadata(ctx context.Context, id string, entries map[stri
 	return noContent(resp.StatusCode(), resp.JSONDefault)
 }
 
+// ReaderTarget is a target that also takes the reading state of an
+// account in a public folder.
+type ReaderTarget interface {
+	// PutReader makes seen the UIDs the reader has seen in the mailbox
+	// and sets its subscription; it returns how many messages changed.
+	PutReader(ctx context.Context, id, reader string, uidValidity uint32, seen []uint32, subscribed bool) (int, error)
+}
+
+// PutReader implements ReaderTarget.
+func (t *APITarget) PutReader(ctx context.Context, id, reader string, uidValidity uint32, seen []uint32, subscribed bool) (int, error) {
+	uids := make([]int64, len(seen))
+	for i, uid := range seen {
+		uids[i] = int64(uid)
+	}
+
+	resp, err := t.C.PutImportReaderWithResponse(ctx, t.account, id, reader, &adminapi.PutImportReaderParams{XImportSession: t.session},
+		adminapi.ImportReader{Uidvalidity: int64(uidValidity), Seen: uids, Subscribed: &subscribed})
+	if err != nil {
+		return 0, err
+	}
+
+	if resp.JSON200 == nil {
+		return 0, apiError(resp.StatusCode(), resp.JSONDefault)
+	}
+
+	return resp.JSON200.Changed, nil
+}
+
 // noContent is nil for 204, the API error otherwise.
 func noContent(status int, doc *adminapi.Error) error {
 	if status != 204 {

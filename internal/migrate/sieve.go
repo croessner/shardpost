@@ -107,7 +107,7 @@ func (c *sieveClient) response() ([]*response, error) {
 		switch strings.ToUpper(word) {
 		case "OK":
 			return out, nil
-		case "NO", "BYE":
+		case statusNO, "BYE":
 			return nil, fmt.Errorf("managesieve: %s %s", word, rest)
 		default:
 			out = append(out, r)

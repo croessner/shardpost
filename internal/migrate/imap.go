@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"shardpost/internal/model"
 )
 
 // TLS modes of an Endpoint.
@@ -147,6 +149,15 @@ func (e *imapError) Error() string { return e.status + " " + e.text }
 func isBAD(err error) bool {
 	var ie *imapError
 	return errors.As(err, &ie) && ie.status == "BAD"
+}
+
+// statusNO is the completion of a command the server refuses.
+const statusNO = "NO"
+
+// isNO reports a NO completion (the server refuses the command).
+func isNO(err error) bool {
+	var ie *imapError
+	return errors.As(err, &ie) && ie.status == statusNO
 }
 
 // imapClient is a minimal IMAP4rev1 client for reading a source account.
@@ -313,7 +324,7 @@ func (c *imapClient) listMailboxes() ([]srcMailbox, error) {
 		c.skippedNamespaces = ns.extra
 	}
 
-	rs, subscribed, err := c.list(ns.prefix)
+	rs, subscribed, err := c.list(personalPatterns(ns.prefix))
 	if err != nil {
 		return nil, err
 	}
@@ -344,16 +355,127 @@ func (c *imapClient) listMailboxes() ([]srcMailbox, error) {
 	return out, nil
 }
 
-// list runs LIST (with RETURN SUBSCRIBED SPECIAL-USE where supported,
-// else LIST and LSUB) and returns the LIST responses and the names LSUB
-// reported. With a namespace prefix INBOX is listed as well ("INBOX." +
-// "*" does not match INBOX itself).
-func (c *imapClient) list(prefix string) ([]*response, map[string]bool, error) {
+// listNamespace lists the mailboxes of one namespace of the source other
+// than the personal one — a public namespace, as the source user sees
+// it — for an import below targetPrefix. The namespace's own root
+// mailbox ("Zabbix" of the namespace "Zabbix/") is part of it and takes
+// the name of the target prefix. Special-use attributes are not carried
+// over: they describe a mailbox of an account.
+func (c *imapClient) listNamespace(prefix, targetPrefix string) ([]srcMailbox, error) {
+	delim, known := "", false
+
+	if c.caps["NAMESPACE"] {
+		rs, err := c.cmd("NAMESPACE")
+		if err != nil {
+			return nil, err
+		}
+
+		ns := parseNamespaces(rs)
+		if delim, known = ns.delims[prefix]; !known {
+			return nil, fmt.Errorf("the source has no namespace %q (it has %s)", prefix, strings.Join(ns.prefixes(), ", "))
+		}
+	}
+
+	patterns := []string{quote(prefix + "*")}
+
+	root := prefix
+	if delim != "" {
+		root = strings.TrimSuffix(prefix, delim)
+	}
+
+	if root != "" && root != prefix {
+		patterns = append(patterns, quote(root))
+	}
+
+	rs, subscribed, err := c.list(patterns)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []srcMailbox
+
+	for _, r := range rs {
+		e, ok := parseList(r)
+		if !ok {
+			continue
+		}
+
+		mb := srcMailbox{Raw: e.raw, Selectable: true, Subscribed: subscribed[e.raw]}
+
+		if mb.Name, err = mapNamespaceName(e.raw, prefix, root, cmp.Or(delim, e.delim), targetPrefix); err != nil {
+			mb.Name, mb.Err = e.raw, err
+		}
+
+		mb.applyAttrs(e.attrs)
+		mb.SpecialUse = nil
+		out = append(out, mb)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
+	return out, nil
+}
+
+// prefixes are the namespace prefixes of the source, quoted and sorted.
+func (ns namespaces) prefixes() []string {
+	out := make([]string, 0, len(ns.delims))
+	for p := range ns.delims {
+		out = append(out, strconv.Quote(p))
+	}
+
+	sort.Strings(out)
+
+	return out
+}
+
+// mapNamespaceName turns a source name of the namespace prefix into a
+// ShardPost name below targetPrefix: decoded from modified UTF-7, "/"
+// as the hierarchy delimiter. root is the namespace's own mailbox.
+func mapNamespaceName(raw, prefix, root, delim, targetPrefix string) (string, error) {
+	if raw == root && root != prefix {
+		if targetPrefix == "" {
+			return "", errors.New("the root mailbox of the namespace has no name of its own; give it one with a target prefix")
+		}
+
+		return strings.TrimSuffix(targetPrefix, "/"), nil
+	}
+
+	name, err := decodeMUTF7(strings.TrimPrefix(raw, prefix))
+	if err != nil {
+		return "", err
+	}
+
+	if delim != "" && delim != "/" {
+		if strings.Contains(name, "/") {
+			return "", errors.New(`the name contains "/", the hierarchy delimiter here`)
+		}
+
+		name = strings.ReplaceAll(name, delim, "/")
+	}
+
+	if name == "" {
+		return "", errors.New("empty mailbox name")
+	}
+
+	return targetPrefix + name, nil
+}
+
+// personalPatterns are the LIST patterns of the personal namespace.
+// With a namespace prefix INBOX is listed as well ("INBOX." + "*" does
+// not match INBOX itself).
+func personalPatterns(prefix string) []string {
 	patterns := []string{quote(prefix + "*")}
 	if prefix != "" {
 		patterns = append(patterns, quote(inboxName))
 	}
 
+	return patterns
+}
+
+// list runs LIST (with RETURN SUBSCRIBED SPECIAL-USE where supported,
+// else LIST and LSUB) over the quoted patterns and returns the LIST
+// responses and the names LSUB reported.
+func (c *imapClient) list(patterns []string) ([]*response, map[string]bool, error) {
 	if c.caps["LIST-EXTENDED"] && c.caps["SPECIAL-USE"] {
 		rs, err := c.cmd(`LIST "" (` + strings.Join(patterns, " ") + `) RETURN (SUBSCRIBED SPECIAL-USE)`)
 		return rs, map[string]bool{}, err
@@ -411,6 +533,8 @@ type namespaces struct {
 	// extra are further personal namespaces; they are not imported (a
 	// warning names them).
 	extra []string
+	// delims maps every namespace prefix to its hierarchy delimiter.
+	delims map[string]string
 }
 
 // foreign reports whether raw belongs to another namespace (a longer
@@ -427,7 +551,7 @@ func (ns namespaces) foreign(raw string) bool {
 
 // parseNamespaces reads a NAMESPACE response.
 func parseNamespaces(rs []*response) namespaces {
-	var ns namespaces
+	ns := namespaces{delims: map[string]string{}}
 
 	for _, r := range rs {
 		vs, err := newParser(r, 2).values()
@@ -450,6 +574,7 @@ func parseNamespaces(rs []*response) namespaces {
 
 				prefix, _ := str(fields[0])
 				delim, _ := str(fields[1])
+				ns.delims[prefix] = delim
 
 				switch {
 				case i == 0 && j == 0:
@@ -778,6 +903,60 @@ func (m *srcMessage) setDate(k string, v value) error {
 	}
 
 	return nil
+}
+
+// errNoAccess means the logged-in user may not open a mailbox it can
+// list (the server answered NO to STATUS or EXAMINE).
+var errNoAccess = errors.New("not readable for this user")
+
+// seenUIDs examines the mailbox and returns the UIDs that carry \Seen
+// for the logged-in user; errNoAccess if the user may not open it.
+func (c *imapClient) seenUIDs(raw string) ([]uint32, error) {
+	st, err := c.status(raw)
+	if err == nil {
+		err = c.examine(raw)
+	}
+
+	if isNO(err) {
+		return nil, fmt.Errorf("%w: %v", errNoAccess, err)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	var out []uint32
+
+	err = c.cmdEach("UID FETCH 1:* (UID FLAGS)", func(r *response) error {
+		kv, ok := fetchItems(r)
+		if !ok {
+			return nil
+		}
+
+		var m srcMessage
+
+		for i := 0; i+1 < len(kv); i += 2 {
+			k, _ := str(kv[i])
+			if err := m.set(strings.ToUpper(k), kv[i+1]); err != nil {
+				return err
+			}
+		}
+
+		if m.UID != 0 && model.HasFlag(m.Flags, `\Seen`) {
+			out = append(out, m.UID)
+		}
+
+		return nil
+	})
+	// An empty mailbox may answer "UID FETCH 1:*" with BAD; from any
+	// other one a BAD is an error, not "nothing seen".
+	if err != nil && (st.Messages != 0 || !isBAD(err)) {
+		return nil, err
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+
+	return out, nil
 }
 
 // fetchBodies reads the messages of uids from the examined mailbox.

@@ -278,7 +278,17 @@ func printCheck(stdout io.Writer, a supportArgs, res *adminapi.SieveCheckResult)
 			rows = append(rows, [2]string{"vacation", fmt.Sprintf("%q every %d days", x.Vacation.Subject, x.Vacation.Days)})
 		}
 
+		if x.Scripts != nil {
+			rows = append(rows, [2]string{"scripts", strings.Join(*x.Scripts, ", ")})
+		}
+
 		table(stdout, rows)
+
+		if x.FailedScripts != nil {
+			for _, s := range *x.FailedScripts {
+				sayln(stdout, "failed script (skipped): "+s)
+			}
+		}
 
 		for _, s := range x.Suppressed {
 			sayln(stdout, "suppressed: "+s)

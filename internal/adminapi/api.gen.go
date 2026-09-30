@@ -470,6 +470,22 @@ type ImportMetadata struct {
 	Entries map[string]string `json:"entries"`
 }
 
+// ImportReader defines model for ImportReader.
+type ImportReader struct {
+	// Seen UIDs the reader has seen; every other message is unseen for the reader.
+	Seen       []int64 `json:"seen"`
+	Subscribed *bool   `json:"subscribed,omitempty"`
+
+	// Uidvalidity UIDVALIDITY the UIDs belong to; another one is a conflict.
+	Uidvalidity int64 `json:"uidvalidity"`
+}
+
+// ImportReaderResult defines model for ImportReaderResult.
+type ImportReaderResult struct {
+	// Changed Messages whose `\Seen` changed for the reader.
+	Changed int `json:"changed"`
+}
+
 // ImportResult defines model for ImportResult.
 type ImportResult struct {
 	Bytes    int64 `json:"bytes"`
@@ -800,9 +816,12 @@ type SharedRef struct {
 
 // SieveActions defines model for SieveActions.
 type SieveActions struct {
-	Discard      *bool           `json:"discard,omitempty"`
-	Fileinto     []SieveFileInto `json:"fileinto"`
-	HeaderEdited *bool           `json:"header_edited,omitempty"`
+	Discard *bool `json:"discard,omitempty"`
+
+	// FailedScripts Global scripts that failed and were skipped, with the error.
+	FailedScripts *[]string       `json:"failed_scripts,omitempty"`
+	Fileinto      []SieveFileInto `json:"fileinto"`
+	HeaderEdited  *bool           `json:"header_edited,omitempty"`
 
 	// Keep The message would be stored in INBOX (implicit or explicit keep).
 	Keep     bool     `json:"keep"`
@@ -810,6 +829,12 @@ type SieveActions struct {
 	Programs []string `json:"programs"`
 	Redirect []string `json:"redirect"`
 	Reject   *string  `json:"reject,omitempty"`
+
+	// Scripts The scripts that ran, in order, when the server runs global
+	// scripts around the account's own (`before/<name>`,
+	// `personal`, `after/<name>`). A script that does not keep the
+	// message ends the sequence.
+	Scripts *[]string `json:"scripts,omitempty"`
 
 	// Suppressed Side effects that were not carried out.
 	Suppressed []string       `json:"suppressed"`
@@ -947,6 +972,9 @@ type JobID = string
 // MailboxID defines model for MailboxID.
 type MailboxID = string
 
+// Reader defines model for Reader.
+type Reader = string
+
 // ScriptName defines model for ScriptName.
 type ScriptName = string
 
@@ -1021,6 +1049,12 @@ type ImportMessagesParams struct {
 
 // PutImportMetadataParams defines parameters for PutImportMetadata.
 type PutImportMetadataParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// PutImportReaderParams defines parameters for PutImportReader.
+type PutImportReaderParams struct {
 	// XImportSession The session that holds the import lock.
 	XImportSession ImportSessionHeader `json:"X-Import-Session"`
 }
@@ -1155,6 +1189,9 @@ type ImportMessagesMultipartRequestBody = ImportMessagesMultipartBody
 
 // PutImportMetadataJSONRequestBody defines body for PutImportMetadata for application/json ContentType.
 type PutImportMetadataJSONRequestBody = ImportMetadata
+
+// PutImportReaderJSONRequestBody defines body for PutImportReader for application/json ContentType.
+type PutImportReaderJSONRequestBody = ImportReader
 
 // PutImportSieveJSONRequestBody defines body for PutImportSieve for application/json ContentType.
 type PutImportSieveJSONRequestBody = ImportSieve
@@ -1466,6 +1503,40 @@ type ClientInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
 	PutImportMetadata(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportReaderWithBody Set an account's own reading state of a public folder
+	//
+	// Only for the public namespace (`~public`). `\Seen` is private
+	// per account there: the import stores the source user's state as
+	// the shared default, and this call records where the reader
+	// differs from what the reader sees now, so the reader's `\Seen`
+	// becomes exactly `seen`. UIDs the mailbox does not hold are
+	// ignored. The marks are written in batches, each under a new
+	// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+	// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+	// subscription of the folder. The call is repeatable.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+	PutImportReaderWithBody(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutImportReader Set an account's own reading state of a public folder
+	//
+	// Only for the public namespace (`~public`). `\Seen` is private
+	// per account there: the import stores the source user's state as
+	// the shared default, and this call records where the reader
+	// differs from what the reader sees now, so the reader's `\Seen`
+	// becomes exactly `seen`. UIDs the mailbox does not hold are
+	// ignored. The marks are written in batches, each under a new
+	// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+	// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+	// subscription of the folder. The call is repeatable.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+	PutImportReader(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, body PutImportReaderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutImportSieveWithBody Replace the Sieve scripts and the active script
 	//
@@ -2423,6 +2494,60 @@ func (c *Client) PutImportMetadataWithBody(ctx context.Context, account Account,
 // Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
 func (c *Client) PutImportMetadata(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutImportMetadataRequest(c.Server, account, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportReaderWithBody Set an account's own reading state of a public folder
+//
+// Only for the public namespace (`~public`). `\Seen` is private
+// per account there: the import stores the source user's state as
+// the shared default, and this call records where the reader
+// differs from what the reader sees now, so the reader's `\Seen`
+// becomes exactly `seen`. UIDs the mailbox does not hold are
+// ignored. The marks are written in batches, each under a new
+// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+// subscription of the folder. The call is repeatable.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+func (c *Client) PutImportReaderWithBody(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportReaderRequestWithBody(c.Server, account, id, reader, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// PutImportReader Set an account's own reading state of a public folder
+//
+// Only for the public namespace (`~public`). `\Seen` is private
+// per account there: the import stores the source user's state as
+// the shared default, and this call records where the reader
+// differs from what the reader sees now, so the reader's `\Seen`
+// becomes exactly `seen`. UIDs the mailbox does not hold are
+// ignored. The marks are written in batches, each under a new
+// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+// subscription of the folder. The call is repeatable.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+func (c *Client) PutImportReader(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, body PutImportReaderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutImportReaderRequest(c.Server, account, id, reader, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4241,6 +4366,80 @@ func NewPutImportMetadataRequestWithBody(server string, account Account, id Mail
 	}
 
 	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/metadata", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewPutImportReaderRequest calls the generic PutImportReader builder with application/json body
+func NewPutImportReaderRequest(server string, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, body PutImportReaderJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutImportReaderRequestWithBody(server, account, id, reader, params, "application/json", bodyReader)
+}
+
+// NewPutImportReaderRequestWithBody constructs an http.Request for the PutImportReader method, with any body, and a specified content type
+func NewPutImportReaderRequestWithBody(server string, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "reader", reader, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/mailboxes/%s/readers/%s", pathParam0, pathParam1, pathParam2)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -6554,6 +6753,40 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata (the `PutImportMetadata` operationId).
 	PutImportMetadataWithResponse(ctx context.Context, account Account, id MailboxID, params *PutImportMetadataParams, body PutImportMetadataJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportMetadataResponse, error)
 
+	// PutImportReaderWithBodyWithResponse Set an account's own reading state of a public folder
+	//
+	// Only for the public namespace (`~public`). `\Seen` is private
+	// per account there: the import stores the source user's state as
+	// the shared default, and this call records where the reader
+	// differs from what the reader sees now, so the reader's `\Seen`
+	// becomes exactly `seen`. UIDs the mailbox does not hold are
+	// ignored. The marks are written in batches, each under a new
+	// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+	// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+	// subscription of the folder. The call is repeatable.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+	PutImportReaderWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportReaderResponse, error)
+
+	// PutImportReaderWithResponse Set an account's own reading state of a public folder
+	//
+	// Only for the public namespace (`~public`). `\Seen` is private
+	// per account there: the import stores the source user's state as
+	// the shared default, and this call records where the reader
+	// differs from what the reader sees now, so the reader's `\Seen`
+	// becomes exactly `seen`. UIDs the mailbox does not hold are
+	// ignored. The marks are written in batches, each under a new
+	// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+	// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+	// subscription of the folder. The call is repeatable.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+	PutImportReaderWithResponse(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, body PutImportReaderJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportReaderResponse, error)
+
 	// PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
 	//
 	// Stores the scripts as given (nothing is executed), activates
@@ -7764,6 +7997,54 @@ func (r PutImportMetadataResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r PutImportMetadataResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type PutImportReaderResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportReaderResult
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r PutImportReaderResponse) GetJSON200() *ImportReaderResult {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r PutImportReaderResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r PutImportReaderResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r PutImportReaderResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutImportReaderResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r PutImportReaderResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -9950,6 +10231,52 @@ func (c *ClientWithResponses) PutImportMetadataWithResponse(ctx context.Context,
 	return ParsePutImportMetadataResponse(rsp)
 }
 
+// PutImportReaderWithBodyWithResponse Set an account's own reading state of a public folder
+//
+// Only for the public namespace (`~public`). `\Seen` is private
+// per account there: the import stores the source user's state as
+// the shared default, and this call records where the reader
+// differs from what the reader sees now, so the reader's `\Seen`
+// becomes exactly `seen`. UIDs the mailbox does not hold are
+// ignored. The marks are written in batches, each under a new
+// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+// subscription of the folder. The call is repeatable.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+func (c *ClientWithResponses) PutImportReaderWithBodyWithResponse(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutImportReaderResponse, error) {
+	rsp, err := c.PutImportReaderWithBody(ctx, account, id, reader, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportReaderResponse(rsp)
+}
+
+// PutImportReaderWithResponse Set an account's own reading state of a public folder
+//
+// Only for the public namespace (`~public`). `\Seen` is private
+// per account there: the import stores the source user's state as
+// the shared default, and this call records where the reader
+// differs from what the reader sees now, so the reader's `\Seen`
+// becomes exactly `seen`. UIDs the mailbox does not hold are
+// ignored. The marks are written in batches, each under a new
+// MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+// has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+// subscription of the folder. The call is repeatable.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader} (the `PutImportReader` operationId).
+func (c *ClientWithResponses) PutImportReaderWithResponse(ctx context.Context, account Account, id MailboxID, reader Reader, params *PutImportReaderParams, body PutImportReaderJSONRequestBody, reqEditors ...RequestEditorFn) (*PutImportReaderResponse, error) {
+	rsp, err := c.PutImportReader(ctx, account, id, reader, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutImportReaderResponse(rsp)
+}
+
 // PutImportSieveWithBodyWithResponse Replace the Sieve scripts and the active script
 //
 // Stores the scripts as given (nothing is executed), activates
@@ -11281,6 +11608,39 @@ func ParsePutImportMetadataResponse(rsp *http.Response) (*PutImportMetadataRespo
 	switch {
 	case rsp.StatusCode == 204:
 		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutImportReaderResponse parses an HTTP response from a PutImportReaderWithResponse call
+func ParsePutImportReaderResponse(rsp *http.Response) (*PutImportReaderResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutImportReaderResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportReaderResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -12672,6 +13032,9 @@ type ServerInterface interface {
 	// PutImportMetadata Replace the annotations (METADATA) of a mailbox
 	// (PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata)
 	PutImportMetadata(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, params PutImportMetadataParams)
+	// PutImportReader Set an account's own reading state of a public folder
+	// (PUT /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader})
+	PutImportReader(w http.ResponseWriter, r *http.Request, account Account, id MailboxID, reader Reader, params PutImportReaderParams)
 	// PutImportSieve Replace the Sieve scripts and the active script
 	// (PUT /admin/v1/accounts/{account}/import/sieve)
 	PutImportSieve(w http.ResponseWriter, r *http.Request, account Account, params PutImportSieveParams)
@@ -13495,6 +13858,78 @@ func (siw *ServerInterfaceWrapper) PutImportMetadata(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutImportMetadata(w, r, account, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutImportReader operation middleware
+func (siw *ServerInterfaceWrapper) PutImportReader(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "id" -------------
+	var id MailboxID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "reader" -------------
+	var reader Reader
+
+	err = runtime.BindStyledParameterWithOptions("simple", "reader", r.PathValue("reader"), &reader, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "reader", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutImportReaderParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutImportReader(w, r, account, id, reader, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -15248,6 +15683,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/changes", wrapper.ImportChanges)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/finalize", wrapper.FinalizeImportMailbox)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/acl", wrapper.PutImportACL)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader}", wrapper.PutImportReader)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/metadata", wrapper.PutImportMetadata)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/sieve", wrapper.PutImportSieve)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.ClearTrace)

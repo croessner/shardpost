@@ -24,5 +24,10 @@ configMapGenerator:
     namespace: shardpost
     files:
       - server.yaml
+  # Scripts that run after every account's own Sieve script (sieve.after_dir).
+  - name: shardpost-sieve-after
+    namespace: shardpost
+    files:
+      - sieve-after/50-public-folders.sieve
 patches:
   - path: configuration-patch.json

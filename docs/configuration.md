@@ -42,6 +42,8 @@ tls:
 sieve:
   addr: ':14190'
   global_dir: /etc/sieve
+  before_dir: /etc/shardpost/sieve/before
+  after_dir: /etc/shardpost/sieve/after
 telemetry:
   protocol: http/protobuf
   endpoint: http://collector:4318
@@ -54,9 +56,55 @@ Rook-managed secret and ConfigMap through the Kubernetes API and follows key
 rotations. With `ceph.key` set, `rook` is ignored and no Kubernetes access
 happens; see [running without Kubernetes](operations/README.md#running-without-kubernetes).
 
+### Global Sieve scripts
+
+`sieve.global_dir` holds the scripts a user script can pull in with
+`include :global`. `sieve.before_dir` and `sieve.after_dir` hold scripts
+that run for **every** delivery (LMTP and the local delivery API) around
+the account's active script, the way Pigeonhole runs `sieve_before` and
+`sieve_after`:
+
+- Every regular file `<name>.sieve` of a directory is a script; they run
+  in name order (`10-spam.sieve` before `50-lists.sieve`). Other files
+  and names starting with a dot are ignored. The directory is read for
+  every delivery, so a changed ConfigMap takes effect without a restart.
+- The order is: before scripts, the account's active script, after
+  scripts. The next script runs only while the message is still kept
+  (implicit or explicit `keep`); that keep is handed on instead of being
+  carried out, and the actions of all scripts add up. A script that files
+  the message elsewhere, discards or rejects it ends the sequence. So an
+  after script only sees what the user's script left in INBOX, and a
+  `fileinto "INBOX"` in a user script — unlike `keep` — ends the
+  sequence too.
+- A header edit (`editheader`) of one script is what the next one sees.
+- A script that fails at runtime is skipped as if it had kept the message
+  and logged; the others still run, and so do the other scripts of a
+  directory when one file cannot be read. At startup and for
+  `config check` a directory or file that cannot be read or a script that
+  does not compile is an error.
+- The flags of a keep are handed on with it: they are what the flag
+  variable (`imap4flags`) of the next script starts with. So a script
+  that marks the message (`addflag`, `keep :flags`) and keeps it does not
+  lose the mark because a later script keeps the message too, and a later
+  script can still remove it (`removeflag`, `setflag`, `keep :flags`).
+- The startup check compiles the global scripts without an account, so
+  one that uses `include :personal` is refused; `include :global` works.
+- The environment variables `SIEVE_BEFORE_DIR` and `SIEVE_AFTER_DIR` win
+  over the file when they are set, even to an empty value.
+- The scripts run with the rights of the recipient. A `fileinto` into a
+  public folder needs the `p` right of that account; without it the
+  message stays in INBOX. That is how list mail is sorted into public
+  folders for the accounts that may post there and left alone for
+  everybody else.
+- IMAPSieve does not run them, and neither does a delivery with
+  `sieve=false` or into a named mailbox.
+
+`shardpostctl sieve check` runs the same sequence, see
+[admin API](admin-api.md).
+
 Unknown keys, mistyped YAML values, invalid env numbers, invalid boolean values, contradictory TLS pairs and explicit secret files that are missing or read as empty cause a startup error. Env numbers are always interpreted as decimal. A secret file takes precedence over the corresponding direct secret value. Error messages never print values.
 
-`config check` validates the configuration structure and reads the referenced secret files. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards.
+`config check` validates the configuration structure, reads the referenced secret files and compiles the global Sieve scripts of `sieve.before_dir` and `sieve.after_dir`. It is no proof of connectivity to Ceph, Nauthilus, SMTP or the external programs; program files are checked when they are invoked. Certificates are loaded when the server starts afterwards.
 
 A running server looks every `tls.reload_seconds` (default 60; `0` loads once) whether the files of `tls.cert`/`tls.key` and `jmap.tls_cert`/`jmap.tls_key` changed and loads the renewed pair, so a certificate that cert-manager renews in a mounted Secret reaches the listeners without a restart; a renewal is recognised by the files' content, and the reload logs the new certificate's serial and expiry. A renewed pair that does not load is logged and the previous certificate stays in use. Mount the Secret as a volume, not with `subPath`: a `subPath` mount never sees an update. The kubelet itself takes up to about a minute to update a mounted Secret. Without a file path, the existing env-based deployments remain usable.
 

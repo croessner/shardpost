@@ -101,6 +101,11 @@ spec:
             # directory of <name>.sieve files for "include :global" ("" = none)
             - name: SIEVE_GLOBAL_DIR
               value: ""
+            # SIEVE_BEFORE_DIR and SIEVE_AFTER_DIR name directories of
+            # <name>.sieve files that run for every delivery before and
+            # after the account's own script. They are left unset here: a
+            # variable that is set, even to "", wins over sieve.before_dir
+            # and sieve.after_dir of a configuration file.
             - name: DRAIN_SECONDS
               value: "20"
             - name: KEY_POLL_SECONDS

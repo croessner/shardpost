@@ -117,7 +117,8 @@ func (s *Server) OpenImport(w http.ResponseWriter, r *http.Request, account admi
 		return
 	}
 
-	if !s.canonical(w, r, account) {
+	// The public namespace has no user database entry (see openAccount).
+	if !model.IsPublic(account) && !s.canonical(w, r, account) {
 		return
 	}
 
@@ -557,7 +558,7 @@ func (s *Server) importChanges(req *adminapi.ImportChanges) ([]model.ImportFlags
 
 	for _, uid := range derefSlice(req.Expunge) {
 		if uid < 1 || uid > math.MaxUint32 {
-			return nil, nil, "invalid uid"
+			return nil, nil, msgInvalidUID
 		}
 
 		expunge = append(expunge, uint32(uid))
@@ -883,15 +884,20 @@ func (s *Server) importError(w http.ResponseWriter, r *http.Request, err error) 
 
 // checkMailboxSpec validates a mailbox specification; it returns the
 // problem or "".
-// msgInvalidMailbox answers an unusable mailbox name.
-const msgInvalidMailbox = "invalid mailbox name"
+// msgInvalidMailbox answers an unusable mailbox name, the other two a
+// UID or a UIDVALIDITY outside 1..2^32-1.
+const (
+	msgInvalidMailbox     = "invalid mailbox name"
+	msgInvalidUID         = "invalid uid"
+	msgInvalidUIDValidity = "invalid uidvalidity"
+)
 
 func checkMailboxSpec(name string, uidValidity int64, uses []string) string {
 	switch {
 	case name == "" || len(name) > maxMailbox || hasControl(name) || strings.Contains(name, "//"):
 		return msgInvalidMailbox
 	case uidValidity < 1 || uidValidity > math.MaxUint32:
-		return "invalid uidvalidity"
+		return msgInvalidUIDValidity
 	}
 
 	for _, u := range uses {

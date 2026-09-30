@@ -1,8 +1,10 @@
 package delivery
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 
 	"shardpost/internal/extprograms"
@@ -10,9 +12,10 @@ import (
 	"shardpost/internal/sieve"
 )
 
-// runSieve runs the active script with its pipes; a missing script
-// delivers to INBOX, a failing script or pipe keeps the original in
-// INBOX. When the active script did not answer a message it keeps with
+// runSieve runs the global scripts and the active script in sequence
+// with their pipes; a missing script delivers to INBOX, a failing script
+// is skipped as if it had kept the message, a failing pipe keeps the
+// original in INBOX. When the active script did not answer a message it keeps with
 // a vacation, the vacation of the JMAP VacationResponse may.
 func (r *run) runSieve(ctx context.Context) *sieve.Delivery {
 	user, raw := r.req.Account, r.req.Raw
@@ -26,11 +29,9 @@ func (r *run) runSieve(ctx context.Context) *sieve.Delivery {
 
 	hooks := r.sieveHooks()
 
-	d, err := sieve.RunWithHooks(ctx, script, r.req.From, r.req.Rcpt, user, raw, hooks)
-	if err != nil {
-		r.log.Warn("sieve failed, delivering to INBOX", "user", user, "err", err)
-
-		d = &sieve.Delivery{FileInto: []sieve.FileInto{{Mailbox: inboxName}}, Raw: raw}
+	d, failed := sieve.RunSequence(ctx, r.svc.Sequence(script, r.log), r.req.From, r.req.Rcpt, user, raw, hooks)
+	for _, f := range failed {
+		r.log.Warn("sieve failed, script skipped (the message is kept)", "user", user, "script", f.Script, "err", f.Err)
 	}
 
 	if err := d.RunPipes(ctx, hooks.Program); err != nil {
@@ -99,6 +100,32 @@ func (r *run) jmapVacation(ctx context.Context) *sieve.Vacation {
 
 	return d.Vacation
 }
+
+// Sequence is what runs for a delivery: the global scripts before, the
+// account's active script, the global scripts after. A directory or a
+// script that cannot be read is left out (and logged): the mail is still
+// delivered, by the scripts that could be read.
+func (s *Service) Sequence(personal string, log *slog.Logger) []sieve.Script {
+	if log == nil {
+		log = cmp.Or(s.Log, slog.Default())
+	}
+
+	before, err := sieve.LoadDir(s.ScriptsBefore, sieve.LabelBefore)
+	if err != nil {
+		log.Warn("global sieve scripts unavailable", "dir", s.ScriptsBefore, "err", err)
+	}
+
+	after, err := sieve.LoadDir(s.ScriptsAfter, sieve.LabelAfter)
+	if err != nil {
+		log.Warn("global sieve scripts unavailable", "dir", s.ScriptsAfter, "err", err)
+	}
+
+	return sieve.Sequence(before, personal, after)
+}
+
+// HasGlobalScripts reports whether deliveries run scripts besides the
+// account's own.
+func (s *Service) HasGlobalScripts() bool { return s.ScriptsBefore != "" || s.ScriptsAfter != "" }
 
 // sieveHooks connects the script to the user's store and, when enabled,
 // to the external programs.

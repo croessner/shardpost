@@ -17,6 +17,9 @@ import (
 	"shardpost/internal/migrate"
 )
 
+// stateOK is how a report line says that nothing is wrong.
+const stateOK = "ok"
+
 // exPartial is the exit code of a run in which some mailboxes (or the
 // Sieve scripts) failed; a later run continues where it stopped.
 const exPartial = 1
@@ -25,7 +28,7 @@ const exPartial = 1
 type migrateArgs struct {
 	o                      migrate.Options
 	sieve                  migrate.Endpoint
-	pwFile                 string
+	pwFile, readers        string
 	noPrune, noACL, asJSON bool
 }
 
@@ -49,6 +52,9 @@ func migrateFlags(fs *flag.FlagSet) *migrateArgs {
 	fs.StringVar(&a.sieve.TLS, "sieve-tls", envOr("SHARDPOST_MIGRATE_SIEVE_TLS", migrate.TLSStartTLS), "ManageSieve TLS: implicit, starttls or none")
 	fs.StringVar(&a.sieve.ServerName, "sieve-server-name", os.Getenv("SHARDPOST_MIGRATE_SIEVE_SERVER_NAME"), "expected ManageSieve certificate name")
 	fs.BoolVar(&a.sieve.Proxy, "sieve-proxy", envBool("SHARDPOST_MIGRATE_SIEVE_PROXY"), "send a PROXY v1 header to ManageSieve")
+	fs.StringVar(&o.Namespace, "source-namespace", "", "import this namespace of the source (its prefix, such as \"Public/\") instead of the personal one")
+	fs.StringVar(&o.TargetPrefix, "target-prefix", "", "with -source-namespace: put this in front of the mailbox names (\"\" or ending in \"/\")")
+	fs.StringVar(&a.readers, "readers", "", "with the account ~public: comma-separated accounts whose own \\Seen and subscriptions are carried over")
 	fs.StringVar(&o.Session, "session", "", "resume this import session")
 	fs.BoolVar(&a.noPrune, "no-prune", false, "keep target mailboxes the source no longer has")
 	fs.BoolVar(&a.noACL, "no-acl", false, "do not copy mailbox ACLs")
@@ -73,6 +79,8 @@ func migrateCmd(client *adminapi.ClientWithResponses, args []string, stdout, std
 
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || a.o.IMAP.Addr == "" || a.pwFile == "" {
 		sayln(stderr, "usage: shardpostctl migrate -source-addr host:port -password-file file [-master-user name] [-sieve-addr host:port] [...] <account>")
+		sayln(stderr, "       shardpostctl migrate [...] -source-user name -source-namespace prefix [-target-prefix name/] [-readers account,...] '~public'")
+
 		return exUsage
 	}
 
@@ -86,11 +94,17 @@ func migrateCmd(client *adminapi.ClientWithResponses, args []string, stdout, std
 	o.Account = fs.Arg(0)
 	o.Password = strings.TrimRight(string(pw), "\r\n")
 	o.Prune, o.ACL = !a.noPrune, !a.noACL
+	o.Readers = readerList(a.readers)
 	o.Log = slog.New(slog.NewTextHandler(stderr, nil))
 
 	if a.sieve.Addr != "" {
 		a.sieve.CAFile, a.sieve.Timeout = o.IMAP.CAFile, time.Minute
 		o.Sieve = &a.sieve
+	}
+
+	if err := o.Check(); err != nil {
+		sayln(stderr, "shardpostctl: migrate:", err)
+		return exUsage
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -110,6 +124,19 @@ func migrateCmd(client *adminapi.ClientWithResponses, args []string, stdout, std
 		sayln(stderr, "shardpostctl: migrate:", err)
 		return exUnavailable
 	}
+}
+
+// readerList splits the comma-separated accounts of -readers.
+func readerList(s string) []string {
+	var out []string
+
+	for _, reader := range strings.Split(s, ",") {
+		if reader = strings.TrimSpace(reader); reader != "" {
+			out = append(out, reader)
+		}
+	}
+
+	return out
 }
 
 // envBool is true when the variable is "true".
@@ -139,6 +166,15 @@ func printReport(w io.Writer, rep *migrate.Report, asJSON bool) {
 
 		sayf(w, "  %-40s uidvalidity %d uidnext %d modseq %d msgs %d new %d existing %d flags %d expunged %d  %s\n",
 			m.Name, m.UIDValidity, m.UIDNext, m.HighestModSeq, m.Messages, m.Imported, m.Existing, m.FlagChanges, m.Expunged, state)
+	}
+
+	for _, rd := range rep.Readers {
+		state := stateOK
+		if rd.Error != "" {
+			state = "FAILED: " + rd.Error
+		}
+
+		sayf(w, "  reader %-33s mailboxes %d subscribed %d seen changes %d  %s\n", rd.Account, rd.Mailboxes, rd.Subscribed, rd.Changed, state)
 	}
 
 	for _, p := range rep.Pruned {

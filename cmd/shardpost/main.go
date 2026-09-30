@@ -80,8 +80,10 @@ func main() {
 	}
 
 	if err == nil && command == commandCheck {
-		log.Info("configuration valid")
-		return
+		if err = checkGlobalScripts(settings, sieve.ParseSettings(settings.Sieve.Settings)); err == nil {
+			log.Info("configuration valid")
+			return
+		}
 	}
 
 	if err == nil {
@@ -277,6 +279,24 @@ func autocreate(folders []config.AutocreateFolder) []imapproto.SpecialFolder {
 	return out
 }
 
+// checkGlobalScripts compiles the scripts that run before and after the
+// account's own for every delivery: a directory that cannot be read or a
+// script that does not compile is a startup error, not a silent gap in
+// the filtering of every account.
+func checkGlobalScripts(settings *config.Config, sieveCfg map[string]string) error {
+	hooks := sieve.Hooks{Include: sieve.IncludeLoader(nil, settings.Sieve.GlobalDir), Config: sieveCfg}
+
+	if err := sieve.CompileDir(settings.Sieve.BeforeDir, sieve.LabelBefore, hooks); err != nil {
+		return fmt.Errorf("sieve.before_dir: %w", err)
+	}
+
+	if err := sieve.CompileDir(settings.Sieve.AfterDir, sieve.LabelAfter, hooks); err != nil {
+		return fmt.Errorf("sieve.after_dir: %w", err)
+	}
+
+	return nil
+}
+
 // manageSieveConfig derives the ManageSieve capability settings.
 func manageSieveConfig(settings *config.Config, sieveCfg map[string]string, programs *extprograms.Runner) map[string]string {
 	manageConfig := map[string]string{}
@@ -360,6 +380,10 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 
 	sieveCfg := sieve.ParseSettings(settings.Sieve.Settings)
 	provision.Quota = quotaSvc
+
+	if err := checkGlobalScripts(settings, sieveCfg); err != nil {
+		return err
+	}
 
 	imapSieve, stopWorker := newIMAPSieve(ctx, log, settings, store, programs, sieveCfg)
 	defer stopWorker()
@@ -457,6 +481,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 func newDeliveryService(log *slog.Logger, settings *config.Config, store *cephstore.Store, programs *extprograms.Runner, sieveCfg map[string]string) *delivery.Service {
 	return &delivery.Service{Store: storeAdapter{store}, Log: log.With("component", "delivery"),
 		GlobalScripts: settings.Sieve.GlobalDir, SieveConfig: sieveCfg, Programs: programs,
+		ScriptsBefore: settings.Sieve.BeforeDir, ScriptsAfter: settings.Sieve.AfterDir,
 		PublicPrefix: settings.Server.PublicPrefix,
 		SharedPrefix: settings.Server.SharedPrefix,
 		Relay: &outbound.Relay{Addr: settings.SMTP.Addr, HELO: settings.SMTP.Helo,

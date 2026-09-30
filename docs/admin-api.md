@@ -398,6 +398,11 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
   (role `diagnose`), the store tests (`mailboxexists`, `mboxmetadata`,
   `specialuse_exists`) are active. That way `diagnose` learns no more than
   it would through `mailbox list`. This is a deliberate decision.
+  With global scripts configured (`sieve.before_dir`, `sieve.after_dir`)
+  the check runs the sequence a delivery runs — before, the checked
+  script, after — and reports the scripts that ran as `scripts` and
+  failed global ones as `failed_scripts`; an account without an active
+  script is checked with an empty one.
 - **Learning queue:** `learning list|show` shows jobs with their state
   (`pending`, `dead`, `delivered`), program, attempts and next due time.
   `retry` picks up dead jobs only. Learning programs are not idempotent:
@@ -491,6 +496,9 @@ shardpostctl mailbox list -all '~public'
   accepts `~public` wherever an account is expected, without a user
   database lookup. `account show ~public` reports the lookup as `public`.
   Delivery is refused: a public folder has no address of its own.
+- **Migration:** a public namespace of another server is imported with
+  `shardpostctl migrate -source-namespace`, see
+  [Importing a public namespace](#importing-a-public-namespace).
 - **Rights:** there is no owner and therefore no implicit right. Only ACL
   entries grant access; `anyone` covers every authenticated account, an
   entry for one account wins over it. Without the `l` right a folder does
@@ -700,6 +708,65 @@ kubectl -n shardpost exec deploy/shardpost-server -c import -- sh -c \
 
 Exit codes: 0 everything verified, 1 parts failed (run it again), 64
 usage, 69 run aborted.
+
+### Importing a public namespace
+
+A public namespace of the source (Dovecot `namespace { type = public }`)
+is not part of any account, so an account import skips it. It is
+imported on its own, into the public folders:
+
+```sh
+shardpostctl -timeout 10m migrate \
+  -source-user lists@example.org \
+  -source-namespace Mailinglists/ -target-prefix Mailinglists/ \
+  -readers lists@example.org,user@example.org '~public'
+```
+
+- **What is read:** the namespace with the prefix `-source-namespace`, as
+  `-source-user` sees it (master login as for an account). The folders
+  land below `-target-prefix`; a namespace that is itself a mailbox
+  (`Zabbix` of `Zabbix/`) becomes the folder the prefix names. Identities
+  (UIDVALIDITY, UIDs, MODSEQ, flags, dates) are kept as for an account.
+- **Session:** the import session is opened on `~public` and locks the
+  public namespace for its duration: IMAP answers `NO [UNAVAILABLE]` for
+  `LIST` and for public folders, a session that has one selected is
+  closed at its next command (checked every few seconds), a delivery that
+  files into one is deferred. Plan the first copy of a large namespace
+  accordingly; a delta is short, but reads the flags of every folder once
+  per reader.
+- **Only into folders that are not in use yet:** a later run makes the
+  target what the source is. A reader's `\Seen` becomes exactly the
+  source's — what the account read here since the last run is unread
+  again — and the reader marks of an earlier run have moved
+  HIGHESTMODSEQ past the source, so a CONDSTORE/QRESYNC client that
+  synchronized such a folder here between two runs can miss flag changes
+  the second run brings with source MODSEQs below that. Run the last
+  delta before clients are routed here, and grant the rights afterwards
+  (or keep clients away until then).
+- **Readers** log in at the source under their account name; an account
+  that has another login name there cannot be a reader. A folder a reader
+  can list but not open is skipped with a warning.
+- **`\Seen`:** the messages carry the `\Seen` of the source user; that is
+  the shared default every account starts from. For each account of
+  `-readers` the migrator logs in at the source as that account, reads
+  its `\Seen` and sends it with
+  `PUT .../import/mailboxes/{id}/readers/{reader}`: the server writes
+  private marks where the reader's state differs from what the reader
+  sees now, under a new MODSEQ of the mailbox (as an IMAP STORE does),
+  and sets the reader's subscription. The call is repeatable; a run that
+  finds nothing to change writes nothing. The marks are written in
+  batches of 1000, each under its own MODSEQ. A folder the reader does not
+  see at the source is skipped.
+- **Not copied:** rights (Dovecot takes them from the configuration and
+  from groups; grant them with `acl set '~public' ...`), Sieve scripts,
+  special-use attributes.
+- **Prune** only removes folders below a non-empty `-target-prefix`; the
+  folder the prefix itself names stays.
+- **Scope:** an admin client with a scope needs `~public` and every
+  reader in it.
+- **Delivery** into the imported folders is a matter of Sieve; what a
+  global `sieve_after` script did at the source is done here by a script
+  in `sieve.after_dir` (see [configuration](configuration.md)).
 
 ### Migration procedure with the Director
 

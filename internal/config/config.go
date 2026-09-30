@@ -143,6 +143,11 @@ type TLS struct {
 type Sieve struct {
 	Settings  string `mapstructure:"settings" env:"SIEVE_SETTINGS"`
 	GlobalDir string `mapstructure:"global_dir" env:"SIEVE_GLOBAL_DIR"`
+	// BeforeDir and AfterDir hold the scripts (<name>.sieve, run in name
+	// order) that every delivery runs before and after the account's
+	// active script; "" has none.
+	BeforeDir string `mapstructure:"before_dir" env:"SIEVE_BEFORE_DIR"`
+	AfterDir  string `mapstructure:"after_dir" env:"SIEVE_AFTER_DIR"`
 	Addr      string `mapstructure:"addr" env:"SIEVE_ADDR"`
 }
 
@@ -381,6 +386,8 @@ var defaults = []struct {
 	{"server.quota_self_service", false},
 	{"sieve.settings", ""},
 	{"sieve.global_dir", ""},
+	{"sieve.before_dir", ""},
+	{"sieve.after_dir", ""},
 	{"server.quota_attribute", "rnsMSQuota"},
 	{"server.lmtp_addr", ":2424"},
 	{"server.lmtp_hostname", ""},

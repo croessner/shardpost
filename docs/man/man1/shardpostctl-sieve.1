@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-SIEVE 1 "2026-09-27" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-SIEVE 1 "2026-09-30" "ShardPost 0.34.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-sieve \- manage Sieve scripts and test them without side effects
 .SH SYNOPSIS
@@ -105,6 +105,21 @@ record is written, and the message is not filed anywhere. Every
 suppressed side effect is listed under
 .IR suppressed ,
 so you can see exactly what would have happened in production.
+.PP
+When the server runs global scripts around the account's own
+.RI ( sieve.before_dir ", " sieve.after_dir ),
+the check runs the same sequence a delivery runs, with the checked script
+in the place of the active one, and lists the scripts that ran under
+.IR scripts .
+A script that does not keep the message ends the sequence. A global
+script that fails is skipped, as in a delivery, and is reported as a
+failed script. An account without an active script can then be checked
+too, against a stored message: give
+.B \-message
+and neither
+.B \-name
+nor
+.BR \-file .
 .PP
 Which script is checked:
 .B \-file

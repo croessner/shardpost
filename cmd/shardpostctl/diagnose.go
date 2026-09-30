@@ -180,7 +180,7 @@ func serverStatus(ctx context.Context, c *adminapi.ClientWithResponses, a diagAr
 		return printJSON(stdout, st)
 	}
 
-	store := "ok"
+	store := stateOK
 	if !st.Store.Ok {
 		store = "unavailable: " + deref(st.Store.Error)
 	}

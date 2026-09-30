@@ -63,6 +63,8 @@ sieve:
   addr: ":14190"
   settings: ""
   global_dir: ""
+  before_dir: ""
+  after_dir: "/etc/sieve/after"
 imapsieve:
   enabled: true
   user_scripts: true

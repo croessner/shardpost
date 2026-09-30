@@ -57,7 +57,10 @@ type Delivery struct {
 	Notifications []Notification
 	// Pipes are the pipe actions (vnd.dovecot.pipe): the caller runs them
 	// once the delivery is durable.
-	Pipes    []Pipe
+	Pipes []Pipe
+	// Scripts names the scripts of a sequence that ran, in order (see
+	// RunSequence); empty for a single script.
+	Scripts  []string
 	pipeKeep bool
 	imap     bool
 }
@@ -96,6 +99,14 @@ type FileInto struct {
 	Flags      []string
 	Create     bool   // :create (RFC 5490); the store always creates, kept for callers
 	SpecialUse string // :specialuse (RFC 8579): a mailbox with this use wins over Mailbox
+	// Keep marks the keep (implicit or explicit) as opposed to a
+	// fileinto "INBOX": in a sequence of scripts the keep is handed to
+	// the next script instead of being carried out (see RunSequence).
+	Keep bool
+	// scriptFlags are the flags of a keep as the script wrote them
+	// (Flags is lower-case): what the next script of a sequence starts
+	// with, so that its removeflag finds what an earlier addflag set.
+	scriptFlags []string
 }
 
 // IMAPContext marks an IMAPSieve run: the RFC 6785 environment and the
@@ -123,6 +134,11 @@ type Hooks struct {
 	// Config holds implementation settings (Pigeonhole key names, see
 	// DefaultConfig).
 	Config map[string]string
+	// Flags is what the script's flag variable (imap4flags) starts with
+	// in a delivery: the flags of the keep a previous script of the
+	// sequence handed on (see RunSequence). An IMAPSieve run starts with
+	// the message's flags instead (IMAP).
+	Flags []string
 	// Program runs external programs (execute/pipe/filter); nil disables
 	// the extensions at runtime (they still compile when configured).
 	Program interp.ProgramRunner
@@ -217,7 +233,7 @@ func RunWithHooks(ctx context.Context, script string, from, to, user string, raw
 	d := &Delivery{Raw: raw}
 
 	if strings.TrimSpace(script) == "" {
-		return emptyScriptDelivery(d, h), nil
+		return emptyScriptDelivery(d, h), nil // in a delivery: a keep with h.Flags
 	}
 
 	opts := options(h)
@@ -232,10 +248,14 @@ func RunWithHooks(ctx context.Context, script string, from, to, user string, raw
 	data := gosieve.NewRuntimeData(s, interp.DummyPolicy{}, envelope{from: from, to: to, user: user}, msg)
 
 	data.Env = interp.MapEnv{"imap.user": "", "imap.email": "", "imap.cause": "", "imap.mailbox": "", "imap.changedflags": ""}
+	flags := h.Flags
+
 	if h.IMAP != nil {
 		data.Env = interp.MapEnv(h.IMAP.Environment)
-		data.Flags = append([]string{}, h.IMAP.Flags...)
+		flags = h.IMAP.Flags
 	}
+
+	data.Flags = append([]string{}, flags...)
 
 	installHooks(data, h, d)
 
@@ -275,7 +295,7 @@ func emptyScriptDelivery(d *Delivery, h Hooks) *Delivery {
 		return d
 	}
 
-	d.FileInto = []FileInto{{Mailbox: inboxName}}
+	d.FileInto = []FileInto{{Mailbox: inboxName, Keep: true, Flags: lower(h.Flags), scriptFlags: h.Flags}}
 
 	return d
 }
@@ -355,7 +375,7 @@ func (d *Delivery) addAction(a interp.AppliedAction, snapshot []byte, imap bool,
 			return
 		}
 
-		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: inboxName, Flags: lower(act.Flags)})
+		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: inboxName, Flags: lower(act.Flags), Keep: true, scriptFlags: act.Flags})
 	case interp.ActionFileInto:
 		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: act.Mailbox, Flags: lower(act.Flags), Create: act.Create, SpecialUse: act.SpecialUse})
 	case interp.ActionPipe:
@@ -547,5 +567,5 @@ func (d *Delivery) keepAfterPipes() {
 		}
 	}
 
-	d.FileInto = append(d.FileInto, FileInto{Mailbox: inboxName, Raw: d.Raw})
+	d.FileInto = append(d.FileInto, FileInto{Mailbox: inboxName, Raw: d.Raw, Keep: true})
 }

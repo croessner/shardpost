@@ -1190,6 +1190,40 @@ paths:
           description: Replaced.
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader}:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/MailboxID"
+      - $ref: "#/components/parameters/Reader"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    put:
+      operationId: putImportReader
+      summary: Set an account's own reading state of a public folder
+      description: |
+        Only for the public namespace (`~public`). `\Seen` is private
+        per account there: the import stores the source user's state as
+        the shared default, and this call records where the reader
+        differs from what the reader sees now, so the reader's `\Seen`
+        becomes exactly `seen`. UIDs the mailbox does not hold are
+        ignored. The marks are written in batches, each under a new
+        MODSEQ of the mailbox, as an IMAP STORE does. The caller's scope
+        has to cover the reader as well as `~public`. `subscribed`, if given, sets the reader's
+        subscription of the folder. The call is repeatable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportReader"
+      responses:
+        "200":
+          description: What changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportReaderResult"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/import/mailboxes/{id}/metadata:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1323,6 +1357,15 @@ components:
       schema:
         type: string
         pattern: "^[A-Za-z0-9_-]{16,64}$"
+    Reader:
+      name: reader
+      in: path
+      required: true
+      description: Canonical account that reads the public folder.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 320
     Identifier:
       name: identifier
       in: path
@@ -1606,6 +1649,33 @@ components:
           type: integer
           format: int64
           minimum: 0
+    ImportReader:
+      type: object
+      required: [uidvalidity, seen]
+      properties:
+        uidvalidity:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4294967295
+          description: UIDVALIDITY the UIDs belong to; another one is a conflict.
+        seen:
+          type: array
+          description: UIDs the reader has seen; every other message is unseen for the reader.
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+            maximum: 4294967295
+        subscribed:
+          type: boolean
+    ImportReaderResult:
+      type: object
+      required: [changed]
+      properties:
+        changed:
+          type: integer
+          description: Messages whose `\Seen` changed for the reader.
     ImportACL:
       type: object
       required: [entries]
@@ -2435,6 +2505,20 @@ components:
             type: string
         header_edited:
           type: boolean
+        scripts:
+          type: array
+          description: |
+            The scripts that ran, in order, when the server runs global
+            scripts around the account's own (`before/<name>`,
+            `personal`, `after/<name>`). A script that does not keep the
+            message ends the sequence.
+          items:
+            type: string
+        failed_scripts:
+          type: array
+          description: Global scripts that failed and were skipped, with the error.
+          items:
+            type: string
         suppressed:
           type: array
           description: Side effects that were not carried out.
