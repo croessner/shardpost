@@ -538,10 +538,17 @@ type namespaces struct {
 }
 
 // foreign reports whether raw belongs to another namespace (a longer
-// prefix than the personal one wins: "" versus "Shared/").
+// prefix than the personal one wins: "" versus "Shared/"). The mailbox
+// a namespace is rooted in belongs to it as well: "Zabbix" of the
+// namespace "Zabbix/" is a public folder, not a mailbox of the account,
+// although a LIST of the personal namespace "" returns it.
 func (ns namespaces) foreign(raw string) bool {
 	for _, p := range ns.others {
-		if p != "" && len(p) > len(ns.prefix) && strings.HasPrefix(raw, p) {
+		if p == "" || len(p) <= len(ns.prefix) {
+			continue
+		}
+
+		if root := strings.TrimSuffix(p, ns.delims[p]); strings.HasPrefix(raw, p) || (root != p && raw == root) {
 			return true
 		}
 	}

@@ -496,6 +496,15 @@ func TestNamespaces(t *testing.T) {
 		t.Fatal("foreign")
 	}
 
+	// A namespace that is rooted in a mailbox of its own (Dovecot lists
+	// "Zabbix" for the public namespace "Zabbix/" in the personal LIST).
+	dovecot := parseNamespaces([]*response{{text: `* NAMESPACE (("" "/")) (("Shared/" "/")) (("Mailinglists/" "/")("Zabbix/" "/"))`}})
+	for raw, want := range map[string]bool{"Zabbix": true, "Zabbix/2026": true, "Mailinglists/Dovecot": true, "Zabbixx": false, "Sent": false, "INBOX": false} {
+		if dovecot.foreign(raw) != want {
+			t.Errorf("foreign(%q) = %v", raw, !want)
+		}
+	}
+
 	for raw, want := range map[string]string{"INBOX": "INBOX", "INBOX.Sent": "Sent", "INBOX.a.b": "a/b"} {
 		if got, err := mapName(raw, "INBOX.", "."); err != nil || got != want {
 			t.Errorf("%s: %q %v", raw, got, err)
