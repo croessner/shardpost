@@ -41,9 +41,10 @@ const (
 
 // AccountEntry is the directory value of one account.
 type AccountEntry struct {
-	// Created is when the entry was written (the registry's mtime for
-	// accounts a backfill entered). Concurrent first writers may race;
-	// the last one wins, it is only a time.
+	// Created is when the registry was last created (the registry's
+	// mtime for accounts a backfill entered). Concurrent creators may
+	// race; the last one wins, it is only a time. A stale-entry repair
+	// relies on every creation writing it anew (repairStale).
 	Created time.Time `json:"created"`
 	// State is AccountActive or AccountPurging.
 	State string `json:"state"`
@@ -148,10 +149,10 @@ func GetAccountEntry(ix SortedIndex, account string) (AccountEntry, bool, error)
 }
 
 // RegisterAccount is the directory hook of a registry creation: an
-// absent entry is written as active, an entry in AccountPurging refuses
-// with ErrImportLocked unless session is the lock session of the purge
-// (the restarted purge job taking its lock again). Names outside the
-// directory are ignored.
+// absent or active entry is written as active with created = now; an
+// entry in AccountPurging refuses with ErrAccountPurging unless session
+// is the lock session of the purge (the restarted purge job taking its
+// lock again). Names outside the directory are ignored.
 func RegisterAccount(ix SortedIndex, account, session, cluster string, now time.Time) error {
 	if !InDirectory(account) {
 		return nil
@@ -168,11 +169,11 @@ func RegisterAccount(ix SortedIndex, account, session, cluster string, now time.
 				return nil, ErrAccountPurging
 			}
 
-			if err == nil {
-				return cur, nil
-			}
-			// An unreadable entry is replaced: it must not keep the
-			// account from being created.
+			// An active entry is written again with the time of this
+			// creation: a stale-entry repair that read it before compares
+			// the time and leaves the entry alone (repairStale). An
+			// unreadable entry is replaced: it must not keep the account
+			// from being created.
 		}
 
 		return json.Marshal(AccountEntry{Created: now.UTC(), State: AccountActive, Cluster: cluster})
@@ -309,9 +310,12 @@ func RepairAccountEntry(ix SortedIndex, account string, c RepairChecks) (Directo
 }
 
 // repairStale removes an active entry that is older than the grace and
-// has no registry. The entry is removed only if it is unchanged; an
-// account created between the check and the removal gets its entry
-// back.
+// has no registry, with a compare-and-swap on the entry as it was read.
+// A creation of the account writes the entry (RegisterAccount, with a
+// new created time) before it creates the registry, so whichever of the
+// two writes lands first, the entry exists afterwards: if the hook wrote
+// first, the created time differs and the repair leaves the entry; if
+// the repair removed it first, the hook finds no entry and writes one.
 func repairStale(ix SortedIndex, account string, e AccountEntry, c RepairChecks, out DirectoryRepair) (DirectoryRepair, error) {
 	grace := c.Grace
 	if grace <= 0 {
@@ -327,7 +331,14 @@ func repairStale(ix SortedIndex, account string, e AccountEntry, c RepairChecks,
 	}
 
 	err := ix.Update(account, func(cur []byte) ([]byte, error) {
-		if cur2, err := DecodeAccountEntry(cur); cur == nil || err != nil || cur2.State != AccountActive || !cur2.Created.Equal(e.Created) {
+		out.Action, out.After = RepairNone, nil
+
+		cur2, err := DecodeAccountEntry(cur)
+		if cur != nil && err == nil {
+			out.After = &cur2
+		}
+
+		if cur == nil || err != nil || cur2.State != AccountActive || !cur2.Created.Equal(e.Created) {
 			return cur, nil // changed meanwhile: leave it
 		}
 
@@ -335,31 +346,6 @@ func repairStale(ix SortedIndex, account string, e AccountEntry, c RepairChecks,
 
 		return nil, nil
 	})
-	if err != nil || out.Action != RepairStale {
-		return out, err
-	}
-
-	return restoreIfCreated(ix, account, e, c, out)
-}
-
-// restoreIfCreated puts a removed stale entry back when the registry
-// appeared meanwhile: the hook of a creation that found the entry wrote
-// nothing.
-func restoreIfCreated(ix SortedIndex, account string, e AccountEntry, c RepairChecks, out DirectoryRepair) (DirectoryRepair, error) {
-	if reg, err := c.HasRegistry(); err != nil || !reg {
-		return out, err
-	}
-
-	b, _ := json.Marshal(e)
-
-	err := ix.Update(account, func(cur []byte) ([]byte, error) {
-		if cur != nil {
-			return cur, nil
-		}
-
-		return b, nil
-	})
-	out.Action, out.After = RepairNone, &e
 
 	return out, err
 }

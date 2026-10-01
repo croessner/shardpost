@@ -222,7 +222,7 @@ JSON:
 
 | Field | Meaning |
 |---|---|
-| `created` | When the entry was written; the registry's last change for accounts a backfill entered. Concurrent first writers race, the last one wins: it is only a time. |
+| `created` | When the registry was last created (the hook writes it on every creation); the registry's last change for accounts a backfill entered. Concurrent creators race, the last one wins: it is only a time. |
 | `state` | `active` or `purging` |
 | `session` | The purge job's maintenance lock session while `purging` |
 | `cluster` | fsid of the Ceph cluster that holds the account |
@@ -230,9 +230,9 @@ JSON:
 
 The store registers an account in the compare-and-swap that creates its
 registry (`casOmapOpAs`, version 0, the account's own index context),
-right before the exclusive create: one read, and one write when the entry
-is missing. That happens once per account lifetime, so an existing
-account pays nothing. `shardpost index backfill accounts` enters the
+right before the exclusive create: one read and one write (an `active`
+entry is written again with the new `created`). That happens once per
+account lifetime, so an existing account pays nothing. `shardpost index backfill accounts` enters the
 accounts that existed before the directory (see
 [Operations](../operations/README.md#account-directory-backfill)).
 
@@ -283,9 +283,13 @@ rules:
 A stale `active` entry comes from a purge by an older version during the
 rollout, from a crash between the registry hook and the registry
 creation, or from a creation whose write failed. The grace keeps a
-repair away from an account that is being created right now (the hook
-writes the entry just before it creates the registry); an account whose
-registry appears while its stale entry is removed gets the entry back.
+repair away from an account that is being created right now. The
+removal is a compare-and-swap on the entry the repair read, including
+its `created`, and the hook writes the entry (with a new `created`)
+before it creates the registry. So a creation racing the repair always
+keeps its entry: if the hook writes first, the repair finds the entry
+changed and leaves it; if the repair removes first, the hook finds no
+entry and writes one.
 
 While an account is `purging` without registry, no exclusive job can
 take its lock, a second purge included. A job that finds the account

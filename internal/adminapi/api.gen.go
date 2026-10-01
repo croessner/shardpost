@@ -463,7 +463,7 @@ type DirectoryEntry struct {
 	// Cluster Ceph cluster (fsid) that holds the account.
 	Cluster *string `json:"cluster,omitempty"`
 
-	// Created When the entry was written (for accounts a backfill entered, the registry's last change).
+	// Created When the account's registry was last created (for accounts a backfill entered, the registry's last change).
 	Created time.Time `json:"created"`
 
 	// Session Lock session of the purge job (only while purging).
@@ -1507,8 +1507,9 @@ type ClientInterface interface {
 	// back to `active` when the registry exists. An `active` entry older
 	// than ten minutes whose registry is missing is stale and removed
 	// (`stale_removed`). Any other entry is left as it is (action
-	// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
-	// account may no longer exist there. Requires the role `repair`.
+	// `none`; `purge_running` while the purge job still runs). The
+	// account is not resolved through Nauthilus: a purged account may
+	// no longer exist there. Requires the role `repair`.
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/directory/repair (the `RepairAccountDirectory` operationId).
 	RepairAccountDirectory(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2365,8 +2366,9 @@ func (c *Client) GetAccountDirectory(ctx context.Context, account Account, reqEd
 // back to `active` when the registry exists. An `active` entry older
 // than ten minutes whose registry is missing is stale and removed
 // (`stale_removed`). Any other entry is left as it is (action
-// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
-// account may no longer exist there. Requires the role `repair`.
+// `none`; `purge_running` while the purge job still runs). The
+// account is not resolved through Nauthilus: a purged account may
+// no longer exist there. Requires the role `repair`.
 //
 // Corresponds with POST /admin/v1/accounts/{account}/directory/repair (the `RepairAccountDirectory` operationId).
 func (c *Client) RepairAccountDirectory(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -6892,8 +6894,9 @@ type ClientWithResponsesInterface interface {
 	// back to `active` when the registry exists. An `active` entry older
 	// than ten minutes whose registry is missing is stale and removed
 	// (`stale_removed`). Any other entry is left as it is (action
-	// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
-	// account may no longer exist there. Requires the role `repair`.
+	// `none`; `purge_running` while the purge job still runs). The
+	// account is not resolved through Nauthilus: a purged account may
+	// no longer exist there. Requires the role `repair`.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -10396,8 +10399,9 @@ func (c *ClientWithResponses) GetAccountDirectoryWithResponse(ctx context.Contex
 // back to `active` when the registry exists. An `active` entry older
 // than ten minutes whose registry is missing is stale and removed
 // (`stale_removed`). Any other entry is left as it is (action
-// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
-// account may no longer exist there. Requires the role `repair`.
+// `none`; `purge_running` while the purge job still runs). The
+// account is not resolved through Nauthilus: a purged account may
+// no longer exist there. Requires the role `repair`.
 //
 // Returns a wrapper object for the known response body format(s).
 //

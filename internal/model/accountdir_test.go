@@ -51,13 +51,15 @@ func TestRegisterAccount(t *testing.T) {
 		t.Fatalf("entry %+v %v", e, ok)
 	}
 
-	// A second registration keeps the first entry.
-	if err := model.RegisterAccount(ix, "alice", "", "other", now.Add(time.Hour)); err != nil {
+	// A registration (only ever one whose registry is missing, so a
+	// re-creation) writes the entry again with its own time.
+	later := now.Add(time.Hour)
+	if err := model.RegisterAccount(ix, "alice", "", "fsid", later); err != nil {
 		t.Fatal(err)
 	}
 
-	if e2, _ := entryOf(t, ix, "alice"); !e2.Created.Equal(now) || e2.Cluster != "fsid" {
-		t.Fatalf("entry rewritten: %+v", e2)
+	if e2, _ := entryOf(t, ix, "alice"); !e2.Created.Equal(later) || e2.State != model.AccountActive {
+		t.Fatalf("entry not refreshed: %+v", e2)
 	}
 }
 
@@ -209,24 +211,62 @@ func TestRepairAccountEntry(t *testing.T) {
 	}
 }
 
-// TestStaleRepairRestoresRaced: an account created while the stale
-// entry was removed gets its entry back.
-func TestStaleRepairRestoresRaced(t *testing.T) {
-	ix := directory()
-	_ = model.RegisterAccount(ix, "alice", "", "", time.Now().Add(-time.Hour))
+// TestStaleRepairRacesCreation: a creation of the account races the
+// removal of its stale entry; in either order of the two directory
+// writes the entry exists afterwards.
+func TestStaleRepairRacesCreation(t *testing.T) {
+	staleRepair := func(ix model.SortedIndex, hasRegistry func() (bool, error)) model.DirectoryRepair {
+		t.Helper()
 
-	calls := 0
+		rep, err := model.RepairAccountEntry(ix, "alice", model.RepairChecks{
+			HasRegistry: hasRegistry, PurgeRunning: func(string) (bool, error) { return false, nil }, Now: time.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	rep, err := model.RepairAccountEntry(ix, "alice", model.RepairChecks{
-		HasRegistry:  func() (bool, error) { calls++; return calls > 1, nil },
-		PurgeRunning: func(string) (bool, error) { return false, nil },
-		Now:          time.Now(),
+		return rep
+	}
+
+	t.Run("hook first", func(t *testing.T) {
+		// The hook rewrites the stale entry, the repair's stat still
+		// finds no registry (it is created right after), the repair's
+		// removal then meets a changed entry.
+		ix := directory()
+		_ = model.RegisterAccount(ix, "alice", "", "", time.Now().Add(-time.Hour))
+
+		rep := staleRepair(ix, func() (bool, error) {
+			if err := model.RegisterAccount(ix, "alice", "", "", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+
+			return false, nil // the registry is created after the stat
+		})
+		if rep.Action != model.RepairNone || rep.After == nil {
+			t.Fatalf("repair %+v", rep)
+		}
+
+		if e, ok := entryOf(t, ix, "alice"); !ok || e.State != model.AccountActive {
+			t.Fatalf("entry lost: %+v %v", e, ok)
+		}
 	})
-	if err != nil || rep.Action != model.RepairNone {
-		t.Fatalf("repair %+v %v", rep, err)
-	}
 
-	if e, ok := entryOf(t, ix, "alice"); !ok || e.State != model.AccountActive {
-		t.Fatalf("entry lost: %+v %v", e, ok)
-	}
+	t.Run("repair first", func(t *testing.T) {
+		// The repair removes the stale entry before the hook runs; the
+		// hook then finds no entry and writes one.
+		ix := directory()
+		_ = model.RegisterAccount(ix, "alice", "", "", time.Now().Add(-time.Hour))
+
+		if rep := staleRepair(ix, func() (bool, error) { return false, nil }); rep.Action != model.RepairStale {
+			t.Fatalf("repair %+v", rep)
+		}
+
+		if err := model.RegisterAccount(ix, "alice", "", "", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+
+		if e, ok := entryOf(t, ix, "alice"); !ok || e.State != model.AccountActive {
+			t.Fatalf("entry lost: %+v %v", e, ok)
+		}
+	})
 }

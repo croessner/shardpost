@@ -364,8 +364,9 @@ paths:
         back to `active` when the registry exists. An `active` entry older
         than ten minutes whose registry is missing is stale and removed
         (`stale_removed`). Any other entry is left as it is (action
-        `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
-        account may no longer exist there. Requires the role `repair`.
+        `none`; `purge_running` while the purge job still runs). The
+        account is not resolved through Nauthilus: a purged account may
+        no longer exist there. Requires the role `repair`.
       responses:
         "200":
           description: What was found and done.
@@ -1787,7 +1788,7 @@ components:
         created:
           type: string
           format: date-time
-          description: When the entry was written (for accounts a backfill entered, the registry's last change).
+          description: When the account's registry was last created (for accounts a backfill entered, the registry's last change).
         state:
           type: string
           enum: [active, purging]
