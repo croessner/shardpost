@@ -298,7 +298,7 @@ IMAPSieve script entry.
 |---|---|---|
 | `NOTIFY SET [STATUS]`, `NOTIFY NONE` | ✅ | RFC 5465. |
 | Filters | ◐ | `SELECTED`, `SELECTED-DELAYED`, `INBOXES` (INBOX only), `PERSONAL`, `SUBSCRIBED`, `SUBTREE`, `MAILBOXES`; own namespace only, at most 64 mailboxes (`[LIMIT]`). |
-| Events | ◐ | `MessageNew` (with fetch attributes), `MessageExpunge`, `FlagChange`. `MailboxName` and `SubscriptionChange` get `[BADEVENT (MessageNew MessageExpunge FlagChange)]`; the metadata events get `BAD`. `MessageNew` and `MessageExpunge` must be given together; `FlagChange` needs both. |
+| Events | ◐ | `MessageNew` (with fetch attributes), `MessageExpunge`, `FlagChange`. `MailboxName`, `SubscriptionChange`, `MailboxMetadataChange` and `ServerMetadataChange` get `NO [BADEVENT (MessageNew MessageExpunge FlagChange)]`; an unknown event is `BAD`. `MessageNew` and `MessageExpunge` must be given together; `FlagChange` needs both. |
 | Other mailboxes | ✅ | Reported as `STATUS` (`MESSAGES UIDNEXT UIDVALIDITY`, plus `HIGHESTMODSEQ` with CONDSTORE or `FlagChange`). |
 | `IDLE` | ✅ | Authenticated and selected state. |
 
@@ -366,7 +366,7 @@ Behaviour:
 | `SIZE` | RFC 1870 | ✅ | 256 MiB, fixed (not configurable). |
 | `LIMITS RCPTMAX=100` | RFC 9422 | ✅ | |
 | `STARTTLS` | RFC 3207 | ⚙ | With a certificate configured. |
-| `AUTH PLAIN` | RFC 4954 | ⚙ | Optional service credentials (`server.lmtp_auth_user`); advertised only with TLS or `server.insecure_auth`. When configured, `RCPT` before `AUTH` gets `530`. |
+| `AUTH PLAIN` | RFC 4954 | ⚙ | Optional service credentials (`server.lmtp_auth_user`); advertised only with TLS or `server.insecure_auth`. When configured, `RCPT` before `AUTH` gets `530 5.7.0`. |
 | `BINARYMIME`, `DSN`, `REQUIRETLS`, `DELIVERBY`, `XCLIENT` | — | ✗ | |
 
 Delivery:
@@ -689,7 +689,7 @@ under `/admin/v1`, and the command-line client `shardpostctl`; see
 |---|---|---|
 | Metrics | Prometheus exposition | `GET /metrics` on `server.http_addr`. |
 | Health | — | `/healthz` (process), `/readyz` (store reachable, not draining; 503 otherwise); JMAP also serves `/jmap/healthz`. |
-| Tracing | OpenTelemetry OTLP (gRPC or HTTP/protobuf), W3C Trace Context and Baggage | Spans per IMAP, POP3 and ManageSieve command, JMAP request and method call (not the event source), LMTP delivery, admin operation and job, with store operations below them; personal attributes (account and mailbox names, client addresses) only with `telemetry.user_attributes` (default off); off without an endpoint; sampled with `telemetry.sample_ratio` (default 1.0). |
+| Tracing | OpenTelemetry OTLP (gRPC or HTTP/protobuf), W3C Trace Context and Baggage | Spans per IMAP, POP3 and ManageSieve command, JMAP request and method call (not the event source), LMTP delivery, admin operation and job, with store operations below them; personal attributes (account and mailbox names, client addresses, error texts) only with `telemetry.user_attributes` (default off); off without an endpoint; sampled with `telemetry.sample_ratio` (default 1.0). |
 | Logs | JSON (`slog`) | Session ID and the client address from the PROXY header. |
 | Protocol trace | — | IMAP only, per account and time-limited; literals by size, never credentials. |
 

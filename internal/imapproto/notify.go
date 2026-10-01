@@ -215,7 +215,7 @@ func (c *conn) checkNotifyGroup(tag string, g notifyGroup) bool {
 	for ev := range g.events {
 		switch ev {
 		case kwMessageNew, "MESSAGEEXPUNGE", "FLAGCHANGE":
-		case "MAILBOXNAME", "SUBSCRIPTIONCHANGE", "ANNOTATIONCHANGE":
+		case "MAILBOXNAME", "SUBSCRIPTIONCHANGE", "ANNOTATIONCHANGE", "MAILBOXMETADATACHANGE", "SERVERMETADATACHANGE":
 			c.no(tag, notifyBadEvent, "Event "+ev+" is not supported")
 			return false
 		default:

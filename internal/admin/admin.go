@@ -274,7 +274,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			// One trace per request; the store hangs its operations below
 			// it. The operation label carries no account name.
 			ctx, span := telemetry.Span(ctx, "admin."+operation(r.URL.Path),
-				attribute.String("admin.principal", p.name), attribute.String("http.method", r.Method))
+				append(telemetry.Personal(attribute.String("admin.principal", p.name)), attribute.String("http.method", r.Method))...)
 
 			next.ServeHTTP(rec, r.WithContext(ctx))
 			span.SetAttributes(attribute.Int("http.status_code", rec.status))

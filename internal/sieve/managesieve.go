@@ -470,7 +470,7 @@ func (c *conn) handle(line string) (bool, error) {
 
 	quit, err := c.dispatch(cmd, rest)
 	if err != nil {
-		span.RecordError(err)
+		telemetry.Fail(span, err)
 	}
 
 	return quit, err

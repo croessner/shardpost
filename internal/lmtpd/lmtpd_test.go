@@ -236,3 +236,43 @@ func activeScripts(t *testing.T, store *memstore.Store, scripts map[string]strin
 		}
 	}
 }
+
+// TestLMTPRcptBeforeAuth: with service credentials a recipient before
+// AUTH is refused with 530 5.7.0 (RFC 4954 6).
+func TestLMTPRcptBeforeAuth(t *testing.T) {
+	store := memstore.New()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	srv := NewServer("127.0.0.1:0", &Backend{Delivery: &delivery.Service{Store: store, Log: log}, Log: log,
+		Host: "test.example", Auth: auth.Static{"ok": "x"}, ServiceUser: "mta", ServicePassword: "pw"}, nil, true)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() { _ = srv.Serve(ln) }()
+
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := smtp.NewClientLMTP(conn)
+
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.Hello("client.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Mail("sender@example.org", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Rcpt("ok@example.org", nil); !hasStatus(err, 530, smtp.EnhancedCode{5, 7, 0}) {
+		t.Fatalf("RCPT before AUTH: %v, want 530 5.7.0", err)
+	}
+}

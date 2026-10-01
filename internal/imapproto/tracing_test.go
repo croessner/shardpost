@@ -106,6 +106,33 @@ func TestStoreSeesTheCommandContext(t *testing.T) {
 	}
 }
 
+// TestNoPersonalSpanAttributes: without telemetry.user_attributes an IMAP
+// command span names neither the user, the mailbox nor the client.
+func TestNoPersonalSpanAttributes(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	old := telemetry.Tracer
+	telemetry.Tracer = tp.Tracer("shardpost")
+
+	t.Cleanup(func() { telemetry.Tracer = old })
+
+	c, _ := newTestServer(t)
+	defer func() { _ = c.conn.Close() }()
+
+	c.ok("LOGIN test test")
+	c.ok("SELECT INBOX")
+	c.ok("NOOP")
+
+	for _, s := range rec.Ended() {
+		for _, kv := range s.Attributes() {
+			switch kv.Key {
+			case "imap.user", "imap.mailbox", "net.peer":
+				t.Errorf("%s carries %s without user_attributes", s.Name(), kv.Key)
+			}
+		}
+	}
+}
+
 func contains(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {

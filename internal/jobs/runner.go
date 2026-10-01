@@ -214,7 +214,7 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 	// One trace per job run: the store records its operations below it,
 	// instead of producing a root span per object it touches.
 	ctx, span := telemetry.Span(ctx, "job."+j.Kind,
-		attribute.String("job.id", j.ID), attribute.String("job.account", j.Account))
+		append(telemetry.Personal(attribute.String("job.account", j.Account)), attribute.String("job.id", j.ID))...)
 	defer span.End()
 
 	model.UseRequest(ctx, run.User)

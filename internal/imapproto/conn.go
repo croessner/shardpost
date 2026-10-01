@@ -594,7 +594,7 @@ func (c *conn) handleLine() error {
 
 	err = c.dispatch(tag, cmdName, uid)
 	if err != nil {
-		span.RecordError(err)
+		telemetry.Fail(span, err)
 	}
 
 	span.End()

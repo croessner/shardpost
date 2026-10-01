@@ -69,8 +69,9 @@ func TestStoreSpansJoinTheCommand(t *testing.T) {
 		}
 	}
 
-	if s := byName[spanFTSIndex]; len(s.Events()) == 0 || s.Status().Code.String() != "Error" {
-		t.Errorf("failed operation not recorded: %+v", s.Status())
+	// Without personal attributes a failure carries its type, not its text.
+	if s := byName[spanFTSIndex]; len(s.Events()) != 0 || s.Status().Code.String() != "Error" || !hasAttr(s, "error.type") {
+		t.Errorf("failed operation not recorded: %+v %v", s.Status(), s.Attributes())
 	}
 
 	if _, ok := byName[spanListEntry]; ok {
@@ -140,4 +141,15 @@ func TestSpanBudget(t *testing.T) {
 	}
 
 	t.Fatal("the budget was not reset for the next command")
+}
+
+// hasAttr reports whether a span carries an attribute named key.
+func hasAttr(s sdktrace.ReadOnlySpan, key string) bool {
+	for _, kv := range s.Attributes() {
+		if string(kv.Key) == key {
+			return true
+		}
+	}
+
+	return false
 }

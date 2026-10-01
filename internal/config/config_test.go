@@ -41,6 +41,23 @@ func TestFileEnvDefaults(t *testing.T) {
 		t.Fatalf("insecure_auth must default to false: %v", err)
 	}
 }
+// TestUserAttributesOptIn: personal span attributes are off unless the
+// operator switches them on.
+func TestUserAttributesOptIn(t *testing.T) {
+	p := configFile(t, "server:\n  imap_addr: ':2143'\n")
+
+	c, err := Load(p)
+	if err != nil || c.Telemetry.UserAttributes {
+		t.Fatalf("telemetry.user_attributes must default to false: %v", err)
+	}
+
+	t.Setenv("TELEMETRY_USER_ATTRIBUTES", "true")
+
+	if c, err = Load(p); err != nil || !c.Telemetry.UserAttributes {
+		t.Fatalf("TELEMETRY_USER_ATTRIBUTES: %v", err)
+	}
+}
+
 func TestRejectInvalid(t *testing.T) {
 	for _, body := range []string{"server:\n  typo: true", "server:\n  max_conns_per_ip: -1", "server:\n  imap_addr: 'x'", "tls:\n  cert: 'cert.pem'", "telemetry:\n  sample_ratio: 2"} {
 		t.Run(body, func(t *testing.T) {

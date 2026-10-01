@@ -149,12 +149,16 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	return nil
 }
 
+// errAuthRequired answers a recipient before authentication when service
+// credentials are configured (RFC 4954 6: 530 5.7.0).
+var errAuthRequired = &smtp.SMTPError{Code: 530, EnhancedCode: smtp.EnhancedCode{5, 7, 0}, Message: "Authentication required"}
+
 // Rcpt resolves the envelope recipient to its account (aliases included)
 // through the authenticator; the director forwards the original address
 // unchanged, so this is where the mapping has to happen.
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 	if s.be.ServiceUser != "" && !s.authed {
-		return smtp.ErrAuthRequired
+		return errAuthRequired
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

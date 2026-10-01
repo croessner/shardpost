@@ -52,7 +52,7 @@ command (`imap.FETCH`, `pop3.RETR`, `managesieve.PUTSCRIPT`; an unknown
 command is `managesieve.UNKNOWN`), a delivery (`lmtp.deliver`,
 `delivery.deliver`), an admin request (`admin.<operation>`, the operation
 label carries no account name), a JMAP request and a maintenance job
-(`job.<kind>` with `job.id`). The store reports its own work below them,
+(`job.<kind>` with `job.id`, and `job.account` when personal attributes are on). The store reports its own work below them,
 so a trace shows where the time of a command actually goes:
 
 ```
@@ -117,10 +117,14 @@ checkpoints remain the way to follow a long run.
 Store spans deliberately carry no mailbox names, only object ids, counts
 and sizes; mailbox names are user content. Personal attributes — the
 account (`imap.user`, `pop3.user`, `managesieve.user`, `lmtp.user`,
-`jmap.user`, `jmap.account`), the IMAP mailbox (`imap.mailbox`) and the
-client address (`net.peer`, IMAP and JMAP) — are only added with
+`delivery.account`, `jmap.user`, `jmap.account`, `job.account`), the
+admin client (`admin.principal`), the IMAP mailbox (`imap.mailbox`), the
+client address (`net.peer`, IMAP and JMAP) and the text of an error,
+which can echo client input or mailbox names — are only added with
 `telemetry.user_attributes: true` (env `TELEMETRY_USER_ATTRIBUTES`,
-default off). Off, a trace holds no personal data and the collector
+default off). Off, a failed span records the error's type
+(`error.type`) instead of its text, a trace holds no personal data and
+the collector
 filter accepted on 2026-09-15 (below) is a second line of defence, not
 the only one; on, the collector configuration and the access rights have
 to implement the applicable rules for this data. ManageSieve spans carry

@@ -2,14 +2,19 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"shardpost/internal/config"
+	"slices"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestHTTPBaseEndpointAppendsSignalPath(t *testing.T) {
@@ -53,5 +58,37 @@ func TestPersonal(t *testing.T) {
 
 	if got := Personal(kv); len(got) != 1 || got[0] != kv {
 		t.Fatalf("personal attributes missing when switched on: %v", got)
+	}
+}
+
+// TestFail: a failed span carries the error text only with personal
+// attributes switched on, else just the error's type.
+func TestFail(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tr := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("t")
+	err := errors.New("no such mailbox Entwürfe")
+
+	_, span := tr.Start(context.Background(), "off")
+	Fail(span, err)
+	span.End()
+
+	SetPersonal(true)
+	t.Cleanup(func() { SetPersonal(false) })
+
+	_, span = tr.Start(context.Background(), "on")
+	Fail(span, err)
+	span.End()
+
+	off, on := rec.Ended()[0], rec.Ended()[1]
+	if len(off.Events()) != 0 || off.Status().Code != codes.Error || off.Status().Description != "" {
+		t.Errorf("error text leaks without personal attributes: %v %v", off.Events(), off.Status())
+	}
+
+	if !slices.Contains(off.Attributes(), attribute.String("error.type", "*errors.errorString")) {
+		t.Errorf("no error type: %v", off.Attributes())
+	}
+
+	if len(on.Events()) != 1 || on.Status().Description != err.Error() {
+		t.Errorf("error text missing with personal attributes: %v %v", on.Events(), on.Status())
 	}
 }

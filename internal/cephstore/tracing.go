@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"shardpost/internal/model"
@@ -76,8 +75,7 @@ func (u *User) trace(name string, attrs ...attribute.KeyValue) func(error) {
 
 	return func(err error) {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.Fail(span, err)
 		}
 
 		span.End()

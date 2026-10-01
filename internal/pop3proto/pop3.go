@@ -326,7 +326,7 @@ func (c *conn) dispatch(line string) (quit bool, err error) {
 
 	quit, err = c.handle(cmd, arg)
 	if err != nil {
-		span.RecordError(err)
+		telemetry.Fail(span, err)
 	}
 
 	span.End()

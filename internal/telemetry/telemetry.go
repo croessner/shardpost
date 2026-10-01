@@ -5,6 +5,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -100,6 +102,21 @@ func Setup(ctx context.Context, service string, log *slog.Logger, cfg config.Tel
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+// Fail marks a span as failed. The error text goes into the span only
+// with personal attributes switched on: it may echo client input, mailbox
+// names or object names. Otherwise the span records the error's type.
+func Fail(span trace.Span, err error) {
+	if personal.Load() {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return
+	}
+
+	span.SetAttributes(attribute.String("error.type", fmt.Sprintf("%T", err)))
+	span.SetStatus(codes.Error, "")
 }
 
 // Span starts a span with common attributes.

@@ -183,7 +183,8 @@ type run struct {
 // the message into the resulting mailboxes; side effects happen only
 // after the message is durably stored.
 func (s *Service) Deliver(ctx context.Context, req Request) (*Result, error) {
-	ctx, span := telemetry.Span(ctx, "delivery.deliver", attribute.String("delivery.account", req.Account), attribute.Int("delivery.size", len(req.Raw)))
+	ctx, span := telemetry.Span(ctx, "delivery.deliver",
+		append(telemetry.Personal(attribute.String("delivery.account", req.Account)), attribute.Int("delivery.size", len(req.Raw)))...)
 	defer span.End()
 
 	u, err := s.Store.User(req.Account)
