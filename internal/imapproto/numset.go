@@ -168,3 +168,32 @@ func formatSet(nums []uint32) string {
 
 	return b.String()
 }
+
+// formatOrderedSet renders numbers as a sequence set that keeps their
+// order, as the ALL of an ESORT result does (RFC 5267 3.1). Only runs of
+// consecutive ascending numbers become ranges ("4:6,2,9"); a descending
+// run stays a list, since a range expands in increasing order (3.2).
+func formatOrderedSet(nums []uint32) string {
+	var b strings.Builder
+
+	for i := 0; i < len(nums); {
+		j := i
+		for j+1 < len(nums) && nums[j+1] == nums[j]+1 {
+			j++
+		}
+
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+
+		if j == i {
+			fmt.Fprintf(&b, "%d", nums[i])
+		} else {
+			fmt.Fprintf(&b, "%d:%d", nums[i], nums[j])
+		}
+
+		i = j + 1
+	}
+
+	return b.String()
+}

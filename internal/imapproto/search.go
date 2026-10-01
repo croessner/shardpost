@@ -398,10 +398,42 @@ func headerFields(key string) []string {
 	return []string{fts.FieldHeader}
 }
 
-// searchReturn are the ESEARCH RETURN options.
+// searchReturn are the ESEARCH RETURN options. sorted marks an ESORT
+// result (RFC 5267 3.1), whose numbers are in sort order.
 type searchReturn struct {
 	min, max, all, count, save bool
-	esearch                    bool
+	esearch, sorted            bool
+}
+
+// saveOnly tells whether SAVE is the only return option; RFC 5182 1
+// then suppresses the untagged response.
+func (r searchReturn) saveOnly() bool {
+	return r.save && !r.min && !r.max && !r.all && !r.count
+}
+
+// savedResult is what RETURN (SAVE) stores in "$" (RFC 5182 2.4): with
+// only MIN and/or MAX the message(s) those return, otherwise every match.
+// metas are in result order, so the first and last are MIN and MAX.
+func savedResult(ret searchReturn, metas []model.Meta) []uint32 {
+	if len(metas) == 0 || ret.all || ret.count || (!ret.min && !ret.max) {
+		uids := make([]uint32, len(metas))
+		for i, m := range metas {
+			uids[i] = m.UID
+		}
+
+		return uids
+	}
+
+	var uids []uint32
+	if ret.min {
+		uids = append(uids, metas[0].UID)
+	}
+
+	if ret.max && (!ret.min || len(metas) > 1) {
+		uids = append(uids, metas[len(metas)-1].UID)
+	}
+
+	return uids
 }
 
 // cmdSearch handles SEARCH / UID SEARCH with RETURN options, CHARSET and
@@ -432,12 +464,7 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 	}
 
 	if ret.save {
-		uids := make([]uint32, len(metas))
-		for i, m := range metas {
-			uids[i] = m.UID
-		}
-
-		c.searchRes = uids
+		c.searchRes = savedResult(ret, metas)
 	}
 
 	if !ret.esearch {
@@ -456,7 +483,7 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 		return nil
 	}
 
-	c.w.untagged("%s", strings.Join(append([]string{"ESEARCH (TAG " + quote(tag) + ")"}, esearchParts(ret, cr, nums, metas, highest, uid)...), " "))
+	c.writeESearch(tag, ret, cr, nums, metas, highest, uid)
 	c.ok(tag, "", "SEARCH completed")
 
 	return nil
@@ -484,6 +511,16 @@ func searchNums(seqs []int, metas []model.Meta, uid bool) ([]uint32, uint64) {
 	return nums, highest
 }
 
+// writeESearch sends the ESEARCH response of an extended SEARCH or SORT,
+// or nothing when SAVE is the only return option (RFC 5182 1).
+func (c *conn) writeESearch(tag string, ret searchReturn, cr *criteria, nums []uint32, metas []model.Meta, highest uint64, uid bool) {
+	if ret.saveOnly() {
+		return
+	}
+
+	c.w.untagged("%s", strings.Join(append([]string{"ESEARCH (TAG " + quote(tag) + ")"}, esearchParts(ret, cr, nums, metas, highest, uid)...), " "))
+}
+
 // esearchParts renders the ESEARCH result items requested with RETURN.
 func esearchParts(ret searchReturn, cr *criteria, nums []uint32, metas []model.Meta, highest uint64, uid bool) []string {
 	var parts []string
@@ -503,7 +540,12 @@ func esearchParts(ret searchReturn, cr *criteria, nums []uint32, metas []model.M
 		}
 
 		if ret.all {
-			parts = append(parts, "ALL "+formatSet(nums))
+			set := formatSet(nums)
+			if ret.sorted {
+				set = formatOrderedSet(nums)
+			}
+
+			parts = append(parts, "ALL "+set)
 		}
 
 		if hasModseq(cr) {
@@ -621,11 +663,16 @@ func (c *conn) parseSearchCommand() (searchReturn, *criteria, error) {
 	return ret, cr, err
 }
 
-// parseSearchReturn parses the RETURN (options) of an extended SEARCH.
+// parseSearchReturn parses the RETURN (options) of an extended SEARCH or
+// SORT. An option the server does not know is BAD (RFC 4466 2.6.1).
 func (c *conn) parseSearchReturn(ret *searchReturn) error {
 	t, err := c.r.next()
 	if err != nil {
 		return err
+	}
+
+	if t.kind != tokList {
+		return fmt.Errorf("%w: RETURN needs an option list", errSyntax)
 	}
 
 	ret.esearch = true
@@ -645,6 +692,8 @@ func (c *conn) parseSearchReturn(ret *searchReturn) error {
 			ret.count = true
 		case "SAVE":
 			ret.save = true
+		default:
+			return fmt.Errorf("%w: unknown return option %s", errSyntax, o.String())
 		}
 	}
 

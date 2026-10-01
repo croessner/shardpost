@@ -96,8 +96,8 @@ the tagged OK of LOGIN/AUTHENTICATE.
 | `IDLE` | RFC 2177 | ✅ | Also in the authenticated state. Changes come from a RADOS watch plus a 60 s poll. IDLE itself has no timeout. |
 | `UIDPLUS` | RFC 4315 | ✅ | `[APPENDUID]`, `[COPYUID]`, `UID EXPUNGE`. |
 | `MOVE` | RFC 6851 | ✅ | Untagged `OK [COPYUID]` before the expunges. |
-| `ESEARCH` | RFC 4731 | ✅ | `RETURN (MIN MAX ALL COUNT SAVE)`. |
-| `SEARCHRES` | RFC 5182 | ✅ | `RETURN (SAVE)` and `$` wherever a set is taken: `FETCH`, `STORE`, `COPY`, `MOVE`, `REPLACE`, `UID EXPUNGE` and the `SEARCH` keys. |
+| `ESEARCH` | RFC 4731 | ✅ | `RETURN (MIN MAX ALL COUNT SAVE)`; an unknown return option is `BAD`. |
+| `SEARCHRES` | RFC 5182 | ✅ | `RETURN (SAVE)` on `SEARCH` and `SORT`, and `$` wherever a set is taken: `FETCH`, `STORE`, `COPY`, `MOVE`, `REPLACE`, `UID EXPUNGE` and the `SEARCH` keys. `SAVE` alone sends no untagged response; with only `MIN` and/or `MAX` the saved result is those messages, otherwise every match. |
 | `LIST-EXTENDED` | RFC 5258 | ✅ | Selection `SUBSCRIBED`, `RECURSIVEMATCH`, `SPECIAL-USE` (`REMOTE` accepted and ignored); return `SUBSCRIBED`, `CHILDREN`, `SPECIAL-USE`, `MYRIGHTS`, `STATUS`; several patterns. |
 | `LIST-STATUS` | RFC 5819 | ✅ | |
 | `LIST-MYRIGHTS` | RFC 8440 | ✅ | |
@@ -112,7 +112,8 @@ the tagged OK of LOGIN/AUTHENTICATE.
 | `QUOTA` | RFC 9208 | ✅ | One quota root `""`. `GETQUOTA`, `GETQUOTAROOT`; `SETQUOTA` only with `server.quota_self_service` (default off), and `QUOTASET` is advertised exactly then. `STATUS` items `DELETED` and `DELETED-STORAGE` (KiB, rounded up). |
 | `QUOTA=RES-STORAGE` | RFC 9208 | ✅ | In KiB. |
 | `QUOTA=RES-MESSAGE` | RFC 9208 | ✅ | |
-| `SORT` | RFC 5256 | ✅ | `ARRIVAL CC DATE FROM REVERSE SIZE SUBJECT TO`, plus `DISPLAYFROM`/`DISPLAYTO` with `SORT=DISPLAY`. An unknown sort key is `BAD`. The charset of SORT and THREAD converts the search strings like `SEARCH CHARSET`; an unknown one is `NO [BADCHARSET]`. `ESORT` (RFC 5267) is not offered. |
+| `SORT` | RFC 5256 | ✅ | `ARRIVAL CC DATE FROM REVERSE SIZE SUBJECT TO`, plus `DISPLAYFROM`/`DISPLAYTO` with `SORT=DISPLAY`. An unknown sort key is `BAD`. The charset of SORT and THREAD converts the search strings like `SEARCH CHARSET`; an unknown one is `NO [BADCHARSET]`. A `MODSEQ` key appends `(MODSEQ n)` (RFC 7162). Without `RETURN` the answer stays `* SORT`, also after `ENABLE IMAP4rev2`. |
+| `ESORT` | RFC 5267 | ✅ | `SORT`/`UID SORT RETURN (MIN MAX ALL COUNT SAVE)` answer with `ESEARCH`: `MIN`/`MAX` are the first/last message in sort order, `ALL` lists the matches in sort order (only ascending runs become ranges), `RETURN ()` means `ALL`. `CONTEXT=SEARCH`/`CONTEXT=SORT` from the same RFC are not offered. |
 | `SORT=DISPLAY` | RFC 5957 | ✅ | `DISPLAYFROM`, `DISPLAYTO`: the decoded display name of the first address, else `mailbox@host`, else the mailbox; ASCII case-folding (`i;ascii-casemap`). |
 | `THREAD=REFERENCES` | RFC 5256 | ✅ | Simplified JWZ algorithm. |
 | `THREAD=ORDEREDSUBJECT` | RFC 5256 | ✅ | |
@@ -181,7 +182,7 @@ A non-PEEK body fetch sets `\Seen` if the mailbox was opened read-write
 | Text keys | `FROM TO CC BCC SUBJECT BODY TEXT HEADER` |
 | Logic | `NOT`, `OR`, parentheses |
 | Charset | UTF-8, US-ASCII and every charset in the WHATWG list; unknown charsets get `[BADCHARSET (UTF-8)]`. After `ENABLE UTF8=ACCEPT` only UTF-8 and US-ASCII (anything else is `BAD`). |
-| Result forms | classic `SEARCH`, `ESEARCH` with `RETURN (MIN MAX ALL COUNT SAVE)`; always `ESEARCH` after `ENABLE IMAP4rev2` |
+| Result forms | classic `SEARCH`, `ESEARCH` with `RETURN (MIN MAX ALL COUNT SAVE)`; always `ESEARCH` after `ENABLE IMAP4rev2`. `SORT` answers `* SORT`, or `ESEARCH` in sort order with `RETURN` (ESORT) |
 | SORT keys | `ARRIVAL CC DATE FROM REVERSE SIZE SUBJECT TO DISPLAYFROM DISPLAYTO` |
 | THREAD | `REFERENCES`, `ORDEREDSUBJECT` |
 
@@ -213,7 +214,7 @@ messages. An account whose index lacks the version marker (indexed
 before this release, or a rebuild that has not completed) does not use
 the index and checks every message until `fts_rebuild` has run.
 
-Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267), `ESORT`,
+Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267),
 `PARTIAL` (RFC 9394), `MULTISEARCH` (RFC 7377).
 
 ### STORE, flags and keywords
@@ -765,7 +766,7 @@ See [Quota](quota.md).
 
 | Area | Not supported |
 |---|---|
-| IMAP | `CONTEXT=SEARCH`/`SORT`, `ESORT`, `PARTIAL`, `SEARCH=FUZZY`, `MULTISEARCH`, `URLAUTH`, `LANGUAGE`, `I18NLEVEL`, `LIST-METADATA`, `UTF8=ONLY`, UTF-8 downgrade (RFC 6857, RFC 6858), `LITERAL-`, `INPROGRESS`, `UIDONLY`, `JMAPACCESS`, `ANNOTATE`, `CONVERT`, `X-GM-EXT`, `XLIST`, ACL identifiers `authenticated`/`anonymous` and negative rights, `METADATA` `TOOMANY` and unsolicited `METADATA` responses, NOTIFY `MailboxName`/`SubscriptionChange`/metadata events, LIST attributes `\Marked`/`\Unmarked`/`\NoInferiors`/`\Remote` |
+| IMAP | `CONTEXT=SEARCH`/`SORT`, `PARTIAL`, `SEARCH=FUZZY`, `MULTISEARCH`, `URLAUTH`, `LANGUAGE`, `I18NLEVEL`, `LIST-METADATA`, `UTF8=ONLY`, UTF-8 downgrade (RFC 6857, RFC 6858), `LITERAL-`, `INPROGRESS`, `UIDONLY`, `JMAPACCESS`, `ANNOTATE`, `CONVERT`, `X-GM-EXT`, `XLIST`, ACL identifiers `authenticated`/`anonymous` and negative rights, `METADATA` `TOOMANY` and unsolicited `METADATA` responses, NOTIFY `MailboxName`/`SubscriptionChange`/metadata events, LIST attributes `\Marked`/`\Unmarked`/`\NoInferiors`/`\Remote` |
 | POP3 | `APOP`, `LAST`, `LANG`, `EXPIRE`, `LOGIN-DELAY`, `AUTH` without argument |
 | LMTP | `DSN`, `BINARYMIME`, `REQUIRETLS`, `DELIVERBY`, `XCLIENT`, implicit TLS, quota check at `RCPT` |
 | ManageSieve | `OWNER`/`LANGUAGE` capabilities, script-count limit, implicit TLS |
@@ -836,7 +837,7 @@ implemented.
 | RFC 5256 | IMAP SORT and THREAD | IMAP |
 | RFC 5258 | IMAP LIST-EXTENDED | IMAP |
 | RFC 5260 | Sieve date and index | Sieve |
-| RFC 5267 | IMAP CONTEXT=SEARCH/SORT, ESORT | IMAP ✗ |
+| RFC 5267 | IMAP CONTEXT=SEARCH/SORT, ESORT | IMAP ◐ (ESORT implemented, CONTEXT not) |
 | RFC 5293 | Sieve editheader | Sieve |
 | RFC 5322 | Internet message format | message parsing |
 | RFC 5429 | Sieve reject, ereject | Sieve |
