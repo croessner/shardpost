@@ -167,6 +167,7 @@ const (
 	Forbidden          ErrorCode = "forbidden"
 	ImportLocked       ErrorCode = "import_locked"
 	Internal           ErrorCode = "internal"
+	LimitExceeded      ErrorCode = "limit_exceeded"
 	NoSuchJob          ErrorCode = "no_such_job"
 	NoSuchMailbox      ErrorCode = "no_such_mailbox"
 	NoSuchMessage      ErrorCode = "no_such_message"
@@ -195,6 +196,8 @@ func (e ErrorCode) Valid() bool {
 	case ImportLocked:
 		return true
 	case Internal:
+		return true
+	case LimitExceeded:
 		return true
 	case NoSuchJob:
 		return true

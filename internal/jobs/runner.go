@@ -107,9 +107,9 @@ func (r *Run) LoadCheckpoint(v any) bool {
 // the claimable queue (a job was submitted or handed over); a watch that
 // reports an error (dropped by the OSD, or the store rotated its
 // connection) is set up again at the next poll. With the queues it also
-// runs the expiry worker when this server holds its lease. cleanup()
-// keeps running on the poll beside it until the readers switch to the
-// indexes.
+// runs the expiry worker when this server holds its lease. In write and
+// off mode cleanup() (a listing) runs on the poll beside it; in read mode
+// the expiry worker alone deletes what is due.
 func (m *Manager) Run(ctx context.Context) {
 	sem := make(chan struct{}, m.cfg.MaxParallel)
 
@@ -139,7 +139,7 @@ func (m *Manager) Run(ctx context.Context) {
 		metrics.JobWakeups.WithLabelValues(cause).Inc()
 		m.pollOnce(ctx, sem, &wg)
 
-		if cause == wakePoll {
+		if cause == wakePoll && !m.q.reads() {
 			m.cleanup()
 		}
 

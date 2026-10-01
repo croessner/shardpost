@@ -243,7 +243,7 @@ func failure(stderr io.Writer, e *adminapi.Error, status int) int {
 	switch e.Code {
 	case adminapi.NoSuchUser, adminapi.NoSuchMailbox, adminapi.NoSuchJob, adminapi.NoSuchMessage, adminapi.NoSuchScript:
 		return exNoUser
-	case adminapi.OverQuota:
+	case adminapi.OverQuota, adminapi.LimitExceeded:
 		return exCantCreate
 	case adminapi.Temporary, adminapi.AccountPurging:
 		return exTempFail

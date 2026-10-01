@@ -40,6 +40,9 @@ or
 .IR delivered .
 A client with an account scope must pass
 .BR \-account .
+With
+.I imapsieve.learning.index: read
+the server reads the queue's owner index instead of listing the queue.
 Role:
 .BR diagnose .
 .SS learning show
@@ -49,7 +52,10 @@ never printed. Role:
 .BR diagnose .
 .SS learning retry
 Makes a dead job due again: the attempt counter starts over and the
-worker picks it up on its next pass.
+worker picks it up on its next pass (with
+.I imapsieve.learning.index: read
+at once, woken by the queue).
+
 .PP
 Learning programs are not idempotent. A message learned twice counts
 twice and skews the filter, and a job can be dead although its program

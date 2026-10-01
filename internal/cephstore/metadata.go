@@ -70,6 +70,7 @@ func (u *User) GetMetadata(mailbox, accessor string) (map[string]string, error) 
 // SetMetadata sets or removes entries (nil value = remove) in one CAS.
 func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string) error {
 	set := map[string][]byte{}
+	names := map[string]string{} // key -> entry, for the limit
 
 	var rm []string
 
@@ -92,7 +93,12 @@ func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string)
 			}
 
 			set[prefix+entry] = []byte(*val)
+			names[prefix+entry] = entry
 		}
+	}
+
+	if err := u.checkMetadataRoom(set, rm, names); err != nil {
+		return err
 	}
 
 	return casOmap(u, u.idx, oidMetadata, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
@@ -119,6 +125,12 @@ func (u *User) SwapMetadata(mailbox, accessor, entry, old string, next *string) 
 
 	key := prefix + entry
 	swapped := false
+
+	if next != nil {
+		if err := u.checkMetadataRoom(map[string][]byte{key: nil}, nil, map[string]string{key: entry}); err != nil {
+			return false, err
+		}
+	}
 
 	err = casOmap(u, u.idx, oidMetadata, []string{key}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		swapped = string(cur[key]) == old

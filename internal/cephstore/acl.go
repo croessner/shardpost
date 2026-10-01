@@ -97,15 +97,9 @@ func (u *User) SetACL(name, identifier, rights string) error {
 
 	changed := false
 
-	// A grant to an account under purge would outlive it (see
-	// grantBlocked); a removal goes through.
-	blocked, err := u.grantBlocked(identifier)
+	blocked, err := u.mayGrant(name, identifier, rights)
 	if err != nil {
-		return fmt.Errorf("set acl %q: %w", name, err)
-	}
-
-	if blocked && rights != "" {
-		return model.ErrAccountPurging
+		return err
 	}
 
 	acct, err := u.beginKnownMailbox(name)
@@ -135,6 +129,27 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	}
 
 	return u.syncSharedRef(name, identifier)
+}
+
+// mayGrant runs the checks of a SETACL that come before the ACL is
+// written. A grant to an account under purge would outlive it (see
+// grantBlocked), and one beyond the grantee's shared pointer limit is
+// refused; a removal goes through. blocked reports the purge.
+func (u *User) mayGrant(name, identifier, rights string) (blocked bool, err error) {
+	blocked, err = u.grantBlocked(identifier)
+	if err != nil {
+		return false, fmt.Errorf("set acl %q: %w", name, err)
+	}
+
+	if blocked && rights != "" {
+		return false, model.ErrAccountPurging
+	}
+
+	if err := u.checkSharedRoom(name, identifier, func(string) string { return rights }); err != nil {
+		return false, err
+	}
+
+	return blocked, nil
 }
 
 // aclUpdate returns the registry CAS function of a SETACL. *missing
@@ -190,6 +205,10 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 	blocked, err := u.grantBlocked(identifier)
 	if err != nil {
 		return "", 0, fmt.Errorf("modify acl %q: %w", name, err)
+	}
+
+	if err := u.checkSharedRoom(name, identifier, change); err != nil {
+		return "", 0, err
 	}
 
 	acct, err := u.beginKnownMailbox(name)

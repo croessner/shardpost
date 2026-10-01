@@ -126,7 +126,9 @@ sender); in the last two cases `stored` is empty.
 
 Error codes: `bad_request` 400, `unauthenticated` 401, `forbidden` 403,
 `no_such_user`/`no_such_mailbox` 404, `too_large` 413, `rejected` 422
-(Sieve ereject, or a reject that sends no rejection message), `over_quota` 507, `temporary` 503, `internal` 500.
+(Sieve ereject, or a reject that sends no rejection message), `over_quota` 507, `limit_exceeded` 409 (an account limit, see
+[configuration](configuration.md#account-limits-limits); every API that
+changes an account answers it the same way), `temporary` 503, `internal` 500.
 
 ## shardpostctl
 
@@ -223,7 +225,7 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
 
 | API | Semantics |
 | --- | --- |
-| `POST …/mailboxes` `{name, special_use}` | 201 created. If the mailbox already exists with the same special-use: 200 (a retry after a lost response), otherwise 409. Special-use is stored in the standard spelling, as with IMAP CREATE (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`); other attributes are rejected by the API. |
+| `POST …/mailboxes` `{name, special_use}` | 201 created. If the mailbox already exists with the same special-use: 200 (a retry after a lost response), otherwise 409. Beyond `limits.mailboxes` or `limits.mailbox_names`: 409 `limit_exceeded`. Special-use is stored in the standard spelling, as with IMAP CREATE (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`); other attributes are rejected by the API. |
 | `PATCH …/mailboxes/{id}` `{name?, subscribed?}` | Rename including child mailboxes (not INBOX; an occupied target gives 409), set the subscription; the same name is a no-op. |
 | `PUT …/mailboxes/{id}/acl/{identifier}` `{rights, mode}` | `replace` sets the rights, `add`/`remove` change them relative to the current ones; the server computes and writes in one versioned step, so concurrent changes are not lost. |
 | `DELETE …/mailboxes/{id}/acl/{identifier}` | Remove the entry. |
@@ -390,9 +392,11 @@ only the repairs that were planned and are still needed.
   Run `shardpostctl account repair` first (below), then plan again.
 - Finished jobs and plans stay retrievable for `jobs.retention_days`
   (a job from its end, a plan from its expiry), together with the
-  idempotency key of a job. With `admin.kv_index: read` a new job is
-  picked up at once by a server with free capacity (the runners are
-  woken); otherwise, and as the fallback, within `jobs.poll_seconds`.
+  idempotency key of a job. With `admin.kv_index: read` (the default) a
+  new job is picked up at once by a server with free capacity (the
+  runners are woken); otherwise, and as the fallback, within
+  `jobs.poll_seconds`. In `read` mode job lists read the hint index of
+  the jobs instead of listing the admin namespace.
 
 ### The account directory
 
@@ -561,6 +565,11 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
   (no evidence) cannot be retried.
 - Clients with an account scope see learning jobs only when an account is
   given. Jobs of other accounts do not exist for them (404).
+- With `imapsieve.learning.index: read` the learning list reads the
+  owner index of the queue (all jobs, or those of the account given) and
+  then each job; otherwise it lists the queue namespace. `show` and
+  `retry` read the job by its id in every mode. A retried job is due at
+  once, and the worker is woken by a notify in `read` mode.
 
 ## Export and restore (stage 8e)
 

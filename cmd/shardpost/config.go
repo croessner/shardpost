@@ -53,41 +53,44 @@ func loadConfig(args []string) (*config.Config, string, error) {
 	return c, command, err
 }
 
-// showCommand builds "index show kv" with the keys that follow it.
-func showCommand(keys []string) (int, string, error) {
+// showCommand builds "index show kv|learning" (command) with the keys
+// or job ids that follow it.
+func showCommand(command string, keys []string) (int, string, error) {
 	for _, k := range keys {
 		if k == "" || strings.ContainsAny(k, " \t") || strings.HasPrefix(k, "-") {
-			return 0, "", fmt.Errorf("invalid admin store key %q", k)
+			return 0, "", fmt.Errorf("invalid key %q", k)
 		}
 	}
 
-	return 2 + len(keys), strings.Join(append([]string{commandShowKV}, keys...), " "), nil
+	return 2 + len(keys), strings.Join(append([]string{command}, keys...), " "), nil
 }
 
-// indexCommand parses what follows "index": "backfill accounts" or
-// "backfill kv" and an optional "--restart", or "show kv" and the admin
-// store keys to show (the rest of the line; they become part of the
-// command, separated by spaces). It returns the number of arguments it
-// used.
+// indexCommand parses what follows "index": "backfill accounts|kv|
+// learning" and an optional "--restart", or "show kv|learning" and the
+// admin store keys or learning job ids to show (the rest of the line;
+// they become part of the command, separated by spaces). It returns the
+// number of arguments it used.
 func indexCommand(args []string) (int, string, error) {
-	const accounts, kv = "accounts", "kv"
+	const accounts, kv, learning = "accounts", "kv", "learning"
 
-	if len(args) >= 2 && args[0] == "show" && args[1] == kv {
-		return showCommand(args[2:])
+	backfills := map[string][2]string{
+		accounts: {commandBackfillAccounts, commandBackfillRestart},
+		kv:       {commandBackfillKV, commandBackfillKVRestart},
+		learning: {commandBackfillLearning, commandBackfillLearningRestart},
+	}
+	shows := map[string]string{kv: commandShowKV, learning: commandShowLearning}
+
+	if len(args) >= 2 && args[0] == "show" && shows[args[1]] != "" {
+		return showCommand(shows[args[1]], args[2:])
 	}
 
-	if len(args) < 2 || args[0] != "backfill" || (args[1] != accounts && args[1] != kv) {
-		return 0, "", fmt.Errorf("expected index backfill accounts, index backfill kv or index show kv")
-	}
-
-	plain, restart := commandBackfillAccounts, commandBackfillRestart
-	if args[1] == kv {
-		plain, restart = commandBackfillKV, commandBackfillKVRestart
+	if len(args) < 2 || args[0] != "backfill" || backfills[args[1]][0] == "" {
+		return 0, "", fmt.Errorf("expected index backfill accounts|kv|learning [--restart] or index show kv|learning")
 	}
 
 	if len(args) > 2 && args[2] == "--restart" {
-		return 3, restart, nil
+		return 3, backfills[args[1]][1], nil
 	}
 
-	return 2, plain, nil
+	return 2, backfills[args[1]][0], nil
 }

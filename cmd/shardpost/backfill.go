@@ -33,6 +33,10 @@ func backfillCommand(command string) (func(*cephstore.Store, *slog.Logger, *conf
 		return func(store *cephstore.Store, log *slog.Logger, settings *config.Config) error {
 			return backfillKV(store, log, settings, command == commandBackfillKVRestart)
 		}, true
+	case commandBackfillLearning, commandBackfillLearningRestart:
+		return func(store *cephstore.Store, log *slog.Logger, _ *config.Config) error {
+			return backfillLearning(store, log, command == commandBackfillLearningRestart)
+		}, true
 	}
 
 	if rest, ok := strings.CutPrefix(command, commandShowKV); ok {
@@ -41,7 +45,67 @@ func backfillCommand(command string) (func(*cephstore.Store, *slog.Logger, *conf
 		}, true
 	}
 
+	if rest, ok := strings.CutPrefix(command, commandShowLearning); ok {
+		return func(store *cephstore.Store, _ *slog.Logger, _ *config.Config) error {
+			return showLearning(store, os.Stdout, strings.Fields(rest))
+		}, true
+	}
+
 	return nil, false
+}
+
+// showLearning runs "shardpost index show learning [<id>...]": it prints
+// the index mode, the backfill marker, the size of the due queue and the
+// owner index and, for each job id, the record and its index entries, as
+// JSON. It only reads.
+func showLearning(store *cephstore.Store, w io.Writer, ids []string) error {
+	q, err := store.LearningQueue()
+	if err != nil {
+		return err
+	}
+
+	out, err := backfill.InspectLearning(q, ids, time.Now())
+	if err != nil {
+		return fmt.Errorf("learning queue: %w", err)
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+
+	return enc.Encode(out)
+}
+
+// backfillLearning runs "shardpost index backfill learning": it fills
+// the learning queue's due queue and owner index from its records (one
+// listing of the namespace "~learning" of the data pool), under the
+// backfill's cls_lock. It is run after a rollout of the version that
+// writes them, once no older server is left; its completion marker is
+// what imapsieve.learning.index=read relies on.
+func backfillLearning(store *cephstore.Store, log *slog.Logger, restart bool) error {
+	q, err := store.LearningQueue()
+	if err != nil {
+		return err
+	}
+
+	lease, err := store.LockLearningBackfill(backfillLockTTL)
+	if errors.Is(err, cephstore.ErrLocked) {
+		return errors.New("another learning queue backfill is running")
+	}
+
+	if err != nil {
+		return fmt.Errorf("backfill lock: %w", err)
+	}
+
+	defer lease.Release()
+
+	rep, err := backfill.Learning(q, backfill.LearningOptions{Lost: lease.Lost, Restart: restart, Log: log.With("component", "backfill")})
+	if err != nil {
+		return fmt.Errorf("learning queue backfill: %w", err)
+	}
+
+	log.Info("learning queue backfill finished", "started", rep.Started, "jobs", rep.Jobs, "resumed", rep.Resumed)
+
+	return nil
 }
 
 // showKV runs "shardpost index show kv [<key>...]": it prints the index

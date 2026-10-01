@@ -181,6 +181,14 @@ or the request conflicts with the current state.
 .B 67
 No such account or mailbox.
 .TP
+.B 73
+The grantee already has as many mailboxes of other accounts shared with
+it as allowed
+.RB ( limits.shared_pointers
+in the server configuration; error
+.BR limit_exceeded ).
+The ACL is unchanged.
+.TP
 .B 75
 The grantee is being purged (error
 .BR account_purging ):

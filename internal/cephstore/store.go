@@ -25,6 +25,7 @@ import (
 
 	"github.com/ceph/go-ceph/rados"
 
+	"shardpost/internal/learnindex"
 	"shardpost/internal/model"
 	"shardpost/internal/quota"
 )
@@ -70,6 +71,13 @@ type Config struct {
 	// KVQueueShards is the shard count of a due queue its first writer
 	// creates (0: model.DefaultQueueShards).
 	KVQueueShards int
+	// LearningIndex is the mode of the learning queue's due queue and
+	// owner index ("" = model.KVIndexWrite); LearningQueueShards the
+	// shard count of the due queue its first writer creates.
+	LearningIndex       model.KVIndexMode
+	LearningQueueShards int
+	// Limits bounds what one account can grow (0 fields: unlimited).
+	Limits model.Limits
 }
 
 // Store owns the librados connection and hands out per-user views. The
@@ -90,6 +98,11 @@ type Store struct {
 	heldMu  sync.Mutex
 	held    map[*lease]struct{}
 	handles map[*userHandle]struct{}
+
+	// learnQ is the learning queue of the process (LearningQueue).
+	learnOnce sync.Once
+	learnQ    *learnindex.Queue
+	learnErr  error
 }
 
 // connRef is a reference-counted librados connection.
@@ -279,5 +292,6 @@ func (s *Store) User(name string) (*User, error) {
 		idxPool: newVerPool(open(cfg.IndexPool)), dataPool: newVerPool(open(cfg.DataPool)),
 		chunkSize: cfg.ChunkSize, ftsShards: cfg.FTSShards, shardSize: cfg.ShardSize, limit: limit,
 		acctRetention: acctRetention(cfg.AccountLogRetention),
+		limits:        cfg.Limits,
 		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange}, nil
 }

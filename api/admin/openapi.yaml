@@ -1486,6 +1486,8 @@ components:
         `shardpostctl account repair`),
         `not_locked` (409, the session does not hold the lock),
         `precondition_failed` (412, If-Match does not match),
+        `limit_exceeded` (409, the change would take the account beyond
+        one of its configured limits, see `limits` in the configuration),
         `no_such_job` (404, job, plan or learning job), `no_such_message`
         (404), `no_such_script` (404).
       content:
@@ -1499,7 +1501,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, account_purging, not_locked, precondition_failed, no_such_job]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, account_purging, not_locked, precondition_failed, no_such_job, limit_exceeded]
         message:
           type: string
     Version:

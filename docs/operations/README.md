@@ -154,7 +154,7 @@ purge does not set `purging`.
 
 ## Admin store backfill
 
-Servers with `admin.kv_index` `write` (the default) or `read` keep hint
+Servers with `admin.kv_index` `write` or `read` (the default) keep hint
 indexes and due queues next to the admin records (jobs, plans,
 idempotency keys, JMAP push subscriptions; see
 [storage](../architecture/storage.md#admin-store-hint-indexes-and-due-queues)).
@@ -201,24 +201,85 @@ verifies that the ended job has no claimable entry and that it and its
 idempotency key have their expiry entries at `Finished + retention`,
 and prints the queue metrics.
 
-**When `read` may be switched on.** Only after a backfill completed
-whose start lies after the last server without the indexes (an older
-version, or one with `admin.kv_index: off`) stopped; if in doubt, run it
-again with `--restart` first. Then set `admin.kv_index: read` on every
-server. A server in `read` mode that finds no completion marker warns
-at start ("admin.kv_index=read without a completed …"). Going back to
-`write` is always possible.
+**`read` is the default.** `read` is only correct after a backfill
+completed whose start lies after the last server without the indexes
+(an older version, or one with `admin.kv_index: off`) stopped. On the
+cluster this happened with 0.38.0, so servers from the next release on
+run in `read` mode from their start. A server configured for `read`
+that finds no completion marker logs an error at start
+("admin.kv_index=read without a completed …") and behaves as in `write`
+mode (listing) until the marker exists; it looks for it every 30
+seconds, so a backfill run after the rollout switches the running
+servers to `read` without a restart. The server cannot tell when the
+last older server stopped: if in doubt, run the backfill again with
+`--restart` after the rollout. For a cluster that still has servers
+older than 0.38.0, set `admin.kv_index: write` until the backfill ran
+after the last of them stopped. Going back to `write` is always
+possible.
 
 **Expiry.** With `write` or `read`, one server (the holder of the lock
 `ix.jobs/expiry/lock`) deletes jobs and their idempotency keys
 `jobs.retention_days` after they ended, and plans that long after they
-expired, every `jobs.expiry_seconds`. The listing cleanup of earlier
-versions keeps running beside it in this version. Idempotency keys used
-to stay forever; records from before the backfill expire once it ran.
+expired, every `jobs.expiry_seconds`. In `write` mode the listing
+cleanup of earlier versions keeps running beside it on every runner
+poll; in `read` mode it does not run, and no running path lists the
+admin namespace. Idempotency keys used to stay forever; records from
+before the backfill expire once it ran.
 
 **Rollback** is safe: older servers ignore the `ix.*` objects and keep
 reading by listing; the records are unchanged. Queue entries of jobs an
 older server ended are removed by the readers of this version later.
+
+## Learning queue backfill
+
+Servers with `imapsieve.learning.index` `write` (the default) or `read`
+keep a due queue and an owner index of the learning jobs in the
+namespace `~learning` of the index pool (see
+[storage](../architecture/storage.md#learning-queue-due-queue-and-owner-index)).
+In `write` mode the worker, the admin API's learning list and the
+account purge still list the namespace `~learning` of the data pool (the
+worker every second). Rollout order:
+
+1. Deploy the version (default `write`). The learning worker lock is the
+   one older versions take, so only one worker runs during the update.
+2. Once no older server is left, run the backfill with the image and
+   configuration of the server:
+
+   ```sh
+   shardpost index backfill learning             # once after the rollout
+   shardpost index backfill learning --restart   # ignore the position of an interrupted run
+   ```
+
+   It takes the cls_lock `backfill` on `ix.learning/lock` in `~learning`
+   (a second run fails with "another learning queue backfill is
+   running"), lists the namespace once (`learning_backfill` in
+   `imapceph_rados_listings_total`), reads every job again and writes
+   its queue entry (its next attempt, or the dead position) and its
+   owner entry. Every write sets what the record implies, so it may be
+   repeated; every 500 jobs it records its position
+   (`mark:backfill.learning.progress` in `ix.learning/head`), and an
+   interrupted run continues from there. At the end it records
+   `mark:backfill.learning`. It refuses to run with
+   `imapsieve.learning.index: off`.
+3. Set `imapsieve.learning.index: read` on every server. A server in
+   `read` mode without the marker logs an error and behaves as in
+   `write` mode until it exists.
+
+`shardpost index show learning [<id>...]` (read-only) prints as JSON
+the configured and the effective mode, the backfill marker, the number
+of queue entries (all, due now, dead), the number of owner entries and,
+for each job id given, the record, its queue entries and whether its
+owner entry exists.
+
+`hack/learning-smoke.sh` runs the backfill on a cluster, shows the
+marker and the queue sizes and checks the admin API's learning list; it
+enqueues nothing (a learning job runs the configured learning program
+on a real message).
+
+**Rollback** to `write` is always possible; to an older version as
+well: older servers ignore the index objects. A job they rewrite or
+delete leaves its queue entry behind, which the readers of this version
+move or remove.
 
 ## Scrub, backup and observability
 

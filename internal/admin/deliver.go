@@ -145,6 +145,8 @@ func (s *Server) deliveryError(w http.ResponseWriter, r *http.Request, err error
 		writeError(w, http.StatusUnprocessableEntity, adminapi.Rejected, rej.Reason)
 	case errors.Is(err, model.ErrOverQuota):
 		writeError(w, http.StatusInsufficientStorage, adminapi.OverQuota, "mailbox full")
+	case errors.Is(err, model.ErrLimit):
+		writeError(w, http.StatusConflict, adminapi.LimitExceeded, err.Error())
 	case errors.Is(err, delivery.ErrQuotaExemptUnsupported):
 		writeError(w, http.StatusInternalServerError, adminapi.Internal, err.Error())
 	case errors.Is(err, auth.ErrTemporary), errors.Is(err, delivery.ErrBusy), errors.Is(err, delivery.ErrRedirectFailed), errors.Is(err, model.ErrImportLocked):

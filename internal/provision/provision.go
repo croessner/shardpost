@@ -119,6 +119,12 @@ func Mailboxes(u model.User, folders []Folder) error {
 		}
 
 		fresh, err := ensureMailbox(u, f.Name, use)
+		if errors.Is(err, model.ErrLimit) {
+			// An account at its mailbox limit (limits.mailboxes) goes
+			// without the folder rather than without the rest.
+			continue
+		}
+
 		if err != nil {
 			return err
 		}

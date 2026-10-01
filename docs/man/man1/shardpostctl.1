@@ -211,7 +211,11 @@ The request was rejected or the run failed.
 The server sent an answer the client did not understand.
 .TP
 .B 73
-A file could not be created.
+A file could not be created, or the change would exceed the quota or
+one of the account limits (errors
+.B over_quota
+and
+.BR limit_exceeded ).
 .TP
 .B 75
 Temporary failure. Try again later.

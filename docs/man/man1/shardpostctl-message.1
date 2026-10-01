@@ -249,7 +249,11 @@ The UIDVALIDITY does not match: the mailbox is not the one you addressed.
 No such account, mailbox or message.
 .TP
 .B 73
-The copy would exceed the quota.
+The copy would exceed the quota, or the change would give the target
+mailbox more keywords than
+.B limits.keywords_per_mailbox
+allows (error
+.BR limit_exceeded ).
 .TP
 .B 77
 The caller lacks the role

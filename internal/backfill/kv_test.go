@@ -11,6 +11,7 @@ import (
 	"shardpost/internal/kvindex"
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
+	"shardpost/internal/sortedindex"
 )
 
 const retention = 14 * 24 * time.Hour
@@ -157,6 +158,61 @@ func TestKVBackfillThenReadMode(t *testing.T) {
 	if err != nil || len(due) != 1 || due[0].ID != "q1" {
 		t.Fatalf("due: %+v %v", due, err)
 	}
+}
+
+// TestKVReadGatedOnBackfill: a store configured for read mode without the
+// backfill marker behaves as in write mode (the job list and the runner
+// list the records, so the jobs of older servers are found) until a
+// backfill completes; the marker is looked for again after
+// sortedindex.BackfillRecheck.
+func TestKVReadGatedOnBackfill(t *testing.T) {
+	now := time.Now()
+	kv := legacyKV(t, now)
+	clock := now
+	gated := kv.WithGatedMode(model.KVIndexRead, func() time.Time { return clock })
+
+	if gated.IndexMode() != model.KVIndexWrite || gated.ConfiguredMode() != model.KVIndexRead {
+		t.Fatalf("mode without marker: %s", gated.IndexMode())
+	}
+
+	m := jobs.NewManager(gated, &jobs.Env{Accounts: memstore.New()}, jobs.Config{}, "pod")
+
+	if listed := queuedOfAlice(t, m, kv); !listed {
+		t.Fatal("the list without marker did not list the records")
+	}
+
+	if _, err := KV(kv, KVOptions{Retention: retention}); err != nil {
+		t.Fatal(err)
+	}
+
+	if gated.IndexMode() != model.KVIndexWrite {
+		t.Fatal("marker looked for before the recheck interval")
+	}
+
+	clock = clock.Add(sortedindex.BackfillRecheck)
+
+	if gated.IndexMode() != model.KVIndexRead {
+		t.Fatal("read mode not reached after the backfill")
+	}
+
+	if listed := queuedOfAlice(t, m, kv); listed {
+		t.Fatal("the list after the backfill listed the records")
+	}
+}
+
+// queuedOfAlice checks that m lists alice's queued job q1 and reports
+// whether that listed the records.
+func queuedOfAlice(t *testing.T, m *jobs.Manager, kv *memstore.AdminKV) bool {
+	t.Helper()
+
+	before := kv.Listings()
+
+	list, _, err := m.List("alice", jobs.StateQueued, "", 10)
+	if err != nil || len(list) != 1 || list[0].ID != "q1" {
+		t.Fatalf("list: %v %v", list, err)
+	}
+
+	return kv.Listings() > before
 }
 
 // TestInspectKV: the inspection shows the marker, the queue sizes and,

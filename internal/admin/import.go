@@ -876,6 +876,8 @@ func (s *Server) importError(w http.ResponseWriter, r *http.Request, err error) 
 		writeError(w, http.StatusNotFound, adminapi.NoSuchUser, "no such user")
 	case errors.Is(err, model.ErrTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, adminapi.TooLarge, "message or batch too large")
+	case errors.Is(err, model.ErrLimit):
+		writeError(w, http.StatusConflict, adminapi.LimitExceeded, err.Error())
 	case errors.Is(err, auth.ErrTemporary), errors.Is(err, delivery.ErrBusy):
 		writeError(w, http.StatusServiceUnavailable, adminapi.Temporary, "temporary failure, try again later")
 	default:

@@ -16,10 +16,13 @@ import (
 // backfill marker, the size of the queues and, for the keys asked for,
 // record, hint index entry and queue entries.
 type KVInspection struct {
-	Mode     model.KVIndexMode       `json:"mode"`
-	Backfill *KVReport               `json:"backfill"`
-	Queues   map[string]QueueSummary `json:"queues"`
-	Keys     []KeyInspection         `json:"keys,omitempty"`
+	// Mode is the mode the store behaves in, Configured the configured
+	// one (read waits for the backfill marker).
+	Mode       model.KVIndexMode       `json:"mode"`
+	Configured model.KVIndexMode       `json:"configured_mode,omitempty"`
+	Backfill   *KVReport               `json:"backfill"`
+	Queues     map[string]QueueSummary `json:"queues"`
+	Keys       []KeyInspection         `json:"keys,omitempty"`
 }
 
 // QueueSummary counts the entries of a queue.
@@ -57,7 +60,7 @@ type InspectSource interface {
 // reads every queue entry, so it is a diagnosis tool, not a routine).
 // A job key brings the idempotency key its record names along.
 func InspectKV(src InspectSource, keys []string, now time.Time) (KVInspection, error) {
-	out := KVInspection{Mode: src.IndexMode(), Queues: map[string]QueueSummary{}}
+	out := KVInspection{Mode: src.IndexMode(), Configured: configuredMode(src), Queues: map[string]QueueSummary{}}
 
 	if rep, ok, err := KVBackfilled(src); err != nil {
 		return out, err
@@ -105,6 +108,16 @@ func InspectKV(src InspectSource, keys []string, now time.Time) (KVInspection, e
 	}
 
 	return out, nil
+}
+
+// configuredMode is the configured mode of a store that tells it ("":
+// it does not).
+func configuredMode(src InspectSource) model.KVIndexMode {
+	if c, ok := src.(interface{ ConfiguredMode() model.KVIndexMode }); ok {
+		return c.ConfiguredMode()
+	}
+
+	return ""
 }
 
 // entriesOf returns the queue entries of key: in jobs/expiry under the

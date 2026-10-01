@@ -132,6 +132,10 @@ func TestConnectionAndFailures(t *testing.T) {
 	if code := failure(&errOut, nil, 404); code != exSoftware || !strings.Contains(errOut.String(), "404") {
 		t.Fatalf("answer without error document: %d %q", code, errOut.String())
 	}
+
+	if code := failure(&errOut, &adminapi.Error{Code: adminapi.LimitExceeded, Message: "account limit reached"}, 409); code != exCantCreate {
+		t.Fatalf("limit_exceeded: %d", code)
+	}
 }
 
 func TestTraceCommand(t *testing.T) {

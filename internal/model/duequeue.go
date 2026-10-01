@@ -66,6 +66,11 @@ const (
 	// JobsExpiryQueue holds every job, plan and idempotency key at the
 	// time it expires.
 	JobsExpiryQueue = "jobs/expiry"
+	// LearningQueue holds every learning job (namespace "~learning" of
+	// the index pool) at the time of its next attempt; a dead job sits
+	// at DeadDue, after every live one.
+	LearningQueue = "learning"
+
 	// DefaultQueueShards and MaxQueueShards bound the shards of a queue.
 	DefaultQueueShards = 4
 	MaxQueueShards     = 8

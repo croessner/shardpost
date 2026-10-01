@@ -275,7 +275,10 @@ func (s *Server) PutImportMetadata(w http.ResponseWriter, r *http.Request, accou
 	}
 
 	if change := metadataChange(have, req.Entries); len(change) > 0 {
-		if err := c.u.SetMetadata(mb.Name, account, change); err != nil {
+		if err := c.u.SetMetadata(mb.Name, account, change); errors.Is(err, model.ErrLimit) {
+			s.importError(w, r, err)
+			return
+		} else if err != nil {
 			writeError(w, http.StatusBadRequest, adminapi.BadRequest, "metadata: "+err.Error())
 			return
 		}

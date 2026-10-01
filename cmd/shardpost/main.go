@@ -117,6 +117,13 @@ const (
 	// queues ("shardpost index show kv [<key>...]", read-only); the keys
 	// follow in the command, separated by spaces.
 	commandShowKV = "index show kv"
+	// commandBackfillLearning fills the learning queue's due queue and
+	// owner index ("shardpost index backfill learning [--restart]").
+	commandBackfillLearning        = "index backfill learning"
+	commandBackfillLearningRestart = "index backfill learning --restart"
+	// commandShowLearning prints the state of the learning queue indexes
+	// ("shardpost index show learning [<id>...]", read-only).
+	commandShowLearning = "index show learning"
 )
 
 // capabilityEnabled is the ManageSieve capability value for enabled features.
@@ -206,6 +213,20 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		AccountLogRetention: int(settings.Server.AccountLogRetention),
 		KVIndex:             model.KVIndexMode(settings.Admin.KVIndex),
 		KVQueueShards:       settings.Admin.KVQueueShards,
+		LearningIndex:       model.KVIndexMode(settings.IMAPSieve.Learning.Index),
+		LearningQueueShards: settings.IMAPSieve.Learning.QueueShards,
+		Limits:              accountLimits(settings.Limits),
+	}
+}
+
+// accountLimits converts the configured account limits for the store.
+func accountLimits(l config.Limits) model.Limits {
+	return model.Limits{
+		Mailboxes:          int(l.Mailboxes),
+		MailboxNames:       int(l.MailboxNames),
+		KeywordsPerMailbox: int(l.KeywordsPerMailbox),
+		MetadataEntries:    int(l.MetadataEntries),
+		SharedPointers:     int(l.SharedPointers),
 	}
 }
 
@@ -275,13 +296,21 @@ func certConfig(log *slog.Logger, cert, key string, settings *config.Config) (*t
 // learning worker. The returned function stops the worker and waits for it.
 func newIMAPSieve(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store,
 	programs *extprograms.Runner, sieveCfg map[string]string,
-) (*imapsieve.Engine, func()) {
+) (*imapsieve.Engine, func(), error) {
 	imapSieve := imapsieve.New(settings.IMAPSieve, storeAdapter{store}, log)
 	stopWorker := func() {}
 
 	imapSieve.Programs = programs
+
 	if settings.IMAPSieve.Enabled && settings.IMAPSieve.Learning.Enabled {
-		worker := imapsieve.NewLearningWorker(settings.IMAPSieve.Learning, cephstore.LearningQueue{Store: store}, programs)
+		queue, err := store.LearningQueue()
+		if err != nil {
+			return nil, nil, fmt.Errorf("learning queue: %w", err)
+		}
+
+		queue.Mode() // logs at startup when read mode waits for the backfill
+
+		worker := imapsieve.NewLearningWorker(settings.IMAPSieve.Learning, queue, programs)
 		imapSieve.Learner = worker
 		workerCtx, workerCancel := context.WithCancel(ctx)
 
@@ -296,7 +325,7 @@ func newIMAPSieve(ctx context.Context, log *slog.Logger, settings *config.Config
 	imapSieve.SharedPrefix = settings.Server.SharedPrefix
 	imapSieve.SieveConfig = sieveCfg
 
-	return imapSieve, stopWorker
+	return imapSieve, stopWorker, nil
 }
 
 // autocreate maps the configured mailboxes to what the IMAP server
@@ -424,7 +453,10 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 		return err
 	}
 
-	imapSieve, stopWorker := newIMAPSieve(ctx, log, settings, store, programs, sieveCfg)
+	imapSieve, stopWorker, err := newIMAPSieve(ctx, log, settings, store, programs, sieveCfg)
+	if err != nil {
+		return err
+	}
 	defer stopWorker()
 
 	srv := newServers(log, settings, store, authn, tlsCfg, imapSieve, programs, sieveCfg)

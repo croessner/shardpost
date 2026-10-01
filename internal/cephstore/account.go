@@ -562,24 +562,22 @@ func (u *User) acctEntries(since, bound uint64, limit int) ([]model.AccountChang
 
 // trimAccountLog keeps the account log bounded and moves h:logstart
 // forward, never backward: a slower concurrent trim must not undo a
-// newer one, so the write is a CAS against the current value.
+// newer one, so the write is a CAS against the current value. It reads
+// the header first and the log only when the window h:logstart..h:seq is
+// over the retention. Unlike the mailbox log, the account log has gaps
+// (announcements not yet recorded, withdrawn announcements), so the new
+// start may lie a few sequences later than under the count-based rule
+// this replaced; see model.PlanLogTrim.
 func (u *User) trimAccountLog() {
-	retention := u.acctRetention
-
-	all, err := u.idx.GetAllOmapValues(oidAccount, "", acctEntryPrefix, omapPageSize)
-	if err != nil || len(all) <= retention {
+	seq, logStart, err := u.acctBounds()
+	if err != nil {
 		return
 	}
 
-	keys := make([]string, 0, len(all))
-	for k := range all {
-		keys = append(keys, k)
+	start, drop, err := model.PlanLogTrim(seq, logStart, u.acctRetention, omapPageSize, acctEntryKey, u.logPageReader(oidAccount, acctEntryPrefix))
+	if err != nil || start == 0 {
+		return
 	}
-
-	sort.Strings(keys)
-
-	drop := keys[:len(keys)-retention]
-	start := acctSeqOf(keys[len(keys)-retention])
 
 	_ = casOmap(u, u.idx, oidAccount, []string{acctKeyLogStart}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		have, _ := strconv.ParseUint(string(cur[acctKeyLogStart]), 10, 64)

@@ -3,34 +3,98 @@ package cephstore
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ceph/go-ceph/rados"
+
 	"shardpost/internal/imapsieve"
+	"shardpost/internal/learnindex"
 	"shardpost/internal/model"
+	"shardpost/internal/sortedindex"
 )
 
-// LearningQueue uses a reserved data-pool namespace. Each object's body and
-// metadata are committed in one RADOS write operation. It is independent of
-// message blobs, quota and mailbox scrub operations.
-type LearningQueue struct{ Store *Store }
+// The learning queue (scaling plan B5):
+//
+//	data pool, namespace "~learning":
+//	  "learning/<id>"              the message; xattr "job" (the job as
+//	                               JSON), xattr "confirmed" (receipt kept
+//	                               when the mailbox was deleted)
+//	index pool, namespace "~learning":
+//	  "ix.learning/head|<n>"       due queue: "<next>/<id>/<gen>" -> ""
+//	  "ix.learning/owner/head|<nn>" hint index: "<account>/<id>" -> ""
+//	  "ix.learning/lock"           cls_lock of the backfill
+//	  "mbox/learning-worker"       cls_lock "maildrop" of the worker (the
+//	                               object every version locks, so servers
+//	                               of different versions exclude each other)
+//
+// Each record's body and job are committed in one RADOS write operation.
+// The queue is independent of message blobs, quota and mailbox scrub
+// operations. learnindex keeps the indexes.
 
-// Put enqueues a job with its raw message. A job that is already queued
-// (same ID) is left as it is.
-func (q LearningQueue) Put(j imapsieve.Job, raw []byte) error {
-	u, err := q.Store.User("~learning")
+// learningWorkerOID and learningLockTTL are the worker lease: the object
+// and TTL every version uses (renewed every third of it while held).
+const (
+	learningWorkerOID = "mbox/learning-worker"
+	learningLockTTL   = 2 * time.Minute
+)
+
+// maxLearningJob bounds the job attribute of a record.
+const maxLearningJob = 4096
+
+// LearningQueue returns the learning queue of this process in the
+// configured index mode (one per store, it follows key rotations).
+func (s *Store) LearningQueue() (*learnindex.Queue, error) {
+	s.learnOnce.Do(func() {
+		s.mu.RLock()
+		mode, shards := s.cfg.LearningIndex, s.cfg.LearningQueueShards
+		s.mu.RUnlock()
+
+		o := learnindex.Options{Mode: mode, QueueShards: shards, RequireBackfill: true, Log: s.log.With("component", "learning")}
+
+		if mode != model.KVIndexOff {
+			h, err := s.openHandle(model.LearningNamespace)
+			if err != nil {
+				s.learnErr = err
+				return
+			}
+
+			o.Backend = &handleOmap{h: h, key: s.indexKey(model.LearningNamespace)}
+		}
+
+		s.learnQ = learnindex.New(learningRecords{s: s}, o)
+	})
+
+	return s.learnQ, s.learnErr
+}
+
+// LockLearningBackfill takes the exclusive cls_lock of the learning
+// queue backfill ("ix.learning/lock" in "~learning") like
+// LockAccountIndex.
+func (s *Store) LockLearningBackfill(ttl time.Duration) (model.Lease, error) {
+	return s.holdLock(model.LearningNamespace, sortedindex.LockOID(model.LearningQueue), "backfill", "learning queue backfill", ttl, false)
+}
+
+// learningRecords is the record layer of the learning queue.
+type learningRecords struct{ s *Store }
+
+var _ learnindex.Records = learningRecords{}
+
+func learningOID(id string) string { return "learning/" + id }
+
+// Create implements learnindex.Records.
+func (q learningRecords) Create(j imapsieve.Job, raw []byte) (bool, error) {
+	u, err := q.s.User(model.LearningNamespace)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer u.Close()
 
 	b, err := json.Marshal(j)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	op := rados.CreateWriteOp()
@@ -40,20 +104,49 @@ func (q LearningQueue) Put(j imapsieve.Job, raw []byte) error {
 	op.WriteFull(raw)
 	op.SetXattr("job", b)
 
-	err = op.Operate(u.data, "learning/"+j.ID, rados.OperationNoFlag)
+	err = op.Operate(u.data, learningOID(j.ID), rados.OperationNoFlag)
 	if errCode(err) == syscall.EEXIST {
-		return nil
+		return false, nil
 	}
 
-	return err
+	return err == nil, err
 }
 
-// All returns every job of the queue, due or not, dead ones included.
-func (q LearningQueue) All() ([]imapsieve.Job, error) { return q.all(listLearningAll) }
+// Get implements learnindex.Records.
+func (q learningRecords) Get(id string) (imapsieve.Job, error) {
+	u, err := q.s.User(model.LearningNamespace)
+	if err != nil {
+		return imapsieve.Job{}, err
+	}
+	defer u.Close()
 
-// all is All, its listing counted under site.
-func (q LearningQueue) all(site string) ([]imapsieve.Job, error) {
-	u, err := q.Store.User("~learning")
+	return getLearningJob(u, id)
+}
+
+// getLearningJob reads the job attribute of a record.
+func getLearningJob(u *User, id string) (imapsieve.Job, error) {
+	buf := make([]byte, maxLearningJob)
+
+	n, err := u.data.GetXattr(learningOID(id), "job", buf)
+
+	switch c := errCode(err); {
+	case c == syscall.ENOENT || c == syscall.ENODATA:
+		return imapsieve.Job{}, imapsieve.ErrNoJob
+	case err != nil:
+		return imapsieve.Job{}, err
+	}
+
+	var j imapsieve.Job
+	if err := json.Unmarshal(buf[:n], &j); err != nil {
+		return imapsieve.Job{}, fmt.Errorf("learning job %s: %w", id, err)
+	}
+
+	return j, nil
+}
+
+// List implements learnindex.Records.
+func (q learningRecords) List(site string) ([]imapsieve.Job, error) {
+	u, err := q.s.User(model.LearningNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -68,23 +161,17 @@ func (q LearningQueue) all(site string) ([]imapsieve.Job, error) {
 	var jobs []imapsieve.Job
 
 	for it.Next() {
-		if !strings.HasPrefix(it.Value(), "learning/") {
+		id, ok := strings.CutPrefix(it.Value(), "learning/")
+		if !ok {
 			continue
 		}
 
-		buf := make([]byte, 4096)
-
-		n, err := u.data.GetXattr(it.Value(), "job", buf)
-		if errCode(err) == syscall.ENOENT {
+		j, err := getLearningJob(u, id)
+		if err == imapsieve.ErrNoJob {
 			continue
 		}
 
 		if err != nil {
-			return nil, err
-		}
-
-		var j imapsieve.Job
-		if err = json.Unmarshal(buf[:n], &j); err != nil {
 			return nil, err
 		}
 
@@ -94,67 +181,13 @@ func (q LearningQueue) all(site string) ([]imapsieve.Job, error) {
 	return jobs, it.Err()
 }
 
-// List returns up to 100 live jobs that are due, oldest due time first.
-func (q LearningQueue) List() ([]imapsieve.Job, error) {
-	all, err := q.All()
-	if err != nil {
-		return nil, err
-	}
-
-	jobs := all[:0]
-
-	for _, j := range all {
-		if !j.Dead && !time.Now().Before(j.Next) {
-			jobs = append(jobs, j)
-		}
-	}
-
-	sort.Slice(jobs, func(i, j int) bool {
-		if jobs[i].Next.Equal(jobs[j].Next) {
-			return jobs[i].ID < jobs[j].ID
-		}
-
-		return jobs[i].Next.Before(jobs[j].Next)
-	})
-
-	if len(jobs) > 100 {
-		jobs = jobs[:100]
-	}
-
-	return jobs, nil
-}
-
-// PurgeOwner deletes every learning job of an account (account purge).
-func (q LearningQueue) PurgeOwner(account string) (int, error) {
-	all, err := q.all(listLearningPurge)
-	if err != nil {
-		return 0, err
-	}
-
-	n := 0
-
-	for _, j := range all {
-		if j.Owner != account {
-			continue
-		}
-
-		if err := q.Delete(j); err != nil && errCode(err) != syscall.ENOENT {
-			return n, err
-		}
-
-		n++
-	}
-
-	return n, nil
-}
-
-// Read returns the raw message stored with the job.
-func (q LearningQueue) Read(j imapsieve.Job) ([]byte, error) {
+// Read implements learnindex.Records.
+func (q learningRecords) Read(j imapsieve.Job) ([]byte, error) {
 	if j.Size < 0 || j.Size > 64<<20 {
 		return nil, fmt.Errorf("invalid learning size")
 	}
 
-	u, err := q.Store.User("~learning")
+	u, err := q.s.User(model.LearningNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +195,7 @@ func (q LearningQueue) Read(j imapsieve.Job) ([]byte, error) {
 
 	buf := make([]byte, j.Size)
 
-	n, err := u.data.Read("learning/"+j.ID, buf, 0)
+	n, err := u.data.Read(learningOID(j.ID), buf, 0)
 	if err == nil && int64(n) != j.Size {
 		err = fmt.Errorf("short learning read")
 	}
@@ -170,9 +203,10 @@ func (q LearningQueue) Read(j imapsieve.Job) ([]byte, error) {
 	return buf, err
 }
 
-// Update rewrites the job record of a queued job.
-func (q LearningQueue) Update(j imapsieve.Job) error {
-	u, err := q.Store.User("~learning")
+// Set implements learnindex.Records: it rewrites the job of an existing
+// record (a removed job is not recreated as an empty object).
+func (q learningRecords) Set(j imapsieve.Job) error {
+	u, err := q.s.User(model.LearningNamespace)
 	if err != nil {
 		return err
 	}
@@ -181,48 +215,6 @@ func (q LearningQueue) Update(j imapsieve.Job) error {
 	b, err := json.Marshal(j)
 	if err != nil {
 		return err
-	}
-
-	return u.data.SetXattr("learning/"+j.ID, "job", b)
-}
-
-// Revive makes a dead job due again (manual retry): attempts start over,
-// Retries counts the retry. The job must still exist (a purged job is
-// not recreated) and be dead; the worker leaves dead jobs alone, so no
-// worker write races this one.
-func (q LearningQueue) Revive(id string) (imapsieve.Job, error) {
-	u, err := q.Store.User("~learning")
-	if err != nil {
-		return imapsieve.Job{}, err
-	}
-	defer u.Close()
-
-	buf := make([]byte, 4096)
-
-	n, err := u.data.GetXattr("learning/"+id, "job", buf)
-	if errCode(err) == syscall.ENOENT {
-		return imapsieve.Job{}, imapsieve.ErrNoJob
-	}
-
-	if err != nil {
-		return imapsieve.Job{}, err
-	}
-
-	var j imapsieve.Job
-	if err := json.Unmarshal(buf[:n], &j); err != nil {
-		return imapsieve.Job{}, err
-	}
-
-	if !j.Dead {
-		return j, imapsieve.ErrNotDead
-	}
-
-	j.Dead, j.Attempts, j.Next = false, 0, time.Now()
-	j.Retries++
-
-	b, err := json.Marshal(j)
-	if err != nil {
-		return imapsieve.Job{}, err
 	}
 
 	op := rados.CreateWriteOp()
@@ -231,62 +223,47 @@ func (q LearningQueue) Revive(id string) (imapsieve.Job, error) {
 	op.AssertExists()
 	op.SetXattr("job", b)
 
-	if err := op.Operate(u.data, "learning/"+id, rados.OperationNoFlag); err != nil {
-		if errCode(err) == syscall.ENOENT {
-			return imapsieve.Job{}, imapsieve.ErrNoJob
-		}
-
-		return imapsieve.Job{}, err
+	err = op.Operate(u.data, learningOID(j.ID), rados.OperationNoFlag)
+	if errCode(err) == syscall.ENOENT {
+		return imapsieve.ErrNoJob
 	}
 
-	return j, nil
+	return err
 }
 
-// Delete removes a job and its message from the queue.
-func (q LearningQueue) Delete(j imapsieve.Job) error {
-	u, err := q.Store.User("~learning")
+// Remove implements learnindex.Records.
+func (q learningRecords) Remove(id string) error {
+	u, err := q.s.User(model.LearningNamespace)
 	if err != nil {
 		return err
 	}
 	defer u.Close()
 
-	return u.data.Delete("learning/" + j.ID)
-}
-
-type learningLease struct {
-	model.Lease
-	u *User
-}
-
-func (l *learningLease) Release() { l.Lease.Release(); l.u.Close() }
-
-// Lock takes the queue-wide worker lease; Release on the returned lease
-// also closes the queue namespace.
-func (q LearningQueue) Lock() (model.Lease, error) {
-	u, err := q.Store.User("~learning")
-	if err != nil {
-		return nil, err
+	if err := u.data.Delete(learningOID(id)); err != nil && errCode(err) != syscall.ENOENT {
+		return err
 	}
 
-	lease, err := u.Lock("learning-worker", 2*time.Minute)
-	if err != nil {
-		u.Close()
-		return nil, err
-	}
+	return nil
+}
 
-	return &learningLease{lease, u}, nil
+// Lock implements learnindex.Records: the worker lease is the cls_lock
+// "maildrop" on "mbox/learning-worker" in the index pool, the lock every
+// version takes (older ones per pass), held and renewed while this
+// server is the worker and given up at a key rotation.
+func (q learningRecords) Lock() (model.Lease, error) {
+	return q.s.holdLock(model.LearningNamespace, learningWorkerOID, lockName, "learning worker", learningLockTTL, true)
 }
 
 // Ready reports whether the delivery a job belongs to is durable: its
 // learning receipt is confirmed or committed in the owner's index.
-func (q LearningQueue) Ready(j imapsieve.Job) (bool, error) {
-	queued, err := q.Store.User("~learning")
+func (q learningRecords) Ready(j imapsieve.Job) (bool, error) {
+	queued, err := q.s.User(model.LearningNamespace)
 	if err != nil {
 		return false, err
 	}
 
 	buf := make([]byte, 8)
-	_, err = queued.data.GetXattr("learning/"+j.ID, "confirmed", buf)
+	_, err = queued.data.GetXattr(learningOID(j.ID), "confirmed", buf)
 	queued.Close()
 
 	if err == nil {
@@ -297,7 +274,7 @@ func (q LearningQueue) Ready(j imapsieve.Job) (bool, error) {
 		return false, err
 	}
 
-	u, err := q.Store.User(j.Owner)
+	u, err := q.s.User(j.Owner)
 	if err != nil {
 		return false, err
 	}
@@ -334,12 +311,12 @@ func (q LearningQueue) Ready(j imapsieve.Job) (bool, error) {
 
 // Cleanup removes the learning receipt of a prepared job from the
 // owner's index.
-func (q LearningQueue) Cleanup(j imapsieve.Job) error {
+func (q learningRecords) Cleanup(j imapsieve.Job) error {
 	if !j.Prepared {
 		return nil
 	}
 
-	u, err := q.Store.User(j.Owner)
+	u, err := q.s.User(j.Owner)
 	if err != nil {
 		return err
 	}
@@ -384,9 +361,9 @@ func (u *User) preserveLearningReceipts(mb *Mailbox) error {
 		return err
 	}
 
-	q := LearningQueue{Store: u.store}
+	q := learningRecords{s: u.store}
 
-	queue, err := u.store.User("~learning")
+	queue, err := u.store.User(model.LearningNamespace)
 	if err != nil {
 		return err
 	}
@@ -405,7 +382,7 @@ func (u *User) preserveLearningReceipts(mb *Mailbox) error {
 			continue
 		}
 
-		if err := queue.data.SetXattr("learning/"+id, "confirmed", []byte("yes")); err != nil && errCode(err) != syscall.ENOENT {
+		if err := queue.data.SetXattr(learningOID(id), "confirmed", []byte("yes")); err != nil && errCode(err) != syscall.ENOENT {
 			return err
 		}
 	}

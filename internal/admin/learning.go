@@ -14,7 +14,11 @@ import (
 
 // LearningAdmin is what the admin API needs from the learning queue.
 type LearningAdmin interface {
-	All() ([]imapsieve.Job, error)
+	// Jobs returns every job of account ("" = all), dead ones included:
+	// from the owner index (imapsieve.learning.index read) or a listing.
+	Jobs(account string) ([]imapsieve.Job, error)
+	// Job reads one job (imapsieve.ErrNoJob when it does not exist).
+	Job(id string) (imapsieve.Job, error)
 	Ready(imapsieve.Job) (bool, error)
 	Revive(id string) (imapsieve.Job, error)
 }
@@ -74,7 +78,7 @@ func (s *Server) ListLearningJobs(w http.ResponseWriter, r *http.Request, p admi
 		state = string(*p.State)
 	}
 
-	all, err := s.o.Learning.All()
+	all, err := s.o.Learning.Jobs(account)
 	if err != nil {
 		s.importError(w, r, err)
 		return
@@ -116,17 +120,16 @@ func (s *Server) learningJob(w http.ResponseWriter, r *http.Request, id, role st
 		return nil, false
 	}
 
-	all, err := s.o.Learning.All()
-	if err != nil {
+	j, err := s.o.Learning.Job(id)
+
+	switch {
+	case errors.Is(err, imapsieve.ErrNoJob):
+	case err != nil:
 		s.importError(w, r, err)
 		return nil, false
-	}
-
-	for i := range all {
-		if all[i].ID == id && principalOf(r.Context()).inScope(all[i].Owner) {
-			auditf(r, "account", all[i].Owner)
-			return &all[i], true
-		}
+	case principalOf(r.Context()).inScope(j.Owner):
+		auditf(r, "account", j.Owner)
+		return &j, true
 	}
 
 	writeError(w, http.StatusNotFound, adminapi.NoSuchJob, "no such learning job")

@@ -27,6 +27,16 @@ type Learning struct {
 	MaxAttempts     int64          `mapstructure:"max_attempts" env:"LEARNING_MAX_ATTEMPTS" validate:"gt=0,lte=20"`
 	MaxMessageBytes int64          `mapstructure:"max_message_bytes" env:"LEARNING_MAX_MESSAGE_BYTES" validate:"gt=0,lte=67108864"`
 	Rules           []LearningRule `mapstructure:"rules" validate:"dive"`
+	// Index is the mode of the learning queue's due queue and owner
+	// index (scaling plan B5): off writes none, write keeps them up to
+	// date while the worker, the admin API and the purge list the queue
+	// namespace, read also reads from them. read needs a completed
+	// "shardpost index backfill learning"; without its marker the
+	// server behaves as in write mode.
+	Index string `mapstructure:"index" env:"LEARNING_INDEX" validate:"oneof=off write read"`
+	// QueueShards is the shard count of the due queue when its first
+	// writer creates it; an existing queue keeps the count in its head.
+	QueueShards int `mapstructure:"queue_shards" validate:"gte=1,lte=8"`
 }
 
 // LearningRule selects COPY/MOVE events by special-use flags and names the

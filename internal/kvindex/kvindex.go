@@ -173,7 +173,19 @@ type Options struct {
 	// Lock takes a worker lease (model.IndexedKV.LockQueue).
 	Lock func(name string, ttl time.Duration) (model.Lease, error)
 	Log  *slog.Logger
+	// RequireBackfill gates read mode on the completion marker of
+	// "shardpost index backfill kv" (MarkerKV): while it is missing the
+	// store behaves as in write mode (readers list the namespace) and
+	// looks for the marker again every sortedindex.BackfillRecheck.
+	RequireBackfill bool
+	// Now is the clock of the marker checks (time.Now when nil).
+	Now func() time.Time
 }
+
+// MarkerKV is the marker of the last completed admin store backfill in
+// the head of the job hint index ("ix.job/head"): a backfill report as
+// JSON whose "finished" is set.
+const MarkerKV = "backfill.kv"
 
 // Store is a model.IndexedKV over a record store (the plain admin
 // store, whose List lists the namespace).
@@ -184,6 +196,10 @@ type Store struct {
 	mu     sync.Mutex
 	ix     map[string]*sortedindex.Index
 	queues map[string]*sortedindex.Queue
+
+	// gate holds read mode back until the backfill marker exists
+	// (RequireBackfill).
+	gate *sortedindex.Gate
 }
 
 var _ model.IndexedKV = (*Store)(nil)
@@ -202,11 +218,34 @@ func New(raw model.AdminKV, o Options) *Store {
 		o.Log = slog.New(slog.DiscardHandler)
 	}
 
-	return &Store{raw: raw, o: o, ix: map[string]*sortedindex.Index{}, queues: map[string]*sortedindex.Queue{}}
+	s := &Store{raw: raw, o: o, ix: map[string]*sortedindex.Index{}, queues: map[string]*sortedindex.Queue{}}
+
+	if o.Mode == model.KVIndexRead && o.RequireBackfill {
+		s.gate = &sortedindex.Gate{Head: s.MarkerIndex(), Marker: MarkerKV, Now: o.Now,
+			Closed: func(err error) {
+				o.Log.Error("admin.kv_index=read without a completed \"shardpost index backfill kv\": "+
+					"behaving as admin.kv_index=write (listing) until the marker exists", "err", err)
+			},
+			Opened: func() { o.Log.Info("admin.kv_index=read: backfill marker found, readers use the indexes now") },
+		}
+	}
+
+	return s
 }
 
-// IndexMode implements model.IndexedKV.
-func (s *Store) IndexMode() model.KVIndexMode { return s.o.Mode }
+// IndexMode implements model.IndexedKV: the mode the store behaves in.
+// A store configured for read mode that requires the backfill marker
+// behaves as in write mode until the marker exists.
+func (s *Store) IndexMode() model.KVIndexMode {
+	if s.gate != nil && !s.gate.Open() {
+		return model.KVIndexWrite
+	}
+
+	return s.o.Mode
+}
+
+// ConfiguredMode is the configured mode (IndexMode is the effective one).
+func (s *Store) ConfiguredMode() model.KVIndexMode { return s.o.Mode }
 
 // writes reports whether the indexes are kept.
 func (s *Store) writes() bool { return s.o.Mode != model.KVIndexOff }
@@ -371,7 +410,7 @@ func (s *Store) indexError(c *Collection, key string, err error) {
 // indexed collection comes from its hint index (entries without record
 // are skipped and removed); otherwise it lists the namespace.
 func (s *Store) List(prefix, after string, limit int) ([]model.KVEntry, error) {
-	if s.o.Mode != model.KVIndexRead || collectionNamed(prefix) == nil {
+	if s.IndexMode() != model.KVIndexRead || collectionNamed(prefix) == nil {
 		return s.raw.List(prefix, after, limit)
 	}
 
