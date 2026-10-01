@@ -73,22 +73,22 @@ func decodeHeaderText(v []byte) (string, bool) {
 	return string(b), true
 }
 
-// putHeaderTexts stores the header texts of the messages.
-func (u *User) putHeaderTexts(docs []ftsDoc) error {
+// putHeaderTexts stores the header texts of the messages, by GUID.
+func (u *User) putHeaderTexts(texts map[string]string) error {
 	byShard := map[string]map[string][]byte{}
 
-	for _, d := range docs {
-		v, ok := encodeHeaderText(fts.HeaderText(d.raw))
+	for guid, text := range texts {
+		v, ok := encodeHeaderText(text)
 		if !ok {
 			continue
 		}
 
-		oid := u.headerShardOID(d.guid)
+		oid := u.headerShardOID(guid)
 		if byShard[oid] == nil {
 			byShard[oid] = map[string][]byte{}
 		}
 
-		byShard[oid][d.guid] = v
+		byShard[oid][guid] = v
 	}
 
 	groups := map[string][]string{}

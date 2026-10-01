@@ -113,17 +113,18 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 		return err
 	}
 
-	// The version marker goes on only when every message is indexed: a
-	// rebuild that stops midway leaves an index that substring search
-	// must not trust beyond whole words.
-	u.ftsRebuilding, u.ftsCurrent = true, ftsCurrentUnknown
-	defer func() { u.ftsRebuilding = false }()
+	// The version marker goes on only when every message is indexed;
+	// until then the rebuild key keeps substring search from trusting
+	// the index, also when the rebuild stops midway (see ftsRebuildKey).
+	if err := u.startFTSRebuild(); err != nil {
+		return fmt.Errorf("index version: %w", err)
+	}
 
 	if err := u.reindex(metas, fence, progress); err != nil {
 		return err
 	}
 
-	if err := u.setFTSVersion(); err != nil {
+	if err := u.finishFTSRebuild(); err != nil {
 		return fmt.Errorf("index version: %w", err)
 	}
 

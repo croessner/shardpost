@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -189,7 +190,7 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		return err
 	}
 
-	docsOf, terms := termDocs(docs, ids)
+	docsOf, terms, headers := termDocs(docs, ids)
 
 	var (
 		mu       sync.Mutex
@@ -214,7 +215,7 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		return err
 	}
 
-	if err := u.putHeaderTexts(docs); err != nil {
+	if err := u.putHeaderTexts(headers); err != nil {
 		return err
 	}
 
@@ -288,12 +289,17 @@ func docGUIDs(docs []ftsDoc) (guids []string, size int, err error) {
 }
 
 // termDocs tokenizes the messages and returns, for every term, the ids
-// of the messages that contain it, and the terms.
-func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []string) {
+// of the messages that contain it, the terms, and the header text of
+// every message (fts.IndexText decodes the header once for both).
+func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []string, map[string]string) {
 	docsOf := map[string][]uint64{}
+	headers := make(map[string]string, len(docs))
 
 	for _, d := range docs {
-		for _, t := range fts.Terms(d.raw) {
+		terms, header := fts.IndexText(d.raw)
+		headers[d.guid] = header
+
+		for _, t := range terms {
 			docsOf[t] = append(docsOf[t], ids[d.guid])
 		}
 	}
@@ -303,7 +309,7 @@ func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []stri
 		terms = append(terms, t)
 	}
 
-	return docsOf, terms
+	return docsOf, terms, headers
 }
 
 // casPostings is casOmap over posting lists with legacy conversion: fn
@@ -509,27 +515,23 @@ func idKey(id uint64) string    { return "i:" + strconv.FormatUint(id, 10) }
 // one compare-and-swap on the map object.
 func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 	// Deduplicate: a GUID named twice must not get two ids.
-	seen := map[string]bool{}
+	guids = slices.Compact(slices.Sorted(slices.Values(guids)))
 
-	uniq := guids[:0:0]
-	for _, g := range guids {
-		if !seen[g] {
-			seen[g] = true
-			uniq = append(uniq, g)
-		}
-	}
-
-	guids = uniq
-
-	keys := make([]string, 0, len(guids)+1)
+	keys := make([]string, 0, len(guids)+len(freshIndexKeys))
 	for _, g := range guids {
 		keys = append(keys, docKey(g))
 	}
 
-	keys = append(keys, "n")
+	keys = append(keys, freshIndexKeys...)
+
+	fresh, err := u.freshIndexOnce()
+	if err != nil {
+		return nil, err
+	}
+
 	out := map[string]uint64{}
 
-	err := casOmap(u, u.idx, oidFTSMap, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+	err = casOmap(u, u.idx, oidFTSMap, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
 		for k := range out {
 			delete(out, k)
 		}
@@ -558,7 +560,7 @@ func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 		}
 
 		set["n"] = []byte(strconv.FormatUint(next, 10))
-		u.markFreshIndex(cur, set)
+		markFreshIndex(cur, set, fresh)
 
 		return set, nil
 	})

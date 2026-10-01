@@ -100,6 +100,14 @@ func Tokenize(text string) []string {
 // HeaderValue returns them, every value of a field; the body text is
 // what BodyText returns.
 func Terms(raw []byte) []Term {
+	terms, _ := IndexText(raw)
+
+	return terms
+}
+
+// IndexText returns the terms of a message (Terms) and its HeaderText,
+// parsing and decoding the header once for both.
+func IndexText(raw []byte) ([]Term, string) {
 	set := map[Term]struct{}{}
 	add := func(field, text string) {
 		for _, tok := range Tokenize(text) {
@@ -115,6 +123,8 @@ func Terms(raw []byte) []Term {
 		})
 	}
 
+	var htext strings.Builder
+
 	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
 	if err == nil {
 		for _, kv := range []struct{ key, field string }{
@@ -129,8 +139,11 @@ func Terms(raw []byte) []Term {
 		// names and values: IMAP TEXT matches the header as a whole
 		fields := hdr.Fields()
 		for fields.Next() {
+			v := HeaderValue(fields.Value())
+
 			add(FieldHeader, fields.Key())
-			add(FieldHeader, HeaderValue(fields.Value()))
+			add(FieldHeader, v)
+			headerLine(&htext, fields.Key(), v)
 		}
 	}
 
@@ -143,7 +156,7 @@ func Terms(raw []byte) []Term {
 
 	sort.Strings(out)
 
-	return out
+	return out, htext.String()
 }
 
 // MaxHeaderTextBytes bounds the HeaderText the store keeps per message;
@@ -166,13 +179,18 @@ func HeaderText(raw []byte) string {
 
 	fields := hdr.Fields()
 	for fields.Next() {
-		b.WriteString("\r\n")
-		b.WriteString(strings.ToLower(fields.Key()))
-		b.WriteString(": ")
-		b.WriteString(strings.ToLower(unbreak.Replace(HeaderValue(fields.Value()))))
+		headerLine(&b, fields.Key(), HeaderValue(fields.Value()))
 	}
 
 	return b.String()
+}
+
+// headerLine appends one line of HeaderText.
+func headerLine(b *strings.Builder, name, value string) {
+	b.WriteString("\r\n")
+	b.WriteString(strings.ToLower(name))
+	b.WriteString(": ")
+	b.WriteString(strings.ToLower(unbreak.Replace(value)))
 }
 
 // unbreak turns line breaks that decoding put into a value into spaces,

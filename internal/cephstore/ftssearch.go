@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -17,14 +16,22 @@ import (
 // candidateIndex, so that the tests can run it over an index in memory
 // with the same key layout.
 
-// The index version marker: the key ftsVersionKey of "ftsmap" holds
+// The index version marker. The key ftsVersionKey of "ftsmap" holds
 // ftsVersion when every message of the account was indexed by a version
 // that prepares text as this one does (fts.Terms with window terms and
-// markers, header names, charset conversion). A fresh index gets it
-// with its first document id; RebuildFTS sets it when it is done.
+// markers, header names, charset conversion, HTML text, file names). A
+// fresh index gets it with its first document id; RebuildFTS sets it
+// when it has indexed every message. ftsRebuildKey is set while a
+// rebuild runs (right after the old index is deleted) and removed with
+// the marker set in one write, so that a rebuild that stops midway — or
+// a delivery into the empty index it leaves — never marks an index that
+// misses messages. An index without the marker, or with ftsRebuildKey,
+// narrows nothing: the old preparation (markup, undecoded words, no file
+// names) cannot be trusted even for whole words.
 const (
 	ftsVersionKey = "v"
 	ftsVersion    = "2"
+	ftsRebuildKey = "r"
 )
 
 // omapLister lists the keys of an object that start with prefix and
@@ -39,7 +46,7 @@ type candidateIndex interface {
 	// legacyDictPresent reports whether the account still has the
 	// dictionary layout before 0.35.0.
 	legacyDictPresent() (bool, error)
-	// current reports whether the index has the version marker.
+	// current reports whether the index can be trusted (indexCurrent).
 	current() (bool, error)
 	shards() int
 }
@@ -61,23 +68,32 @@ func (r radosIndex) shards() int                      { return r.u.ftsShards }
 
 func (u *User) lister() omapLister { return radosIndex{u}.list }
 
-// Whether the index has the version marker, cached per view.
+// Whether the index can be trusted, cached per view.
 const (
 	ftsCurrentUnknown = iota
 	ftsCurrentYes
 	ftsCurrentNo
 )
 
-// ftsIndexCurrent reports whether the index has the version marker.
+// indexCurrent reports, from the keys ftsVersionKey and ftsRebuildKey of
+// the id map, whether the index can be trusted: the marker is there and
+// no rebuild is running.
+func indexCurrent(vals map[string][]byte) bool {
+	_, rebuilding := vals[ftsRebuildKey]
+
+	return string(vals[ftsVersionKey]) == ftsVersion && !rebuilding
+}
+
+// ftsIndexCurrent reports whether the index can be trusted.
 func (u *User) ftsIndexCurrent() (bool, error) {
 	if u.ftsCurrent == ftsCurrentUnknown {
-		vals, err := getOmapKeys(u.idx, oidFTSMap, []string{ftsVersionKey})
+		vals, err := getOmapKeys(u.idx, oidFTSMap, []string{ftsVersionKey, ftsRebuildKey})
 		if err != nil && errCode(err) != syscall.ENOENT {
 			return false, err
 		}
 
 		u.ftsCurrent = ftsCurrentNo
-		if string(vals[ftsVersionKey]) == ftsVersion {
+		if indexCurrent(vals) {
 			u.ftsCurrent = ftsCurrentYes
 		}
 	}
@@ -85,19 +101,85 @@ func (u *User) ftsIndexCurrent() (bool, error) {
 	return u.ftsCurrent == ftsCurrentYes, nil
 }
 
+// freshIndexKeys are the keys of the id map markFreshIndex looks at.
+var freshIndexKeys = []string{"n", ftsVersionKey, ftsRebuildKey}
+
 // markFreshIndex adds the version marker to the first write of the id
-// map: a fresh index is written by this version from the start. A
-// rebuild sets it when it is done instead.
-func (u *User) markFreshIndex(cur, set map[string][]byte) {
-	if _, ok := cur["n"]; !ok && !u.ftsRebuilding {
+// map of an index this version writes from the start: there is no id
+// yet ("n"), no rebuild is running, and fresh says that no posting
+// shard existed — an account indexed before document ids existed has
+// posting lists of GUIDs and no "n", and must not be marked.
+func markFreshIndex(cur, set map[string][]byte, fresh bool) {
+	_, hasN := cur["n"]
+	_, rebuilding := cur[ftsRebuildKey]
+
+	if !hasN && !rebuilding && fresh {
 		set[ftsVersionKey] = []byte(ftsVersion)
 	}
 }
 
-// setFTSVersion sets the version marker.
-func (u *User) setFTSVersion() error {
+// freshIndexOnce is freshIndex, asked until the view has seen ids.
+func (u *User) freshIndexOnce() (bool, error) {
+	if u.ftsHasIDs {
+		return false, nil
+	}
+
+	fresh, err := u.freshIndex()
+	if err == nil && !fresh {
+		u.ftsHasIDs = true
+	}
+
+	return fresh, err
+}
+
+// ftsPostingsExist reports whether any posting shard object exists.
+func (u *User) ftsPostingsExist() (bool, error) {
+	for i := 0; i < u.ftsShards; i++ {
+		if _, err := u.idx.Stat(fmt.Sprintf("%s%02d", ftsPrefix, i)); err == nil {
+			return true, nil
+		} else if errCode(err) != syscall.ENOENT {
+			return false, err
+		}
+	}
+
+	return false, nil
+}
+
+// freshIndex reports whether the id map has no ids yet and no posting
+// shard exists: the precondition of markFreshIndex, looked up before the
+// compare-and-swap (which checks "n" again).
+func (u *User) freshIndex() (bool, error) {
+	vals, err := getOmapKeys(u.idx, oidFTSMap, []string{"n"})
+	if err != nil && errCode(err) != syscall.ENOENT {
+		return false, err
+	}
+
+	if _, ok := vals["n"]; ok {
+		return false, nil
+	}
+
+	exist, err := u.ftsPostingsExist()
+
+	return !exist, err
+}
+
+// startFTSRebuild sets ftsRebuildKey; the index is not trusted until
+// finishFTSRebuild.
+func (u *User) startFTSRebuild() error {
+	u.ftsCurrent = ftsCurrentUnknown
+
 	return casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
-		return map[string][]byte{ftsVersionKey: []byte(ftsVersion)}, nil
+		return map[string][]byte{ftsRebuildKey: nil}, nil
+	})
+}
+
+// finishFTSRebuild sets the version marker and removes ftsRebuildKey in
+// one write.
+func (u *User) finishFTSRebuild() error {
+	u.ftsCurrent = ftsCurrentUnknown
+
+	return casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{ftsVersionKey: []byte(ftsVersion)}, []string{ftsRebuildKey}
 	})
 }
 
@@ -123,24 +205,17 @@ func (u *User) SearchCandidates(fields []string, query string) (hits map[string]
 // and so not narrowing, are: an inner part in a field without the
 // dictionary or of fewer than three characters, a scan or dictionary
 // answer of more than maxCandidates terms, an account on the dictionary
-// layout before 0.35.0. An index without the version marker was written
-// by a version that prepared text differently (no window terms or
-// markers, no header names, no charset conversion): there only whole
-// ASCII words outside the header field narrow, which every version
-// indexed alike.
+// layout before 0.35.0. An index that cannot be trusted (see
+// ftsVersionKey) narrows nothing.
 func searchCandidates(ix candidateIndex, fields []string, query string) (map[string]bool, error) {
 	current, err := ix.current()
-	if err != nil {
+	if err != nil || !current {
 		return nil, err
 	}
 
 	var result map[string]bool
 
 	for _, sp := range fts.Spans(query) {
-		if !current && !oldIndexAnswers(fields, sp) {
-			continue
-		}
-
 		terms, ok, err := spanTerms(ix, fields, sp)
 		if err != nil {
 			return nil, err
@@ -171,28 +246,6 @@ func searchCandidates(ix candidateIndex, fields []string, query string) (map[str
 	}
 
 	return result, nil
-}
-
-// oldIndexAnswers reports whether an index without the version marker
-// can narrow by a span: a whole ASCII word outside the header field.
-func oldIndexAnswers(fields []string, sp fts.Span) bool {
-	if sp.Match != fts.MatchWord {
-		return false
-	}
-
-	for _, f := range fields {
-		if f == fts.FieldHeader {
-			return false
-		}
-	}
-
-	for i := 0; i < len(sp.Token); i++ {
-		if sp.Token[i] >= utf8.RuneSelf {
-			return false
-		}
-	}
-
-	return true
 }
 
 // spanTerms returns every term of fields that can hold the span, and

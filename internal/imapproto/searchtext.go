@@ -2,8 +2,10 @@ package imapproto
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"shardpost/internal/fts"
@@ -284,7 +286,14 @@ func (c *conn) verify(cr *criteria, idx []int, hit []bool) error {
 
 	header := needsHeader(cr)
 
+	watch := c.watchClient()
+	defer watch.stop()
+
 	for len(idx) > 0 {
+		if watch.gone() {
+			return errClientGone
+		}
+
 		batch := idx[:min(verifyBatch, len(idx))]
 		idx = idx[len(batch):]
 
@@ -302,7 +311,7 @@ func (c *conn) verify(cr *criteria, idx []int, hit []bool) error {
 			}
 		}
 
-		if err := c.verifyBatch(cr, batch, hit, texts, workers); err != nil {
+		if err := c.verifyBatch(cr, batch, hit, texts, workers, watch); err != nil {
 			return err
 		}
 	}
@@ -311,7 +320,7 @@ func (c *conn) verify(cr *criteria, idx []int, hit []bool) error {
 }
 
 // verifyBatch checks one batch with a pool of workers.
-func (c *conn) verifyBatch(cr *criteria, batch []int, hit []bool, texts map[string]string, workers int) error {
+func (c *conn) verifyBatch(cr *criteria, batch []int, hit []bool, texts map[string]string, workers int, watch *clientWatch) error {
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -354,6 +363,14 @@ func (c *conn) verifyBatch(cr *criteria, batch []int, hit []bool, texts map[stri
 			break
 		}
 
+		if watch.gone() {
+			mu.Lock()
+			ferr = errClientGone
+			mu.Unlock()
+
+			break
+		}
+
 		next <- i
 	}
 
@@ -361,6 +378,63 @@ func (c *conn) verifyBatch(cr *criteria, batch []int, hit []bool, texts map[stri
 	wg.Wait()
 
 	return ferr
+}
+
+// errClientGone ends a search whose client went away.
+var errClientGone = errors.New("search: the client is gone")
+
+// clientWatch notices, while a search checks messages, that its client
+// went away (the connection closed, the server shut it down, the
+// command's context ended), so that the search stops instead of reading
+// messages for nobody. It peeks at the connection without consuming
+// what a client sends: a pipelined command stays for the command loop.
+type clientWatch struct {
+	c        *conn
+	lost     atomic.Bool
+	wg       sync.WaitGroup
+	watching bool
+}
+
+// watchClient starts the watch. A compressed session is not peeked at:
+// the read deadline that ends the peek would break the inflate stream;
+// there only the server closing the connection is noticed.
+func (c *conn) watchClient() *clientWatch {
+	w := &clientWatch{c: c}
+	if c.compressed {
+		return w
+	}
+
+	w.watching = true
+	w.wg.Add(1)
+
+	go func() {
+		defer w.wg.Done()
+
+		// a timeout is the end of the watch, anything else a lost client
+		var ne net.Error
+		if _, err := c.r.br.Peek(1); err != nil && (!errors.As(err, &ne) || !ne.Timeout()) {
+			w.lost.Store(true)
+		}
+	}()
+
+	return w
+}
+
+// gone reports whether the search should stop.
+func (w *clientWatch) gone() bool {
+	return w.lost.Load() || w.c.closing.Load() || w.c.requestContext().Err() != nil
+}
+
+// stop ends the peek: an expired read deadline returns it at once; the
+// command loop sets its own deadline before it reads again.
+func (w *clientWatch) stop() {
+	if !w.watching {
+		return
+	}
+
+	_ = w.c.nc.SetReadDeadline(time.Now())
+	w.wg.Wait()
+	_ = w.c.nc.SetReadDeadline(time.Time{})
 }
 
 func (c *conn) match(seq int, m *model.Meta, cr *criteria, ev *textEval) bool {

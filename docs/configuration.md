@@ -393,9 +393,10 @@ combines them over `AND`, `OR` and `NOT`. Each candidate is checked:
   include it.
 
 A word of the value narrows the candidates when the index can look it
-up completely: a whole word always, the start of a word always, the
-inside of a word in the subject, the addresses and the body when it
-has three or more characters. The inside of a word of another header
+up completely: a whole word always; the start of a word unless more
+than 4096 index terms begin with it; the inside of a word in the
+subject, the addresses and the body when it has three or more
+characters and lies inside at most 4096 index terms. The inside of a word of another header
 field cannot be looked up, so a `TEXT` or `HEADER <name>` value that
 may begin inside a header word (any value not starting with a space or
 punctuation) checks the stored header of every message of the mailbox —
@@ -412,15 +413,16 @@ a word.
 **Existing messages.** The index keeps what a message was indexed
 with. An account indexed entirely by this version carries a version
 marker in its index (set for a new account with its first message and
-by `fts_rebuild` when it completes). Without the marker, substring
-search narrows only by whole ASCII words outside the header field,
-which every version indexed alike, and checks the rest, reading the
-headers of messages without a stored header from the messages
-themselves: correct, but slower. Even so, a message indexed by an
-earlier version can be missed where the old index lacks a whole word
-the new preparation finds (a file name, an attached message). A changed
-`fts.fallback_charset` or `fts.html` likewise reaches messages stored
-before only when they are indexed again. Removing a message indexed
+by `fts_rebuild` when it completes; a rebuild that stops midway leaves
+the account without it). Without the marker, substring search does not
+use the index at all — an older index (HTML markup, undecoded words, no
+file names) cannot be trusted even for whole words — and checks every
+message of the mailbox, reading the headers of messages without a
+stored header from the messages themselves: correct, but slow, until
+the rebuild. A changed `fts.fallback_charset` or `fts.html` reaches
+messages stored before only when they are indexed again; until then
+substring search can miss such a message where the index lacks its new
+words. Removing a message indexed
 under other rules leaves terms it was indexed with behind (harmless;
 the rebuild drops them). Run the rebuild for every account after the
 upgrade, see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c):

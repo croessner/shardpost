@@ -157,8 +157,8 @@ func TestSearchCandidates(t *testing.T) {
 // TestSearchCandidatesLimits: a word start shared by more than
 // maxCandidates terms, read over many pages, does not narrow; one with
 // fewer is complete across the shards. The dictionary of the layout
-// before 0.35.0 and an index without the version marker narrow only
-// what they can answer.
+// before 0.35.0 narrows no inner part; an index that cannot be trusted
+// (no version marker, or a rebuild key) narrows nothing.
 func TestSearchCandidatesLimits(t *testing.T) {
 	ix := newMemIndex(DefaultFTSShards, map[string]string{"g0": "Subject: s\r\n\r\nbody\r\n"})
 
@@ -189,9 +189,50 @@ func TestSearchCandidatesLimits(t *testing.T) {
 
 	ix.legacy, ix.stale = false, true
 	runCandidates(t, ix, []string{fts.FieldBody}, " bod", nil)
-	runCandidates(t, ix, []string{fts.FieldBody}, " body ", []string{"g0"})
-	runCandidates(t, ix, []string{fts.FieldHeader}, " subject ", nil)
-	runCandidates(t, ix, []string{fts.FieldBody}, " bödy ", nil)
+	runCandidates(t, ix, []string{fts.FieldBody}, " body ", nil)
+	runCandidates(t, ix, []string{fts.FieldSubject}, " s ", nil)
+}
+
+// TestIndexVersionMarker: the index is trusted with the marker and
+// without a running rebuild; a rebuild key, also one a stopped rebuild
+// left, takes the trust away. Only a fresh index — no ids, no rebuild,
+// no posting shard of an older index — gets the marker with its first
+// ids.
+func TestIndexVersionMarker(t *testing.T) {
+	marker := []byte(ftsVersion)
+
+	for _, c := range []struct {
+		vals map[string][]byte
+		want bool
+	}{
+		{map[string][]byte{ftsVersionKey: marker}, true},
+		{map[string][]byte{}, false},
+		{map[string][]byte{ftsVersionKey: []byte("1")}, false},
+		{map[string][]byte{ftsVersionKey: marker, ftsRebuildKey: nil}, false},
+		{map[string][]byte{ftsRebuildKey: nil}, false},
+	} {
+		if got := indexCurrent(c.vals); got != c.want {
+			t.Errorf("indexCurrent(%v) = %v", c.vals, got)
+		}
+	}
+
+	for _, c := range []struct {
+		cur   map[string][]byte
+		fresh bool
+		want  bool
+	}{
+		{map[string][]byte{}, true, true},
+		{map[string][]byte{}, false, false}, // posting shards of an older index
+		{map[string][]byte{"n": []byte("7")}, true, false},
+		{map[string][]byte{ftsRebuildKey: nil}, true, false}, // a delivery during a rebuild
+	} {
+		set := map[string][]byte{}
+		markFreshIndex(c.cur, set, c.fresh)
+
+		if _, got := set[ftsVersionKey]; got != c.want {
+			t.Errorf("markFreshIndex(%v, fresh %v) set the marker: %v", c.cur, c.fresh, got)
+		}
+	}
 }
 
 // TestHeaderTextCodec: the header store keeps a text compressed and

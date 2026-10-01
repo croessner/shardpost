@@ -37,8 +37,12 @@ type countingUser struct {
 	gone  *sync.Map
 }
 
+// readDelay slows every whole-message read of a countingUser down.
+var readDelay atomic.Int64
+
 func (u *countingUser) Read(m *model.Meta) ([]byte, error) {
 	u.reads.Add(1)
+	time.Sleep(time.Duration(readDelay.Load()))
 
 	if _, ok := u.gone.Load(m.GUID); ok {
 		return nil, fmt.Errorf("read %s: %w", m.GUID, model.ErrNoBlob)

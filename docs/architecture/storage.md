@@ -270,7 +270,7 @@ count against the quota.
 | Object | omap key | Value |
 |---|---|---|
 | `ftsh/<nn>`, `server.fts_shards` of them, shard = fnv1a(GUID) | GUID | format byte 1, DEFLATE of the header text |
-| `ftsmap` | `v` | index version marker `2` |
+| `ftsmap` | `v`, `r` | index version marker `2`; `r` (empty) while `fts_rebuild` runs |
 
 IMAP `SEARCH` matches substrings (RFC 9051 6.4.4). The index cannot
 answer that alone — stems, words in any order and the missing
@@ -291,10 +291,17 @@ fewer than three characters, a lookup of more than 4096 terms, an
 account still on the dictionary layout before 0.35.0.
 
 The version marker `v` in `ftsmap` says that every message of the
-account was indexed by this version: a fresh index gets it with its
-first document ID, `fts_rebuild` when it has indexed every message.
-Without it only whole ASCII words outside `h`, which every version
-indexed alike, narrow.
+account was indexed by this version. A fresh index gets it with its
+first document ID — only when the id map has no `n` yet, no rebuild is
+running and no posting shard exists (an index from before document IDs
+has posting lists of GUIDs and no `n`). `fts_rebuild` sets `r` right
+after deleting the old index and, when every message is indexed again,
+sets `v` and removes `r` in one compare-and-swap; a rebuild that stops
+midway, or a delivery into the index it is rebuilding, leaves no
+trusted marker. Without `v`, or with `r`, `SearchCandidates` does not
+narrow at all — an older index (markup, undecoded words, no file
+names) cannot be trusted even for whole words — and every message is
+checked: correct, but slow, until the rebuild.
 
 The protocol layer ([searchtext.go](../../internal/imapproto/searchtext.go))
 asks for candidates separately for the header and the body of every

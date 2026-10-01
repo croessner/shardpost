@@ -13,6 +13,7 @@ import (
 	"shardpost/internal/logging"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -261,6 +262,7 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 
 	s.mu.Lock()
 	for c := range s.conns {
+		c.closing.Store(true)
 		_ = c.nc.Close()
 	}
 	s.mu.Unlock()
@@ -369,6 +371,9 @@ type conn struct {
 	qresync    bool
 	utf8       bool
 	compressed bool
+	// closing is set when the server closes the connection (bye,
+	// shutdown), so that a running search stops.
+	closing atomic.Bool
 
 	// per-command memory accounting for literals
 	cmdBytes int64
@@ -674,6 +679,7 @@ func (c *conn) bye(text string) {
 	defer c.wmu.Unlock()
 
 	_ = c.nc.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	c.closing.Store(true)
 	_, _ = fmt.Fprintf(c.nc, "* BYE [UNAVAILABLE] %s\r\n", text)
 	_ = c.nc.Close()
 }
