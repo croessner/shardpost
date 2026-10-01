@@ -29,6 +29,7 @@ type Config struct {
 	Sieve     Sieve     `mapstructure:"sieve"`
 	SMTP      SMTP      `mapstructure:"smtp"`
 	Scrub     Scrub     `mapstructure:"scrub"`
+	Purge     Purge     `mapstructure:"purge"`
 	Nauthilus Nauthilus `mapstructure:"nauthilus"`
 	// Auth configures the auth cache in front of Nauthilus.
 	Auth Auth `mapstructure:"auth"`
@@ -201,6 +202,31 @@ type Scrub struct {
 	// idle account alone: an account whose last complete scrub is older
 	// is scrubbed again in any case.
 	IntervalDays int `mapstructure:"interval_days" env:"SCRUB_INTERVAL_DAYS" validate:"gte=1,lte=365"`
+	// OrphanSource is where a scrub finds what a crash left behind:
+	// "listing" lists the account's namespaces (before 0.42.0), "shadow"
+	// lists and acts on the listing but also works out what the intents
+	// name and reports where they differ, "intents" reads the intents
+	// only and lists nothing.
+	OrphanSource string `mapstructure:"orphan_source" env:"SCRUB_ORPHAN_SOURCE" validate:"oneof=listing shadow intents"`
+	// IntentGraceSeconds is how old an intent must be before a scrub
+	// takes it for the leftover of a crash.
+	IntentGraceSeconds int64 `mapstructure:"intent_grace_seconds" env:"SCRUB_INTENT_GRACE_SECONDS" validate:"gte=600,lte=604800"`
+	// SweepSpillShards is how many spill objects "shardpost scrub
+	// --sweep" spreads the object names of a pool over.
+	SweepSpillShards int `mapstructure:"sweep_spill_shards" env:"SCRUB_SWEEP_SPILL_SHARDS" validate:"gte=1,lte=4096"`
+	// SweepClockMarginSeconds is how far before reading a namespace the
+	// sweep draws the line after which nothing is a remnant: object
+	// mtimes have whole seconds and come from the writer's clock.
+	SweepClockMarginSeconds int64 `mapstructure:"sweep_clock_margin_seconds" env:"SCRUB_SWEEP_CLOCK_MARGIN_SECONDS" validate:"gte=1,lte=3600"`
+}
+
+// Purge configures the account purge job.
+type Purge struct {
+	// Listing makes a purge delete what a listing of the account's
+	// namespaces finds (before 0.42.0) instead of what its data model
+	// names; with it on, the purge also reports what the data model
+	// missed.
+	Listing bool `mapstructure:"listing" env:"PURGE_LISTING"`
 }
 
 // Nauthilus configures the Nauthilus authentication backend.
@@ -473,6 +499,12 @@ var defaults = []struct {
 	{"scrub.dry_run", false},
 	{"scrub.parallel", 2},
 	{"scrub.interval_days", 7},
+	{"scrub.orphan_source", "shadow"},
+	{"scrub.intent_grace_seconds", 3600},
+	{"scrub.sweep_spill_shards", 256},
+	{"scrub.sweep_clock_margin_seconds", 60},
+	{"purge.listing", true},
+	{"jmap.upload_ttl_seconds", 86400},
 	{"server.auth_backend", "static"},
 	{"server.users", "test:test"},
 	{"nauthilus.url", ""},

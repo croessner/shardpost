@@ -59,7 +59,25 @@ type ScrubReport struct {
 	// IndexIncomplete: an index could not be read in full (or a registry
 	// entry did not parse), so the destructive repairs were skipped.
 	IndexIncomplete bool `json:",omitempty"`
-	Errors          []string
+	// OrphanSource is where the run looked for orphans (intents.go,
+	// scrubintents.go).
+	OrphanSource model.OrphanSource `json:",omitempty"`
+	// IntentsOpen are intents older than the intent grace period: what a
+	// crash left; IntentsDropped the intents the run removed because what
+	// they name is settled.
+	IntentsOpen    int `json:",omitempty"`
+	IntentsDropped int `json:",omitempty"`
+	// DeletionsFinished are mailbox deletions completed from their
+	// tombstone, CreationsUndone mailbox objects of creations that never
+	// registered their name (both by intent).
+	DeletionsFinished int `json:",omitempty"`
+	CreationsUndone   int `json:",omitempty"`
+	// StaleMetadata are METADATA entries of mailboxes that are gone.
+	StaleMetadata int `json:",omitempty"`
+	// Shadow compares the listing with the intents (orphan source
+	// "shadow").
+	Shadow *ShadowReport `json:",omitempty"`
+	Errors []string
 }
 
 var _ model.ScrubOutcome = (*ScrubReport)(nil)
@@ -69,7 +87,7 @@ var _ model.ScrubOutcome = (*ScrubReport)(nil)
 // again by the next run).
 func (r *ScrubReport) Findings() int {
 	n := r.OrphanBlobs + r.MissingBlobs + r.RefsFixed + r.MoveIntents + r.DeliveryIntents + r.OrphanCandidates +
-		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects
+		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects + r.IntentsOpen + r.StaleMetadata
 	if r.QuotaFixed {
 		n++
 	}
@@ -93,6 +111,9 @@ type ScrubOptions struct {
 	// Fence (if set) is checked before each repair; failing, the repair
 	// is skipped.
 	Fence func() error
+	// afterList runs between the read of a mailbox's entries and of its
+	// removal intents (tests).
+	afterList func(Mailbox)
 }
 
 // Repair classes of the scrubber (model.Repair*).
@@ -166,12 +187,16 @@ func (s *Store) ListUsers() ([]string, error) {
 
 // scrubRun carries the state shared by the phases of one Scrub call.
 type scrubRun struct {
-	u      *User
-	o      ScrubOptions
-	log    *slog.Logger
-	rep    *ScrubReport
-	cutoff time.Time
-	byID   map[string]Mailbox
+	u   *User
+	o   ScrubOptions
+	log *slog.Logger
+	rep *ScrubReport
+	// cutoff is the scrub grace (object mtimes), icut the intent grace
+	// (intent times).
+	cutoff, icut time.Time
+	byID         map[string]Mailbox
+	source       model.OrphanSource
+	intents      *intentScan
 }
 
 // scrubIndex is what phase 1 (the index scan) collects.
@@ -191,8 +216,8 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 		log = u.log
 	}
 
-	rep := &ScrubReport{User: u.name}
-	cutoff := time.Now().Add(-o.Grace)
+	source := u.orphanSource()
+	rep := &ScrubReport{User: u.name, OrphanSource: source}
 
 	if u.importing(rep, log) {
 		return rep, nil
@@ -211,7 +236,14 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 		byID[mb.ID] = mb
 	}
 
-	sr := &scrubRun{u: u, o: o, log: log, rep: rep, cutoff: cutoff, byID: byID}
+	// Without a listing, nothing but the grace period keeps the scrub
+	// from collecting a blob that is being written: it has a minimum.
+	if source == model.OrphanSourceIntents {
+		o.Grace = repairGrace(o.Grace)
+	}
+
+	sr := &scrubRun{u: u, o: o, log: log, rep: rep, cutoff: time.Now().Add(-o.Grace), icut: time.Now().Add(-u.intentGrace()),
+		byID: byID, source: source, intents: newIntentScan()}
 
 	// 0a. Abandoned multi-target deliveries (Sieve fileinto into several
 	//     mailboxes, MULTIAPPEND). The client never saw a success, so what
@@ -235,27 +267,108 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 		return rep, nil
 	}
 
-	// 2. Reference counts.
-	sr.fixRefs(idx.refs)
-
-	// 3. Orphan blobs and unknown index objects.
-	if err := sr.removeOrphans(idx.refs); err != nil {
+	if err := sr.repair(idx); err != nil {
 		return nil, err
 	}
-
-	unknown, err := sr.collectUnknownIndex(idx.known)
-	if err != nil {
-		return nil, err
-	}
-
-	sr.removeUnknownIndex(unknown)
-
-	// 4. Quota counters.
-	sr.fixQuota(idx.quota)
 
 	sr.logDone()
 
 	return rep, nil
+}
+
+// repair runs the steps after the index scan.
+func (sr *scrubRun) repair(idx *scrubIndex) error {
+	// 2. The intents, then the reference counts: a blob a write may still
+	//    be working on keeps its count (a release that is about to come
+	//    would otherwise be applied twice).
+	if _, err := sr.gatherIntents(); err != nil {
+		return err
+	}
+
+	sr.fixRefs(idx.refs)
+
+	// 3. Orphan blobs, unknown index objects, stale marks: by listing or
+	//    by intent (scrubintents.go).
+	if err := sr.orphans(idx); err != nil {
+		return err
+	}
+
+	// 4. METADATA of mailboxes that are gone.
+	sr.cleanMetadata()
+
+	// 5. Quota counters.
+	sr.fixQuota(idx.quota)
+
+	return nil
+}
+
+// orphans finds and removes what nothing points at, from the source the
+// configuration names.
+func (sr *scrubRun) orphans(idx *scrubIndex) error {
+	switch sr.source {
+	case model.OrphanSourceIntents:
+		sr.settleIntents(idx.refs, true)
+		sr.forgetCandidates()
+
+		return nil
+	case model.OrphanSourceShadow:
+		// The intents are judged before the listing acts, so both look
+		// at the same state.
+		sr.settleIntents(idx.refs, false)
+	}
+
+	orphans, err := sr.removeOrphans(idx.refs)
+	if err != nil {
+		return err
+	}
+
+	unknown, marks, err := sr.collectUnknownIndex(idx.known)
+	if err != nil {
+		return err
+	}
+
+	if sr.source == model.OrphanSourceShadow {
+		sr.compareShadow(orphans, sr.oldUnknown(unknown), marks)
+	} else {
+		sr.settleIntents(idx.refs, false)
+	}
+
+	sr.removeUnknownIndex(unknown)
+
+	return nil
+}
+
+// forgetCandidates drops the orphan candidates a listing run remembered
+// (o: in the scrub object): without the listing nobody looks at them
+// again, and left behind they would keep a batch scrub from skipping the
+// account.
+func (sr *scrubRun) forgetCandidates() {
+	if !sr.o.Allowed(RepairOrphans) {
+		return
+	}
+
+	seen, err := sr.u.orphanCandidates()
+	if err != nil || len(seen) == 0 {
+		return
+	}
+
+	if err := sr.u.rememberOrphans(nil, slices.Collect(maps.Keys(seen))); err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, err.Error())
+	}
+}
+
+// oldUnknown returns the unknown index objects older than the grace
+// period (what removeUnknownIndex may delete).
+func (sr *scrubRun) oldUnknown(oids []string) []string {
+	var out []string
+
+	for _, oid := range oids {
+		if st, err := sr.u.idx.Stat(oid); err == nil && !st.ModTime.After(sr.cutoff) {
+			out = append(out, oid)
+		}
+	}
+
+	return out
 }
 
 // importing reports whether an import holds the account (or its lock is
@@ -402,6 +515,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 	u, rep, log, o := sr.u, sr.rep, sr.log, sr.o
 
 	if time.Unix(in.Started, 0).After(sr.cutoff) {
+		sr.protectAll(in.GUIDs) // the MOVE is still running
 		return
 	}
 
@@ -431,7 +545,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 		// destination stays until fixQuota recounts.
 		log.Warn("MOVE destination vanished, keeping source", "intent", in.ID)
 
-		if _, _, err := u.unlink(&src, nil, in.ID); err != nil {
+		if _, _, _, err := u.unlink(&src, nil, in.ID); err != nil {
 			rep.Errors = append(rep.Errors, err.Error())
 		}
 
@@ -456,17 +570,26 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 		return // intent stays, next run retries
 	}
 
-	removed, err := sr.unlinkLogged(&src, srcMetas, in.ID)
+	removed, rkeys, err := sr.unlinkLogged(&src, srcMetas, in.ID)
 	if err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
 		return
 	}
 
-	sr.releaseRemoved(removed)
+	if failed := u.releaseRemoved(&src, removed, rkeys); failed > 0 {
+		rep.Errors = append(rep.Errors, fmt.Sprintf("move %s: %d blob references not released", in.ID, failed))
+	}
 	// Like Move: leaving a counted mailbox for an ignored one frees the
 	// space. The opposite direction was reserved before the intent.
 	if err := u.moveUsage(&src, &dst, sizeOf(removed)); err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
+	}
+}
+
+// protectAll marks the blobs as ones a write may still be working on.
+func (sr *scrubRun) protectAll(guids []string) {
+	for _, g := range guids {
+		sr.intents.protect(g)
 	}
 }
 
@@ -485,27 +608,19 @@ func (sr *scrubRun) linkMissingLogged(dst *Mailbox, metas []Meta, inDest map[str
 	return complete
 }
 
-// unlinkLogged is unlink bracketed by the account change log.
-func (sr *scrubRun) unlinkLogged(src *Mailbox, metas []Meta, intentID string) ([]Meta, error) {
+// unlinkLogged is unlink bracketed by the account change log; it returns
+// the removed entries and the keys of their removal intents.
+func (sr *scrubRun) unlinkLogged(src *Mailbox, metas []Meta, intentID string) ([]Meta, []string, error) {
 	acct, err := sr.u.beginPartial(model.KindEmail, src.ID, src.Name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	removed, _, err := sr.u.unlink(src, metas, intentID)
+	removed, _, rkeys, err := sr.u.unlink(src, metas, intentID)
 
 	acct.partial()
 
-	return removed, err
-}
-
-// releaseRemoved drops the blob references of unlinked entries.
-func (sr *scrubRun) releaseRemoved(removed []Meta) {
-	for i := range removed {
-		if err := sr.u.releaseBlob(&removed[i]); err != nil {
-			sr.rep.Errors = append(sr.rep.Errors, err.Error())
-		}
-	}
+	return removed, rkeys, err
 }
 
 // linkMissing links every source entry not yet in dst into dst, each with
@@ -582,6 +697,24 @@ func (sr *scrubRun) scanMailbox(mb Mailbox, idx *scrubIndex) bool {
 		return false
 	}
 
+	if sr.o.afterList != nil {
+		sr.o.afterList(mb)
+	}
+
+	// The removal intents are read after the entries: a removal whose
+	// header CAS landed before the entries were read has its intent seen
+	// here (and its blob is left alone while it is young); one that
+	// lands after it still finds its entry counted.
+	removals, err := u.removeIntents(mb.ID)
+	if err != nil {
+		rep.Errors = append(rep.Errors, fmt.Sprintf("mailbox %q removal intents: %v", mb.Name, err))
+		return false
+	}
+
+	if len(removals) > 0 {
+		sr.intents.removals[mb.ID] = removals
+	}
+
 	for _, m := range metas {
 		sr.scanMessage(&mb, m, idx)
 	}
@@ -610,13 +743,18 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 		return
 	}
 
+	// The retired object is left to the deletion tombstone (a later run
+	// deletes it, scrubintents.go), or to the listing.
+	info, _ := u.retired(&mb)
+	tomb := deletionTombstone(&mb, info)
+
 	err = casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		var rec MailboxRec
 		if v, ok := cur[regKey(mb.Name)]; !ok || json.Unmarshal(v, &rec) != nil || rec.ID != mb.ID {
 			return nil, nil
 		}
 
-		return nil, []string{regKey(mb.Name)}
+		return map[string][]byte{deleteKey(mb.ID): tomb}, []string{regKey(mb.Name)}
 	})
 
 	acct.partial()
@@ -627,6 +765,10 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 	}
 
 	u.invalidate()
+
+	// No longer registered: its tombstone must not read as one of a
+	// mailbox id that is in use.
+	delete(sr.byID, mb.ID)
 
 	sr.rep.RetiredRepaired++
 }
@@ -654,32 +796,82 @@ func (sr *scrubRun) removeUncovered(mb *Mailbox, info *MailboxInfo) {
 	scrubFinding("uncovered_entry")
 
 	// An import that resumed since the scrub started writes such entries
-	// before its header: leave them to it.
+	// before its header: leave them to it. Entries that stay keep their
+	// blobs, which the import's intent names, from being collected.
 	if locked, err := u.ImportLocked(); !sr.o.Allowed(RepairUncovered) || err != nil || locked {
-		return
-	}
-
-	removed := 0
-
-	err := casOmap(u, u.idx, oid, slices.Collect(maps.Keys(seen)), func(cur map[string][]byte) (map[string][]byte, []string) {
-		var rm []string
-
-		for k, v := range cur {
-			if bytes.Equal(v, seen[k]) {
-				rm = append(rm, k)
+		for _, v := range seen {
+			var m Meta
+			if json.Unmarshal(v, &m) == nil {
+				sr.intents.protect(m.GUID)
 			}
 		}
 
-		removed = len(rm)
+		return
+	}
 
-		return nil, rm
-	})
+	removed, rkeys, err := u.unlinkUncovered(mb, oid, seen)
 	if err != nil {
 		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("remove uncovered entries of %q: %v", mb.Name, err))
 		return
 	}
 
-	sr.rep.UncoveredEntries += removed
+	// Their blob references go like those of any removal.
+	if failed := u.releaseRemoved(mb, removed, rkeys); failed > 0 {
+		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("uncovered entries of %q: %d blob references not released", mb.Name, failed))
+	}
+
+	sr.rep.UncoveredEntries += len(removed)
+}
+
+// unlinkUncovered removes the entries seen (as read) from shard oid with
+// removal intents on shard 0: in the same CAS when oid is shard 0, else
+// written before. It returns the entries removed and the intent keys.
+func (u *User) unlinkUncovered(mb *Mailbox, oid string, seen map[string][]byte) ([]Meta, []string, error) {
+	byKey := make(map[string]Meta, len(seen))
+	metas := make([]Meta, 0, len(seen))
+
+	for k, v := range seen {
+		var m Meta
+		if json.Unmarshal(v, &m) == nil {
+			byKey[k] = m
+			metas = append(metas, m)
+		}
+	}
+
+	rset := removalSet(time.Now().Unix(), metas)
+	rkeys := slices.Collect(maps.Keys(rset))
+
+	shard0 := oid == mboxOID(mb.ID)
+	if !shard0 {
+		if err := casOmap(u, u.idx, mboxOID(mb.ID), nil, func(map[string][]byte) (map[string][]byte, []string) {
+			return rset, nil
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var removed []Meta
+
+	err := casOmap(u, u.idx, oid, slices.Collect(maps.Keys(seen)), func(cur map[string][]byte) (map[string][]byte, []string) {
+		var rm []string
+
+		removed = removed[:0]
+
+		for k, v := range cur {
+			if bytes.Equal(v, seen[k]) {
+				rm = append(rm, k)
+				removed = append(removed, byKey[k])
+			}
+		}
+
+		if shard0 && len(rm) > 0 {
+			return removalSet(time.Now().Unix(), removed), rm
+		}
+
+		return nil, rm
+	})
+
+	return removed, rkeys, err
 }
 
 // uncovered returns the entries of shard oid at or above UIDNEXT, as
@@ -768,6 +960,10 @@ func (sr *scrubRun) fixRefs(refs map[string][]Meta) {
 	u, rep, log := sr.u, sr.rep, sr.log
 
 	for guid, entries := range refs {
+		if sr.intents.young[guid] {
+			continue // a release or a link may still come
+		}
+
 		val, ver, err := u.xattrVer(u.data, chunkOID(guid, 0), xattrRefs)
 		if err != nil {
 			continue
@@ -842,27 +1038,33 @@ func (sr *scrubRun) collectOrphans(refs map[string][]Meta) (map[string]int, erro
 // not change in between (no COPY/refcount write touched it). The scan and
 // the deletion are not under a common lock; the second look replaces it.
 // Candidates are remembered on the scrub object of the namespace.
-func (sr *scrubRun) removeOrphans(refs map[string][]Meta) error {
+//
+// It returns the orphans older than the grace period (what the intents
+// should name, for the shadow comparison).
+func (sr *scrubRun) removeOrphans(refs map[string][]Meta) (map[string]bool, error) {
 	u, rep, log := sr.u, sr.rep, sr.log
 
 	orphans, err := sr.collectOrphans(refs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	seen, err := u.orphanCandidates()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	confirmed := map[string]uint64{}
 	forget := vanishedCandidates(seen, orphans)
+	old := map[string]bool{}
 
 	for guid, chunks := range orphans {
 		st, err := u.data.Stat(chunkOID(guid, 0))
 		if err == nil && st.ModTime.After(sr.cutoff) {
 			continue // a delivery in flight
 		}
+
+		old[guid] = true
 
 		_, ver, verr := u.xattrVer(u.data, chunkOID(guid, 0), xattrRefs)
 		if verr != nil {
@@ -895,15 +1097,20 @@ func (sr *scrubRun) removeOrphans(refs map[string][]Meta) error {
 		}
 	}
 
-	return nil
+	return old, nil
 }
 
 // dropEntry removes an index entry whose blob is gone, bracketed by the
 // account change log like every other removal.
 func (sr *scrubRun) dropEntry(mb *Mailbox, m Meta, rep *ScrubReport) {
-	if _, err := sr.unlinkLogged(mb, []Meta{m}, ""); err != nil {
+	removed, rkeys, err := sr.unlinkLogged(mb, []Meta{m}, "")
+	if err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
+		return
 	}
+
+	// The blob is gone; releasing finds nothing and drops the intents.
+	sr.u.releaseRemoved(mb, removed, rkeys)
 }
 
 // vanishedCandidates returns the remembered orphan candidates that are
@@ -949,10 +1156,13 @@ func (sr *scrubRun) deleteOrphan(guid string, chunks int, st rados.ObjectStat) {
 // left behind when a process died between creating a mailbox object and
 // registering its name, or between unregistering and deleting. Nothing
 // can reach them (mailbox ids are random).
-func (sr *scrubRun) collectUnknownIndex(known map[string]bool) ([]string, error) {
+//
+// It also returns the mark objects removeStaleMarks found stale (for the
+// shadow comparison).
+func (sr *scrubRun) collectUnknownIndex(known map[string]bool) ([]string, []string, error) {
 	iter, err := listObjects(sr.u.idx, listScrubUnknown)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var unknown, marks []string
@@ -970,18 +1180,16 @@ func (sr *scrubRun) collectUnknownIndex(known map[string]bool) ([]string, error)
 
 	iter.Close()
 
-	sr.removeStaleMarks(marks)
-
-	return unknown, nil
+	return unknown, sr.removeStaleMarks(marks), nil
 }
 
 // removeStaleMarks deletes the private \Seen marks of public folders
 // that no longer exist. The marks live in this account's namespace, so
 // nobody else can reach them: deleting the folder cannot, and neither
 // can the account that deleted it.
-func (sr *scrubRun) removeStaleMarks(oids []string) {
+func (sr *scrubRun) removeStaleMarks(oids []string) []string {
 	if len(oids) == 0 || sr.u.name == model.PublicNamespace {
-		return
+		return nil
 	}
 
 	live, err := sr.publicMailboxIDs()
@@ -989,13 +1197,17 @@ func (sr *scrubRun) removeStaleMarks(oids []string) {
 		sr.log.Warn("scrub: public folders not readable, marks kept", "err", err)
 		sr.rep.Errors = append(sr.rep.Errors, "public folders: "+err.Error())
 
-		return
+		return nil
 	}
+
+	var stale []string
 
 	for _, oid := range oids {
 		if live[strings.TrimPrefix(oid, oidPrivateSeen)] {
 			continue
 		}
+
+		stale = append(stale, oid)
 
 		scrubFinding("stale_marks")
 
@@ -1011,6 +1223,8 @@ func (sr *scrubRun) removeStaleMarks(oids []string) {
 			sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("remove %s: %v", oid, err))
 		}
 	}
+
+	return stale
 }
 
 // publicMailboxIDs returns the ids of the public folders that exist. A

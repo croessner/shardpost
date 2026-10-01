@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,6 +145,7 @@ type User struct {
 	legacyDict    int
 	acctRetention int
 	limits        model.Limits
+	uploadTTL     time.Duration
 	shardSize     uint32
 	limit         QuotaLimit
 	rules         *quota.Policy
@@ -155,6 +158,12 @@ type User struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]cachedMailbox
+	// pubSeen caches the public folders whose "ps:" intent this view
+	// knows to be recorded (under cacheMu).
+	pubSeen map[string]bool
+
+	// intents are finished intents waiting to be removed (intents.go).
+	intents intentBatch
 
 	// traceCtx is the context of the command currently running on this
 	// view, spans the number of store spans it produced (see tracing.go).
@@ -172,8 +181,11 @@ type cachedMailbox struct {
 // caller: destroying an IOContext that a notify still uses would crash
 // inside librados.
 func (u *User) Close() {
+	u.stopIntentTimer()
+
 	go func() {
 		u.inflight.Wait()
+		u.flushIntents(false)
 		u.idx.Destroy()
 		u.data.Destroy()
 		u.idxPool.destroy()
@@ -385,21 +397,23 @@ func (u *User) CreateMailbox(name string, specialUse []string) error {
 		return err
 	}
 
-	// 1. The index object under its fresh id (nobody can race for it).
-	err = u.createIndexObject(&rec)
-	if err != nil {
+	// 1. The index object under its fresh id (nobody can race for it),
+	//    announced by its intent first: an object the name never comes to
+	//    point at is found through the intent, not by listing the pool.
+	if err := u.createIntended(&rec, name, u.shardSize); err != nil {
 		acct.withdraw()
 
 		return fmt.Errorf("create mailbox %q: %w", name, err)
 	}
 
-	// 2. Claim the name in the registry. Concurrent creators on different
-	//    pods race here; exactly one wins, the others see the name taken.
+	// 2. Claim the name in the registry (which drops the intent).
+	//    Concurrent creators on different pods race here; exactly one
+	//    wins, the others see the name taken.
 	exists, err := u.claimName(name, &rec)
 	if err != nil || exists {
 		acct.settle(err, false, rec.ID)
 
-		_ = u.idx.Delete(mboxOID(rec.ID))
+		u.abandonCreated(rec.ID)
 
 		if err != nil {
 			return fmt.Errorf("register mailbox %q: %w", name, err)
@@ -430,13 +444,13 @@ func (u *User) claimName(name string, rec *MailboxRec) (exists bool, err error) 
 		exists = false
 		set := map[string][]byte{regKey(name): b, regLastValidity + name: []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10))}
 
-		var rm []string
+		rm := []string{createKey(rec.ID)}
 
 		if _, ok := cur[regSubMissing+name]; ok {
 			rec.Subscribed = true
 			b, _ = json.Marshal(rec)
 			set[regKey(name)] = b
-			rm = []string{regSubMissing + name}
+			rm = append(rm, regSubMissing+name)
 		}
 
 		return set, rm
@@ -445,10 +459,37 @@ func (u *User) claimName(name string, rec *MailboxRec) (exists bool, err error) 
 	return exists, err
 }
 
-// createIndexObject creates the index object (shard 0 with a fresh
-// header) of a new mailbox; it fails if the object exists.
-func (u *User) createIndexObject(rec *MailboxRec) error {
-	return u.createIndexObjectSized(rec, u.shardSize)
+// createIntended records the creation intent ("ci:") of a new mailbox
+// and creates its index object with the shard size; it fails if the
+// object exists (the intent is then dropped again).
+func (u *User) createIntended(rec *MailboxRec, name string, shardSize uint32) error {
+	if err := u.setIntent(map[string][]byte{createKey(rec.ID): encode(mailboxIntent{Time: time.Now().Unix(), Name: name})}); err != nil {
+		return err
+	}
+
+	// On an error the intent stays: an object of that id may exist (a
+	// creation by someone else, or this one if the error came after the
+	// write), and the intent may be another creator's of the same id.
+	// The scrubber settles it.
+	return u.createIndexObjectSized(rec, shardSize)
+}
+
+// abandonCreated deletes the index object of a mailbox whose name was
+// not registered, then its creation intent.
+func (u *User) abandonCreated(id string) {
+	if err := u.idx.Delete(mboxOID(id)); err != nil && errCode(err) != syscall.ENOENT {
+		u.log.Warn("abandoned mailbox object not deleted", "id", id, "err", err)
+		return // the intent stays: the scrubber deletes the object
+	}
+
+	u.dropCreateIntent(id)
+}
+
+// dropCreateIntent removes the creation intent of a mailbox object.
+func (u *User) dropCreateIntent(id string) {
+	if err := rmKeys(u.idx, oidRegistry, []string{createKey(id)}); err != nil {
+		u.log.Warn("creation intent not removed", "id", id, "err", err)
+	}
 }
 
 // createIndexObjectSized is createIndexObject with the given shard size.
@@ -491,6 +532,16 @@ func (u *User) EnsureMailbox(name string, specialUse []string) error {
 // DeleteMailbox removes the mailbox, its index shards and all its messages.
 // Child mailboxes are kept (their parent becomes an implicit \Noselect
 // node), as RFC 9051 requires.
+//
+// The registry entry goes first, replaced by a tombstone ("dm:", see
+// intents.go) in the same CAS; then the header of shard 0 is retired, so
+// that no delivery that looked the mailbox up before can allocate a UID
+// in it any more; then the blobs are released and the shards deleted top
+// down, shard 0 last; the tombstone goes at the end. A crash on the way
+// leaves the tombstone, from which the scrubber completes the deletion
+// without listing the pools. So does a delivery whose entry for a higher
+// shard was still on its way when the header was retired: the tombstone
+// is then kept for the scrubber.
 func (u *User) DeleteMailbox(name string) error {
 	mb, err := u.Lookup(name)
 	if err != nil {
@@ -531,7 +582,7 @@ func (u *User) DeleteMailbox(name string) error {
 	// concurrent DELETEs exactly one wins and releases the blobs, and a
 	// mailbox re-created under the name meanwhile is left alone. The
 	// subscription and the ACL come from that winning snapshot.
-	snap, lost, err := u.unregisterLogged(mb, lease, metas)
+	snap, lost, err := u.unregisterLogged(mb, lease, metas, info)
 	if err != nil {
 		return fmt.Errorf("unregister mailbox %q: %w", name, err)
 	}
@@ -544,13 +595,168 @@ func (u *User) DeleteMailbox(name string) error {
 
 	u.dropSharedRefs(snap.ACL, mb.Name)
 
-	q := u.releaseMessages(metas)
+	return u.destroyUnregistered(mb, info, metas, name)
+}
 
-	if err := u.deleteShards(mb, info, name); err != nil {
-		return err
+// destroyUnregistered is the part of DeleteMailbox after the registry
+// entry was replaced by the tombstone: retire the header, release the
+// blobs, delete the shards, drop the tombstone. metas (read before the
+// unregistration) only serve the account log, which recorded them; what
+// is released is what the shards hold once the header is retired, since
+// another session may have removed (and released) an entry meanwhile.
+//
+// The usage of the entries is released in any case: the mailbox is no
+// longer registered, so its entries count nowhere. Whatever is left
+// undone stays with the tombstone, from which the scrubber completes the
+// deletion (it recounts the blobs, it never releases twice).
+func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta, name string) error {
+	final, inFlight, err := u.retireDeleted(mb, info)
+	if err != nil {
+		u.log.Warn("delete: header not retired, left to the scrubber", "mailbox", name, "err", err)
+
+		q := sizeOf(metas)
+
+		return u.releaseUsage(mb, Quota{Bytes: -q.Bytes, Msgs: -q.Msgs})
 	}
 
+	if final == nil {
+		// No shard 0 and no header read before. Higher shards that are
+		// left keep the tombstone, which names them for the scrubber
+		// (it probes above the range); otherwise nothing is left.
+		if u.lastShard(mb.ID, nil) == 0 {
+			u.dropTombstone(mb, name)
+		}
+
+		return u.releaseUsage(mb, Quota{})
+	}
+
+	entries, foreign, err := u.entriesToRelease(mb.ID, final)
+	if err != nil {
+		u.log.Warn("delete: entries not read, left to the scrubber", "mailbox", name, "err", err)
+		return nil
+	}
+
+	// A removal of another session whose release is still to come (its
+	// r: key on shard 0) or a delivery whose entry is still on its way:
+	// the tombstone (with the range the header had when it was retired)
+	// and the shards stay for the scrubber, which counts what they hold
+	// once the grace period is over.
+	if inFlight || foreign {
+		u.keepTombstone(mb, final, name)
+	}
+
+	q, failed := u.releaseMessages(entries)
+	if failed > 0 || foreign || inFlight {
+		// The shards are the only record of which blobs still hold a
+		// reference too many: they stay with the tombstone.
+		u.log.Warn("delete: shards left to the scrubber", "mailbox", name, "failed", failed, "foreign_removals", foreign,
+			"in_flight", inFlight)
+
+		return u.releaseUsage(mb, q)
+	}
+
+	if err := u.deleteShardRange(mb.ID, u.lastShard(mb.ID, final)); err != nil {
+		return errors.Join(err, u.releaseUsage(mb, q))
+	}
+
+	u.dropTombstone(mb, name)
+
 	return u.releaseUsage(mb, q)
+}
+
+// dropTombstone removes the tombstone of a finished deletion.
+func (u *User) dropTombstone(mb *Mailbox, name string) {
+	if err := rmKeys(u.idx, oidRegistry, []string{deleteKey(mb.ID)}); err != nil {
+		u.log.Warn("delete: tombstone not removed", "mailbox", name, "err", err)
+	}
+}
+
+// keepTombstone rewrites the tombstone with the range of the retired
+// header, for the scrubber.
+func (u *User) keepTombstone(mb *Mailbox, final *MailboxInfo, name string) {
+	if err := u.setIntent(map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final)}); err != nil {
+		u.log.Warn("delete: tombstone not updated", "mailbox", name, "err", err)
+	}
+}
+
+// entriesToRelease reads the entries a deleted mailbox holds after its
+// header was retired (no session can remove one any more, unless its
+// removal already started): every shard of the range and above it. An
+// entry whose removal intent (r:) is on shard 0 belongs to the session
+// that removes it and is left out; foreign reports that there was one.
+func (u *User) entriesToRelease(id string, final *MailboxInfo) ([]Meta, bool, error) {
+	if final == nil {
+		return nil, false, nil
+	}
+
+	removals, err := u.removeIntents(id)
+	if err != nil {
+		return nil, false, err
+	}
+
+	theirs := make(map[uint32]bool, len(removals))
+	for k := range removals {
+		theirs[uidOfKey(strings.Replace(k, keyRemovePrefix, keyMsgPrefix, 1))] = true
+	}
+
+	var out []Meta
+
+	for s := uint32(0); s <= u.lastShard(id, final); s++ {
+		vals, err := u.idx.GetAllOmapValues(u.shardOID(id, s), "", keyMsgPrefix, omapPageSize)
+		if err != nil && errCode(err) != syscall.ENOENT {
+			return nil, false, err
+		}
+
+		for _, v := range vals {
+			var m Meta
+			if json.Unmarshal(v, &m) == nil && !theirs[m.UID] {
+				out = append(out, m)
+			}
+		}
+	}
+
+	return out, len(removals) > 0, nil
+}
+
+// retireDeleted retires the header of an unregistered mailbox (UIDNEXT 0,
+// the old value kept under h:retired) and returns the header as it was
+// then and whether a delivery may still write an entry to a higher shard
+// (a pending change younger than pendingMaxAge). A missing shard 0
+// returns info unchanged.
+func (u *User) retireDeleted(mb *Mailbox, info *MailboxInfo) (*MailboxInfo, bool, error) {
+	var final *MailboxInfo
+
+	err := casOmap(u, u.idx, mboxOID(mb.ID), []string{keyUIDNext, keyRetired, keyShardSize, keyModSeq},
+		func(cur map[string][]byte) (map[string][]byte, []string) {
+			final = nil
+
+			if _, ok := cur[keyUIDNext]; !ok {
+				return nil, nil // no shard 0: nothing to retire
+			}
+
+			n := max(retiredUIDNext(cur), 1)
+			ss, _ := strconv.ParseUint(string(cur[keyShardSize]), 10, 32)
+			ms, _ := strconv.ParseUint(string(cur[keyModSeq]), 10, 64)
+			final = &MailboxInfo{Mailbox: *mb, UIDNext: n, ShardSize: uint32(ss), HighestModSeq: ms}
+
+			if final.ShardSize == 0 {
+				final.ShardSize = DefaultShardSize
+			}
+
+			return map[string][]byte{keyUIDNext: []byte("0"), keyRetired: []byte(strconv.FormatUint(uint64(n), 10))}, nil
+		})
+	if err != nil || final == nil {
+		return info, false, err
+	}
+
+	inFlight := false
+
+	if shardOf(max(final.UIDNext-1, 1), final.ShardSize) > 0 {
+		_, pending, err := u.PendingFloor(mb.ID, final.HighestModSeq)
+		inFlight = pending || err != nil
+	}
+
+	return final, inFlight, nil
 }
 
 // unregisterLogged unregisters a mailbox and records both the mailbox
@@ -562,13 +768,13 @@ func (u *User) DeleteMailbox(name string) error {
 // as having come and gone. Marking the entry Partial instead would make
 // every reader resynchronise after the deletion of a mailbox, which is
 // an ordinary thing for a client to do — most often of an empty one.
-func (u *User) unregisterLogged(mb *Mailbox, lease model.Lease, metas []Meta) (MailboxRec, bool, error) {
+func (u *User) unregisterLogged(mb *Mailbox, lease model.Lease, metas []Meta, info *MailboxInfo) (MailboxRec, bool, error) {
 	acct, err := u.beginAccount(emailSpec(mb.ID), mailboxSpec(mb.ID, mb.Name))
 	if err != nil {
 		return MailboxRec{}, false, err
 	}
 
-	snap, lost, err := u.unregisterMailbox(mb, lease)
+	snap, lost, err := u.unregisterMailbox(mb, lease, info)
 
 	switch {
 	case err != nil:
@@ -599,12 +805,14 @@ func (u *User) readForDelete(mb *Mailbox) (*MailboxInfo, []Meta, error) {
 }
 
 // unregisterMailbox removes the registry entry of mb if it still names
-// this mailbox (same id) and the lease is held. It returns the record it
-// removed and lost=true if it did not remove it.
-func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease) (MailboxRec, bool, error) {
+// this mailbox (same id) and the lease is held, and records the deletion
+// tombstone with the range of info in the same CAS. It returns the record
+// it removed and lost=true if it did not remove it.
+func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease, info *MailboxInfo) (MailboxRec, bool, error) {
 	var snap MailboxRec
 
 	lost := false
+	tomb := map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, info)}
 
 	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		lost = true
@@ -620,38 +828,59 @@ func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease) (MailboxRec, bo
 
 		lost = false
 
+		set := maps.Clone(tomb)
 		if snap.Subscribed { // the subscription survives as one to a missing name
-			return map[string][]byte{regSubMissing + mb.Name: []byte("1")}, []string{regKey(mb.Name)}
+			set[regSubMissing+mb.Name] = []byte("1")
 		}
 
-		return nil, []string{regKey(mb.Name)}
+		return set, []string{regKey(mb.Name)}
 	})
 
 	return snap, lost, err
 }
 
+// deletionTombstone is the "dm:" value of a mailbox about to be deleted.
+func deletionTombstone(mb *Mailbox, info *MailboxInfo) []byte {
+	t := mailboxIntent{Time: time.Now().Unix(), Name: mb.Name}
+	if info != nil {
+		t.UIDNext, t.ShardSize = info.UIDNext, info.ShardSize
+	}
+
+	return encode(t)
+}
+
 // releaseMessages drops the blob references of the entries of a deleted
-// mailbox and returns the (negative) quota delta.
-func (u *User) releaseMessages(metas []Meta) Quota {
+// mailbox and returns the (negative) quota delta and how many releases
+// failed.
+func (u *User) releaseMessages(metas []Meta) (Quota, int) {
 	var q Quota
+
+	failed := 0
 
 	for i := range metas {
 		if err := u.releaseBlob(&metas[i]); err != nil {
 			u.log.Warn("orphan blob", "guid", metas[i].GUID, "err", err)
+
+			failed++
 		}
 
 		q.Bytes -= metas[i].Size
 		q.Msgs--
 	}
 
-	return q
+	return q, failed
 }
 
-// deleteShards deletes the index objects of a deleted mailbox; name is
-// the name used in the error.
+// deleteShards deletes the index objects of a deleted mailbox from the
+// highest shard down, shard 0 (with the header that gives the range)
+// last; name is the name used in the error.
 func (u *User) deleteShards(mb *Mailbox, info *MailboxInfo, name string) error {
-	for s := uint32(0); info != nil && s <= shardOf(max(info.UIDNext-1, 1), info.ShardSize); s++ {
-		if err := u.idx.Delete(u.shardOID(mb.ID, s)); err != nil && errCode(err) != syscall.ENOENT {
+	if info == nil {
+		return nil
+	}
+
+	for s := int64(shardOf(max(info.UIDNext-1, 1), info.ShardSize)); s >= 0; s-- {
+		if err := u.idx.Delete(u.shardOID(mb.ID, uint32(s))); err != nil && errCode(err) != syscall.ENOENT {
 			return fmt.Errorf("delete index %q shard %d: %w", name, s, err)
 		}
 	}
@@ -1154,12 +1383,27 @@ type reservation struct {
 // reservations of the others). ErrOverQuota leaves the counters
 // untouched.
 func (u *User) reserve(mb *Mailbox, total Quota) (*reservation, error) {
+	return u.reserveWith(mb, total, nil)
+}
+
+// reserveWith is reserve that also sets the registry keys intents in the
+// same CAS (written even when nothing is to be reserved, then in a CAS of
+// their own, and not at all on ErrOverQuota). Finished intents of the
+// view go along with either write (intents.go).
+func (u *User) reserveWith(mb *Mailbox, total Quota, intents map[string][]byte) (*reservation, error) {
 	r := &reservation{u: u, total: total}
 	if !u.rules.Counts(mb) || (total.Bytes == 0 && total.Msgs == 0) {
+		if len(intents) > 0 {
+			if err := u.setIntent(intents); err != nil {
+				return nil, err
+			}
+		}
+
 		return r, nil
 	}
 
 	over := false
+	done := u.takeIntents()
 
 	err := casOmap(u, u.idx, oidRegistry, quotaKeys, func(cur map[string][]byte) (map[string][]byte, []string) {
 		over = false
@@ -1170,8 +1414,15 @@ func (u *User) reserve(mb *Mailbox, total Quota) (*reservation, error) {
 			return nil, nil
 		}
 
-		return usageValues(Quota{Bytes: max(r.before.Bytes+total.Bytes, 0), Msgs: max(r.before.Msgs+total.Msgs, 0)}), nil
+		set := usageValues(Quota{Bytes: max(r.before.Bytes+total.Bytes, 0), Msgs: max(r.before.Msgs+total.Msgs, 0)})
+		maps.Copy(set, intents)
+
+		return set, done
 	})
+	if err != nil || over {
+		u.restoreIntents(done)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -1427,6 +1678,10 @@ func (u *User) commitPending(mb *Mailbox, modseq uint64, chg *changeRec, rm []st
 
 	op := rados.CreateWriteOp()
 	defer op.Release()
+
+	// A mailbox deleted meanwhile must not get its shard 0 back as an
+	// object that holds nothing but this record.
+	op.AssertExists()
 
 	set := map[string][]byte{chgKey(modseq): b}
 
@@ -1907,6 +2162,10 @@ func (u *User) Deliver(name string, raw []byte, flags []string, when time.Time) 
 }
 
 // DeliverGUID is Deliver with a caller-chosen GUID (delivery intents).
+//
+// The blob intent "bi:<guid>" is set in the reservation's CAS, before the
+// blob is written, and queued for removal once the entry is linked (or
+// the blob is deleted again); see intents.go.
 func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when time.Time) (stored *Meta, err error) {
 	end := u.trace(spanDeliver, attrBytes(len(raw)))
 	defer func() { end(err) }()
@@ -1926,30 +2185,60 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 	// The quota is reserved before anything is written; a failure below
 	// gives it back. Mailboxes a rule ignores reserve nothing.
 	size := Quota{Bytes: int64(len(raw)), Msgs: 1}
+	intent := blobIntentKey(guid)
 
-	res, err := u.reserve(mb, size)
+	u.intentAgain(intent)
+
+	res, err := u.reserveWith(mb, size, map[string][]byte{intent: u.newBlobIntent(size.Bytes)})
 	if err != nil {
 		return nil, err
 	}
 
-	release := func() { res.settle(Quota{}) }
+	// undo gives back what was done when the message cannot be stored:
+	// the blob goes, and with it the intent (unless the blob may still
+	// be there; then the scrubber deletes it).
+	undo := func(chunks int, indexed bool) {
+		if indexed {
+			_ = u.ftsRemove(&Meta{GUID: guid, Size: size.Bytes, Chunks: chunks})
+		}
 
+		// After a failed blob write (chunks 0) the write removed what it
+		// created; the intent stays for anything it could not.
+		if chunks > 0 && u.deleteBlobAll(guid, chunks) {
+			u.intentDone(intent)
+		}
+
+		res.settle(Quota{})
+	}
+
+	meta, err := u.storeAndLink(mb, guid, raw, flags, when, undo)
+	if err != nil {
+		return nil, err
+	}
+
+	res.settle(size)
+	u.intentDone(intent)
+
+	return meta, nil
+}
+
+// storeAndLink writes the blob and its postings and links the entry; on
+// failure it calls undo with what is to be given back.
+func (u *User) storeAndLink(mb *Mailbox, guid string, raw []byte, flags []string, when time.Time, undo func(chunks int, indexed bool)) (*Meta, error) {
 	if when.IsZero() {
 		when = time.Now()
 	}
 
 	chunks, err := u.writeBlob(guid, raw)
 	if err != nil {
-		release()
+		undo(0, false)
 		return nil, fmt.Errorf("write blob: %w", err)
 	}
 
 	if err := u.ftsIndex(guid, raw); err != nil {
 		// What was indexed before the failure goes again; the blob is
 		// still there for that.
-		_ = u.ftsRemove(&Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks})
-		u.deleteBlob(guid, chunks)
-		release()
+		undo(chunks, true)
 
 		return nil, err
 	}
@@ -1961,14 +2250,10 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 
 	meta, err := u.linkLogged(mb, m)
 	if err != nil {
-		_ = u.ftsRemove(&m)
-		u.deleteBlob(guid, chunks)
-		release()
+		undo(chunks, true)
 
 		return nil, err
 	}
-
-	res.settle(size)
 
 	return meta, nil
 }
@@ -2593,7 +2878,7 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 		return err
 	}
 
-	removed, modseq, err := u.unlink(mb, metas, "")
+	removed, modseq, rkeys, err := u.unlink(mb, metas, "")
 	if err != nil {
 		acct.partial()
 		return err
@@ -2605,19 +2890,13 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 		acct.commit(emailChange(model.OpDestroyed, modseq, removed))
 	}
 	// Index no longer references the blobs; drop our reference. A failure
-	// here only leaves orphans, never dangling index entries.
-	var q Quota
+	// here leaves the removal intent for the scrubber, never dangling
+	// index entries.
+	u.releaseRemoved(mb, removed, rkeys)
 
-	for i := range removed {
-		if err := u.releaseBlob(&removed[i]); err != nil {
-			u.log.Warn("orphan blob", "guid", removed[i].GUID, "err", err)
-		}
+	q := sizeOf(removed)
 
-		q.Bytes -= removed[i].Size
-		q.Msgs--
-	}
-
-	return u.releaseUsage(mb, q)
+	return u.releaseUsage(mb, Quota{Bytes: -q.Bytes, Msgs: -q.Msgs})
 }
 
 // unlink removes index entries and writes the change/vanished records.
@@ -2627,7 +2906,12 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 // if set, is the MOVE intent to drop with the last durable step. Returns
 // the entries that were removed, so callers release exactly those
 // references.
-func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) ([]Meta, uint64, error) {
+//
+// The header CAS also records a removal intent ("r:<uid>", intents.go) for
+// every entry it removes from shard 0 or announces on a higher shard;
+// their keys are returned as rkeys, and the caller drops them with
+// releaseRemoved once the blob references are released.
+func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) (removed []Meta, modseq uint64, rkeys []string, err error) {
 	byUID := map[uint32]Meta{}
 	for _, m := range metas {
 		byUID[m.UID] = m
@@ -2640,32 +2924,33 @@ func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) ([]Meta, uint6
 		extraRm = []string{keyIntentPrefix + intentID}
 	}
 
-	removed, chg, modseq, err := u.unlinkHeader(mb, metas, extraRm, higher)
+	removed, chg, modseq, rkeys, err := u.unlinkHeader(mb, metas, extraRm, higher)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	if chg == nil || !chg.Pending {
-		return removed, modseq, nil
+		return removed, modseq, rkeys, nil
 	}
 
 	removed, err = u.unlinkHigher(mb, byUID, higher, removed, chg, modseq, extraRm)
 
-	return removed, modseq, err
+	return removed, modseq, rkeys, err
 }
 
 // unlinkHeader is phase 1 of unlink: the header CAS removes the shard 0
 // entries that still exist and announces the UIDs on higher shards
 // (filled into higher) as pending. It returns the removed shard 0 entries
 // and the change record.
-func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher map[string][]string) ([]Meta, *changeRec, uint64, error) {
+func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher map[string][]string) ([]Meta, *changeRec, uint64, []string, error) {
 	var (
 		removed []Meta
 		chg     *changeRec
+		rkeys   []string
 	)
 
 	_, modseq, err := u.casHeader(mb, func(info *MailboxInfo, _ uint64) (*headerChange, error) {
-		removed = removed[:0]
+		removed, rkeys = removed[:0], rkeys[:0]
 
 		for k := range higher {
 			delete(higher, k)
@@ -2697,7 +2982,12 @@ func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher 
 			return nil, nil
 		}
 
-		hc := &headerChange{rm: rm, chg: chg}
+		set := removalSet(time.Now().Unix(), append(slices.Clone(removed), announcedMetas(metas, higher)...))
+		for k := range set {
+			rkeys = append(rkeys, k)
+		}
+
+		hc := &headerChange{set: set, rm: rm, chg: chg}
 		if !chg.Pending {
 			hc.rm = append(hc.rm, extraRm...)
 		}
@@ -2705,7 +2995,33 @@ func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher 
 		return hc, nil
 	})
 
-	return removed, chg, modseq, err
+	return removed, chg, modseq, rkeys, err
+}
+
+// announcedMetas returns the entries of metas whose keys higher lists
+// (the entries announced for higher shards).
+func announcedMetas(metas []Meta, higher map[string][]string) []Meta {
+	if len(higher) == 0 {
+		return nil
+	}
+
+	want := map[string]bool{}
+
+	for _, keys := range higher {
+		for _, k := range keys {
+			want[k] = true
+		}
+	}
+
+	var out []Meta
+
+	for _, m := range metas {
+		if want[uidKey(m.UID)] {
+			out = append(out, m)
+		}
+	}
+
+	return out
 }
 
 // partitionMetas returns the UIDs of the entries that live on shard 0 of
@@ -2986,18 +3302,14 @@ func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
 		mv.out = append(mv.out, *nm)
 	}
 
-	removed, modseq, err := u.unlink(smb, metas, intent.ID)
+	removed, modseq, rkeys, err := u.unlink(smb, metas, intent.ID)
 	if err != nil {
 		return mv, err
 	}
 
 	mv.modseq = modseq
 
-	for i := range removed {
-		if err := u.releaseBlob(&removed[i]); err != nil {
-			u.log.Warn("release after move", "guid", removed[i].GUID, "err", err)
-		}
-	}
+	u.releaseRemoved(smb, removed, rkeys)
 
 	mv.removed = removed
 	mv.freed = sizeOf(removed)
@@ -3087,15 +3399,23 @@ func (u *User) RecordDelivery(id, mailbox, guid string) error {
 	})
 }
 
-// EndDelivery removes the intent (id "" is a no-op).
+// EndDelivery removes the intent (id "" is a no-op), together with the
+// blob intents of the deliveries it covered (intents.go).
 func (u *User) EndDelivery(id string) error {
 	if id == "" {
 		return nil
 	}
 
-	return casOmap(u, u.idx, oidRegistry, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
-		return nil, []string{regDeliveryPrefix + id}
+	done := u.takeIntents()
+
+	err := casOmap(u, u.idx, oidRegistry, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return nil, append([]string{regDeliveryPrefix + id}, done...)
 	})
+	if err != nil {
+		u.restoreIntents(done)
+	}
+
+	return err
 }
 
 // deliveryIntents lists the recorded intents (scrubber).

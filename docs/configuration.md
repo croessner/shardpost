@@ -417,13 +417,20 @@ and [batches over all accounts](admin-api.md#batches-over-all-accounts).
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `scrub.users` | `SCRUB_USERS` | "" | accounts `shardpost scrub` scrubs, comma-separated; empty: every account (not with `--batch`) |
-| `scrub.grace_seconds` | `SCRUB_GRACE_SECONDS` | 3600 | objects younger than this are left alone (operations in flight); the batch scrub uses the servers' value |
+| `scrub.grace_seconds` | `SCRUB_GRACE_SECONDS` | 3600 | objects younger than this are left alone (operations in flight); the batch scrub uses the servers' value; with `scrub.orphan_source: intents` and for `scrub --sweep --repair` at least 600 apply |
 | `scrub.dry_run` | `SCRUB_DRY_RUN` | false | report only; `scrub --batch` then submits a batch of `index_check` |
 | `scrub.parallel` | `SCRUB_PARALLEL` | 2 | accounts a batch scrub works on at once in the server that runs it (1–32) |
 | `scrub.interval_days` | `SCRUB_INTERVAL_DAYS` | 7 | a batch scrub with `skip_idle` scrubs an idle account again at the latest after this many days (1–365) |
+| `scrub.orphan_source` | `SCRUB_ORPHAN_SOURCE` | `shadow` | where a scrub finds what a crash left behind: `listing` lists the account's namespace in both pools (before 0.42.0), `shadow` lists and repairs from the listing and reports where the intents differ, `intents` reads the intents only and lists nothing; `intents` only when every server runs 0.42.0 or later (nothing checks it: messages that older servers move or expunge would look like orphans) |
+| `scrub.intent_grace_seconds` | `SCRUB_INTENT_GRACE_SECONDS` | 3600 | how old an intent must be before a scrub takes it for the leftover of a crash (600–604800) |
+| `scrub.sweep_clock_margin_seconds` | `SCRUB_SWEEP_CLOCK_MARGIN_SECONDS` | 60 | how far before reading a namespace `scrub --sweep` draws the line after which no object is a remnant, when that read is later than now less the grace period (1–3600); object mtimes have whole seconds and come from the writer's clock |
+| `scrub.sweep_spill_shards` | `SCRUB_SWEEP_SPILL_SHARDS` | 256 | spill objects per pool of a new `shardpost scrub --sweep` (1–4096); more keep each smaller for a cluster with many objects |
+| `purge.listing` | `PURGE_LISTING` | true | a purge lists the account's namespaces and deletes what it finds, as before 0.42.0, and reports what the data model does not name; `false` deletes what the data model names and lists nothing (see [operations](operations/README.md#scrub-without-listings)) |
 
-`scrub.parallel` and `scrub.interval_days` take effect in the servers
-that run the batch, not in the pod that submits it.
+`scrub.parallel`, `scrub.interval_days`, `scrub.orphan_source` and
+`scrub.intent_grace_seconds` take effect in the servers that run the
+batch, not in the pod that submits it. For the switch from `shadow` to
+`intents` see [operations](operations/README.md#scrub-without-listings).
 
 ### IMAP watches (`server.imap_max_watches`)
 

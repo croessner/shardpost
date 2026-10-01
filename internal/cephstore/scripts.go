@@ -104,8 +104,36 @@ func (u *User) PutScript(name, text string) error {
 		return ErrTooLarge
 	}
 
+	// An account that only keeps Sieve scripts (ManageSieve, the admin
+	// API) gets its registry, and with it its directory entry: without
+	// them its scripts would look like debris to the sweep.
+	if err := u.ensureRegistry(); err != nil {
+		return err
+	}
+
 	return casOmap(u, u.idx, oidSieve, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
 		return map[string][]byte{sieveKeyPrefix + name: []byte(text)}, nil
+	})
+}
+
+// regCreated is the registry key that ensureRegistry writes when it
+// creates the registry (the time, unix seconds).
+const regCreated = "created"
+
+// ensureRegistry creates the account's registry when it has none (one
+// read when it exists); the directory hook registers the account.
+func (u *User) ensureRegistry() error {
+	_, ver, err := u.getKeysVer(u.idx, oidRegistry, []string{regCreated})
+	if err != nil || ver != 0 {
+		return err
+	}
+
+	return casOmap(u, u.idx, oidRegistry, []string{regCreated}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		if _, ok := cur[regCreated]; ok {
+			return nil, nil
+		}
+
+		return map[string][]byte{regCreated: []byte(strconv.FormatInt(time.Now().Unix(), 10))}, nil
 	})
 }
 

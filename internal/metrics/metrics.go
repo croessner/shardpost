@@ -96,6 +96,22 @@ var (
 		Namespace: namespace, Subsystem: subsystemScrub, Name: "findings_total",
 		Help: "Scrubber findings by kind.",
 	}, []string{labelKind})
+	// ScrubShadowDiff counts what a scrub in shadow mode found by listing
+	// and the intents did not name (orphan_missed, unknown_missed,
+	// marks_missed), and what the intents took for an orphan that the
+	// listing did not (orphan_extra). Before the scrub may switch to
+	// intents only, the first must stay at what the sweep cleans up and
+	// the second at zero.
+	ScrubShadowDiff = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemScrub, Name: "shadow_differences_total",
+		Help: "Differences between the listing and the intents in a scrub in shadow mode, by kind.",
+	}, []string{labelKind})
+	// PurgeUnnamed counts objects a purge with listing found that the
+	// data model did not name (they are deleted all the same).
+	PurgeUnnamed = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemScrub, Name: "purge_unnamed_objects_total",
+		Help: "Objects a purge found by listing that the account's data model did not name.",
+	})
 	// QueueOps counts the operations on due queues (scaling plan B1) by
 	// queue, operation (move, due) and outcome (ok, error).
 	QueueOps = promauto.NewCounterVec(prometheus.CounterOpts{

@@ -26,7 +26,7 @@ func loadConfig(args []string) (*config.Config, string, error) {
 			}
 
 			path = args[i]
-		case commandScrub, commandPush, flagBatch:
+		case commandScrub, commandPush, flagBatch, flagSweep, flagRepair, flagRestart:
 			var err error
 			if command, err = runCommand(command, args[i]); err != nil {
 				return nil, "", err
@@ -56,21 +56,53 @@ func loadConfig(args []string) (*config.Config, string, error) {
 	return c, command, err
 }
 
-// flagBatch makes scrub submit the batch job (commandScrubBatch).
-const flagBatch = "--batch"
+// Flags of scrub: --batch submits the batch job (commandScrubBatch),
+// --sweep runs the sweep (commandScrubSweep), which --repair lets delete
+// and --restart starts over.
+const (
+	flagBatch   = "--batch"
+	flagSweep   = "--sweep"
+	flagRepair  = "--repair"
+	flagRestart = "--restart"
+)
 
-// runCommand applies a command word: scrub, push, or --batch after
-// scrub.
+// runCommand applies a command word: scrub, push, or a flag of scrub.
 func runCommand(command, arg string) (string, error) {
-	if arg != flagBatch {
-		return arg, nil
+	switch arg {
+	case flagBatch, flagSweep:
+		if command != commandScrub {
+			return "", fmt.Errorf("%s belongs to scrub", arg)
+		}
+
+		if arg == flagBatch {
+			return commandScrubBatch, nil
+		}
+
+		return commandScrubSweep, nil
+	case flagRepair, flagRestart:
+		if !strings.HasPrefix(command, commandScrubSweep) || strings.Contains(command, arg) {
+			return "", fmt.Errorf("%s belongs to scrub --sweep (once)", arg)
+		}
+
+		return sweepCommand(strings.Contains(command, flagRepair) || arg == flagRepair,
+			strings.Contains(command, flagRestart) || arg == flagRestart), nil
 	}
 
-	if command != commandScrub {
-		return "", fmt.Errorf("--batch belongs to scrub")
+	return arg, nil
+}
+
+// sweepCommand is the sweep command with its flags in a fixed order.
+func sweepCommand(repair, restart bool) string {
+	command := commandScrubSweep
+	if repair {
+		command += " " + flagRepair
 	}
 
-	return commandScrubBatch, nil
+	if restart {
+		command += " " + flagRestart
+	}
+
+	return command
 }
 
 // showCommand builds "index show kv|learning" (command) with the keys

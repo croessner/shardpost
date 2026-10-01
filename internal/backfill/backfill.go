@@ -329,6 +329,8 @@ func (r *run) repair(e model.IndexEntry) error {
 		return fmt.Errorf("repair %q: %w", e.ID, err)
 	}
 
+	jobs.ForgetActivated(r.src, res)
+
 	r.rep.Repaired[res.Action]++
 
 	if res.Action != model.RepairNone {

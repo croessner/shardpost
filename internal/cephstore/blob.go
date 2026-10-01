@@ -39,7 +39,10 @@ func (u *User) chunkCount(size int64) int {
 	return int((size + u.chunkSize - 1) / u.chunkSize)
 }
 
-// writeBlob stores raw under guid and sets refs=1 on chunk 0.
+// writeBlob stores raw under guid and sets refs=1 on chunk 0. Every
+// chunk is created exclusively; on a failure the chunks this call created
+// are deleted again, never one that existed before (a chunk of another
+// blob under the same GUID).
 func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
 	end := u.trace(spanBlobWrite, attrGUID(guid), attrBytes(len(raw)))
 	defer func() { end(err) }()
@@ -47,6 +50,7 @@ func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
 	chunks = u.chunkCount(int64(len(raw)))
 	errs := make(chan error, chunks)
 	sem := make(chan struct{}, blobParallelism)
+	created := make([]bool, chunks)
 
 	var wg sync.WaitGroup
 
@@ -75,7 +79,10 @@ func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
 
 			if err := op.Operate(u.data, chunkOID(guid, n), rados.OperationNoFlag); err != nil {
 				errs <- fmt.Errorf("write chunk %d: %w", n, err)
+				return
 			}
+
+			created[n] = true
 		}(n, raw[lo:hi])
 	}
 
@@ -83,7 +90,14 @@ func (u *User) writeBlob(guid string, raw []byte) (chunks int, err error) {
 	close(errs)
 
 	if err := <-errs; err != nil {
-		u.deleteBlob(guid, chunks)
+		for n, ok := range created {
+			if ok {
+				if derr := u.data.Delete(chunkOID(guid, n)); derr != nil && errCode(derr) != syscall.ENOENT {
+					u.log.Warn("orphan chunk", "guid", guid, "chunk", n, "err", derr)
+				}
+			}
+		}
+
 		return 0, err
 	}
 
@@ -139,12 +153,22 @@ func (u *User) readBlob(m *Meta) (raw []byte, err error) {
 }
 
 // deleteBlob removes all chunks (best effort, ENOENT ignored).
-func (u *User) deleteBlob(guid string, chunks int) {
+func (u *User) deleteBlob(guid string, chunks int) { u.deleteBlobAll(guid, chunks) }
+
+// deleteBlobAll removes all chunks (ENOENT ignored) and reports whether
+// every one is gone; a failure is logged.
+func (u *User) deleteBlobAll(guid string, chunks int) bool {
+	ok := true
+
 	for n := 0; n < max(chunks, 1); n++ {
 		if err := u.data.Delete(chunkOID(guid, n)); err != nil && errCode(err) != syscall.ENOENT {
 			u.log.Warn("orphan chunk", "guid", guid, "chunk", n, "err", err)
+
+			ok = false
 		}
 	}
+
+	return ok
 }
 
 // ErrGone is returned when a blob is being garbage collected.
@@ -222,21 +246,6 @@ func (u *User) releaseBlob(m *Meta) error {
 	u.deleteBlob(m.GUID, m.Chunks)
 
 	return nil
-}
-
-// PutBlob implements model.Blobs: it stores raw under a fresh GUID with
-// one reference, so that nothing collects it while the client is still
-// looking at the response. Nothing points at the blob yet, so the
-// scrubber sees it as an orphan and removes it after the two runs its
-// orphan rule requires — which is what an expiring JMAP upload is.
-func (u *User) PutBlob(raw []byte) (string, error) {
-	guid := newGUID()
-
-	if _, err := u.writeBlob(guid, raw); err != nil {
-		return "", err
-	}
-
-	return guid, nil
 }
 
 // BlobSize implements model.Blobs. A blob written before the length was

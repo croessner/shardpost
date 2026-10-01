@@ -34,12 +34,17 @@ func TestPurgeRemovesDirectoryEntry(t *testing.T) {
 		t.Fatal("alice not registered")
 	}
 
+	writeAccountRecords(t, m, "alice", "bob")
+
 	_, j := planAndApply(t, m, KindPurge, "alice", nil)
 
 	var cp purgeCheckpoint
-	if err := json.Unmarshal(j.Checkpoint, &cp); err != nil || cp.Phase != 5 {
+	if err := json.Unmarshal(j.Checkpoint, &cp); err != nil || cp.Phase != 6 {
 		t.Fatalf("checkpoint %+v %v", cp, err)
 	}
+
+	// The admin records of alice are gone, bob's stay.
+	checkAccountRecords(t, m, map[string]error{"alice": model.ErrNotFound, "bob": nil})
 
 	if _, ok := dirEntry(t, store, "alice"); ok {
 		t.Fatal("entry kept after the purge")
@@ -51,6 +56,33 @@ func TestPurgeRemovesDirectoryEntry(t *testing.T) {
 
 	if _, ok := dirEntry(t, store, "bob"); !ok {
 		t.Fatal("bob lost his entry")
+	}
+}
+
+// writeAccountRecords writes the admin store records of the accounts.
+func writeAccountRecords(t *testing.T, m *Manager, accounts ...string) {
+	t.Helper()
+
+	for _, account := range accounts {
+		for _, key := range model.AccountRecordKeys(account) {
+			if err := m.st.kv.Update(key, func([]byte) ([]byte, error) { return []byte("{}"), nil }); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// checkAccountRecords checks the reads of the accounts' admin store
+// records against want (nil: present).
+func checkAccountRecords(t *testing.T, m *Manager, want map[string]error) {
+	t.Helper()
+
+	for account, w := range want {
+		for _, key := range model.AccountRecordKeys(account) {
+			if _, err := m.st.kv.Get(key); !errors.Is(err, w) {
+				t.Errorf("%s: %v, want %v", key, err, w)
+			}
+		}
 	}
 }
 

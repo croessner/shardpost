@@ -323,7 +323,7 @@ only the repairs that were planned and are still needed.
 | Kind | Role | Account lock | Effect |
 | --- | --- | --- | --- |
 | `index_check` (no plan) | `diagnose` | no | scrubber without repair, findings as the result |
-| `scrub` | `repair` | no | scrubber with the chosen classes: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (all of them if none are given) |
+| `scrub` | `repair` | no | scrubber with the chosen classes: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (all of them if none are given); with `scrub.orphan_source: intents`, `orphans` covers the blobs of open intents and `unknown` the objects of abandoned creations, unfinished deletions, the private `\Seen` marks of public folders that are gone and the METADATA of deleted mailboxes (see [storage](architecture/storage.md#intents-debris-that-a-scrub-finds-without-listing)); the report carries `OrphanSource`, `IntentsOpen`, `IntentsDropped`, `DeletionsFinished`, `CreationsUndone`, `StaleMetadata` and, in shadow mode, `Shadow` |
 | `quota_recalc` | `repair` | yes | recount the usage from the index and set it |
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index (with the header store) and rebuild it from all messages; when it completes it sets the index version marker that IMAP substring search needs to narrow fully, see [configuration](configuration.md#full-text-index-fts) |
@@ -332,7 +332,7 @@ only the repairs that were planned and are still needed.
 | `attachment_backfill` | `repair` | no | read every message whose index record does not carry `hasAttachment` (stored before the record had the field) and remember the answer in the JMAP locator (`a:<guid>`, see [JMAP: hasAttachment](jmap.md#hasattachment)); changes no message and no index record, may be repeated and then reads only what is left, stops when an import or another job locks the account; a mailbox that cannot be listed and a message that cannot be read are skipped and counted (`skipped_mailboxes`, `failed`, the first errors in `errors`); the plan counts such messages and the ones already remembered |
 | `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
 | `expunge` | `delete` | no | permanently remove messages of a mailbox: `uids` or `deleted: true` (all with `\Deleted`) |
-| `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account |
+| `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account (listed with `purge.listing: true`, the default; named by the data model with `false`, see [storage](architecture/storage.md#purge-without-listing)), remove the directory entry, delete the account's JMAP push and submission records |
 
 - **Account lock** (maintenance mode, decision of 2026-09-19): the job
   holds the lock the import uses as well. While it is held, IMAP and POP3
@@ -956,7 +956,10 @@ imapsync cannot do this, because IMAP APPEND always assigns new UIDs.
   `internal_date`, `save_date`, `guid`, `pop3_uidl`). UIDs ascending. A
   UID whose message has the same size is skipped (resumption), one with a
   different size is a conflict. Quota is counted, not enforced. The same
-  source GUID in several mailboxes shares one blob.
+  source GUID in several mailboxes shares one blob: the import takes an
+  existing blob of that GUID when its size matches, without comparing the
+  content (a source GUID names one message); a blob of another size gets
+  a fresh GUID of its own.
 - **Deltas:** `POST .../changes` sets flags with the source MODSEQ and
   removes UIDs the source no longer has. `GET .../messages` returns the
   inventory page by page (`after`, `limit`).

@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syscall"
-
-	"github.com/ceph/go-ceph/rados"
+	"time"
 
 	"shardpost/internal/model"
 )
@@ -44,9 +43,9 @@ func (u *User) ScrubState() (model.ScrubState, error) {
 }
 
 // ScrubPending implements model.ScrubProber: any key of the scrub object
-// (orphan candidates "o:", the quota count), a delivery intent in the
-// registry, or a MOVE intent on a mailbox (one read per mailbox, no
-// listing).
+// (orphan candidates "o:", the quota count), an intent in the registry
+// (d:, bi:, bimp:, up:, ci:, dm:; one read op), or a MOVE or removal
+// intent on a mailbox (i:, r:; one read op per mailbox, no listing).
 func (u *User) ScrubPending() (string, error) {
 	switch n, err := u.firstKeys(oidScrub, ""); {
 	case err != nil:
@@ -55,11 +54,18 @@ func (u *User) ScrubPending() (string, error) {
 		return "scrub candidates", nil
 	}
 
-	switch n, err := u.firstKeys(oidRegistry, regDeliveryPrefix); {
+	switch p, err := u.anyKey(oidRegistry, intentPrefixes...); {
 	case err != nil:
-		return "", fmt.Errorf("read delivery intents: %w", err)
-	case n > 0:
-		return "delivery intents", nil
+		return "", fmt.Errorf("read intents: %w", err)
+	case p != "":
+		return "intents " + p, nil
+	}
+
+	switch expired, err := u.expiredUpload(time.Now()); {
+	case err != nil:
+		return "", fmt.Errorf("read upload intents: %w", err)
+	case expired:
+		return "intents " + regUploadPrefix, nil
 	}
 
 	boxes, err := u.ListMailboxes()
@@ -68,11 +74,11 @@ func (u *User) ScrubPending() (string, error) {
 	}
 
 	for i := range boxes {
-		switch n, err := u.firstKeys(mboxOID(boxes[i].ID), keyIntentPrefix); {
+		switch p, err := u.anyKey(mboxOID(boxes[i].ID), keyIntentPrefix, keyRemovePrefix); {
 		case err != nil:
-			return "", fmt.Errorf("read move intents of %q: %w", boxes[i].Name, err)
-		case n > 0:
-			return "move intents", nil
+			return "", fmt.Errorf("read intents of %q: %w", boxes[i].Name, err)
+		case p != "":
+			return "mailbox intents " + p, nil
 		}
 	}
 
@@ -343,68 +349,4 @@ func (u *User) convertShard(oid string, rep *model.FTSDictReport, flush func([]s
 			return nil
 		}
 	}
-}
-
-// PurgeNamespace implements model.NamespacePurger: every object of the
-// account's namespaces in the data and index pools is deleted, the
-// registry (which holds the maintenance lock) last, so protocols keep
-// refusing the account until the very end.
-func (u *User) PurgeNamespace(fence func() error) (int, error) {
-	removed := 0
-
-	for _, ioctx := range []*rados.IOContext{u.data, u.idx} {
-		n, err := purgeObjects(ioctx, fence, oidRegistry)
-		removed += n
-
-		if err != nil {
-			return removed, err
-		}
-	}
-
-	if err := fence(); err != nil {
-		return removed, err
-	}
-
-	if err := u.idx.Delete(oidRegistry); err != nil && errCode(err) != syscall.ENOENT {
-		return removed, fmt.Errorf("delete registry: %w", err)
-	}
-
-	u.invalidate()
-
-	return removed + 1, nil
-}
-
-// purgeObjects deletes every object of the IO context's namespace except
-// keep, in one listing, fencing before each batch.
-func purgeObjects(ioctx *rados.IOContext, fence func() error, keep string) (int, error) {
-	const batch = 100
-
-	it, err := listObjects(ioctx, listPurgeObjects)
-	if err != nil {
-		return 0, err
-	}
-	defer it.Close()
-
-	removed := 0
-
-	for it.Next() {
-		oid := it.Value()
-		if oid == keep {
-			continue
-		}
-
-		if removed%batch == 0 {
-			if err := fence(); err != nil {
-				return removed, err
-			}
-		}
-
-		if err := ioctx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
-			return removed, fmt.Errorf("delete %s: %w", oid, err)
-		}
-
-		removed++
-	}
-
-	return removed, it.Err()
 }

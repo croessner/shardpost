@@ -367,6 +367,111 @@ cancelled with `shardpostctl job cancel`.
 `scrub.users`, else every account of the directory (once its backfill
 completed), else every namespace of an index pool listing.
 
+## Scrub without listings
+
+From 0.42.0 every write that can leave debris records an intent, and the
+scrub can find what a crash left from the intents instead of listing the
+account's namespace in both pools (see
+[storage](../architecture/storage.md#intents-debris-that-a-scrub-finds-without-listing)).
+Where it looks is `scrub.orphan_source`; the release ships with
+`shadow`: the scrub lists and repairs from the listing as before, but
+also works out what the intents name and reports where they differ.
+Nothing has to be done for the rollout itself, and servers of different
+versions may run side by side (older servers ignore the intents; their
+writes leave none, which the listing still covers).
+
+**Before the switch to `intents`**, after every server runs 0.42.0:
+
+1. Let the nightly batch scrub run for a few nights. Watch
+   `imapceph_scrub_shadow_differences_total{kind}`:
+   `orphan_extra` (blobs the intents take for orphans that the listing
+   does not) must stay 0; `orphan_missed`, `unknown_missed` and
+   `marks_missed` count debris without an intent — debris from before
+   0.42.0, which the listing removes in the same runs (or the sweep, see
+   below). They must fall to 0 once that is gone. The scrub report of an
+   account names samples (`Shadow.Samples`).
+2. `hack/r3-smoke.sh` checks a cluster: it creates and deletes a
+   mailbox with messages on the throwaway account and scrubs it in shadow
+   mode; the report must show no difference.
+
+**Only when every server runs 0.42.0 or later.** Servers do not report
+their versions to each other, so nothing enforces this: an older server
+writes no removal intents, and a message it moves or expunges can then
+look like an orphan to a scrub without listing, which deletes it.
+
+**The switch** is `scrub.orphan_source: intents` (or
+`SCRUB_ORPHAN_SOURCE=intents`) in the servers' configuration (the batch
+scrub runs there) and in the scrub CronJob's environment (for a scrub
+without `--batch`). From then on `imapceph_rados_listings_total` stays
+flat for `scrub_orphans` and `scrub_unknown_index`. Rollback: back to
+`shadow` or `listing`; the intents keep being written either way.
+
+`scrub.intent_grace_seconds` (3600) is how old an intent must be before
+the scrub takes it for the leftover of a crash; it must exceed the
+longest write (a large delivery, an import step), which is far below
+the default.
+
+**Debris from before 0.42.0.** With `intents` the scrub no longer finds
+what older servers left without an intent (blobs of crashed deliveries
+and of JMAP uploads, mailbox objects of crashed creations, the private
+`\Seen` marks of deleted public folders). The listing removes it while
+the scrub runs in `shadow`; what remains, and the objects of accounts
+purged by older versions, is the sweep's work:
+
+```sh
+shardpost scrub --sweep             # report only (JSON on stdout)
+shardpost scrub --sweep --repair    # delete what is older than scrub.grace_seconds
+shardpost scrub --sweep --restart   # drop a sweep that stopped and start over
+```
+
+Run it once after every server runs 0.42.0, as a Kubernetes Job with the
+scrub CronJob's image, configuration and Ceph credentials, first without
+`--repair` (the report names the remnants by class: `blob`, `mailbox`,
+`marks`, `other`, `namespace` for objects of a namespace without
+registry, with samples), then with it. It lists both pools in every
+namespace (the cost of one scrub listing per pool, not per account),
+spills the object names into `~accounts` and evaluates them account by
+account; a sweep that stops (a restart of the Job, a lost lease) goes on
+from its checkpoint when it is run again. `imapceph_rados_listings_total{site="sweep"}`
+counts its listings. Run it with the servers' configuration: full-text
+shards (`fts/`, `ftsh/`, `ftsd/`) above `server.fts_shards` in an
+account are reported (`fts`) and never deleted, since they may be live
+ones of servers configured with more; after lowering `fts_shards` on
+purpose, run `fts_rebuild` for the account and remove the shards above
+the new count with `rados rm`. A namespace whose account is created
+again while the sweep looks at it is counted as `recreated` and keeps
+everything; no object written later than `scrub.sweep_clock_margin_seconds`
+(60) before the sweep read the namespace is taken for a remnant, so the
+servers' clocks must agree (NTP) to well within that margin. It needs `mon 'allow r'` (it reads each pool's
+`pg_num`), which the server's CephClient has. A namespace without
+registry is deleted only when the account directory says it is being
+purged, or a purge of 0.42.0 or later recorded it (`ix.purged`) and the
+directory holds no entry (an active entry always wins); any other one is reported and left alone: `registry_missing` (the directory
+holds it as active: a lost registry), `unregistered` (no directory
+entry: an account that only kept Sieve scripts before 0.42.0, or what a
+purge of an older version left; remove the latter by hand once
+checked). When a repairing sweep ends it removes every purge record
+older than its start less its grace period (`purged_forgotten`),
+except those of namespaces in which it left something (an object
+younger than the grace period, a failed delete, a namespace it
+skipped), which stay for the next run. Registering the name again, and
+a directory repair that activates the account or removes its stale
+entry, remove the record as well. Before the sweep deletes anything in
+a namespace without registry it checks again that the account was not
+created meanwhile. See the
+[manual page](../man/man1/shardpost-scrub.1).
+
+**The purge without listing.** `purge.listing` (default `true`) keeps the
+purge of earlier versions, which lists the account's namespaces; it also
+counts the objects the data model does not name
+(`imapceph_scrub_purge_unnamed_objects_total`). Once that stays at 0 for
+the purges of accounts the sweep has been through, set
+`purge.listing: false` (`PURGE_LISTING=false`) in the servers'
+configuration: the purge then deletes what the data model names and
+lists nothing (`purge_objects` stays flat). Debris of an account that
+was never swept stays behind; the purge records the account, and the
+next repairing sweep removes it. Rollback: back to `true`.
+
 ## Auth cache
 
 Every server keeps the logins and lookups Nauthilus answered for a

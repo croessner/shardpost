@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -170,6 +172,27 @@ func scrubBatch(store *cephstore.Store, log *slog.Logger, settings *config.Confi
 	}
 
 	return submitScrubBatch(m, log, p, "shardpost scrub --batch@"+instance)
+}
+
+// scrubSweep runs "shardpost scrub --sweep": it lists both pools in every
+// namespace and reports what no account's data model names; with
+// --repair (and without scrub.dry_run) it deletes what is older than
+// scrub.grace_seconds. A sweep that stopped goes on from its checkpoint
+// in the cluster unless --restart is given. The report goes to standard
+// output as one line of JSON, after the log lines.
+func scrubSweep(ctx context.Context, store *cephstore.Store, log *slog.Logger, settings *config.Config, repair, restart bool) error {
+	rep, err := store.Sweep(ctx, cephstore.SweepOptions{
+		Repair: repair && !settings.Scrub.DryRun, Restart: restart, Log: log,
+		Grace:       time.Duration(settings.Scrub.GraceSeconds) * time.Second,
+		SpillShards: settings.Scrub.SweepSpillShards,
+		ClockMargin: time.Duration(settings.Scrub.SweepClockMarginSeconds) * time.Second,
+	})
+	if rep != nil {
+		b, _ := json.Marshal(rep)
+		fmt.Println(string(b))
+	}
+
+	return err
 }
 
 // submitScrubBatch submits the batch unless one of the same kind has not

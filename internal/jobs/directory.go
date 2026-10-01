@@ -45,11 +45,27 @@ func RepairAccountEntry(kv model.AdminKV, dir model.AccountDirectory, account st
 	}
 	defer release()
 
-	return model.RepairAccountEntry(ix, account, model.RepairChecks{
+	res, err := model.RepairAccountEntry(ix, account, model.RepairChecks{
 		HasRegistry:  func() (bool, error) { return dir.HasRegistry(account) },
 		PurgeRunning: func(session string) (bool, error) { return PurgeRunning(kv, session) },
 		Now:          time.Now(),
 	})
+
+	ForgetActivated(dir, res)
+
+	return res, err
+}
+
+// ForgetActivated drops the purge record of an account a repair activated
+// again or whose stale entry it removed: such an account is no purged
+// one, and without an entry a left-over record would let the sweep take
+// its namespace for debris (best effort; the sweep still requires the
+// registry to be missing).
+func ForgetActivated(dir any, res model.DirectoryRepair) {
+	f, ok := dir.(model.PurgedForgetter)
+	if ok && (res.Action == model.RepairActivated || res.Action == model.RepairStale) {
+		_ = f.ForgetPurged(res.Account)
+	}
 }
 
 // ErrLeftPurging refuses an exclusive job on an account that an ended

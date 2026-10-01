@@ -928,6 +928,10 @@ func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint3
 
 	mark := encodeMark(model.PrivateMark{Seen: seen, ModSeq: modseq})
 
+	if err := u.notePubSeen(mailboxID); err != nil {
+		return err
+	}
+
 	return casOmap(u, u.idx, oidPrivateSeen+mailboxID, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
 		set := map[string][]byte{}
 
@@ -943,6 +947,43 @@ func (u *User) SetPrivateSeen(mailboxID string, uidValidity uint32, uids []uint3
 
 		return set, nil
 	})
+}
+
+// notePubSeen records that the account has marks of the public folder
+// ("ps:<id>" in the registry, intents.go) before the first of them is
+// written, so that a scrub or a purge finds the object without listing
+// the pool. Each view looks the key up once per folder.
+func (u *User) notePubSeen(mailboxID string) error {
+	u.cacheMu.Lock()
+	known := u.pubSeen[mailboxID]
+	u.cacheMu.Unlock()
+
+	if known {
+		return nil
+	}
+
+	key := pubSeenKey(mailboxID)
+
+	vals, err := getOmapKeys(u.idx, oidRegistry, []string{key})
+	if err != nil {
+		return fmt.Errorf("read %s: %w", key, err)
+	}
+
+	if _, ok := vals[key]; !ok {
+		if err := u.setIntent(map[string][]byte{key: encode(mailboxIntent{Time: time.Now().Unix()})}); err != nil {
+			return err
+		}
+	}
+
+	u.cacheMu.Lock()
+	if u.pubSeen == nil {
+		u.pubSeen = map[string]bool{}
+	}
+
+	u.pubSeen[mailboxID] = true
+	u.cacheMu.Unlock()
+
+	return nil
 }
 
 // PrunePrivateSeen implements model.User.

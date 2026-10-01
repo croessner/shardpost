@@ -146,10 +146,19 @@ func (u *User) PurgeNamespace(fence func() error) (int, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
+	// Everything the RADOS namespaces would hold goes, as there: the
+	// registry (mailboxes, quota counters and limits, intents, the used
+	// names, the import lock, the trace switch, share pointers, public
+	// subscriptions), the account log, the indexes, METADATA, the Sieve
+	// object with its vacation records, the \Seen marks of public
+	// folders, blobs and the full-text index (TestPurgeLeavesNothing).
 	n := len(u.boxes) + len(u.blobs) + len(u.scripts) + len(u.shared)
 	u.boxes, u.blobs, u.terms = map[string]*box{}, map[string][]byte{}, map[string]map[string]bool{}
 	u.scripts, u.active, u.shared = nil, "", map[string]*model.SharedRef{}
-	u.usage, u.imp = model.Quota{}, nil
+	u.usage, u.limit, u.imp, u.trace = model.Quota{}, model.Quota{}, nil, model.TraceState{}
+	u.annot, u.vacSeen, u.subMiss, u.pubSubs, u.pubSeen = nil, nil, nil, nil, nil
+	u.indexes, u.usedNames, u.intents = nil, nil, 0
+	u.acct.entries, u.acct.seq, u.acct.logStart = nil, 0, 0
 	u.registered.Store(false) // the registry goes last
 
 	return n, nil

@@ -70,6 +70,9 @@ const (
 	// the index pool) at the time of its next attempt; a dead job sits
 	// at DeadDue, after every live one.
 	LearningQueue = "learning"
+	// UploadsQueue holds every JMAP upload (namespace "~accounts" of the
+	// index pool) at the time it expires; the id is "<account>/<guid>".
+	UploadsQueue = "uploads"
 
 	// DefaultQueueShards and MaxQueueShards bound the shards of a queue.
 	DefaultQueueShards = 4

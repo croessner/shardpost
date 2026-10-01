@@ -14,7 +14,7 @@ user namespaces.
 
 | Object/structure | Meaning | Primary source |
 |---|---|---|
-| `mailboxes` | Registry of names and stable mailbox IDs; quota and delivery intents | [user.go](../../internal/cephstore/user.go) |
+| `mailboxes` | Registry of names and stable mailbox IDs; quota, delivery intents and the intents of the scrub (`bi:`, `bimp:`, `up:`, `ci:`, `dm:`, `ps:`) | [user.go](../../internal/cephstore/user.go), [intents.go](../../internal/cephstore/intents.go) |
 | `account` | Account-wide change counter and change log (JMAP state); watched by JMAP push | [account.go](../../internal/cephstore/account.go), [watch.go](../../internal/cephstore/watch.go) |
 | `ix/<space>/<nn>` | Front-end indexes derived from the rest (JMAP locator), 32 shards | [index.go](../../internal/cephstore/index.go) |
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
@@ -23,6 +23,10 @@ user namespaces.
 | `fts/<shard>`, `ftst/<shard>`, `ftsmap` | Posting lists, trigram dictionary, GUID/doc ID mapping; `ftsd/<shard>` is the dictionary layout before 0.35.0 | [fts.go](../../internal/cephstore/fts.go) |
 | Script/metadata objects | Sieve texts, the active script, private/shared metadata | [scripts.go](../../internal/cephstore/scripts.go), [metadata.go](../../internal/cephstore/metadata.go) |
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
+| `pubseen/<id>` | Private `\Seen` marks of the public folder `<id>` (registry key `ps:<id>`) | [acl.go](../../internal/cephstore/acl.go) |
+| `~accounts` / `ix.uploads/…` in the index pool | Due queue of the JMAP uploads, by expiry | [uploads.go](../../internal/cephstore/uploads.go) |
+| `~accounts` / `ix.purged/…` in the index pool | Accounts a purge deleted, for the sweep to clean after (removed by a repairing sweep) | [purged.go](../../internal/cephstore/purged.go) |
+| `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`) | [sweep.go](../../internal/cephstore/sweep.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
 | `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
 | `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
@@ -108,6 +112,269 @@ before the message is written. Orphaned intents are repaired or rolled back
 after the designated age threshold. Intents do not guarantee
 exactly-once delivery to an external client whose
 success response can be lost on the network.
+
+## Intents: debris that a scrub finds without listing
+
+A crash between two writes can leave an object that nothing points at: a
+blob written before its entry, a mailbox object created before its name
+was registered, the shards of a mailbox whose deletion stopped half way.
+Until 0.41 the scrub found such objects by listing the account's
+namespace in both pools, which costs a walk over every placement group of
+the pool per account. Since 0.42.0 every write that can leave such an
+object first records an **intent** in an object the scrub reads anyway,
+and removes it once the write is complete
+([intents.go](../../internal/cephstore/intents.go)):
+
+| Intent | Where | Set | Removed |
+|---|---|---|---|
+| `bi:<guid>` | registry | in the reservation CAS of `DeliverGUID` (delivery, APPEND, CATENATE, REPLACE, Sieve `fileinto`, COPY into another account), before the blob is written | once the entry is linked or the blob deleted again; batched, see below |
+| `bimp:<batch>` | registry | in the reservation CAS of an import step: each message's GUID and a salt from which its two fallback GUIDs follow (about 35 bytes per message, 350 KiB for the largest step of 10 000 messages) | after the header write of the step |
+| `up:<guid>` | registry | before a JMAP upload's blob is written, after its entry in the uploads due queue | when the upload expires (`jmap.upload_ttl_seconds`) |
+| `ci:<id>` | registry | in a CAS of its own before `mbox/<id>` is created | in the CAS that registers the name (or an import replacement's swap) |
+| `dm:<id>` | registry | in the CAS that unregisters a mailbox, with its UIDNEXT and shard size | after the blobs are released and the shards deleted (highest first, shard 0 last) |
+| `ps:<id>` | registry | before the first private `\Seen` mark of the public folder `<id>` is written | when the scrub removes the marks of a folder that is gone |
+| `r:<uid>` | shard 0 of the mailbox | in the header CAS that removes the entry (EXPUNGE, MOVE, the scrub's own removals; for entries above UIDNEXT on a higher shard in a write before the removal), with the blob's GUID, size and chunk count | after the blob reference is released, by the session that removed the entry |
+
+A DELETE also **retires** the header of shard 0 after unregistering the
+mailbox (`h:uidnext` 0, the old value kept as `h:retired`), so that a
+delivery that looked the mailbox up before can no longer allocate a UID
+in it; entries such a delivery added between the read of the messages
+and the retirement are released as well. A delivery whose entry for a
+higher shard was still on its way when the header was retired keeps the
+tombstone for the scrub, rewritten with the range the header had then;
+a release that failed keeps the tombstone and the shards.
+
+An account that only stores Sieve scripts (ManageSieve, the admin API)
+gets a registry with its first script (the key `created`), and with it
+a directory entry; before 0.42.0 such accounts had none.
+
+DELETE releases what the shards hold once the header is retired, not
+the list it read before unregistering: an EXPUNGE or MOVE of another
+session in between released its entries itself. An entry whose removal
+intent is on shard 0 belongs to that session; its release may still
+come, so the shards and the tombstone then stay for the scrub.
+
+**What the scrub does with an intent.** An intent older than
+`scrub.intent_grace_seconds` (3600) belongs to a write that will not
+finish ([scrubintents.go](../../internal/cephstore/scrubintents.go)).
+The scrub settles what it names against its index scan of the account
+(the omap reads of every registered mailbox it does anyway, no listing):
+
+- a blob that an entry references is fine and the intent goes; a blob
+  nothing references and whose chunk 0 is older than
+  `scrub.grace_seconds` is an orphan: its reference count is set to 0
+  under the object version read (a COPY in between makes this fail, and
+  the blob stays), then it is unindexed and its chunks are deleted.
+- a blob that a **young** intent names (a removal whose release may
+  still come, a deletion between its unregistration and its releases, a
+  running MOVE or delivery) keeps its reference count: `fixRefs` leaves
+  it alone, since a release that follows would otherwise be applied on
+  top of the corrected count and could take the blob from a copy. So do
+  the blobs of entries an import left above UIDNEXT that the run did not
+  remove. Without a listing the scrub never collects anything younger
+  than ten minutes, whatever `scrub.grace_seconds` says; the repairing
+  sweep keeps the same minimum.
+- `r:` and `dm:` are **never** settled by releasing again: the scan
+  counts every reference anew (`fixRefs`, with the same mtime guard and
+  `AssertVersion`), so a release that did happen before the crash is not
+  repeated, and a second decrement can never take the blob away from a
+  copy in another mailbox. The mailbox of a `dm:` is not registered, so
+  its entries do not count; its range is the larger of its retired
+  header (a shard 0 without header keys says nothing) and the tombstone,
+  and shards above that range that exist are probed one by one.
+- a `dm:` whose blobs are settled loses its shards (highest first,
+  shard 0 last), then the tombstone; a `ci:` whose id is not registered
+  loses its object; a `ps:` whose folder is gone loses its marks.
+- the METADATA entries of mailboxes that are no longer registered go as
+  well (the registry is read after the entries; ids are never used
+  again).
+
+The age of an intent is the writer's clock (the time in its value)
+against the scrubber's: the servers' clocks must agree (NTP) to well
+within `scrub.intent_grace_seconds`; a writer whose clock runs ahead
+only delays the scrub, one that runs behind by more than the grace
+period lets a scrub take an intent of a write in flight for a crash.
+Object mtimes, which the scrub and the sweep compare with their own
+clock, have whole seconds and come from the writer's clock as well; the
+sweep's line for a namespace it read lies `scrub.sweep_clock_margin_seconds`
+(60) before the read, on a whole second, so a write in the same second
+or from a clock a little behind is never taken for older.
+
+**Where the scrub looks** is `scrub.orphan_source`:
+
+| Value | Listing | Acts on | Intents |
+|---|---|---|---|
+| `listing` | both pools, per account | the listing (two-run rule for blobs) | dropped once what they name is gone or referenced |
+| `shadow` (default) | as `listing` | the listing | judged first, then compared with the listing; differences go to the report (`Shadow`), the log and `imapceph_scrub_shadow_differences_total{kind}` |
+| `intents` | none | the intents | settled as above |
+
+In shadow mode `orphan_missed`, `unknown_missed` and `marks_missed`
+count what the listing found and no intent names: debris from before
+0.42.0, or of a server of an older version during a rolling update, or a
+write path without an intent (which would be a bug). `orphan_extra`
+counts blobs the intents take for orphans and the listing does not; it
+must stay 0. The switch to `intents` is safe only once every server runs
+0.42.0 or later (servers do not report their versions to each other, so
+nothing enforces this: older servers write no removal intents, and a
+blob they move or expunge can then look like an orphan), `orphan_extra` stayed 0, and what `*_missed` still
+reports is debris from before (the sweep removes it, see
+[operations](../operations/README.md#scrub-without-listings)).
+
+**What it costs on the hot paths** (round trips to the OSDs added per
+operation, against 0.41):
+
+| Operation | Set | Remove |
+|---|---|---|
+| LMTP delivery (one view per delivery) | 0 (in the reservation CAS) | 1 key removal when the view closes |
+| LMTP delivery to several mailboxes (Sieve), MULTIAPPEND | 0 | 0 (with the CAS that ends the delivery intent) |
+| IMAP APPEND in a session | 0 | 0 (with the next reservation of the session), at the latest one write after 30 s or at logout |
+| Delivery into a mailbox the quota rules ignore | 1 CAS | as above |
+| EXPUNGE, MOVE (per command, not per message) | 0 (in the header CAS) | 1 key removal on shard 0 |
+| CREATE | 1 CAS | 0 (in the CAS that registers the name) |
+| DELETE | 0 (in the unregister CAS) | 1 CAS that retires the header, 1 key removal |
+| JMAP upload | 1 due queue write + 1 CAS | the expiry |
+| First private `\Seen` mark of a public folder | 1 read per session and folder, 1 CAS per account and folder | — |
+| Import step | 0 (in the reservation CAS) | 1 key removal |
+
+A key removal is one write op without a read; it bumps the object
+version, so a concurrent CAS on the same object retries once. The
+skip-if-idle check of the batch scrub reads the registry intents in one
+read op (one bounded step per prefix) and each mailbox's `i:` and `r:`
+in one more.
+
+Measured on the test cluster (`TestHotPathOps` in
+[opcount_test.go](../../internal/cephstore/opcount_test.go), run with
+`SHARDPOST_TEST_OPCOUNT=1` through `hack/ceph-test-cluster.sh`; the OSD's
+`op_r` and `op_w`; four full-text shards, a 500-byte message), against
+the same test on 0.41.0:
+
+| Operation | Reads 0.41 → 0.42 | Writes 0.41 → 0.42 |
+|---|---|---|
+| LMTP delivery, a view per message | 16.4 → 17.1 | 14.0 → 15.0 |
+| APPEND, ten in one session | 15.6 → 15.6 | 12.2 → 12.2 |
+| EXPUNGE of one message | 15.0 → 15.0 | 12.4 → 13.4 |
+| CREATE and DELETE of an empty mailbox | 16.0 → 18.0 | 9.0 → 12.0 |
+| JMAP upload | 0.0 → 1.2 | 1.0 → 3.2 |
+
+The extra reads of the LMTP delivery are CAS retries: the removal a
+closed view sends in the background meets the next delivery's
+reservation on the same registry object. The full-text index dominates
+a delivery either way (with the default sixteen shards more so).
+
+**The uploads.** A JMAP upload is a blob that nothing points at, so it
+costs an entry in the due queue `ix.uploads` (namespace `~accounts`), the
+intent `up:` and the blob, in that order. The upload expiry worker (one
+server of the cluster holds its lease) deletes what is due every
+minute; the scrub does the same for an expired upload the worker did not
+get to, and a purge finds the uploads through their intents. Upload blobs
+are never the blob of a message: `Email/import` and `Email/set` read
+them and store a new message (`model.Blobs` has no way to link one;
+`TestBlobsCannotLink`, `TestUploadBlobsAreNeverLinked`).
+
+**Batched removal.** A view collects the keys of finished intents and
+removes them with its next registry write that can carry them (a
+reservation, the end of a delivery), after 30 seconds at the latest,
+and when it is closed; LMTP, which opens a view per delivery, pays one
+write per delivery, an IMAP session that appends many messages none.
+
+## Purge without listing
+
+With the intents, everything an account holds is named by its data
+model, so a purge deletes it object by object instead of listing the
+account's namespace in both pools
+([purge.go](../../internal/cephstore/purge.go)):
+
+- the mailboxes of the registry, of creation intents (`ci:`) and of
+  deletion tombstones (`dm:`), each with its shards from the header of
+  shard 0 (retired or not) or the tombstone, and the shards above that
+  range that exist (entries of an import step that stopped);
+- the blobs of their entries, of the removal and MOVE intents on shard
+  0, of `bi:`, `bimp:`, `up:` and `d:` in the registry and of the orphan
+  candidates in the `scrub` object; a blob whose chunk count is not
+  recorded is sized from its length attribute;
+- the fixed objects: the full-text index (`fts/`, `ftst/`, `ftsh/`,
+  `ftsd/`, `ftsmap`; the configured shard count, at least 16), the
+  front-end indexes (`ix/<space>/<nn>` of every known space), `account`,
+  `metadata`, `sieve` (with the vacation records), `scrub`;
+- `pubseen/<id>` for every `ps:<id>`;
+- the registry, last (it holds the maintenance lock).
+
+Blobs go first, while the entries still name them, then the index
+objects (the shards of a mailbox highest first), the registry last; a
+purge that starts again finds what is left. The admin store records of
+the account (`jmap/push/acct/`, `jmap/push/seen/`, `jmap/submission/`)
+are removed in a phase of their own after the directory entry, through
+the admin store, which keeps their hint indexes in step. The phase is
+the last one on purpose: the phases are checkpointed by number, and an
+older server that takes a purge over knows only the earlier ones. Such a
+takeover (or a crash between the two phases that no server resumes)
+leaves the records; they belong to no account any more and a later
+purge of the same name removes them. Accepted for the rolling update.
+
+`purge.listing` (default `true` in 0.42.0) keeps the purge of earlier
+versions: it lists both namespaces and deletes what it finds, and it
+also reads the data model first and counts the listed objects the model
+does not name (`imapceph_scrub_purge_unnamed_objects_total`, with a
+warning naming a few). What the model cannot name: debris that servers
+before 0.42.0 left without an intent, objects of an account that was
+never scrubbed since, full-text shards above a lowered `fts_shards`.
+A purge without listing leaves those behind in a namespace that then has
+neither a registry nor a directory entry. So that the sweep can tell such
+a namespace from an account that only kept Sieve scripts before 0.42.0,
+every purge first records the account in the hint index `ix.purged`
+(`~accounts`); the sweep deletes what is left in a recorded namespace
+without registry and without an active directory entry (an active entry
+always wins: a lost registry is no debris). Before it deletes anything
+in such a namespace it checks again that there is still no registry and
+that the namespace may still be cleaned, and it takes no object written
+after it read the namespace for a remnant: an account created again
+while the sweep looks at it keeps everything. When a repairing sweep
+ends, it removes every record of a purge older than its start less its
+grace period, except those of namespaces in which it left something
+(an object younger than the grace period, a failed delete, a namespace
+it skipped); a purged namespace with no object left at all loses its
+record as well. An account registered again under the name, set active
+again by a directory repair, or whose stale entry a repair removed,
+loses its record at once.
+
+## The sweep
+
+`shardpost scrub --sweep` ([sweep.go](../../internal/cephstore/sweep.go))
+is the tool for what no intent names: it lists both pools in all
+namespaces, so it costs a walk over every placement group of each, and
+runs as a one-off, not as a routine.
+
+- **Pass 1** lists a pool and spills the object names into spill objects
+  in `~accounts` (`sweep/<run>/<pool>/<nnn>`, one omap key
+  `<namespace>␟<object>` per object, the spill object chosen by the
+  namespace, `scrub.sweep_spill_shards` of them). The iterator's position
+  (the PG hash position of go-ceph's `Iter.Token`) is checkpointed in
+  `sweep/state` every 10 000 objects; a sweep that stopped seeks there.
+  When the pool's `pg_num` changed meanwhile, the position means nothing
+  any more and that pool's listing starts over (a name spilled twice
+  changes nothing).
+- **Pass 2** reads each spill object in key order, so the names of one
+  namespace come together, and compares them with what the account's data
+  model (the purge's enumeration). What it does not name is a
+  remnant; with `--repair`, a remnant older than `scrub.grace_seconds`
+  (at least ten minutes) is deleted (a blob through its reference count,
+  under the version of its chunk 0). A namespace without registry is
+  deleted only when the account directory says the account is being
+  purged, or the purge recorded it in `ix.purged` and the directory holds
+  no entry for it; any other one (a lost registry, an account that only kept
+  Sieve scripts before 0.42.0, the leftovers of a purge whose directory
+  entry is gone) is reported (`registry_missing`, `unregistered`, class
+  `namespace`) and left alone. An account whose data model cannot be
+  read in full (a registry record that does not parse, an unreadable
+  header, a registered mailbox without shard 0) and accounts under an
+  import lock are left alone. A full-text shard above the configured
+  count in an account is reported and never deleted (it may belong to
+  servers configured with more shards); any other remnant is deleted
+  only at the object version that was judged. Private `\Seen` marks of a live public folder
+  that predate the intents are adopted: their `ps:` key is written.
+
+One sweep runs at a time (a cls_lock on `sweep/lock`); the report is
+printed as JSON and logged.
 
 ## The account change log
 
@@ -360,28 +627,31 @@ holds:
    wait for the second run of the two-run rule (a run that finds the
    quota counters right removes a count an earlier run left);
 3. the recorded run was complete;
-4. no delivery intent (`d:` in the registry) and no MOVE intent (`i:` on
-   a mailbox object) is open; this costs one read of the registry and
-   one per mailbox, no listing;
+4. no intent is open: none of `d:`, `bi:`, `bimp:`, `up:`, `ci:`, `dm:`
+   in the registry, no MOVE intent `i:` and no removal intent `r:` on a
+   mailbox object; this costs one read op of the registry and one per
+   mailbox, no listing;
 5. the recorded run had no findings;
 6. it is younger than `scrub.interval_days` (7): after that the account
    is scrubbed again in any case.
 
 The cheap conditions (3, 5, 6) are checked from the directory entry
 before the account is read at all. Accounts that are not skipped are
-scrubbed as before, including the listing of their namespace in the
-data pool (orphan blobs) and the index pool (unknown objects); a scrub
-without those listings needs the intents of a later stage.
+scrubbed with the configured orphan source (see
+[intents](#intents-debris-that-a-scrub-finds-without-listing)): with
+`listing` and `shadow` including the listing of their namespace in the
+data pool (orphan blobs) and the index pool (unknown objects), with
+`intents` without any listing.
 
-**What skipping misses until the intents exist.** A skipped account gets
-none of the per-account listings, so debris that changes neither its
-account counter nor its registry waits for the next scrub of the account,
-at the latest `scrub.interval_days` later: blobs a JMAP upload stored but
-nothing referenced (an upload writes a blob only), the private `\Seen`
-marks (`pubseen/`) of public folders that were deleted in `~public`
-meanwhile, and objects a process left when it died between two writes
-that do not touch the counter or the registry. None of them is visible
-to a client; they only take space until then.
+**What skipping still misses.** Since 0.42.0 every write that can leave
+debris records an intent in the registry or on a mailbox object, so an
+account with debris of a crash is not idle (condition 4) and is
+scrubbed. What a skipped account can still hold until its next scrub, at
+the latest `scrub.interval_days` later: the private `\Seen` marks
+(`pubseen/`) of public folders that were deleted in `~public` meanwhile
+(their `ps:` key is no open intent), and debris that writes of servers
+before 0.42.0 left without an intent. None of it is visible to a client;
+it only takes space until then.
 
 `shardpost scrub` (the run in the process itself) takes its accounts
 from `scrub.users`, else from the directory once it carries a completed

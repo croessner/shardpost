@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"shardpost/internal/config"
 	"shardpost/internal/logging"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -105,6 +106,10 @@ const (
 	// commandScrubBatch submits the scrub of every account as a batch
 	// job the servers run ("shardpost scrub --batch").
 	commandScrubBatch = "scrub --batch"
+	// commandScrubSweep lists both pools in every namespace and removes
+	// what no account names ("shardpost scrub --sweep [--repair]
+	// [--restart]", the flags follow in the command).
+	commandScrubSweep = "scrub --sweep"
 	commandCheck      = "check"
 	commandPush       = "push"
 	// commandBackfillAccounts fills the account directory and repairs it
@@ -180,13 +185,8 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		rotate(store)
 	}
 
-	// "shardpost scrub" runs the scrubber over all users and exits;
-	// "shardpost scrub --batch" submits the batch scrub job instead.
-	switch command {
-	case commandScrub:
-		return scrub(store, log, settings)
-	case commandScrubBatch:
-		return scrubBatch(store, log, settings)
+	if run, ok := scrubCommand(ctx, command); ok {
+		return run(store, log, settings)
 	}
 
 	if backfill, ok := backfillCommand(command); ok {
@@ -222,6 +222,10 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		LearningIndex:       model.KVIndexMode(settings.IMAPSieve.Learning.Index),
 		LearningQueueShards: settings.IMAPSieve.Learning.QueueShards,
 		Limits:              accountLimits(settings.Limits),
+		UploadTTL:           time.Duration(settings.JMAP.UploadTTLSeconds) * time.Second,
+		OrphanSource:        model.OrphanSource(settings.Scrub.OrphanSource),
+		IntentGrace:         time.Duration(settings.Scrub.IntentGraceSeconds) * time.Second,
+		PurgeListing:        settings.Purge.Listing,
 	}
 }
 
@@ -471,6 +475,8 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	}
 	defer stopWorker()
 
+	defer startUploadExpiry(ctx, store)()
+
 	srv := newServers(log, settings, store, authn, tlsCfg, imapSieve, programs, sieveCfg)
 	logRelay(log, settings)
 
@@ -498,6 +504,48 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	log.Info("shutdown complete")
 
 	return nil
+}
+
+// scrubCommand returns the run of a scrub command: "shardpost scrub" runs
+// the scrubber over all users and exits, "shardpost scrub --batch"
+// submits the batch scrub job instead, "shardpost scrub --sweep" sweeps
+// the pools.
+func scrubCommand(ctx context.Context, command string) (func(*cephstore.Store, *slog.Logger, *config.Config) error, bool) {
+	switch {
+	case command == commandScrub:
+		return scrub, true
+	case command == commandScrubBatch:
+		return scrubBatch, true
+	case strings.HasPrefix(command, commandScrubSweep):
+		return func(store *cephstore.Store, log *slog.Logger, settings *config.Config) error {
+			return scrubSweep(ctx, store, log, settings, strings.Contains(command, flagRepair), strings.Contains(command, flagRestart))
+		}, true
+	}
+
+	return nil, false
+}
+
+// uploadExpiryPoll is how often the upload expiry worker looks for
+// expired JMAP uploads, and how often the other servers try its lease.
+const uploadExpiryPoll = time.Minute
+
+// startUploadExpiry runs the upload expiry worker (one server of the
+// cluster holds its lease at a time) until the returned function is
+// called.
+func startUploadExpiry(ctx context.Context, store *cephstore.Store) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		store.RunUploadExpiry(ctx, uploadExpiryPoll)
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // shutdown drains the listeners, then the quota programs, then the

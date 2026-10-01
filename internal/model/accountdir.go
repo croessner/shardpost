@@ -31,6 +31,11 @@ const (
 	// AccountBackfillMarker is the head marker of the last completed
 	// account backfill.
 	AccountBackfillMarker = "backfill.accounts"
+	// PurgedIndexName is the hint index of purged accounts in
+	// AccountsNamespace, which the sweep cleans after (cephstore
+	// purged.go).
+	PurgedIndexName   = "purged"
+	PurgedIndexShards = 16
 )
 
 // Directory states.
@@ -105,6 +110,13 @@ type AccountDirectory interface {
 	AccountIndex() (SortedIndex, func(), error)
 	// HasRegistry reports whether the account's registry object exists.
 	HasRegistry(account string) (bool, error)
+}
+
+// PurgedForgetter is implemented by stores that record purged accounts
+// for the sweep: an account that is registered again (or activated
+// again by a repair) is no purged account any more.
+type PurgedForgetter interface {
+	ForgetPurged(account string) error
 }
 
 // DirectoryPurger is implemented by user views of a store with an

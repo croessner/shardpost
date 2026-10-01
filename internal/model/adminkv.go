@@ -1,9 +1,23 @@
 package model
 
-import "errors"
+import (
+	"errors"
+	"net/url"
+)
 
 // ErrNotFound is returned by AdminKV.Get for an absent key.
 var ErrNotFound = errors.New("not found")
+
+// AccountRecordKeys are the keys of the admin store records that belong
+// to one account ("<prefix><escaped account>"): its JMAP push
+// subscriptions, the state last pushed and its JMAP submissions. A purge
+// of the account deletes them (scaling plan B9); jmap checks that its
+// keys are the ones named here.
+func AccountRecordKeys(account string) []string {
+	esc := url.PathEscape(account)
+
+	return []string{"jmap/push/acct/" + esc, "jmap/push/seen/" + esc, "jmap/submission/" + esc}
+}
 
 // KVEntry is one record of the admin store.
 type KVEntry struct {

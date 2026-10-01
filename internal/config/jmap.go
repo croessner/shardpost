@@ -30,6 +30,10 @@ type JMAP struct { //nolint:dupl // a configuration section is a list of tagged 
 	// The limits the session resource advertises and the server
 	// enforces; 0 takes the built-in default.
 	MaxSizeUpload         int64 `mapstructure:"max_size_upload" env:"JMAP_MAX_SIZE_UPLOAD" validate:"gte=0"`
+	// UploadTTLSeconds is how long an uploaded blob is kept (RFC 8620
+	// 6.1 asks for at least an hour); the upload expiry worker deletes it
+	// then.
+	UploadTTLSeconds int64 `mapstructure:"upload_ttl_seconds" env:"JMAP_UPLOAD_TTL_SECONDS" validate:"gte=3600,lte=2592000"`
 	MaxSizeRequest        int64 `mapstructure:"max_size_request" env:"JMAP_MAX_SIZE_REQUEST" validate:"gte=0"`
 	MaxConcurrentUpload   int64 `mapstructure:"max_concurrent_upload" env:"JMAP_MAX_CONCURRENT_UPLOAD" validate:"gte=0"`
 	MaxConcurrentRequests int64 `mapstructure:"max_concurrent_requests" env:"JMAP_MAX_CONCURRENT_REQUESTS" validate:"gte=0"`
