@@ -100,16 +100,24 @@ func TestUTF8Names(t *testing.T) {
 }
 
 // TestMUTF7Invalid: a name that is not valid modified UTF-7 (or not in
-// its only valid form) is NO [CANNOT] in every command; octets that are
-// not UTF-8 are BAD. Literals that follow are consumed.
+// its only valid form) is NO [CANNOT] in every command that names a
+// mailbox; a LIST pattern or reference is taken as it stands and lists
+// nothing (imaptest "atoms"); octets that are not UTF-8 are BAD. Literals
+// that follow are consumed.
 func TestMUTF7Invalid(t *testing.T) {
 	c, store := newTestServer(t)
 	c.ok("LOGIN test test")
 
-	for _, cmd := range []string{"CREATE AT&T", "SELECT &AGE-", `CREATE "&APw-&APw-"`, `LIST "" "&Jjo!"`,
+	for _, cmd := range []string{"CREATE AT&T", "SELECT &AGE-", `CREATE "&APw-&APw-"`,
 		"STATUS Entw&APw (MESSAGES)", "RENAME INBOX &U,BTFw", "SUBSCRIBE &-&"} {
 		mustHave(t, c.cmd("%s", cmd), " NO [CANNOT] Mailbox name is not valid modified UTF-7")
 	}
+
+	if lines := c.ok(`LIST "" "&Jjo!"`); len(lines) != 1 {
+		t.Errorf("an invalid pattern listed something: %v", lines)
+	}
+
+	c.ok("%s", `LIST "" !#$$&'+,-.0123456789:;<=>?@^_`+"`"+`|[}%*`)
 
 	msg := "Subject: x\r\n\r\nbody\r\n"
 	mustHave(t, c.cmd("APPEND &AGE- {%d+}\r\n%s", len(msg), msg), " NO [CANNOT]")
@@ -433,7 +441,8 @@ func TestBadURLCarriesURL(t *testing.T) {
 }
 
 // TestMUTF7MoreResponses: the \Noselect parent of LSUB, the server
-// entries of GETMETADATA "" and an invalid LIST reference.
+// entries of GETMETADATA "" and an invalid LIST reference, which lists
+// nothing instead of failing.
 func TestMUTF7MoreResponses(t *testing.T) {
 	c, _ := newTestServer(t)
 	c.ok("LOGIN test test")
@@ -447,8 +456,8 @@ func TestMUTF7MoreResponses(t *testing.T) {
 	c.ok(`SETMETADATA "" (/private/comment "x")`)
 	mustHave(t, c.ok(`GETMETADATA "" /private/comment`), `* METADATA "" (/private/comment "x")`)
 
-	mustHave(t, c.cmd(`LIST "&Jjo!" "*"`), "NO [CANNOT]")
-	mustHave(t, c.cmd(`LIST "" ("INBOX" "AT&T")`), "NO [CANNOT]")
+	c.ok(`LIST "&Jjo!" "*"`)
+	mustHave(t, c.ok(`LIST "" ("INBOX" "AT&T")`), `* LIST (\HasNoChildren) "/" INBOX`)
 }
 
 // TestSortDisplay: SORT=DISPLAY is advertised, DISPLAYFROM sorts on the

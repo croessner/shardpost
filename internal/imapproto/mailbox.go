@@ -86,7 +86,7 @@ func (c *conn) readListNames(t token) (ref string, patterns []string, err error)
 		return "", nil, fmt.Errorf("%w: expected reference", errSyntax)
 	}
 
-	if ref, err = c.fromWire(t.str); err != nil {
+	if ref, err = c.listWire(t.str); err != nil {
 		return "", nil, err
 	}
 
@@ -95,7 +95,7 @@ func (c *conn) readListNames(t token) (ref string, patterns []string, err error)
 	}
 
 	for i := range patterns {
-		if patterns[i], err = c.fromWire(patterns[i]); err != nil {
+		if patterns[i], err = c.listWire(patterns[i]); err != nil {
 			return "", nil, err
 		}
 	}

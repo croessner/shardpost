@@ -81,6 +81,20 @@ func (c *conn) fromWire(s string) (string, error) {
 	return name, nil
 }
 
+// listWire converts a LIST/LSUB reference or pattern like fromWire, but
+// takes one that is not canonical modified UTF-7 as it stands instead of
+// refusing it: a pattern names no mailbox, it only selects, and a pattern
+// nothing can match lists nothing (as RFC 3501 6.3.8 allows any string).
+// Octets that are not UTF-8 stay an error.
+func (c *conn) listWire(s string) (string, error) {
+	name, err := c.fromWire(s)
+	if err != nil && err != errNotUTF8 {
+		return s, nil
+	}
+
+	return name, err
+}
+
 // mailboxArg reads a mailbox name argument and converts it to its stored
 // form.
 func (c *conn) mailboxArg() (string, error) {
