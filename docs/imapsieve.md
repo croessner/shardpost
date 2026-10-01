@@ -161,7 +161,131 @@ if allof (environment :is "imap.cause" "FLAG",
 
 `fileinto` currently requires the target mailbox to exist already; `:create` does not create a mailbox in the IMAP path. `keep` retains the original; `fileinto` creates an additional message and, without keep, marks the original as Deleted. `discard` marks the original as Deleted. There is no automatic EXPUNGE. Header changes affect only subsequent copies and forwards. Redirect and mailto notify use the configured SMTP relay with loop protection; they require a valid owner address. Reject, ereject and vacation are not permitted in the IMAP context; envelope tests raise a runtime error. Eight actions and the configured time limit bound a single run. FLAG scripts do not trigger further FLAG scripts; fileinto does not produce a COPY event.
 
+`notify :fcc` (RFC 8580) works in IMAPSieve scripts too: once the
+notification went out, its copy is stored in the owner's mailbox. As
+for `fileinto` in this context, that mailbox must exist (`:create` does
+not create it) and lie in the owner's namespace; `:flags` and
+`:specialuse` apply. A copy that cannot be stored is logged and does not
+fail the run. `vacation`, and with it `vacation :fcc`, is not available
+here.
+
 Script errors leave the original IMAP change in place. With competing flags, the later client change wins. Target copies are durably committed before the original is possibly marked as deleted. A crash in that window can leave an additional copy behind; it removes no remaining copy of a message. On an ambiguous storage error, committed target copies are not rolled back.
+
+## Sieve during delivery
+
+LMTP and the local delivery API (the LDA, `shardpostctl deliver`) share
+one delivery path, so everything below holds for both. The Sieve
+settings are `key=value` pairs separated by `;` in `sieve.settings`
+(`SIEVE_SETTINGS`), with Pigeonhole's key names where Pigeonhole has
+the setting:
+
+```yaml
+sieve:
+  settings: "sieve_vacation_min_period=1d;sieve_vacation_max_period=60d;sieve_vacation_default_period=7d;sieve_reject_mode=mdn"
+```
+
+A setting that cannot work — a period that does not parse, periods that
+contradict each other, an unknown `sieve_reject_mode`, a
+`postmaster_address` that is no address — is a startup error and fails
+`config check`.
+
+### Delivery headers
+
+Every delivered copy gets `Return-Path: <envelope sender>` (`<>` for
+the null sender) and `Delivered-To: <envelope recipient>` on top, the
+way Dovecot's LMTP writes them. The order is:
+
+```text
+Return-Path: <sender@example.net>
+Delivered-To: user@example.org
+Received: from 192.0.2.25:41234
+	by mail.example.org with LMTP
+	for <user@example.org>; Thu, 01 Oct 2026 10:00:00 +0000
+(the message as it arrived)
+```
+
+Return-Path fields the message brought along are removed first: only the
+final delivery sets one (RFC 5321 4.4), so any other cannot be trusted.
+`Delivered-To` fields already in the message stay; MTAs use them to
+detect forwarding loops. Both headers are added before Sieve runs, so a
+script sees them (`header :is "Return-Path" "<sender@example.net>"`);
+the `envelope` test is unchanged. `editheader` cannot add or delete
+either of them (`sieve_editheader_header`, see the defaults). The
+recipient in `Delivered-To` is the address of `RCPT TO` (LMTP) or the
+`recipient` parameter (LDA) as given, not the canonical account an
+alias resolved to.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `server.lmtp_return_path` (`LMTP_RETURN_PATH`) | `true` | Add `Return-Path` and remove the ones the message brought along. `false` stores the message without a Return-Path of ours and leaves its own fields alone. |
+| `server.lmtp_delivered_to` (`LMTP_DELIVERED_TO`) | `final` | `final` adds `Delivered-To` with the envelope recipient (Dovecot's `lmtp_hdr_delivery_address = final`), `none` adds none. Dovecot's `original` (the `ORCPT` address) has no counterpart: LMTP does not offer DSN, so no `ORCPT` arrives. |
+
+### Vacation period
+
+`vacation` answers a sender once per period (RFC 5230 4.1, `:seconds`
+from RFC 6131). The period of a script is clamped into the configured
+range, the way Pigeonhole does it:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `sieve_vacation_min_period` | `1d` | The shortest period a script can ask for; `:days 0` becomes this. `0` lets a script ask for `0` (`:days 0`, `:seconds 0`), which means a reply to every message: nothing is recorded. |
+| `sieve_vacation_max_period` | `60d` | The longest period; `0` means no maximum. |
+| `sieve_vacation_default_period` | `7d` | The period without `:days` and `:seconds`; it must lie between minimum and maximum. |
+
+Periods are written the way Dovecot writes them: a number with an
+optional unit (`s`, `m`, `h`, `d`, `w` or their long forms such as
+`days`; a bare number is seconds), or a Go duration such as `36h`. Up to
+0.35.2, `:days 0` and `:seconds 0` silently meant seven days.
+
+### Reject and ereject
+
+`ereject` (RFC 5429 2.2) refuses the message in the protocol: LMTP
+answers `550 5.7.1` with the reason, the local delivery API `422`
+(`rejected`). `reject` (RFC 5429 2.1) accepts the message instead,
+stores nothing and sends a rejection message to the envelope sender: an
+MDN (RFC 8098) with the null sender, `Auto-Submitted: auto-replied
+(rejected)`, `multipart/report; report-type=disposition-notification`
+with three parts — the reason as text, the disposition
+`automatic-action/MDN-sent-automatically; deleted` with `Final-Recipient`
+and `Original-Message-ID`, and the header of the original message (not
+its body, as `text/rfc822-headers`). The message then counts as
+delivered (LMTP `250`, the API `200` with nothing stored).
+
+Mail from the null sender and automatic mail (`Auto-Submitted` other
+than `no`) get no rejection message — that would answer a bounce or an
+auto-reply; the message is discarded silently. Without an SMTP relay
+(`smtp.addr`), or when the relay does not take the rejection message,
+`reject` falls back to the protocol-level rejection, so the sender still
+learns of it.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `sieve_reject_mode` | `mdn` | `mdn` as described; `protocol` makes `reject` refuse in the protocol like `ereject` (the behaviour up to 0.35.2). A ShardPost setting: Pigeonhole leaves this to the delivery agent (`dovecot-lda -e`). |
+| `rejection_subject` | `Rejected: %s` | Subject of the rejection message (Dovecot's setting). `%s` is the original subject. |
+| `rejection_reason` | `Your message to <%t> was automatically rejected:%n%r` | Text of the rejection message (Dovecot's setting). `%t` is the recipient, `%r` the reason of the script, `%n` a line break, `%%` a percent sign. |
+| `postmaster_address` | `postmaster@%d` | Sender address of rejection messages and of notifications without `:from` (Dovecot's setting); `%d` is the recipient's domain. |
+
+### Copies of generated messages (fcc)
+
+`vacation` and `notify` accept `:fcc "mailbox"` (RFC 8580, `require
+"fcc"`): the reply or notification is also stored in that mailbox of
+the recipient once it was sent — a suppressed reply (within the period,
+to a list, …) stores nothing either. The optional companions are
+`:create` (needs `mailbox`) to create a missing mailbox, `:flags` (needs
+`imap4flags`) for the flags of the copy, and `:specialuse` (needs
+`special-use`), whose mailbox wins over the name when there is one.
+They are only allowed together with `:fcc`.
+
+```sieve
+require ["vacation", "fcc", "mailbox", "imap4flags"];
+vacation :days 7 :fcc "Sent" :create :flags "\\Seen" :subject "Away" "Back on Monday.";
+```
+
+The copy is stored like any message, under the account's quota.
+Without `:create` a missing mailbox gets no copy; a public folder (under
+`server.public_prefix`) needs the post right and must exist, a mailbox
+of another account is refused. A copy that cannot be stored is logged
+and never fails the delivery. The JMAP VacationResponse stores no copy.
 
 ## Durable learning queue
 

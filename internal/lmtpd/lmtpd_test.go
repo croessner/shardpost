@@ -38,7 +38,8 @@ func serve(t *testing.T) (string, *memstore.Store) {
 		t.Fatal(err)
 	}
 
-	srv := NewServer("127.0.0.1:0", &Backend{Delivery: &delivery.Service{Store: store, Log: log}, Log: log, Host: "test.example",
+	srv := NewServer("127.0.0.1:0", &Backend{Delivery: &delivery.Service{Store: store, Log: log,
+		ReturnPath: true, DeliveredTo: delivery.DeliveredToFinal}, Log: log, Host: "test.example",
 		Auth: auth.Static{"full": "x", "reject": "x", "ok": "x"}}, nil, true)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -138,5 +139,10 @@ func TestLMTPPerRecipientStatus(t *testing.T) {
 	raw, _ := u.Read(&metas[0])
 	if !strings.Contains(string(raw), "by test.example with LMTP") || !strings.Contains(string(raw), "for <ok@example.org>") {
 		t.Fatalf("trace header: %q", raw)
+	}
+
+	// Return-Path and Delivered-To above Received, as Dovecot writes them.
+	if !strings.HasPrefix(string(raw), "Return-Path: <sender@example.org>\r\nDelivered-To: ok@example.org\r\nReceived: from ") {
+		t.Fatalf("delivery headers: %q", raw)
 	}
 }

@@ -110,7 +110,15 @@ type Server struct {
 	LmtpHostname              string `mapstructure:"lmtp_hostname" env:"LMTP_HOSTNAME"`
 	LmtpAuthUser              string `mapstructure:"lmtp_auth_user" env:"LMTP_AUTH_USER"`
 	LmtpAuthPassword          string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD" secret:"true"`
-	HTTPAddr                  string `mapstructure:"http_addr" env:"HTTP_ADDR"`
+	// LmtpReturnPath adds "Return-Path: <envelope sender>" to every
+	// delivered copy (LMTP and local delivery) and removes the
+	// Return-Path fields the message brought along.
+	LmtpReturnPath bool `mapstructure:"lmtp_return_path" env:"LMTP_RETURN_PATH"`
+	// LmtpDeliveredTo selects the Delivered-To field of every delivered
+	// copy: "final" the envelope recipient, "none" no field (after
+	// Dovecot's lmtp_hdr_delivery_address).
+	LmtpDeliveredTo string `mapstructure:"lmtp_delivered_to" env:"LMTP_DELIVERED_TO" validate:"oneof=final none"`
+	HTTPAddr                 string `mapstructure:"http_addr" env:"HTTP_ADDR"`
 	ImapAddr                  string `mapstructure:"imap_addr" env:"IMAP_ADDR"`
 	ImapsAddr                 string `mapstructure:"imaps_addr" env:"IMAPS_ADDR"`
 	DrainSeconds              int64  `mapstructure:"drain_seconds" env:"DRAIN_SECONDS" validate:"gte=0,lte=86400"`
@@ -393,6 +401,8 @@ var defaults = []struct {
 	{"server.lmtp_hostname", ""},
 	{"server.lmtp_auth_user", ""},
 	{"server.lmtp_auth_password", ""},
+	{"server.lmtp_return_path", true},
+	{"server.lmtp_delivered_to", "final"},
 	{"smtp.addr", ""},
 	{"smtp.helo", ""},
 	{"smtp.starttls", true},

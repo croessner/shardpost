@@ -95,7 +95,14 @@ LMTP (aliases, canonical account, userdb attributes). Sieve runs by
 default, including redirect, vacation and notify. LMTP and LDA share the
 same delivery path (`internal/delivery`). The server prepends
 `Received: from <transport> <principal> by <lmtp_hostname> with LDA` to
-the message. Recipient and sender must not contain control characters or
+the message, and above it `Return-Path: <from>` and
+`Delivered-To: <recipient>` (removing a Return-Path the message brought
+along; `server.lmtp_return_path`, `server.lmtp_delivered_to`, see
+[Sieve during delivery](imapsieve.md#delivery-headers)). A Sieve
+`ereject` answers `422` (`rejected`); a `reject` sends a rejection
+message to the sender and answers `200` with nothing stored, unless no
+relay is configured or `sieve_reject_mode=protocol` is set (then `422`
+as well). Recipient and sender must not contain control characters or
 spaces and no further angle brackets. Resolution (10 s) and delivery
 (5 min) run decoupled from the HTTP request: if the client aborts, the
 delivery still runs to completion.

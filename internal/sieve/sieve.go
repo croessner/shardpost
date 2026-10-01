@@ -46,7 +46,11 @@ type Delivery struct {
 	Raw []byte
 	// Redirects are addresses to forward a copy to.
 	Redirects []string
-	Rejected  string // non-empty: reject with this reason
+	// Rejected is non-empty for a reject or ereject with this reason;
+	// EReject tells which (RFC 5429: ereject refuses in the protocol,
+	// reject may send a rejection message instead).
+	Rejected string
+	EReject  bool
 	// Vacation is the requested auto-reply, if any.
 	Vacation *Vacation
 	// Tracked are the duplicate-test keys the script consulted; the
@@ -84,6 +88,30 @@ type Notification struct {
 	Subject     string
 	Body        string
 	Headers     [][2]string
+	// Fcc is where a copy of the sent notification is stored (RFC 8580).
+	Fcc *Fcc
+}
+
+// Fcc is the :fcc argument of vacation or notify (RFC 8580): the
+// generated message is also stored in this mailbox of the user.
+type Fcc struct {
+	Mailbox string
+	// Create creates a missing mailbox (:create); without it a missing
+	// mailbox means no copy.
+	Create bool
+	// Flags are the flags of the copy (lower case, as for fileinto).
+	Flags []string
+	// SpecialUse is :specialuse: the mailbox with this use wins.
+	SpecialUse string
+}
+
+// fccOf converts the interpreter's :fcc target.
+func fccOf(t *interp.FccTarget) *Fcc {
+	if t == nil {
+		return nil
+	}
+
+	return &Fcc{Mailbox: t.Mailbox, Create: t.Create, Flags: lower(t.Flags), SpecialUse: t.SpecialUse}
 }
 
 // Tracked is one duplicate-test key with its tracking period.
@@ -389,12 +417,13 @@ func (d *Delivery) addAction(a interp.AppliedAction, snapshot []byte, imap bool,
 
 		d.Redirects = append(d.Redirects, act.Address)
 	case interp.ActionReject:
-		d.Rejected = act.Reason
+		d.Rejected, d.EReject = act.Reason, false
 	case interp.ActionEReject:
-		d.Rejected = act.Reason
+		d.Rejected, d.EReject = act.Reason, true
 	case interp.ActionVacation:
 		d.Vacation = &Vacation{Reason: act.Reason, Subject: act.Subject, From: act.From,
-			Addresses: act.Addresses, Handle: act.Handle, Mime: act.Mime, Seconds: act.Seconds, Config: cfg}
+			Addresses: act.Addresses, Handle: act.Handle, Mime: act.Mime, Seconds: act.Seconds, PeriodSet: act.PeriodSet,
+			Fcc: fccOf(act.Fcc), Config: cfg}
 	}
 }
 
@@ -405,7 +434,8 @@ func (d *Delivery) addNotification(act interp.ActionNotify, snapshot []byte) {
 	}
 
 	d.Notifications = append(d.Notifications, Notification{Raw: snapshot, From: act.From, Importance: act.Importance, Message: act.Message,
-		To: act.Mailto.To, Cc: act.Mailto.Cc, Bcc: act.Mailto.Bcc, Subject: act.Mailto.Subject, Body: act.Mailto.Body, Headers: act.Mailto.Headers})
+		To: act.Mailto.To, Cc: act.Mailto.Cc, Bcc: act.Mailto.Bcc, Subject: act.Mailto.Subject, Body: act.Mailto.Body, Headers: act.Mailto.Headers,
+		Fcc: fccOf(act.Fcc)})
 }
 
 func lower(f interp.Flags) []string {

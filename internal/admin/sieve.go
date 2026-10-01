@@ -491,11 +491,12 @@ func describeDelivery(acts *adminapi.SieveActions, d *sieve.Delivery, raw []byte
 
 	if d.Rejected != "" {
 		acts.Reject = &d.Rejected
-		acts.Suppressed = append(acts.Suppressed, "reject (no bounce sent)")
+		acts.Suppressed = append(acts.Suppressed, "reject (no rejection message sent)")
 	}
 
 	if v := d.Vacation; v != nil {
-		days := v.Seconds / 86400
+		// The effective period, after the vacation period settings.
+		days := int(v.Period() / (24 * time.Hour))
 		acts.Vacation = &adminapi.SieveVacation{Days: days, From: optional(v.From), Subject: v.Subject}
 		acts.Suppressed = append(acts.Suppressed, "vacation reply (not sent, not recorded)")
 	}

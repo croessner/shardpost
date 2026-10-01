@@ -1255,7 +1255,10 @@ script, and a set whose script would not compile is refused
 The once-per-sender record is kept under a handle derived from the
 setting — dates, subject and bodies. A changed text therefore reaches a
 sender that was answered before; turning the vacation off and on again
-with the same setting does not, within the seven days.
+with the same setting does not, within the seven days (`:days 7`, which
+the vacation period settings `sieve_vacation_min_period` and
+`sieve_vacation_max_period` still clamp; see
+[Sieve during delivery](imapsieve.md#sieve-during-delivery)).
 
 **A copy for display.** Every change also stores the script under the
 name `jmap-vacation` in the account's script store while the vacation

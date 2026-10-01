@@ -42,7 +42,9 @@ var (
 	ErrQuotaExemptUnsupported = errors.New("quota exemption not supported by the store")
 )
 
-// RejectedError is a Sieve reject: the message was refused with Reason.
+// RejectedError is a Sieve rejection the caller answers in the protocol
+// (ereject, or reject when no rejection message is sent; see run.reject):
+// the message was refused with Reason.
 type RejectedError struct{ Reason string }
 
 func (e *RejectedError) Error() string { return "rejected by sieve: " + e.Reason }
@@ -84,6 +86,17 @@ type Service struct {
 	// is one account — so a fileinto below it goes to INBOX instead of
 	// creating a mailbox nobody can open.
 	SharedPrefix string
+	// ReturnPath adds "Return-Path: <envelope sender>" to every copy and
+	// removes the Return-Path fields the message brought along
+	// (server.lmtp_return_path).
+	ReturnPath bool
+	// DeliveredTo selects the Delivered-To field of every copy:
+	// DeliveredToFinal is the envelope recipient, DeliveredToNone or ""
+	// none (server.lmtp_delivered_to).
+	DeliveredTo string
+	// Hostname names this server in generated reports (the
+	// Reporting-UA of a rejection); "" uses the recipient's domain.
+	Hostname string
 }
 
 // closeOpened releases the extra namespaces a delivery filed into.
@@ -103,7 +116,9 @@ type Request struct {
 	Rcpt string
 	// From is the envelope sender.
 	From string
-	// Raw is the message, including any trace header the caller adds.
+	// Raw is the message, including any trace header the caller adds
+	// (Received); Deliver puts Return-Path and Delivered-To above it
+	// (see Service.ReturnPath and Service.DeliveredTo).
 	Raw []byte
 	// Lookup is the result of the recipient lookup (userdb attributes
 	// such as the quota limit and the over-quota flag); may be nil.
@@ -168,6 +183,10 @@ func (s *Service) Deliver(ctx context.Context, req Request) (*Result, error) {
 	model.UseRequest(ctx, u)
 	defer model.UseRequest(context.Background(), u)
 
+	// Return-Path and Delivered-To are part of what Sieve sees and what
+	// is stored.
+	req.Raw = s.withDeliveryHeaders(req)
+
 	r := &run{svc: s, req: req, log: req.Log, u: u}
 
 	defer r.closeOpened()
@@ -203,7 +222,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 	}
 
 	if d.Rejected != "" {
-		return nil, &RejectedError{d.Rejected}
+		return r.reject(ctx, d)
 	}
 	// A redirect without a local copy goes out now: a relay failure is
 	// a temporary delivery failure (the sender retries, nothing was

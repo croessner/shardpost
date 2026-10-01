@@ -199,7 +199,7 @@ func (d *Delivery) merge(next *Delivery) *FileInto {
 	d.pipeKeep = next.pipeKeep
 
 	if next.Rejected != "" {
-		d.Rejected = next.Rejected
+		d.Rejected, d.EReject = next.Rejected, next.EReject
 	}
 
 	// One reply per message: the first script that asks for one wins.

@@ -15,8 +15,18 @@ import (
 
 // Relay records the messages it accepted.
 type Relay struct {
-	mu   sync.Mutex
-	sent []string
+	mu        sync.Mutex
+	sent      []string
+	envelopes []Envelope
+}
+
+// Envelope is one accepted message with its envelope.
+type Envelope struct {
+	// From is the MAIL FROM path without angle brackets ("" is the
+	// null sender), To the RCPT TO paths.
+	From string
+	To   []string
+	Data string
 }
 
 // Start runs a relay until the test ends and returns the outbound
@@ -55,6 +65,25 @@ func (r *Relay) Messages() []string {
 	return append([]string(nil), r.sent...)
 }
 
+// Envelopes are the messages the relay took so far, with their
+// envelopes.
+func (r *Relay) Envelopes() []Envelope {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]Envelope(nil), r.envelopes...)
+}
+
+// path is the address of a MAIL FROM or RCPT TO line.
+func path(line string) string {
+	_, a, _ := strings.Cut(line, ":")
+	if i := strings.IndexByte(a, '>'); i >= 0 {
+		a = a[:i]
+	}
+
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(a), "<"))
+}
+
 // serve runs one SMTP session. A message is recorded before the relay
 // accepts it, so it is there when the client's send returns.
 func (r *Relay) serve(c net.Conn) {
@@ -65,6 +94,8 @@ func (r *Relay) serve(c net.Conn) {
 
 	say("220 relay")
 
+	var env Envelope
+
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -74,7 +105,13 @@ func (r *Relay) serve(c net.Conn) {
 		switch cmd := strings.ToUpper(strings.TrimSpace(line)); {
 		case strings.HasPrefix(cmd, "EHLO"):
 			say("250 relay")
-		case strings.HasPrefix(cmd, "MAIL"), strings.HasPrefix(cmd, "RCPT"):
+		case strings.HasPrefix(cmd, "MAIL"):
+			env = Envelope{From: path(strings.TrimSpace(line))}
+
+			say("250 ok")
+		case strings.HasPrefix(cmd, "RCPT"):
+			env.To = append(env.To, path(strings.TrimSpace(line)))
+
 			say("250 ok")
 		case cmd == "DATA":
 			say("354 go")
@@ -84,8 +121,11 @@ func (r *Relay) serve(c net.Conn) {
 				return
 			}
 
+			env.Data = msg
+
 			r.mu.Lock()
 			r.sent = append(r.sent, msg)
+			r.envelopes = append(r.envelopes, env)
 			r.mu.Unlock()
 
 			say("250 queued")
