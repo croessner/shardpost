@@ -54,11 +54,11 @@ func TestRegisterAccount(t *testing.T) {
 	// A registration (only ever one whose registry is missing, so a
 	// re-creation) writes the entry again with its own time.
 	later := now.Add(time.Hour)
-	if err := model.RegisterAccount(ix, "alice", "", "fsid", later); err != nil {
+	if err := model.RegisterAccount(ix, "alice", "", "fsid2", later); err != nil {
 		t.Fatal(err)
 	}
 
-	if e2, _ := entryOf(t, ix, "alice"); !e2.Created.Equal(later) || e2.State != model.AccountActive {
+	if e2, _ := entryOf(t, ix, "alice"); !e2.Created.Equal(later) || e2.State != model.AccountActive || e2.Cluster != "fsid2" {
 		t.Fatalf("entry not refreshed: %+v", e2)
 	}
 }

@@ -54,7 +54,9 @@ type AccountEntry struct {
 	// Cluster is the Ceph cluster (fsid) that holds the account.
 	Cluster string `json:"cluster"`
 	// Shard and Scrub are reserved for later stages (placement, scrub
-	// state); empty for now.
+	// state); empty for now. A registration rewrites the whole entry
+	// (Cluster of the creating store, Shard and Scrub empty): it only
+	// happens while the registry is missing, so the account is new.
 	Shard string          `json:"shard"`
 	Scrub json.RawMessage `json:"scrub,omitempty"`
 }
