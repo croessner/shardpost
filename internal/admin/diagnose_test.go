@@ -18,8 +18,8 @@ import (
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
 	"shardpost/internal/memstore"
-	"shardpost/internal/sharenotice"
 	"shardpost/internal/model"
+	"shardpost/internal/sharenotice"
 )
 
 // diagUsers are the static accounts of the diagnosis tests.

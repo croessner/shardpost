@@ -39,6 +39,9 @@ type target struct {
 	prefix string // the namespace prefix it was addressed with
 	name   string // name inside the namespace
 	full   string // name as the client sees it
+	// normalized: the client's name was not in NFC and stands for the
+	// NFC name (see conn.target).
+	normalized bool
 }
 
 // shared is true when rights come from the ACL rather than from
@@ -58,8 +61,29 @@ func (t *target) display(name string) string {
 	}
 }
 
-// target resolves a client-visible mailbox name.
+// target resolves a client-visible mailbox name. A name not in Unicode
+// Normalization Form C stands for its NFC form (RFC 9051 5.1: a server
+// that accepts denormalized names accepts them in every command) —
+// unless a mailbox of exactly that name exists: names stored before new
+// names were normalized stay reachable as they are.
 func (c *conn) target(full string) (*target, error) {
+	t, err := c.resolveTarget(full)
+	if err != nil {
+		return nil, err
+	}
+
+	if nfc, changed := nfcName(t.name); changed {
+		if _, err := t.u.Lookup(t.name); errors.Is(err, model.ErrNoMailbox) {
+			t.name, t.full, t.normalized = nfc, t.display(nfc), true
+		}
+	}
+
+	return t, nil
+}
+
+// resolveTarget splits a client-visible mailbox name into namespace and
+// name.
+func (c *conn) resolveTarget(full string) (*target, error) {
 	if prefix := c.publicPrefix(); prefix != "" && strings.HasPrefix(full, prefix) {
 		name := strings.TrimPrefix(full, prefix)
 		if name == "" {
@@ -96,7 +120,9 @@ func (c *conn) target(full string) (*target, error) {
 		return nil, err
 	}
 
-	return &target{u: u, owner: owner, prefix: shared, name: name, full: full}, nil
+	// The owner part is case-insensitive; full carries it lowercased,
+	// as the listing of the shared namespace does.
+	return &target{u: u, owner: owner, prefix: shared, name: name, full: shared + owner + "/" + name}, nil
 }
 
 // publicPrefix is the client-visible prefix of the public namespace,
@@ -109,15 +135,16 @@ func (c *conn) publicPrefix() string { return c.s.o.PublicPrefix }
 // no client can reach them while the namespace is off.
 func (c *conn) sharedPrefix() string { return c.s.o.SharedPrefix }
 
-// namespaceField renders one NAMESPACE field: the prefix and the
-// hierarchy delimiter, or NIL when that namespace is switched off.
-func namespaceField(prefix string) string {
+// namespaceField renders one NAMESPACE field: the prefix, in the
+// session's mailbox name form, and the hierarchy delimiter, or NIL when
+// that namespace is switched off.
+func (c *conn) namespaceField(prefix string) string {
 	if prefix == "" {
 		return "NIL"
 	}
 
 	// RFC 3501 wants a string here, never a bare atom.
-	return fmt.Sprintf(`((%s "/"))`, quote(prefix))
+	return fmt.Sprintf(`((%s "/"))`, c.mailboxString(prefix))
 }
 
 // publicUser opens the public namespace, once per session. Its view is
@@ -307,7 +334,7 @@ func (c *conn) cmdSetACL(tag string, del bool) error {
 // the identifier and the rights; ok is false after they were answered
 // with BAD.
 func (c *conn) readSetACLArgs(tag string, del bool) (name, identifier, rights string, mod byte, ok bool, err error) {
-	if name, err = c.r.astring(); err != nil {
+	if name, err = c.mailboxArg(); err != nil {
 		return
 	}
 
@@ -406,7 +433,7 @@ func resolveRights(t *target, identifier, rights string, mod byte) (string, erro
 
 // GETACL mailbox
 func (c *conn) cmdGetACL(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -439,7 +466,7 @@ func (c *conn) cmdGetACL(tag string) error {
 		parts = append(parts, astringOut(id), acl[id])
 	}
 
-	c.w.untagged("ACL %s %s", astringOut(name), strings.Join(parts, " "))
+	c.w.untagged("ACL %s %s", c.mailboxOut(name), strings.Join(parts, " "))
 	c.ok(tag, "", "GETACL completed")
 
 	return nil
@@ -447,7 +474,7 @@ func (c *conn) cmdGetACL(tag string) error {
 
 // LISTRIGHTS mailbox identifier
 func (c *conn) cmdListRights(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -473,10 +500,10 @@ func (c *conn) cmdListRights(tag string) error {
 	}
 
 	if strings.EqualFold(identifier, owner) {
-		c.w.untagged("LISTRIGHTS %s %s %s", astringOut(name), astringOut(identifier), model.AllRights)
+		c.w.untagged("LISTRIGHTS %s %s %s", c.mailboxOut(name), astringOut(identifier), model.AllRights)
 	} else {
 		// nothing is always granted; every right can be granted singly
-		c.w.untagged(`LISTRIGHTS %s %s "" l r s w i p k x t e a`, astringOut(name), astringOut(identifier))
+		c.w.untagged(`LISTRIGHTS %s %s "" l r s w i p k x t e a`, c.mailboxOut(name), astringOut(identifier))
 	}
 
 	c.ok(tag, "", "LISTRIGHTS completed")
@@ -486,7 +513,7 @@ func (c *conn) cmdListRights(tag string) error {
 
 // MYRIGHTS mailbox
 func (c *conn) cmdMyRights(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -513,7 +540,7 @@ func (c *conn) cmdMyRights(tag string) error {
 		return nil
 	}
 
-	c.w.untagged("MYRIGHTS %s %s", astringOut(name), rights)
+	c.w.untagged("MYRIGHTS %s %s", c.mailboxOut(name), rights)
 	c.ok(tag, "", "MYRIGHTS completed")
 
 	return nil

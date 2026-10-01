@@ -12,14 +12,9 @@ import (
 	"golang.org/x/text/encoding/htmlindex"
 
 	"shardpost/internal/fts"
-	"shardpost/internal/mailmeta"
 	"shardpost/internal/membudget"
 	"shardpost/internal/model"
 )
-
-func extractMeta(raw []byte) (*imap.Envelope, []string, string) {
-	return mailmeta.Extract(raw)
-}
 
 // criteria is a parsed SEARCH key tree. Text criteria are resolved
 // against the full-text index; everything else against the snapshot.
@@ -30,15 +25,18 @@ type criteria struct {
 	notFlags              []string
 	since, before         time.Time
 	sentSince, sentBefore time.Time
-	younger, older        int64 // WITHIN (RFC 5032): seconds relative to now
-	recent                int   // 1 = RECENT/NEW, -1 = OLD
-	larger, smaller       int64
-	modseq                uint64
-	emailIDs              []string
-	threadIDs             []string
-	text                  []textCrit // resolved via FTS at top level, brute force nested
-	not                   []*criteria
-	or                    [][2]*criteria
+	// savedSince and savedBefore are the SAVEDATE keys (RFC 8514 4.3);
+	// SAVEDATESUPPORTED needs no field, every mailbox has save dates.
+	savedSince, savedBefore time.Time
+	younger, older          int64 // WITHIN (RFC 5032): seconds relative to now
+	recent                  int   // 1 = RECENT/NEW, -1 = OLD
+	larger, smaller         int64
+	modseq                  uint64
+	emailIDs                []string
+	threadIDs               []string
+	text                    []textCrit // resolved via FTS at top level, brute force nested
+	not                     []*criteria
+	or                      [][2]*criteria
 }
 
 type textCrit struct {
@@ -200,16 +198,21 @@ var searchKeys = map[string]searchKeyParser{
 
 		return nil
 	},
-	"BEFORE":     dateKey(func(cr *criteria, t time.Time) { cr.before = t }),
-	"SINCE":      dateKey(func(cr *criteria, t time.Time) { cr.since = t }),
-	"ON":         dateKey(func(cr *criteria, t time.Time) { cr.since, cr.before = t, t.AddDate(0, 0, 1) }),
-	"SENTBEFORE": dateKey(func(cr *criteria, t time.Time) { cr.sentBefore = t }),
-	"SENTSINCE":  dateKey(func(cr *criteria, t time.Time) { cr.sentSince = t }),
-	"SENTON":     dateKey(func(cr *criteria, t time.Time) { cr.sentSince, cr.sentBefore = t, t.AddDate(0, 0, 1) }),
-	"LARGER":     numKey(func(cr *criteria, n int64) { cr.larger = n }),
-	"SMALLER":    numKey(func(cr *criteria, n int64) { cr.smaller = n }),
-	"YOUNGER":    numKey(func(cr *criteria, n int64) { cr.younger = n }),
-	"OLDER":      numKey(func(cr *criteria, n int64) { cr.older = n }),
+	"BEFORE":      dateKey(func(cr *criteria, t time.Time) { cr.before = t }),
+	"SINCE":       dateKey(func(cr *criteria, t time.Time) { cr.since = t }),
+	"ON":          dateKey(func(cr *criteria, t time.Time) { cr.since, cr.before = t, t.AddDate(0, 0, 1) }),
+	"SENTBEFORE":  dateKey(func(cr *criteria, t time.Time) { cr.sentBefore = t }),
+	"SENTSINCE":   dateKey(func(cr *criteria, t time.Time) { cr.sentSince = t }),
+	"SENTON":      dateKey(func(cr *criteria, t time.Time) { cr.sentSince, cr.sentBefore = t, t.AddDate(0, 0, 1) }),
+	"SAVEDBEFORE": dateKey(func(cr *criteria, t time.Time) { cr.savedBefore = t }),
+	"SAVEDSINCE":  dateKey(func(cr *criteria, t time.Time) { cr.savedSince = t }),
+	"SAVEDON":     dateKey(func(cr *criteria, t time.Time) { cr.savedSince, cr.savedBefore = t, t.AddDate(0, 0, 1) }),
+	// Every mailbox here keeps the save date, so the key matches all.
+	"SAVEDATESUPPORTED": func(_ *conn, _ *reader, _ *criteria, _ string) error { return nil },
+	"LARGER":            numKey(func(cr *criteria, n int64) { cr.larger = n }),
+	"SMALLER":           numKey(func(cr *criteria, n int64) { cr.smaller = n }),
+	"YOUNGER":           numKey(func(cr *criteria, n int64) { cr.younger = n }),
+	"OLDER":             numKey(func(cr *criteria, n int64) { cr.older = n }),
 	kwUID: func(c *conn, r *reader, cr *criteria, _ string) error {
 		s, err := r.atom()
 		if err != nil {
@@ -417,6 +420,12 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 
 	nums, highest := searchNums(seqs, metas, uid)
 
+	// RFC 9051 6.4.4, appendix E 4: an IMAP4rev2 session gets ESEARCH
+	// also without RETURN, with the matches as ALL.
+	if c.rev2 && !ret.esearch {
+		ret.esearch, ret.all = true, true
+	}
+
 	if ret.save {
 		uids := make([]uint32, len(metas))
 		for i, m := range metas {
@@ -442,7 +451,7 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 		return nil
 	}
 
-	c.w.untagged("ESEARCH (TAG %s) %s", quote(tag), strings.Join(esearchParts(ret, cr, nums, metas, highest, uid), " "))
+	c.w.untagged("%s", strings.Join(append([]string{"ESEARCH (TAG " + quote(tag) + ")"}, esearchParts(ret, cr, nums, metas, highest, uid)...), " "))
 	c.ok(tag, "", "SEARCH completed")
 
 	return nil
@@ -581,6 +590,12 @@ func (c *conn) parseSearchCommand() (searchReturn, *criteria, error) {
 			dec, err := c.readSearchCharset()
 			if err != nil {
 				return ret, nil, err
+			}
+			// RFC 6855 3: after ENABLE UTF8=ACCEPT the text is UTF-8, and
+			// another charset label conflicts with that (SHOULD be BAD).
+			// UTF-8 and US-ASCII say nothing new and are taken.
+			if c.utf8 && dec != nil {
+				return ret, nil, fmt.Errorf("%w: only UTF-8 is allowed after ENABLE UTF8=ACCEPT", errSyntax)
 			}
 
 			charset = dec
@@ -820,7 +835,7 @@ func (c *conn) match(seq int, m *model.Meta, cr *criteria) bool {
 // sets, flags, size, \Recent, WITHIN, dates, modseq and object ids.
 func (c *conn) matchPlain(seq int, m *model.Meta, cr *criteria) bool {
 	return c.matchSets(seq, m, cr) && matchFlags(m, cr) && matchSize(m, cr) && c.matchAge(m, cr) &&
-		matchDates(m, cr) && matchSentDates(m, cr) && matchIDs(m, cr)
+		matchDates(m, cr) && matchSentDates(m, cr) && matchSavedDates(m, cr) && matchIDs(m, cr)
 }
 
 // matchSets checks the sequence and UID set criteria.
@@ -899,6 +914,32 @@ func matchDates(m *model.Meta, cr *criteria) bool {
 	}
 
 	if !cr.before.IsZero() && !d.Before(cr.before) {
+		return false
+	}
+
+	return true
+}
+
+// matchSavedDates checks the save date criteria (RFC 8514 4.3), on the
+// date alone like the internal date. A message stored before the save
+// date was recorded has none; its internal date stands in, as RFC 8514
+// asks for storage without save dates.
+func matchSavedDates(m *model.Meta, cr *criteria) bool {
+	if cr.savedSince.IsZero() && cr.savedBefore.IsZero() {
+		return true
+	}
+
+	saved := m.SaveDate
+	if saved.IsZero() {
+		saved = m.InternalDate
+	}
+
+	d := dateOnly(saved)
+	if !cr.savedSince.IsZero() && d.Before(cr.savedSince) {
+		return false
+	}
+
+	if !cr.savedBefore.IsZero() && !d.Before(cr.savedBefore) {
 		return false
 	}
 

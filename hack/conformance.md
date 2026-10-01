@@ -147,10 +147,16 @@ for children that no pattern lists itself, subscription survives DELETE
 (\NonExistent), FLAGS/PERMANENTFLAGS before every FETCH with a new keyword,
 APPEND with Content-Transfer-Encoding: binary is re-encoded to base64.
 
-Open: for `<@route:user@domain>`, `fetch-envelope` expects the
-source route in the ENVELOPE (`(NIL "@route" "user" "domain")`); the parser
-discards the obsolete route. Deliberately not implemented (go-imap does not know
-the field, no client needs it).
+Then open, implemented after 0.35.2: for `<@route:user@domain>`,
+`fetch-envelope` expects the source route in the ENVELOPE
+(`(NIL "@route" "user" "domain")`). The parser now keeps the obsolete
+route as the address's at-domain-list. go-imap's address type has no
+field for it, so the index record carries the routes next to the cached
+envelope (`model.Meta.Routes`, only when an address has one). Messages
+stored before that keep their cached envelope without the route; they
+are not recomputed, since real mail does not carry source routes any
+more (RFC 5322 4.4 made them obsolete). A re-import of the message
+yields the route.
 
 Note: a run can additionally fail on a `NO [UNAVAILABLE]` response
 (imaptest then reports "initialization failed"); this is not a

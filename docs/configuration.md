@@ -217,6 +217,11 @@ settings and client-side filter rules that name a folder path have to
 be redone. Subscriptions survive: they are kept per account and per
 mailbox, not by name.
 
+A prefix may contain non-ASCII characters. Like every mailbox name it
+reaches IMAP clients that enabled neither `UTF8=ACCEPT` nor `IMAP4rev2`
+in modified UTF-7 (`Öffentlich/` is `&ANY-ffentlich/` in `NAMESPACE`
+and `LIST`), all other clients in UTF-8.
+
 With an empty prefix no client can reach a shared mailbox, although the
 permissions remain in the store and the admin API still shows them. The
 same prefix switches the shared accounts of JMAP: with it empty, the

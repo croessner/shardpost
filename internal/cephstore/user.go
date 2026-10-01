@@ -125,17 +125,17 @@ func HasFlag(flags []string, f string) bool { return model.HasFlag(flags, f) }
 
 // User is a per-user view of the store (namespace-scoped IOContexts).
 type User struct {
-	learningHook  func(model.Mailbox, model.Meta) (string, error)
-	name          string
-	store         *Store // to open other namespaces (shared folder pointers)
-	idx           *rados.IOContext
-	data          *rados.IOContext
-	log           *slog.Logger
-	chunkSize     int64
-	ftsShards     int
+	learningHook func(model.Mailbox, model.Meta) (string, error)
+	name         string
+	store        *Store // to open other namespaces (shared folder pointers)
+	idx          *rados.IOContext
+	data         *rados.IOContext
+	log          *slog.Logger
+	chunkSize    int64
+	ftsShards    int
 	// legacyDict caches whether the account still has the dictionary
 	// objects of the layout before 0.35.0 (see legacyDictMatches).
-	legacyDict int
+	legacyDict    int
 	acctRetention int
 	shardSize     uint32
 	limit         QuotaLimit
@@ -1919,9 +1919,9 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 		return nil, err
 	}
 
-	env, refs, preview := mailmeta.Extract(raw)
+	p := mailmeta.Parse(raw)
 	m := Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks, Flags: flags,
-		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: env, References: refs, Preview: preview}
+		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: p.Envelope, Routes: p.Routes, References: p.Refs, Preview: p.Preview}
 
 	meta, err := u.linkLogged(mb, m)
 	if err != nil {

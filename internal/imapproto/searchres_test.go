@@ -47,6 +47,6 @@ func TestReplaceCatenateTooBig(t *testing.T) {
 
 	mustHave(t, c.cmd(`APPEND INBOX CATENATE (`+url+` `+url+`)`), "NO [TOOBIG]")
 	mustHave(t, c.cmd(`REPLACE 1 INBOX CATENATE (`+url+` `+url+`)`), "NO [TOOBIG]")
-	mustHave(t, c.cmd(`REPLACE 1 INBOX CATENATE (URL "imap:///INBOX/;UID=9")`), "NO [BADURL]")
+	mustHave(t, c.cmd(`REPLACE 1 INBOX CATENATE (URL "imap:///INBOX/;UID=9")`), "NO [BADURL imap:///INBOX/;UID=9]")
 	mustHave(t, c.cmd(`REPLACE 1 INBOX CATENATE (FOO "x")`), " BAD ")
 }

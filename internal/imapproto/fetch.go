@@ -1,16 +1,19 @@
 package imapproto
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
+	"github.com/emersion/go-message/textproto"
 
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/membudget"
@@ -73,7 +76,13 @@ func (c *conn) cmdFetch(tag string, uid bool) error {
 
 	c.sieveEvents("FLAG", c.selectedTarget(), flagEvents, metas)
 
-	if failed {
+	switch {
+	case errors.Is(failed, errUnknownCTE):
+		// RFC 3516 4.2: a BINARY section that cannot be decoded fails
+		// the request.
+		c.no(tag, "UNKNOWN-CTE", "Content-Transfer-Encoding of a BINARY section is unknown")
+		return nil
+	case failed != nil:
 		c.no(tag, "SERVERBUG", "Some messages could not be read")
 		return nil
 	}
@@ -153,10 +162,24 @@ func fetchSetsSeen(opts *fetchOptions) bool {
 }
 
 // fetchMessages writes the FETCH responses for the resolved messages. It
-// returns the messages whose \Seen flag the FETCH set and whether a
-// message could not be read.
-func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions, uid bool) (flagEvents []model.Meta, failed bool, err error) {
+// returns the messages whose \Seen flag the FETCH set and, as failed,
+// why a message was left out (errReadFailed, errUnknownCTE; the first
+// read failure wins).
+func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions, uid bool) (flagEvents []model.Meta, failed, err error) {
 	markSeen := fetchSetsSeen(opts)
+
+	// A BINARY section that cannot be decoded fails the whole FETCH
+	// (RFC 3516 4.2). When the FETCH sets \Seen, that is found out
+	// before any message is marked; a BINARY.PEEK changes nothing and
+	// is checked message by message as it is written.
+	if markSeen && hasBinaryItem(opts) {
+		done, failed := c.binaryPrecheck(metas, opts)
+		if failed != nil {
+			return nil, failed, nil
+		}
+		defer done()
+	}
+
 	marked := c.markSeenBatch(markSeen, metas, opts)
 
 	for i, m := range metas {
@@ -164,28 +187,41 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 			continue
 		}
 
-		seenSet := false
-
-		if markSeen {
-			var changed bool
-
-			m, seenSet, changed = c.fetchSetSeen(seqs[i], m, marked)
-			if changed {
-				flagEvents = append(flagEvents, m)
-			}
+		event, err := c.fetchOne(seqs[i], m, opts, uid, markSeen, marked)
+		if event != nil {
+			flagEvents = append(flagEvents, *event)
 		}
 
-		if err := c.writeFetchSeen(seqs[i], &m, opts, uid, seenSet); err != nil {
-			if errors.Is(err, errReadFailed) {
-				failed = true
-				continue
+		switch {
+		case errors.Is(err, errReadFailed):
+			failed = err
+		case errors.Is(err, errUnknownCTE):
+			if failed == nil {
+				failed = err
 			}
-
+		case err != nil:
 			return flagEvents, failed, err
 		}
 	}
 
 	return flagEvents, failed, nil
+}
+
+// fetchOne sets \Seen on message seq when the FETCH does (event is the
+// message when this session changed its flags) and writes its response.
+func (c *conn) fetchOne(seq int, m model.Meta, opts *fetchOptions, uid, markSeen bool, marked map[uint32]bool) (event *model.Meta, err error) {
+	seenSet := false
+
+	if markSeen {
+		var changed bool
+
+		m, seenSet, changed = c.fetchSetSeen(seq, m, marked)
+		if changed {
+			event = &m
+		}
+	}
+
+	return event, c.writeFetchSeen(seq, &m, opts, uid, seenSet)
 }
 
 // fetchSetSeen sets \Seen on message seq when the session may. It
@@ -283,7 +319,10 @@ func (c *conn) markSeenAll(want []model.Meta) (map[uint32]bool, error) {
 	return marked, nil
 }
 
-var errReadFailed = errors.New("message read failed")
+var (
+	errReadFailed = errors.New("message read failed")
+	errUnknownCTE = errors.New("unknown content transfer encoding")
+)
 
 // parseFetchItems parses the data item list, a single item, or a macro.
 func (c *conn) parseFetchItems() (*fetchOptions, error) {
@@ -295,9 +334,44 @@ func (c *conn) parseFetchItems() (*fetchOptions, error) {
 func parseFetchItemsFrom(r *reader) (*fetchOptions, error) {
 	opts := &fetchOptions{}
 
-	r.skipSpaces()
+	items, err := readFetchItems(r)
+	if err != nil {
+		return nil, err
+	}
 
-	var items []string
+	expanded := expandFetchMacros(items)
+	if len(expanded) > 64 {
+		return nil, fmt.Errorf("%w: too many fetch items", errSyntax)
+	}
+
+	for i := 0; i < len(expanded); i++ {
+		it, err := parseFetchItem(expanded[i])
+		if err != nil {
+			return nil, err
+		}
+
+		// PREVIEW may carry its modifiers (RFC 8970 4.1). LAZY asks for
+		// the preview only when it costs no delay; it is computed at
+		// delivery and stored with the message, so it never does, and
+		// PREVIEW (LAZY) answers like PREVIEW.
+		if it.name == kwPreview && i+1 < len(expanded) && strings.HasPrefix(expanded[i+1], "(") {
+			if err := checkPreviewModifiers(expanded[i+1]); err != nil {
+				return nil, err
+			}
+
+			i++
+		}
+
+		opts.items = append(opts.items, it)
+	}
+
+	return opts, nil
+}
+
+// readFetchItems reads the item list, or the single item, of FETCH as
+// raw strings.
+func readFetchItems(r *reader) ([]string, error) {
+	r.skipSpaces()
 
 	if r.peek() == '(' {
 		// Items may contain brackets and spaces (HEADER.FIELDS (...)), so
@@ -307,17 +381,25 @@ func parseFetchItemsFrom(r *reader) (*fetchOptions, error) {
 			return nil, err
 		}
 
-		items = splitItems(group[1 : len(group)-1])
-	} else {
-		a, err := r.balanced()
-		if err != nil {
-			return nil, err
-		}
-
-		items = []string{a}
+		return splitItems(group[1 : len(group)-1]), nil
 	}
-	// Expand macros first: appending while ranging would never visit
-	// the added items.
+
+	a, err := r.balanced()
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.EqualFold(a, kwPreview) {
+		return append([]string{a}, previewModifiers(r)...), nil
+	}
+
+	return []string{a}, nil
+}
+
+// expandFetchMacros replaces ALL, FAST and FULL by their items. The
+// macros are expanded into a new list: appending while ranging would
+// never visit the added items.
+func expandFetchMacros(items []string) []string {
 	var expanded []string
 
 	for _, raw := range items {
@@ -333,20 +415,53 @@ func parseFetchItemsFrom(r *reader) (*fetchOptions, error) {
 		}
 	}
 
-	if len(expanded) > 64 {
-		return nil, fmt.Errorf("%w: too many fetch items", errSyntax)
+	return expanded
+}
+
+// previewModifiers returns the parenthesised group after a lone PREVIEW
+// item ("FETCH 1 PREVIEW (LAZY)") when it holds preview modifiers only;
+// any other group (the FETCH modifiers of RFC 4466) is left unread.
+func previewModifiers(r *reader) []string {
+	save := r.pos
+
+	r.skipSpaces()
+
+	if r.peek() != '(' {
+		r.pos = save
+		return nil
 	}
 
-	for _, raw := range expanded {
-		it, err := parseFetchItem(raw)
-		if err != nil {
-			return nil, err
+	group, err := r.balanced()
+	if err != nil || len(group) < 2 {
+		r.pos = save
+		return nil
+	}
+
+	for _, m := range strings.Fields(group[1 : len(group)-1]) {
+		if !strings.EqualFold(m, kwLazy) {
+			r.pos = save
+			return nil
 		}
-
-		opts.items = append(opts.items, it)
 	}
 
-	return opts, nil
+	return []string{group}
+}
+
+// checkPreviewModifiers checks the modifier list of a PREVIEW item; LAZY
+// is the only modifier (RFC 8970 6).
+func checkPreviewModifiers(group string) error {
+	mods := strings.Fields(strings.TrimSuffix(strings.TrimPrefix(group, "("), ")"))
+	if len(mods) == 0 {
+		return fmt.Errorf("%w: empty PREVIEW modifier list", errSyntax)
+	}
+
+	for _, m := range mods {
+		if !strings.EqualFold(m, kwLazy) {
+			return fmt.Errorf("%w: unknown PREVIEW modifier %q", errSyntax, m)
+		}
+	}
+
+	return nil
 }
 
 // balanced reads a token that may contain balanced parentheses and
@@ -630,19 +745,14 @@ func (c *conn) writeFetchSeen(seq int, m *model.Meta, opts *fetchOptions, uidCmd
 		parts = append(parts, "FLAGS ("+c.flagsOut(m)+")")
 	}
 
-	var raw []byte
+	raw, rel, err := c.fetchRaw(opts, m)
+	if err != nil {
+		return err
+	}
+	defer rel()
 
-	if needsRaw(opts, m) {
-		rel, err := membudget.Acquire(m.Size)
-		if err != nil {
-			return errReadFailed
-		}
-		defer rel()
-
-		if raw, err = c.mu.Read(m); err != nil {
-			c.log.Error("read message", "guid", m.GUID, "err", err)
-			return errReadFailed
-		}
+	if binaryUndecodable(opts, raw) {
+		return errUnknownCTE
 	}
 
 	for _, it := range opts.items {
@@ -662,6 +772,19 @@ func (c *conn) writeFetchSeen(seq int, m *model.Meta, opts *fetchOptions, uidCmd
 	c.w.untagged("%d FETCH (%s)", seq, strings.Join(parts, " "))
 
 	return nil
+}
+
+// fetchRaw returns the content of m when an item needs it: the one the
+// BINARY check read already, or read now; release returns the memory.
+func (c *conn) fetchRaw(opts *fetchOptions, m *model.Meta) (raw []byte, release func(), err error) {
+	switch {
+	case !needsRaw(opts, m):
+		return nil, func() {}, nil
+	case c.preread != nil && c.preread.uid == m.UID:
+		return c.preread.raw, func() {}, nil
+	}
+
+	return c.readMessage(m)
 }
 
 // needsRaw reports whether any item needs the message content.
@@ -700,7 +823,9 @@ var fetchAttrs = map[string]func(c *conn, m *model.Meta) string{
 	kwModSeq:     func(_ *conn, m *model.Meta) string { return fmt.Sprintf("MODSEQ (%d)", m.ModSeq) },
 	kwEmailID:    func(_ *conn, m *model.Meta) string { return fmt.Sprintf("EMAILID (%s)", m.GUID) },
 	kwThreadID:   func(_ *conn, m *model.Meta) string { return fmt.Sprintf("THREADID (%s)", threadID(m)) },
-	kwPreview:    func(_ *conn, m *model.Meta) string { return "PREVIEW " + nstring(m.Preview) },
+	// RFC 8970 3.2: a message without preview text has the empty
+	// string; NIL is only for PREVIEW (LAZY), and never needed here.
+	kwPreview: func(_ *conn, m *model.Meta) string { return "PREVIEW " + quote(m.Preview) },
 }
 
 // fetchItemOut renders one FETCH item of m; raw is the message content
@@ -712,12 +837,13 @@ func (c *conn) fetchItemOut(it fetchItem, m *model.Meta, raw []byte) (string, bo
 
 	switch it.name {
 	case kwEnvelope:
-		env := m.Envelope
+		env, routes := m.Envelope, m.Routes
 		if env == nil {
-			env = envelopeOf(raw)
+			p := mailmeta.Parse(raw)
+			env, routes = p.Envelope, p.Routes
 		}
 
-		return "ENVELOPE " + encodeEnvelope(env), true
+		return "ENVELOPE " + encodeEnvelope(env, routes), true
 	case kwBodyStructure:
 		return "BODYSTRUCTURE " + encodeBodyStructure(imapserver.ExtractBodyStructure(bytes.NewReader(raw)), true), true
 	case kwBody:
@@ -736,6 +862,138 @@ func (c *conn) fetchItemOut(it fetchItem, m *model.Meta, raw []byte) (string, bo
 	}
 
 	return "", false
+}
+
+// hasBinaryItem reports whether the FETCH has a BINARY or BINARY.SIZE
+// item.
+func hasBinaryItem(opts *fetchOptions) bool {
+	return slices.ContainsFunc(opts.items, func(it fetchItem) bool { return it.binary != nil || it.binSize != nil })
+}
+
+// preread is a message the BINARY check read and the FETCH writes, so
+// that it is read once.
+type preread struct {
+	uid uint32
+	raw []byte
+}
+
+// binaryPrecheck reads the messages of a FETCH that sets \Seen and has
+// BINARY items, and returns errUnknownCTE (or errReadFailed) before
+// anything is written or marked. A FETCH of one message — what a client
+// opening a part sends — keeps the content for writing the response; for
+// several messages each one is released after its check (keeping them
+// all could exceed the memory budget), and is read again when written.
+// done ends the FETCH's hold on the kept content.
+func (c *conn) binaryPrecheck(metas []model.Meta, opts *fetchOptions) (done func(), err error) {
+	var todo []*model.Meta
+
+	for i := range metas {
+		if opts.changedSince == 0 || metas[i].ModSeq > opts.changedSince {
+			todo = append(todo, &metas[i])
+		}
+	}
+
+	for _, m := range todo {
+		raw, rel, err := c.readMessage(m)
+		if err != nil {
+			return nil, err
+		}
+
+		if binaryUndecodable(opts, raw) {
+			rel()
+			return nil, errUnknownCTE
+		}
+
+		if len(todo) == 1 {
+			c.preread = &preread{uid: m.UID, raw: raw}
+
+			return func() { c.preread = nil; rel() }, nil
+		}
+
+		rel()
+	}
+
+	return func() {}, nil
+}
+
+// readMessage reads the content of m within the memory budget; release
+// returns the reservation.
+func (c *conn) readMessage(m *model.Meta) (raw []byte, release func(), err error) {
+	rel, err := membudget.Acquire(m.Size)
+	if err != nil {
+		return nil, nil, errReadFailed
+	}
+
+	if raw, err = c.mu.Read(m); err != nil {
+		rel()
+		c.log.Error("read message", "guid", m.GUID, "err", err)
+
+		return nil, nil, errReadFailed
+	}
+
+	return raw, rel, nil
+}
+
+// binaryUndecodable reports whether a BINARY or BINARY.SIZE item asks
+// for a section whose Content-Transfer-Encoding is not one the server
+// decodes (RFC 3516 4.2). Each section is looked at once, however many
+// items name it.
+func binaryUndecodable(opts *fetchOptions, raw []byte) bool {
+	checked := map[string]bool{}
+
+	for _, it := range opts.items {
+		var part []int
+
+		switch {
+		case it.binary != nil:
+			part = it.binary.Part
+		case it.binSize != nil:
+			part = it.binSize.Part
+		default:
+			continue
+		}
+
+		key := fmt.Sprint(part)
+		if checked[key] {
+			continue
+		}
+
+		checked[key] = true
+
+		if !knownCTE(sectionCTE(raw, part)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// sectionCTE is the Content-Transfer-Encoding of a section: of the
+// message for the empty part, else of that MIME part. A section that
+// does not exist has none.
+func sectionCTE(raw []byte, part []int) string {
+	sec := &imap.FetchItemBodySection{Part: part, Specifier: imap.PartSpecifierMIME}
+	if len(part) == 0 {
+		sec.Specifier = imap.PartSpecifierHeader
+	}
+
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(imapserver.ExtractBodySection(bytes.NewReader(raw), sec))))
+	if err != nil {
+		return ""
+	}
+
+	return hdr.Get("Content-Transfer-Encoding")
+}
+
+// knownCTE reports whether the BINARY items can decode an encoding: the
+// identity encodings, base64 and quoted-printable (what go-message reads).
+func knownCTE(cte string) bool {
+	switch strings.ToLower(strings.TrimSpace(cte)) {
+	case "", "7bit", "8bit", cteBinary, "base64", "quoted-printable":
+		return true
+	}
+
+	return false
 }
 
 func hasItem(o *fetchOptions, name string) bool {
@@ -781,27 +1039,32 @@ func literalString(b []byte) string {
 // References chain (or the message's own Message-ID).
 func threadID(m *model.Meta) string { return mailmeta.ThreadID(m) }
 
-func envelopeOf(raw []byte) *imap.Envelope {
-	env, _, _ := extractMeta(raw)
-	return env
-}
-
 // --- encoding of ENVELOPE and BODYSTRUCTURE ---------------------------------
 
-func encodeAddrs(l []imap.Address) string {
+// encodeAddrs renders an address list of the ENVELOPE; routes, parallel
+// to l, are the at-domain-lists (source routes) of its addresses.
+func encodeAddrs(l []imap.Address, routes []string) string {
 	if len(l) == 0 {
 		return kwNIL
 	}
 
 	var parts []string
-	for _, a := range l {
-		parts = append(parts, fmt.Sprintf("(%s NIL %s %s)", nstring(a.Name), nstring(a.Mailbox), nstring(a.Host)))
+
+	for i, a := range l {
+		adl := ""
+		if i < len(routes) {
+			adl = routes[i]
+		}
+
+		parts = append(parts, fmt.Sprintf("(%s %s %s %s)", nstring(a.Name), nstring(adl), nstring(a.Mailbox), nstring(a.Host)))
 	}
 
 	return "(" + strings.Join(parts, "") + ")"
 }
 
-func encodeEnvelope(e *imap.Envelope) string {
+// encodeEnvelope renders an ENVELOPE (RFC 3501 7.4.2) with the source
+// routes of its addresses (model.Meta.Routes; nil for none).
+func encodeEnvelope(e *imap.Envelope, routes map[string][]string) string {
 	if e == nil {
 		return kwNIL
 	}
@@ -812,8 +1075,10 @@ func encodeEnvelope(e *imap.Envelope) string {
 	}
 
 	return fmt.Sprintf("(%s %s %s %s %s %s %s %s %s %s)", date, nstring(e.Subject),
-		encodeAddrs(e.From), encodeAddrs(e.Sender), encodeAddrs(e.ReplyTo), encodeAddrs(e.To),
-		encodeAddrs(e.Cc), encodeAddrs(e.Bcc), nstring(strings.Join(e.InReplyTo, " ")), nstring(e.MessageID))
+		encodeAddrs(e.From, routes[model.RouteFrom]), encodeAddrs(e.Sender, routes[model.RouteSender]),
+		encodeAddrs(e.ReplyTo, routes[model.RouteReplyTo]), encodeAddrs(e.To, routes[model.RouteTo]),
+		encodeAddrs(e.Cc, routes[model.RouteCc]), encodeAddrs(e.Bcc, routes[model.RouteBcc]),
+		nstring(strings.Join(e.InReplyTo, " ")), nstring(e.MessageID))
 }
 
 func encodeParams(p map[string]string) string {
@@ -867,7 +1132,7 @@ func encodeBodyStructure(bs imap.BodyStructure, extended bool) string {
 			nstring(b.ID), nstring(b.Description), quote(enc), b.Size)
 
 		if b.MessageRFC822 != nil {
-			fmt.Fprintf(&sb, " %s %s %d", encodeEnvelope(b.MessageRFC822.Envelope),
+			fmt.Fprintf(&sb, " %s %s %d", encodeEnvelope(b.MessageRFC822.Envelope, nil),
 				encodeBodyStructure(b.MessageRFC822.BodyStructure, extended), b.MessageRFC822.NumLines)
 		} else if b.Text != nil {
 			fmt.Fprintf(&sb, " %d", b.Text.NumLines)

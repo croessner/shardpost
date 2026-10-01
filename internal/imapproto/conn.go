@@ -356,10 +356,18 @@ type conn struct {
 	cmdMu  sync.Mutex
 	notify *notifyState
 
-	// ENABLE
+	// ENABLE; utf8 is UTF8=ACCEPT, rev2 IMAP4rev2. Both switch the
+	// session to UTF-8 mailbox names (see mboxname.go). rev2 also drops
+	// \Recent, the RECENT response and STATUS item and [UNSEEN] from
+	// SELECT, answers SEARCH with ESEARCH, sends a LIST with SELECT and
+	// puts the UID into every FETCH the client did not ask for by UID
+	// (RFC 9051 appendix E). LSUB, CHECK and the RFC822 items stay
+	// available, as the deprecated parts of IMAP4rev1 a client may still
+	// use.
 	condstore  bool
 	qresync    bool
 	utf8       bool
+	rev2       bool
 	compressed bool
 
 	// per-command memory accounting for literals
@@ -389,7 +397,10 @@ type conn struct {
 	readOnly   bool
 	examine    bool     // selected with EXAMINE
 	searchRes  []uint32 // saved SEARCH result (UIDs)
-	searchErr  error    // read failure during brute-force matching
+	// preread is the message a FETCH read for its BINARY check, written
+	// without a second read (see binaryPrecheck).
+	preread   *preread
+	searchErr error // read failure during brute-force matching
 }
 
 // maxLiteralsPerCommand bounds the number of literals in one command
@@ -585,13 +596,24 @@ func (c *conn) handleLine() error {
 // literal, syntax error) and flushes; any other error is connection-level
 // and returned unflushed.
 func (c *conn) commandResult(tag string, err error) error {
-	var lt *literalTooLarge
+	var (
+		lt *literalTooLarge
+		mn *mailboxNameError
+	)
 
 	switch {
 	case err == nil:
 	case errors.As(err, &lt):
 		c.drain() // further arguments and literals of the command
 		c.w.line("%s NO [TOOBIG] %v", tag, err)
+	case errors.As(err, &mn):
+		c.drain()
+
+		if mn.bad {
+			c.bad(tag, mn.msg)
+		} else {
+			c.no(tag, "CANNOT", mn.msg)
+		}
 	case errors.Is(err, errSyntax):
 		c.w.line("%s BAD %v", tag, err)
 	default:
@@ -696,12 +718,19 @@ func (c *conn) caps() []string {
 		return caps
 	}
 
-	return append(caps,
+	caps = append(caps,
 		"NAMESPACE", kwUnselect, "IDLE", "UIDPLUS", "MOVE", "ESEARCH", "SEARCHRES",
 		"LIST-EXTENDED", "LIST-STATUS", "STATUS=SIZE", "SPECIAL-USE", "CREATE-SPECIAL-USE",
 		"CHILDREN", "BINARY", "MULTIAPPEND", kwCondstore, kwQresync, "QUOTA", "QUOTA=RES-STORAGE",
-		"QUOTA=RES-MESSAGE", "SORT", "THREAD=REFERENCES", "THREAD=ORDEREDSUBJECT", "OBJECTID",
+		"QUOTA=RES-MESSAGE", "SORT", "SORT=DISPLAY", "THREAD=REFERENCES", "THREAD=ORDEREDSUBJECT", "OBJECTID",
 		kwPreview, "SAVEDATE", "ACL", "RIGHTS=kxte", "METADATA", "CATENATE", "NOTIFY", "WITHIN", "REPLACE", "LIST-MYRIGHTS", "UNAUTHENTICATE", fmt.Sprintf("APPENDLIMIT=%d", c.s.o.MaxLiteral))
+
+	// RFC 9208 4.1.3: a server that lets the client set limits says so.
+	if c.s.o.QuotaSelfService {
+		caps = append(caps, "QUOTASET")
+	}
+
+	return caps
 }
 
 // cmdHandler runs one command; name is the upper-cased command name and
@@ -746,7 +775,7 @@ var uidCommands = map[string]bool{
 var authCommands = map[string]cmdHandler{
 	kwEnable: func(c *conn, tag, _ string, _ bool) error { return c.cmdEnable(tag) },
 	"NAMESPACE": func(c *conn, tag, _ string, _ bool) error {
-		c.w.untagged(`NAMESPACE (("" "/")) %s %s`, namespaceField(c.sharedPrefix()), namespaceField(c.publicPrefix()))
+		c.w.untagged(`NAMESPACE (("" "/")) %s %s`, c.namespaceField(c.sharedPrefix()), c.namespaceField(c.publicPrefix()))
 		c.ok(tag, "", "NAMESPACE completed")
 
 		return nil
@@ -1242,7 +1271,11 @@ func (c *conn) cmdEnable(tag string) error {
 				enabled = append(enabled, kwUTF8Accept)
 			}
 		case "IMAP4REV2":
-			enabled = append(enabled, "IMAP4rev2")
+			if !c.rev2 {
+				c.rev2 = true
+
+				enabled = append(enabled, "IMAP4rev2")
+			}
 		}
 	}
 
@@ -1497,7 +1530,7 @@ func (c *conn) cmdUnauthenticate(tag string) error {
 	}
 
 	c.user, c.name = nil, ""
-	c.condstore, c.qresync, c.utf8 = false, false, false
+	c.condstore, c.qresync, c.utf8, c.rev2 = false, false, false, false
 	c.state = stateNotAuth
 	c.log.Info("authentication cleared", "event", "auth_cleared")
 	c.log = c.sessionLog
@@ -1525,6 +1558,15 @@ func (c *conn) isRecent(m *model.Meta) bool {
 	return c.recentFrom != 0 && m.UID >= c.recentFrom
 }
 
+// announceRecent writes the untagged RECENT response that follows
+// EXISTS, except for a session that enabled IMAP4rev2, which has no
+// RECENT response (RFC 9051 appendix E 12).
+func (c *conn) announceRecent() {
+	if !c.rev2 {
+		c.w.untagged("%d RECENT", c.recentCount())
+	}
+}
+
 // recentCount counts the \Recent messages of the snapshot.
 func (c *conn) recentCount() int {
 	n := 0
@@ -1538,9 +1580,10 @@ func (c *conn) recentCount() int {
 	return n
 }
 
-// flagsOut renders the flags of a message including \Recent.
+// flagsOut renders the flags of a message including \Recent, which a
+// session that enabled IMAP4rev2 never sees (RFC 9051 appendix E 12).
 func (c *conn) flagsOut(m *model.Meta) string {
-	if !c.isRecent(m) {
+	if c.rev2 || !c.isRecent(m) {
 		return flagList(m.Flags)
 	}
 

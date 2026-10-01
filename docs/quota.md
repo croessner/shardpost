@@ -8,6 +8,13 @@ K/M/G/T suffix), or from `server.quota_bytes`/`server.quota_msgs`
 (0 = unlimited). The attribute sets the storage limit only; the message
 limit still follows `SETQUOTA` or `server.quota_msgs`.
 
+IMAP clients may only send `SETQUOTA` when `server.quota_self_service`
+is on (default off); otherwise it is answered `NO [NOPERM]`. The server
+advertises `QUOTASET` (RFC 9208) exactly when the setting is on.
+`STATUS` reports `DELETED` (messages flagged `\Deleted`) and
+`DELETED-STORAGE` (their size, in the 1024-octet unit of the `STORAGE`
+resource, rounded up): what an `EXPUNGE` would free.
+
 On top of that sits the `quota` section, modeled on Dovecot's
 `quota_grace`, `quota_rule`, `quota_warning` and `quota_over_flag`:
 

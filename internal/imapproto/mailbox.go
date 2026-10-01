@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-imap/v2/imapserver"
 
@@ -27,6 +28,21 @@ type listOptions struct {
 	returnSubscribed, returnChildren, returnSpecialUse  bool
 	returnMyRights                                      bool
 	returnStatus                                        []string
+	// exact lists the one name patterns[0] only, wildcards and all (the
+	// LIST response of SELECT); extended is extended data appended to
+	// its line (OLDNAME).
+	exact    bool
+	extended string
+}
+
+// listMatch reports whether a name is listed: the name itself for an
+// exact listing, otherwise when it matches one of the patterns.
+func listMatch(opts listOptions, name, ref string, patterns []string) bool {
+	if opts.exact {
+		return len(patterns) > 0 && name == patterns[0]
+	}
+
+	return matchAny(name, ref, patterns)
 }
 
 func (c *conn) cmdList(tag string, lsub bool) error {
@@ -47,13 +63,7 @@ func (c *conn) cmdList(tag string, lsub bool) error {
 		}
 	}
 
-	if !t.isString() {
-		return fmt.Errorf("%w: expected reference", errSyntax)
-	}
-
-	ref := t.str
-
-	patterns, err := c.readOneOrList("pattern")
+	ref, patterns, err := c.readListNames(t)
 	if err != nil {
 		return err
 	}
@@ -65,6 +75,34 @@ func (c *conn) cmdList(tag string, lsub bool) error {
 	}
 
 	return c.listRun(tag, lsub, opts, ref, patterns)
+}
+
+// readListNames reads the reference (the token t) and the patterns of
+// LIST and LSUB in their stored form. Patterns are names with wildcards;
+// "*" and "%" are printable ASCII and stand for themselves in modified
+// UTF-7.
+func (c *conn) readListNames(t token) (ref string, patterns []string, err error) {
+	if !t.isString() {
+		return "", nil, fmt.Errorf("%w: expected reference", errSyntax)
+	}
+
+	if ref, err = c.fromWire(t.str); err != nil {
+		return "", nil, err
+	}
+
+	if patterns, err = c.readOneOrList("pattern"); err != nil {
+		return "", nil, err
+	}
+
+	for i := range patterns {
+		if patterns[i], err = c.fromWire(patterns[i]); err != nil {
+			return "", nil, err
+		}
+	}
+
+	ref, patterns = nfcListArgs(ref, patterns)
+
+	return ref, patterns, nil
 }
 
 // listRun answers a parsed LIST/LSUB command.
@@ -86,32 +124,123 @@ func (c *conn) listRun(tag string, lsub bool, opts listOptions, ref string, patt
 		return nil
 	}
 
+	if err := c.listLines(lsub, opts, ref, patterns); err != nil {
+		c.storeErr(tag, err)
+		return nil
+	}
+
+	c.ok(tag, "", "LIST completed")
+
+	return nil
+}
+
+// listLines writes the LIST/LSUB lines of every namespace.
+func (c *conn) listLines(lsub bool, opts listOptions, ref string, patterns []string) error {
 	// The other namespaces are collected first: an account whose own
 	// mailbox is named like the root of one of them gets a single LIST
 	// line, and that line has to say \HasChildren.
 	public, publicNodes, err := c.collectPublic()
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return err
 	}
 
 	shared, sharedNodes, err := c.collectSharedRefs()
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return err
 	}
 
 	if err := c.listOwn(lsub, opts, ref, patterns, namespaceRoots(ref, patterns, public, shared)); err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return err
 	}
 
 	c.listForeign(public, publicNodes, lsub, opts, ref, patterns)
 	c.listForeign(shared, sharedNodes, lsub, opts, ref, patterns)
 
-	c.ok(tag, "", "LIST completed")
-
 	return nil
+}
+
+// selectList writes the LIST response of SELECT/EXAMINE for an IMAP4rev2
+// session (RFC 9051 6.3.2): the line LIST would give for the mailbox,
+// with \Subscribed and the special-use attributes, and OLDNAME when the
+// name the client gave was normalized. If the listing fails, a line
+// without attributes stands in: the response is required.
+func (c *conn) selectList(t *target, given string) {
+	opts := listOptions{exact: true, returnSubscribed: true, returnSpecialUse: true}
+	if t.normalized {
+		opts.extended = c.oldNameData(given)
+	}
+
+	mark := c.w.bw.Buffered()
+
+	if err := c.selectListLine(t, opts); err == nil && c.w.bw.Buffered() > mark {
+		return
+	}
+
+	c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), opts.extended)
+}
+
+// selectListLine writes the LIST line of the selected mailbox, reading
+// only the namespace it lies in. An own mailbox needs another namespace
+// only when it is named like that namespace's root (its \HasChildren
+// then comes from there).
+func (c *conn) selectListLine(t *target, opts listOptions) error {
+	patterns := []string{t.full}
+
+	switch {
+	case t.public:
+		public, nodes, err := c.collectPublic()
+		if err == nil {
+			c.listForeign(public, nodes, false, opts, "", patterns)
+		}
+
+		return err
+	case t.owner != "":
+		shared, nodes, err := c.collectSharedRefs()
+		if err == nil {
+			c.listForeign(shared, nodes, false, opts, "", patterns)
+		}
+
+		return err
+	}
+
+	var (
+		public, shared []sharedEntry
+		err            error
+	)
+
+	if isRoot(t.full, c.publicPrefix()) {
+		if public, _, err = c.collectPublic(); err != nil {
+			return err
+		}
+	}
+
+	if isRoot(t.full, c.sharedPrefix()) {
+		if shared, _, err = c.collectSharedRefs(); err != nil {
+			return err
+		}
+	}
+
+	return c.listOwn(false, opts, "", patterns, namespaceRoots("", patterns, public, shared))
+}
+
+// isRoot reports whether name is the root of the namespace with that
+// prefix ("" = switched off).
+func isRoot(name, prefix string) bool {
+	return prefix != "" && name == strings.TrimSuffix(prefix, "/")
+}
+
+// oldNameData is the OLDNAME extended data item (RFC 9051 6.3.9.7) for a
+// name the client gave that was normalized. It goes to every session,
+// IMAP4rev1 ones with UTF8=ACCEPT as well: they were told LIST-EXTENDED,
+// whose extended data items a client has to accept (RFC 5258 6).
+func (c *conn) oldNameData(given string) string {
+	return fmt.Sprintf(` ("OLDNAME" (%s))`, c.mailboxString(given))
+}
+
+// oldNameList announces the normalized name of a CREATE or RENAME with
+// the name the client gave (RFC 9051 6.3.4, 6.3.5).
+func (c *conn) oldNameList(t *target, given string) {
+	c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), c.oldNameData(given))
 }
 
 // listVerb is the response name of LIST or LSUB.
@@ -399,7 +528,7 @@ func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []strin
 	sort.Strings(sorted)
 
 	for _, name := range sorted {
-		if !matchAny(name, ref, patterns) {
+		if !listMatch(opts, name, ref, patterns) {
 			continue
 		}
 
@@ -428,7 +557,7 @@ func (c *conn) listOwnEntry(lt *listTree, name string, lsub bool, opts listOptio
 	}
 
 	attrs := lt.attrs(mb, name, viaChild, lsub, opts)
-	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), astringOut(name), childInfo)
+	c.w.untagged(`%s (%s) "/" %s%s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo, opts.extended)
 	c.listOwnExtras(mb, name, opts)
 }
 
@@ -460,7 +589,7 @@ func (lt *listTree) childInfoOf(mb *model.Mailbox, name string, lsub bool, opts 
 // \Noselect when the pattern ends in %.
 func (c *conn) lsubParent(lt *listTree, name string) {
 	if lt.subscribedChild(name) && strings.HasSuffix(lt.patterns[0], "%") {
-		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, astringOut(name))
+		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, c.mailboxOut(name))
 	}
 }
 
@@ -521,7 +650,7 @@ func (c *conn) listOwnExtras(mb *model.Mailbox, name string, opts listOptions) {
 	}
 
 	if opts.returnMyRights && mb != nil {
-		c.w.untagged("MYRIGHTS %s %s", astringOut(name), model.AllRights)
+		c.w.untagged("MYRIGHTS %s %s", c.mailboxOut(name), model.AllRights)
 	}
 }
 
@@ -657,7 +786,7 @@ func (c *conn) listForeign(entries []sharedEntry, nodes map[string]bool, lsub bo
 	sort.Strings(names)
 
 	for _, name := range names {
-		if matchAny(name, ref, patterns) {
+		if listMatch(opts, name, ref, patterns) {
 			c.listSharedEntry(st, name, lsub, opts)
 		}
 	}
@@ -845,7 +974,7 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 	}
 
 	attrs := st.attrs(e, isBox, name, lsub, opts)
-	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), astringOut(name), childInfo)
+	c.w.untagged(`%s (%s) "/" %s%s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo, opts.extended)
 	c.listSharedExtras(e, isBox, name, opts)
 }
 
@@ -854,7 +983,7 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 // mailboxes (RFC 3501 6.3.9).
 func (c *conn) lsubSharedParent(st *sharedTree, name string) {
 	if st.subChild(name) && len(st.patterns) > 0 && strings.HasSuffix(st.patterns[0], "%") {
-		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, astringOut(name))
+		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, c.mailboxOut(name))
 	}
 }
 
@@ -891,14 +1020,14 @@ func (c *conn) listSharedExtras(e sharedEntry, isBox bool, name string, opts lis
 	}
 
 	if opts.returnMyRights && isBox {
-		c.w.untagged("MYRIGHTS %s %s", astringOut(name), e.rights)
+		c.w.untagged("MYRIGHTS %s %s", c.mailboxOut(name), e.rights)
 	}
 }
 
 // --- CREATE / DELETE / RENAME / SUBSCRIBE ----------------------------------
 
 func (c *conn) cmdCreate(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -914,6 +1043,11 @@ func (c *conn) cmdCreate(tag string) error {
 		return nil
 	}
 
+	if checkNewName(t.name) != nil {
+		c.no(tag, "CANNOT", "Mailbox name has control characters")
+		return nil
+	}
+
 	if t.shared() && !c.mayCreateShared(tag, t) {
 		return nil
 	}
@@ -923,7 +1057,19 @@ func (c *conn) cmdCreate(tag string) error {
 		return nil
 	}
 
-	c.ok(tag, "", "CREATE completed")
+	// RFC 9051 6.3.4: a name that was normalized is announced with the
+	// name the client gave.
+	if t.normalized {
+		c.oldNameList(t, name)
+	}
+
+	// RFC 8474 4.1: the id of the new mailbox comes with the OK.
+	code := ""
+	if mb, err := t.u.Lookup(t.name); err == nil {
+		code = "MAILBOXID (" + mb.ID + ")"
+	}
+
+	c.ok(tag, code, "CREATE completed")
 
 	return nil
 }
@@ -977,7 +1123,7 @@ func canonicalAttr(a string) string {
 }
 
 func (c *conn) cmdDelete(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1016,12 +1162,12 @@ func (c *conn) cmdDelete(tag string) error {
 }
 
 func (c *conn) cmdRename(tag string) error {
-	oldName, err := c.r.astring()
+	oldName, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
 
-	newName, err := c.r.astring()
+	newName, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1043,21 +1189,13 @@ func (c *conn) cmdRename(tag string) error {
 		return nil
 	}
 
-	if ot.shared() {
-		if !c.needRight(tag, ot, 'x') {
-			return nil
-		}
+	if checkNewName(nt.name) != nil {
+		c.no(tag, "CANNOT", "Mailbox name has control characters")
+		return nil
+	}
 
-		rights, err := c.parentRights(nt, nt.name)
-		if err != nil {
-			c.storeErr(tag, err)
-			return nil
-		}
-
-		if !model.HasRight(rights, 'k') {
-			c.no(tag, "NOPERM", "Permission denied")
-			return nil
-		}
+	if ot.shared() && !c.mayRenameShared(tag, ot, nt) {
+		return nil
 	}
 
 	if err := ot.u.RenameMailbox(ot.name, nt.name); err != nil {
@@ -1065,13 +1203,41 @@ func (c *conn) cmdRename(tag string) error {
 		return nil
 	}
 
+	// RFC 9051 6.3.5: a new name that was normalized is announced with
+	// the name the client gave.
+	if nt.normalized {
+		c.oldNameList(nt, newName)
+	}
+
 	c.ok(tag, "", "RENAME completed")
 
 	return nil
 }
 
+// mayRenameShared checks the rights a RENAME in another namespace needs:
+// x on the mailbox, k on the new parent; it answers the client when one
+// is missing.
+func (c *conn) mayRenameShared(tag string, ot, nt *target) bool {
+	if !c.needRight(tag, ot, 'x') {
+		return false
+	}
+
+	rights, err := c.parentRights(nt, nt.name)
+	if err != nil {
+		c.storeErr(tag, err)
+		return false
+	}
+
+	if !model.HasRight(rights, 'k') {
+		c.no(tag, "NOPERM", "Permission denied")
+		return false
+	}
+
+	return true
+}
+
 func (c *conn) cmdSubscribe(tag string, on bool) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1121,7 +1287,7 @@ func (c *conn) cmdSubscribe(tag string, on bool) error {
 // --- STATUS ----------------------------------------------------------------
 
 func (c *conn) cmdStatus(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1181,6 +1347,7 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 
 		if model.HasFlag(m.Flags, flagDeleted) {
 			d.deleted++
+			d.deletedSize += m.Size
 		}
 
 		d.size += m.Size
@@ -1198,15 +1365,25 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 		d.unseen = unseen
 	}
 
+	return fmt.Sprintf("STATUS %s (%s)", c.mailboxOut(t.display(info.Name)), strings.Join(c.statusOut(d, items), " ")), nil
+}
+
+// statusOut renders the requested STATUS items; unknown ones are left
+// out, and so is RECENT for an IMAP4rev2 session (RFC 9051 appendix E 12).
+func (c *conn) statusOut(d *statusData, items []string) []string {
 	var out []string
 
 	for _, it := range items {
+		if it == kwRecent && c.rev2 {
+			continue
+		}
+
 		if f, ok := statusItems[it]; ok {
 			out = append(out, f(d))
 		}
 	}
 
-	return fmt.Sprintf("STATUS %s (%s)", astringOut(t.display(info.Name)), strings.Join(out, " ")), nil
+	return out
 }
 
 // statusData is what the STATUS items are computed from.
@@ -1215,7 +1392,9 @@ type statusData struct {
 	msgs            []model.Meta
 	unseen, deleted int
 	size            int64
-	maxLiteral      int64
+	// deletedSize is the size of the \Deleted messages in octets.
+	deletedSize int64
+	maxLiteral  int64
 }
 
 // statusItems render the STATUS data items.
@@ -1232,20 +1411,23 @@ var statusItems = map[string]func(d *statusData) string{
 
 		return fmt.Sprintf("RECENT %d", recent)
 	},
-	kwUIDNext:       func(d *statusData) string { return fmt.Sprintf("UIDNEXT %d", d.info.UIDNext) },
-	kwUIDValidity:   func(d *statusData) string { return fmt.Sprintf("UIDVALIDITY %d", d.info.UIDValidity) },
-	kwUnseen:        func(d *statusData) string { return fmt.Sprintf("UNSEEN %d", d.unseen) },
-	kwDeleted:       func(d *statusData) string { return fmt.Sprintf("DELETED %d", d.deleted) },
-	kwSize:          func(d *statusData) string { return fmt.Sprintf("SIZE %d", d.size) },
-	"HIGHESTMODSEQ": func(d *statusData) string { return fmt.Sprintf("HIGHESTMODSEQ %d", d.info.HighestModSeq) },
-	"MAILBOXID":     func(d *statusData) string { return fmt.Sprintf("MAILBOXID (%s)", d.info.ID) },
-	"APPENDLIMIT":   func(d *statusData) string { return fmt.Sprintf("APPENDLIMIT %d", d.maxLiteral) },
+	kwUIDNext:     func(d *statusData) string { return fmt.Sprintf("UIDNEXT %d", d.info.UIDNext) },
+	kwUIDValidity: func(d *statusData) string { return fmt.Sprintf("UIDVALIDITY %d", d.info.UIDValidity) },
+	kwUnseen:      func(d *statusData) string { return fmt.Sprintf("UNSEEN %d", d.unseen) },
+	kwDeleted:     func(d *statusData) string { return fmt.Sprintf("DELETED %d", d.deleted) },
+	kwSize:        func(d *statusData) string { return fmt.Sprintf("SIZE %d", d.size) },
+	// RFC 9208 4.1.4: what an EXPUNGE frees, in the unit of the STORAGE
+	// resource (1024 octets, rounded up like the usage of GETQUOTA).
+	"DELETED-STORAGE": func(d *statusData) string { return fmt.Sprintf("DELETED-STORAGE %d", (d.deletedSize+1023)/1024) },
+	"HIGHESTMODSEQ":   func(d *statusData) string { return fmt.Sprintf("HIGHESTMODSEQ %d", d.info.HighestModSeq) },
+	"MAILBOXID":       func(d *statusData) string { return fmt.Sprintf("MAILBOXID (%s)", d.info.ID) },
+	"APPENDLIMIT":     func(d *statusData) string { return fmt.Sprintf("APPENDLIMIT %d", d.maxLiteral) },
 }
 
 // --- APPEND (with MULTIAPPEND) ---------------------------------------------
 
 func (c *conn) cmdAppend(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1365,6 +1547,14 @@ func (c *conn) readAppendArgs() (*appendArgs, error) {
 			continue
 		}
 
+		if t.kind == tokAtom && strings.EqualFold(t.str, kwUTF8) {
+			if err := c.readUTF8Part(a, pt); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
 		if t.kind != tokString {
 			a.badSyntax = "Expected message literal"
 			continue
@@ -1429,6 +1619,26 @@ func (c *conn) readCatenatePart(a *appendArgs, pt appendPart) error {
 		if code == "" {
 			a.badSyntax = err.Error()
 		}
+	}
+
+	pt.raw = raw
+	a.parts = append(a.parts, pt)
+
+	return nil
+}
+
+// readUTF8Part reads the "(literal8)" of "UTF8 (literal8)" (RFC 6855 4)
+// and adds the message to a.
+func (c *conn) readUTF8Part(a *appendArgs, pt appendPart) error {
+	lt, err := c.r.next()
+	if err != nil {
+		return err
+	}
+
+	raw, err := c.utf8Literal(lt)
+	if err != nil {
+		a.badSyntax = err.Error()
+		return nil
 	}
 
 	pt.raw = raw
@@ -1521,7 +1731,7 @@ func (c *conn) appendStore(tag string, au model.User, name, appendRights string,
 // --- SELECT / EXAMINE with CONDSTORE and QRESYNC ---------------------------
 
 func (c *conn) cmdSelect(tag string, examine bool) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1544,7 +1754,7 @@ func (c *conn) cmdSelect(tag string, examine bool) error {
 		c.w.untagged("OK [CLOSED] Previous mailbox is now closed")
 	}
 
-	rights, ok := c.openSelected(tag, name, examine)
+	rights, st, ok := c.openSelected(tag, name, examine)
 	if !ok {
 		return nil
 	}
@@ -1552,7 +1762,7 @@ func (c *conn) cmdSelect(tag string, examine bool) error {
 	c.state = stateSelected
 	c.notifyReselect()
 	c.initRecent(examine)
-	c.selectUntagged(rights)
+	c.selectUntagged(rights, st, name)
 
 	if qr != nil {
 		if err := c.qresyncReplay(qr); err != nil {
@@ -1619,17 +1829,17 @@ func (c *conn) parseSelectParams(tag string) (condstore bool, qr *qresyncParams,
 }
 
 // openSelected makes mailbox name the selected one and loads its
-// snapshot; it returns the account's rights on it. ok is false when the
-// client was answered with an error.
-func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
+// snapshot; it returns the account's rights on it and the resolved
+// target. ok is false when the client was answered with an error.
+func (c *conn) openSelected(tag, name string, examine bool) (string, *target, bool) {
 	st, err := c.target(name)
 	if err != nil {
 		c.storeErr(tag, err)
-		return "", false
+		return "", nil, false
 	}
 
 	if !c.needRight(tag, st, 'r') {
-		return "", false
+		return "", nil, false
 	}
 
 	rights, _ := c.rightsOf(st)
@@ -1637,7 +1847,7 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
 	mb, err := st.u.Lookup(st.name)
 	if err != nil {
 		c.storeErr(tag, err)
-		return "", false
+		return "", nil, false
 	}
 
 	c.mu, c.mowner, c.mrights = st.u, st.owner, rights
@@ -1650,12 +1860,12 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
 		c.mbox = nil
 		c.storeErr(tag, err)
 
-		return "", false
+		return "", nil, false
 	}
 
 	c.prunePrivateSeen()
 
-	return rights, true
+	return rights, st, true
 }
 
 // initRecent sets the session's \Recent watermark: everything from the
@@ -1676,14 +1886,22 @@ func (c *conn) initRecent(examine bool) {
 }
 
 // selectUntagged writes the untagged responses of SELECT/EXAMINE.
-func (c *conn) selectUntagged(rights string) {
+// For a session that enabled IMAP4rev2 there is no RECENT response and
+// no [UNSEEN] code, but a LIST response with the mailbox name (RFC 9051
+// 6.3.2, appendix E 10-12), with OLDNAME when the name was normalized.
+func (c *conn) selectUntagged(rights string, t *target, given string) {
 	c.w.untagged("%d EXISTS", len(c.msgs))
-	c.w.untagged("%d RECENT", c.recentCount())
 
-	for i, m := range c.msgs {
-		if !model.HasFlag(m.Flags, flagSeen) {
-			c.w.untagged("OK [UNSEEN %d] First unseen", i+1)
-			break
+	if c.rev2 {
+		c.selectList(t, given)
+	} else {
+		c.w.untagged("%d RECENT", c.recentCount())
+
+		for i, m := range c.msgs {
+			if !model.HasFlag(m.Flags, flagSeen) {
+				c.w.untagged("OK [UNSEEN %d] First unseen", i+1)
+				break
+			}
 		}
 	}
 
@@ -1952,7 +2170,7 @@ func (c *conn) cmdGetQuota(tag string) error {
 }
 
 func (c *conn) cmdGetQuotaRoot(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1968,7 +2186,7 @@ func (c *conn) cmdGetQuotaRoot(tag string) error {
 		return nil
 	}
 
-	c.w.untagged(`QUOTAROOT %s ""`, astringOut(name))
+	c.w.untagged(`QUOTAROOT %s ""`, c.mailboxOut(name))
 	c.w.untagged("%s", line)
 	c.ok(tag, "", "GETQUOTAROOT completed")
 
@@ -2087,29 +2305,35 @@ func formatGaps(msgs []model.Meta, uidNext uint32) string {
 	return b.String()
 }
 
-// catenate assembles a message from TEXT parts and IMAP URLs (RFC 4469,
-// RFC 5092 relative URLs: imap:///<mailbox>;UIDVALIDITY=<n>/;UID=<n>
-// [/;SECTION=<section>]). A part the account may not read or that does
-// not exist is a BADURL failure; the total is bounded like a literal.
+// catenate assembles a message from TEXT parts, UTF8 parts (RFC 6855 4)
+// and IMAP URLs (RFC 4469, RFC 5092 relative URLs:
+// imap:///<mailbox>;UIDVALIDITY=<n>/;UID=<n>[/;SECTION=<section>]). A
+// part the account may not read or that does not exist is a BADURL
+// failure, whose code carries that URL; the total is bounded like a
+// literal.
 func (c *conn) catenate(items []token) (string, string, error) {
 	var b strings.Builder
 
 	for i := 0; i < len(items); i++ {
 		kind := strings.ToUpper(items[i].str)
-		if i+1 >= len(items) || !items[i+1].isString() {
+		if i+1 >= len(items) {
 			return "", "", fmt.Errorf("%w: CATENATE part needs a value", errSyntax)
 		}
 
-		val := items[i+1].str
+		val, err := c.catenateValue(kind, items[i+1])
+		if err != nil {
+			return "", "", err
+		}
+
 		i++
 
 		switch kind {
-		case kwText:
+		case kwText, kwUTF8:
 			b.WriteString(val)
 		case "URL":
 			part, err := c.resolveURL(val)
 			if err != nil {
-				return "", "BADURL", err
+				return "", "BADURL " + badURLText(val), err
 			}
 			// Account the part like a literal of this command (memory
 			// budget and APPENDLIMIT), released with the command.
@@ -2136,6 +2360,65 @@ func (c *conn) catenate(items []token) (string, string, error) {
 	}
 
 	return b.String(), "", nil
+}
+
+// catenateValue returns the value of a CATENATE part: a string, or for
+// UTF8 the literal in parentheses.
+func (c *conn) catenateValue(kind string, t token) (string, error) {
+	if kind == kwUTF8 {
+		return c.utf8Literal(t)
+	}
+
+	if !t.isString() {
+		return "", fmt.Errorf("%w: CATENATE part needs a value", errSyntax)
+	}
+
+	return t.str, nil
+}
+
+// utf8Literal returns the message of "UTF8 (literal8)" (RFC 6855 4),
+// whose parenthesised list is t. The form exists for sessions that
+// enabled UTF8=ACCEPT; any other session gets a syntax error.
+func (c *conn) utf8Literal(t token) (string, error) {
+	if !c.utf8 {
+		return "", fmt.Errorf("%w: UTF8 message data needs ENABLE UTF8=ACCEPT", errSyntax)
+	}
+
+	if t.kind != tokList || len(t.list) != 1 || t.list[0].kind != tokString {
+		return "", fmt.Errorf("%w: UTF8 needs a parenthesised literal", errSyntax)
+	}
+
+	return t.list[0].str, nil
+}
+
+// maxBadURL bounds the URL echoed in a BADURL response code; the client
+// sent it, and a response line should not grow with it.
+const maxBadURL = 1024
+
+// badURLText renders a URL for the BADURL response code, whose text may
+// hold any TEXT-CHAR but "]" and octet 0xFF (RFC 4469 5); those, and
+// control characters, are percent-encoded, which leaves the URL the same
+// URL. A URL longer than maxBadURL is cut at a character boundary and
+// ends in "...".
+func badURLText(u string) string {
+	var b strings.Builder
+
+	for i := 0; i < len(u); i++ {
+		ch := u[i]
+		if b.Len() >= maxBadURL && utf8.RuneStart(ch) {
+			b.WriteString("...")
+			break
+		}
+
+		if ch == ']' || ch == 0xff || ch < 0x20 || ch == 0x7f {
+			fmt.Fprintf(&b, "%%%02X", ch)
+			continue
+		}
+
+		b.WriteByte(ch)
+	}
+
+	return b.String()
 }
 
 // imapURL is a parsed IMAP URL of a CATENATE part.
@@ -2344,7 +2627,7 @@ func (c *conn) cmdReplace(tag string, uid bool) error {
 		return err
 	}
 
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -2464,6 +2747,17 @@ func (c *conn) readReplaceMessage(tag string, t token) (raw string, ok bool, err
 		return raw, true, nil
 	}
 
+	if t.kind == tokAtom && strings.EqualFold(t.str, kwUTF8) {
+		lt, err := c.r.next()
+		if err != nil {
+			return "", false, err
+		}
+
+		raw, err = c.utf8Literal(lt)
+
+		return raw, err == nil, err
+	}
+
 	if t.kind == tokString {
 		return t.str, true, nil
 	}
@@ -2526,7 +2820,7 @@ func binaryToBase64(raw string) string {
 			return raw
 		}
 
-		if strings.HasPrefix(k, "content-transfer-encoding:") && strings.TrimSpace(k[len("content-transfer-encoding:"):]) == "binary" {
+		if strings.HasPrefix(k, "content-transfer-encoding:") && strings.TrimSpace(k[len("content-transfer-encoding:"):]) == cteBinary {
 			cte = i
 		}
 	}

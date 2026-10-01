@@ -239,10 +239,14 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
   principal: the admin client is nobody the account could look up. A
   change of `anyone` leaves none. The notification is best effort and
   never fails the request.
-- **Names** are stored by the server as they arrive (UTF-8). IMAP clients
-  with `UTF8=ACCEPT` see the same names; older clients using modified
-  UTF-7 send `&AOQ-…` forms and do not see admin-created names with
-  umlauts under the same designation.
+- **Names** are UTF-8, here and in the store. IMAP clients that enabled
+  `UTF8=ACCEPT` or `IMAP4rev2` see the same names; older clients see
+  and send them in modified UTF-7 (`Entwürfe` is `Entw&APw-rfe` for
+  them), which the IMAP server converts in both directions. Both kinds
+  of client address the same mailbox. Mailboxes that such a client
+  created under 0.35.2 or earlier are stored under their modified UTF-7
+  name; see
+  [Upgrade: modified UTF-7 names](#upgrade-modified-utf-7-mailbox-names).
 - **Idempotence** follows from the semantics: absolute values, mailboxes
   addressed by their stable ID. A repeated request after a lost response
   returns the same state. Send relative ACL changes with `If-Match` for
@@ -266,6 +270,7 @@ shardpostctl plan quota_recalc user@example.org
 shardpostctl plan acl_reconcile user@example.org
 shardpostctl plan fts_rebuild user@example.org
 shardpostctl plan fts_dict_convert user@example.org        # dictionary layout of 0.35.0
+shardpostctl plan mailbox_name_convert user@example.org    # modified UTF-7 names of 0.35.2 and earlier
 shardpostctl plan -mailbox "Archiv/2019" mailbox_delete user@example.org
 shardpostctl plan purge user@example.org
 shardpostctl apply -wait <plan-id>
@@ -291,6 +296,7 @@ only the repairs that were planned and are still needed.
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index and rebuild it from all messages |
 | `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account |
+| `mailbox_name_convert` | `repair` | yes | rename mailboxes stored under a modified UTF-7 name to their UTF-8 name (children move with the parent) and rewrite subscriptions without a mailbox the same way; a rename whose target exists is a conflict (with its children) and is skipped; names that are not valid UTF-8 are reported (see [Upgrade: modified UTF-7 names](#upgrade-modified-utf-7-mailbox-names)) |
 | `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
 | `expunge` | `delete` | no | permanently remove messages of a mailbox: `uids` or `deleted: true` (all with `\Deleted`) |
 | `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account |
@@ -338,6 +344,61 @@ only the repairs that were planned and are still needed.
   belongs to its owner. If the account logs in again afterwards, ShardPost
   creates an empty INBOX.
 - Finished jobs and plans stay retrievable for `jobs.retention_days`.
+
+### Upgrade: modified UTF-7 mailbox names
+
+Up to 0.35.2 the IMAP server stored mailbox names as the client sent
+them. A client that had not enabled `UTF8=ACCEPT` sends non-ASCII names
+in modified UTF-7, so a mailbox it created as "Entwürfe" is stored as
+`Entw&APw-rfe`. Since then the server converts names on the wire and
+keeps UTF-8 in the store. Such a mailbox keeps its old name, which every
+client now sees literally (an older client as `Entw&-APw-rfe`), and an
+older client that opens "Entwürfe" no longer finds it.
+
+After the upgrade, run `mailbox_name_convert` for the accounts that may
+have such mailboxes (all of them, if unsure; the plan of an account
+without any is empty):
+
+```sh
+shardpostctl plan mailbox_name_convert user@example.org
+shardpostctl apply -wait <plan-id>
+```
+
+The plan lists every rename (`rename`, with the mailbox ID), every
+subscription without a mailbox that is rewritten (`subscription`),
+every conflict (`conflict`: the UTF-8 name is taken, or a parent is in
+conflict; nothing is renamed for it, resolve it by hand and plan again)
+and every stored name that is not valid UTF-8 (`invalid_utf8`). Only a
+name level that is exactly the modified UTF-7 form of another string is
+converted; `R&D` or `A&B` stay, `A&-B` becomes `A&B`. Check the plan:
+a name a UTF-8 client really chose in that form would be converted too.
+The job locks the account (open sessions are disconnected and
+reconnect), applies only the planned changes that are still needed and
+can be run again; when a rename fails, the mailboxes below it stay where
+they are and the job ends `partially_failed`. Clients see the renamed
+mailboxes as new folders once and synchronise them again.
+
+**The typical conflict.** Delivery and Sieve name mailboxes in UTF-8.
+When a Sieve rule (`fileinto :create "Entwürfe"`), an autocreate entry
+or a JMAP client created `Entwürfe` and an IMAP client without UTF-8
+created `Entw&APw-rfe`, the account has two mailboxes for one name, and
+the plan reports a `conflict`. Resolve it by hand: move the messages of
+one into the other (with an IMAP client that shows both, or
+`shardpostctl move <account> "Entw&APw-rfe" <uids> "Entwürfe"`), delete
+the emptied mailbox
+(`mailbox_delete`), and plan again; or rename the old one to a third
+name (`shardpostctl mailbox rename <account> "Entw&APw-rfe" "Entwürfe (old)"`)
+if both are to stay.
+
+**What the job does not rewrite.** Only mailbox names and subscriptions
+change. Other places that name a mailbox keep the old name: Sieve
+scripts (`fileinto "Entw&APw-rfe"` then files into, or with `:create`
+creates, a mailbox of that literal name again), IMAPSieve and learning
+rules in the configuration, client-side filter rules and folder settings
+(sent and drafts folders). Check the account's Sieve scripts
+(`shardpostctl sieve list|show <account>`, or ManageSieve) for names with
+`&` after the conversion and change them to the UTF-8 names; clients ask
+for their folder settings again or are pointed at the new names.
 
 ## Support tools (stage 8d)
 

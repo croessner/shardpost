@@ -11,8 +11,19 @@ import (
 // a bare address as display name, source routes, empty groups) into the
 // ENVELOPE address form: a group is a start entry (mailbox = group name,
 // no host) followed by its members and an all-empty end entry (RFC 3501
-// 7.4.2). Routes are dropped, encoded words in names are decoded.
+// 7.4.2). Encoded words in names are decoded; source routes are dropped
+// here, ParseAddressListRoutes returns them.
 func ParseAddressList(v string) []imap.Address {
+	out, _ := ParseAddressListRoutes(v)
+	return out
+}
+
+// ParseAddressListRoutes is ParseAddressList with the obsolete source
+// routes (RFC 5322 4.4 obs-route, "<@a,@b:user@host>"), which the ENVELOPE
+// reports as the at-domain-list of an address (RFC 3501 7.4.2). The
+// routes run parallel to the addresses, "" for an address without one;
+// they are nil when no address has a route.
+func ParseAddressListRoutes(v string) ([]imap.Address, []string) {
 	p := &addrParser{s: v}
 
 	var out []imap.Address
@@ -21,7 +32,7 @@ func ParseAddressList(v string) []imap.Address {
 		p.cfws()
 
 		if p.eof() {
-			return out
+			break
 		}
 
 		if p.peek() == ',' || p.peek() == ';' {
@@ -31,11 +42,26 @@ func ParseAddressList(v string) []imap.Address {
 
 		out = p.address(out, false)
 	}
+
+	if len(p.routes) == 0 {
+		return out, nil
+	}
+
+	routes := make([]string, len(out))
+	for i, r := range p.routes {
+		if i < len(routes) {
+			routes[i] = r
+		}
+	}
+
+	return out, routes
 }
 
 type addrParser struct {
 	s string
 	i int
+	// routes are the source routes found, by index of the address.
+	routes map[int]string
 }
 
 func (p *addrParser) eof() bool  { return p.i >= len(p.s) }
@@ -174,7 +200,15 @@ func (p *addrParser) address(out []imap.Address, inGroup bool) []imap.Address {
 		return p.group(out, text)
 	case '<':
 		p.i++
-		mbox, host := p.angle()
+		mbox, host, route := p.angle()
+
+		if route != "" {
+			if p.routes == nil {
+				p.routes = map[int]string{}
+			}
+
+			p.routes[len(out)] = route
+		}
 
 		return append(out, imap.Address{Name: decodeName(text), Mailbox: mbox, Host: host})
 	case '@':
@@ -230,11 +264,11 @@ func (p *addrParser) group(out []imap.Address, name string) []imap.Address {
 }
 
 // angle parses the inside of <...> after the "<".
-func (p *addrParser) angle() (mbox, host string) {
+func (p *addrParser) angle() (mbox, host, route string) {
 	p.cfws()
 
 	if !p.eof() && p.peek() == '@' { // obs-route "@a,@b:"
-		p.skipRoute()
+		route = p.route()
 	}
 
 	mbox = p.angleLocal()
@@ -252,18 +286,32 @@ func (p *addrParser) angle() (mbox, host string) {
 		p.i++
 	}
 
-	return mbox, host
+	return mbox, host, route
 }
 
-// skipRoute skips an obsolete source route "@a,@b:".
-func (p *addrParser) skipRoute() {
+// route reads an obsolete source route "@a,@b:" and returns it without
+// the colon, whitespace and comments ("@a,@b").
+func (p *addrParser) route() string {
+	var b strings.Builder
+
 	for !p.eof() && p.peek() != ':' && p.peek() != '>' {
-		p.i++
+		switch c := p.peek(); c {
+		case '(':
+			p.comment()
+		case ' ', '\t', '\r', '\n':
+			p.i++
+		default:
+			b.WriteByte(c)
+
+			p.i++
+		}
 	}
 
 	if !p.eof() && p.peek() == ':' {
 		p.i++
 	}
+
+	return b.String()
 }
 
 // angleLocal reads the local part inside <...> up to "@" or ">".

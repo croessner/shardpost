@@ -2,6 +2,7 @@ package imapproto
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,10 @@ func (c *conn) cmdNotify(tag string) error {
 		return err
 	}
 
+	if err := c.notifyNames(groups); err != nil {
+		return err
+	}
+
 	st, ok := c.buildNotifyState(tag, groups)
 	if !ok {
 		return nil
@@ -94,6 +99,30 @@ func (c *conn) cmdNotify(tag string) error {
 	go c.notifyLoop(st)
 
 	c.ok(tag, "", "NOTIFY completed")
+
+	return nil
+}
+
+// notifyNames converts the mailboxes of SUBTREE and MAILBOXES from the
+// session's wire form; a name not in NFC also names the NFC mailbox
+// (see target).
+func (c *conn) notifyNames(groups []notifyGroup) error {
+	for i := range groups {
+		for j := range groups[i].mailboxes {
+			name, err := c.fromWire(groups[i].mailboxes[j])
+			if err != nil {
+				return err
+			}
+
+			groups[i].mailboxes[j] = name
+		}
+
+		for _, n := range groups[i].mailboxes {
+			if nfc, changed := nfcName(n); changed && !slices.Contains(groups[i].mailboxes, nfc) {
+				groups[i].mailboxes = append(groups[i].mailboxes, nfc)
+			}
+		}
+	}
 
 	return nil
 }
@@ -612,8 +641,9 @@ func (c *conn) fetchAttributes(seqs []uint32, atts string) {
 			continue
 		}
 
+		// Unsolicited: with the UID for IMAP4rev2 (RFC 9051 appendix E 21).
 		m := c.msgs[seq-1]
-		_ = c.writeFetch(int(seq), &m, opts, false)
+		_ = c.writeFetch(int(seq), &m, opts, c.rev2)
 	}
 }
 

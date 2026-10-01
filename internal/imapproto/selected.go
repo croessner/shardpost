@@ -76,7 +76,7 @@ func (c *conn) poll(allowExpunge bool) error {
 
 	if len(c.msgs) != oldLen {
 		c.w.untagged("%d EXISTS", len(c.msgs))
-		c.w.untagged("%d RECENT", c.recentCount())
+		c.announceRecent()
 		c.claimRecent(info)
 	}
 
@@ -243,7 +243,7 @@ func (c *conn) pollReload(allowExpunge bool) error {
 
 	if len(c.msgs) != len(old) {
 		c.w.untagged("%d EXISTS", len(c.msgs))
-		c.w.untagged("%d RECENT", c.recentCount())
+		c.announceRecent()
 		c.claimRecent(c.info)
 	}
 
@@ -774,8 +774,10 @@ func (c *conn) storeFetches(seqs []int, metas []model.Meta, byUID map[uint32]mod
 		}
 
 		if !silent || (conditional && changed) {
+			// RFC 9051 appendix E 21: an IMAP4rev2 session gets the UID
+			// in every FETCH it did not ask for by UID.
 			uidItem := ""
-			if uid {
+			if uid || c.rev2 {
 				uidItem = fmt.Sprintf("UID %d ", m.UID)
 			}
 
@@ -883,7 +885,7 @@ func (c *conn) cmdCopy(tag string, uid bool) error {
 		return err
 	}
 
-	dest, err := c.r.astring()
+	dest, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1056,7 +1058,7 @@ func (c *conn) cmdMove(tag string, uid bool) error {
 		return err
 	}
 
-	dest, err := c.r.astring()
+	dest, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
