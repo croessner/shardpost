@@ -112,6 +112,9 @@ type Manager struct {
 	// q are the due queues (nil: the admin store has none or its index
 	// mode is off).
 	q *queues
+	// afterBatchSubmit (tests) runs between the submit of SubmitBatchOnce
+	// and its second look.
+	afterBatchSubmit func()
 }
 
 // NewManager builds the job system; instance names this server in

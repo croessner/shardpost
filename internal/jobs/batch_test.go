@@ -486,28 +486,39 @@ func TestSubmitBatchOnce(t *testing.T) {
 	}
 }
 
-// TestSubmitBatchOnceRace: of two batches submitted at the same time the
-// newer one is cancelled.
+// TestSubmitBatchOnceRace: another submitter's batch, created before
+// this one but seen only after its submit, wins; this one is cancelled.
 func TestSubmitBatchOnceRace(t *testing.T) {
 	m, _ := batchSetup(t, Config{}, false)
 	p := BatchParams{Kind: KindScrub, SkipIdle: true}
 
-	// The other submitter got its batch in first, after this one looked.
-	older, created, err := m.SubmitBatchOnce(p, "cron-a")
-	if err != nil || !created {
-		t.Fatal(err)
+	var older *Job
+
+	m.afterBatchSubmit = func() {
+		now := m.now
+		m.now = func() time.Time { return now().Add(-time.Minute) }
+
+		defer func() { m.now = now }()
+
+		plan, err := m.CreateBatchPlan(p, "cron-b")
+		if err != nil {
+			t.Error(err)
+			return
+		}
+
+		k, _ := m.Kind(KindBatch)
+		if older, _, err = m.Submit(k, "", nil, plan.ID, "cron-b", ""); err != nil {
+			t.Error(err)
+		}
 	}
 
-	plan, _ := m.CreateBatchPlan(p, "cron-b")
-	k, _ := m.Kind(KindBatch)
-
-	newer, _, err := m.Submit(k, "", nil, plan.ID, "cron-b", "")
-	if err != nil {
-		t.Fatal(err)
+	got, created, err := m.SubmitBatchOnce(p, "cron-a")
+	if err != nil || created || older == nil || got.ID != older.ID {
+		t.Fatalf("got %v created %v err %v, older %v", got, created, err, older)
 	}
 
 	js, err := m.unfinishedBatches(KindScrub)
-	if err != nil || len(js) != 2 || js[0].ID != older.ID || js[1].ID != newer.ID {
+	if err != nil || len(js) != 1 || js[0].ID != older.ID {
 		t.Fatalf("unfinished %v %v", js, err)
 	}
 }

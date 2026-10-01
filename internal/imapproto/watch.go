@@ -58,15 +58,17 @@ func (errWatchLimit) Error() string { return "the connection holds as many watch
 // subscribe takes one of the connection's subscriptions; NOTIFY leaves
 // one for IDLE.
 func (c *conn) subscribe(notify bool, sub func() (model.Watch, error)) (model.Watch, error) {
-	limit := c.s.o.MaxWatches
+	limit, what := c.s.o.MaxWatches, "idle"
 	if notify {
-		limit = c.notifyWatchLimit()
+		limit, what = c.notifyWatchLimit(), "notify"
 	}
 
-	if int(c.watches.Add(1)) > limit {
+	if int(c.watches.Add(1))-c.watchCredit > limit {
 		c.watches.Add(-1)
 		metrics.IMAPWatchRefused.Inc()
-		c.log.Warn("watch limit of the connection reached, polling only", "limit", c.s.o.MaxWatches)
+		c.log.Warn("watch refused: the connection is at its watch limit (NOTIFY leaves one for IDLE); "+
+			"NOTIFY SET answers NO [LIMIT] when its mailbox watches do not fit, otherwise the session polls",
+			"for", what, "limit", limit)
 
 		return nil, errWatchLimit{}
 	}

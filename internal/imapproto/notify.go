@@ -29,7 +29,7 @@ import (
 // account object cannot be watched, the notifier falls back to watching
 // the mailbox objects, as it did before; those watches count against the
 // connection's bound, and NOTIFY SET is refused with NO [LIMIT] when they
-// do not fit. Every Options.NotifyPoll the notifier also reads the logs (and
+// do not fit; the earlier NOTIFY state then stays as it was. Every Options.NotifyPoll the notifier also reads the logs (and
 // polls what no watch covers): a change recorded later than its notify
 // (an announcement still in flight) or missed while the hub sets a
 // broken watch up again is reported then at the latest.
@@ -60,9 +60,11 @@ type notifyState struct {
 	// when their account object changed.
 	own, sel         *acctFollow
 	ownWake, selWake chan struct{}
-	stop             chan struct{}
-	wg               sync.WaitGroup
-	mu               sync.Mutex
+	// selPoll asks for one poll of the selected mailbox (pollSelected).
+	selPoll chan struct{}
+	stop    chan struct{}
+	wg      sync.WaitGroup
+	mu      sync.Mutex
 	// watches (per notified mailbox) and selectedWatch are the mailbox
 	// watches of the fallback without account watch; selectedStop ends
 	// the forwarder of selectedWatch.
@@ -172,17 +174,30 @@ func (c *conn) cmdNotify(tag string) error {
 		return nil
 	}
 
+	c.notifyReplace(tag, st, sendStatus)
+
+	return nil
+}
+
+// notifyReplace arms the watches of a new NOTIFY state and puts it in
+// place of the earlier one. The new watches are set up while the earlier
+// state still holds its own, counted as if those were given back
+// already; a refused SET (NO [LIMIT]) leaves the earlier state as it was.
+func (c *conn) notifyReplace(tag string, st *notifyState, sendStatus bool) {
+	c.watchCredit = c.notify.held()
+	err := c.startNotifyWatches(st)
+	c.watchCredit = 0
+
+	if err != nil {
+		st.close()
+		c.no(tag, "LIMIT", fmt.Sprintf("The mailboxes need more than the %d watches NOTIFY may take on a connection", c.notifyWatchLimit()))
+
+		return
+	}
+
 	c.notifyStop()
 
 	c.notify = st
-
-	if err := c.startNotifyWatches(st); err != nil {
-		// The earlier state is gone already: NOTIFY is off now.
-		c.notifyStop()
-		c.no(tag, "LIMIT", fmt.Sprintf("The mailboxes need more than the %d watches of a connection; NOTIFY is off", c.notifyWatchLimit()))
-
-		return nil
-	}
 
 	if sendStatus {
 		c.notifyInitialStatus(st)
@@ -194,8 +209,6 @@ func (c *conn) cmdNotify(tag string) error {
 	go c.notifyLoop(st)
 
 	c.ok(tag, "", "NOTIFY completed")
-
-	return nil
 }
 
 // notifyNames converts the mailboxes of SUBTREE and MAILBOXES from the
@@ -261,7 +274,7 @@ func (c *conn) readNotifySet() (sendStatus bool, groups []notifyGroup, err error
 // new notifier state; ok is false when the client was answered.
 func (c *conn) buildNotifyState(tag string, groups []notifyGroup) (*notifyState, bool) {
 	st := &notifyState{boxes: map[string]bool{}, ids: map[string]string{}, events: make(chan string, 64), stop: make(chan struct{}),
-		ownWake: make(chan struct{}, 1), selWake: make(chan struct{}, 1), watches: map[string]model.Watch{}, last: map[string]string{}}
+		ownWake: make(chan struct{}, 1), selWake: make(chan struct{}, 1), selPoll: make(chan struct{}, 1), watches: map[string]model.Watch{}, last: map[string]string{}}
 	seenSelected := false
 
 	for _, g := range groups {
@@ -734,11 +747,12 @@ func (c *conn) notifyReselect() {
 
 // pollSelected has the notifier poll the selected mailbox once: a change
 // between the snapshot of SELECT and the new follow is neither in the
-// snapshot nor after the follow's position.
+// snapshot nor after the follow's position. A request still pending
+// covers this one.
 func (st *notifyState) pollSelected() {
 	select {
-	case st.events <- "":
-	default: // an event is pending already
+	case st.selPoll <- struct{}{}:
+	default:
 	}
 }
 
@@ -750,6 +764,35 @@ func (c *conn) notifyStop() {
 
 	c.notify = nil
 
+	st.close()
+}
+
+// held is the number of watches the state holds (0 for none).
+func (st *notifyState) held() int {
+	if st == nil {
+		return 0
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	n := len(st.watches)
+
+	for _, f := range []*acctFollow{st.own, st.sel} {
+		if f != nil {
+			n++
+		}
+	}
+
+	if st.selectedWatch != nil {
+		n++
+	}
+
+	return n
+}
+
+// close ends the notifier of a state and gives its watches back.
+func (st *notifyState) close() {
 	close(st.stop)
 	st.mu.Lock()
 	for _, w := range st.watches {
@@ -779,25 +822,25 @@ func (c *conn) notifyLoop(st *notifyState) {
 	defer tick.Stop()
 
 	for {
+		var work func()
+
 		select {
 		case <-st.stop:
 			return
 		case <-tick.C:
-			if !c.notifyLocked(st, func() { c.notifyPollAll(st) }) {
-				return
-			}
+			work = func() { c.notifyPollAll(st) }
 		case name := <-st.events:
-			if !c.notifyLocked(st, func() { c.notifyName(st, name) }) {
-				return
-			}
+			work = func() { c.notifyName(st, name) }
 		case <-st.ownWake:
-			if !c.notifyLocked(st, func() { c.notifyOwnChanges(st) }) {
-				return
-			}
+			work = func() { c.notifyOwnChanges(st) }
+		case <-st.selPoll:
+			work = func() { c.notifySelected(st) }
 		case <-st.selWake:
-			if !c.notifyLocked(st, func() { c.notifySelectedChanges(st) }) {
-				return
-			}
+			work = func() { c.notifySelectedChanges(st) }
+		}
+
+		if !c.notifyLocked(st, work) {
+			return
 		}
 	}
 }

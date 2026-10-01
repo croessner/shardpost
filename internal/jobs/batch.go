@@ -226,6 +226,10 @@ func (m *Manager) SubmitBatchOnce(p BatchParams, principal string) (*Job, bool, 
 		return nil, false, err
 	}
 
+	if m.afterBatchSubmit != nil {
+		m.afterBatchSubmit()
+	}
+
 	js, err := m.unfinishedBatches(p.Kind)
 	if err != nil || len(js) == 0 || js[0].ID == j.ID {
 		return j, true, nil

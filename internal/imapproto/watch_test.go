@@ -240,26 +240,32 @@ func (w watchStore) User(ns string) (model.User, error) {
 
 // TestNotifyFallbackCountsAgainstTheLimit: without an account watch NOTIFY
 // takes one watch per mailbox; when they do not fit, NOTIFY SET is
-// refused with NO [LIMIT] and NOTIFY is off.
+// refused with NO [LIMIT] and the earlier NOTIFY state stays.
 func TestNotifyFallbackCountsAgainstTheLimit(t *testing.T) {
-	for _, tc := range []struct {
-		max  int
-		want string
-	}{{4, "NO [LIMIT]"}, {16, "OK"}} {
-		srv, _, dial := hubServer(t, func(o *Options) {
-			o.MaxWatches, o.WatchStore = tc.max, watchStore{s: o.Store.(*memstore.Store), noAccount: true}
-		})
-		a := dial("alice")
+	srv, store, dial := hubServer(t, func(o *Options) {
+		o.MaxWatches, o.WatchStore = 4, watchStore{s: o.Store.(*memstore.Store), noAccount: true}
+	})
+	a := dial("alice")
 
-		mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MessageNew MessageExpunge))`), tc.want)
+	a.ok(`NOTIFY SET (INBOXES (MessageNew MessageExpunge))`)
+	waitHub(t, srv, 1)
 
-		boxes := len(DefaultSpecialFolders) + 1
-		if tc.want != "OK" {
-			boxes = 0
-		}
+	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MessageNew MessageExpunge))`), "NO [LIMIT]")
+	waitHub(t, srv, 1)
 
-		waitHub(t, srv, boxes)
+	// The earlier state still reports.
+	u, _ := store.User("alice")
+	if _, err := u.Deliver("INBOX", []byte("Subject: x\r\n\r\nbody\r\n"), nil, time.Now()); err != nil {
+		t.Fatal(err)
 	}
+
+	mustHave(t, a.unsolicited(300*time.Millisecond), "* STATUS INBOX (MESSAGES 1")
+
+	srv2, _, dial2 := hubServer(t, func(o *Options) {
+		o.MaxWatches, o.WatchStore = 16, watchStore{s: o.Store.(*memstore.Store), noAccount: true}
+	})
+	dial2("alice").ok(`NOTIFY SET (PERSONAL (MessageNew MessageExpunge))`)
+	waitHub(t, srv2, len(DefaultSpecialFolders)+1)
 }
 
 // TestNotifyPollsPeriodically: a change whose notify never arrives is

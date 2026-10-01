@@ -41,7 +41,7 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_imap_watches{object}` | RADOS watches the IMAP watch hub of the pod holds, by `object` (`mailbox`: IDLE, `account`: NOTIFY). One per object however many sessions follow it, so it grows with the mailboxes and accounts in use, not with the sessions. |
 | `imapceph_imap_watch_subscribers{object}` | Sessions following a watch of the hub; against `imapceph_imap_watches` it shows how much the hub shares. |
 | `imapceph_imap_watch_rearms_total` | Watches the hub set up again after an error (the OSD dropped it, a key rotation). A burst after a rotation is expected; a steady rate is not. |
-| `imapceph_imap_watch_refused_total` | Subscriptions refused because the connection held `server.imap_max_watches` already; such a connection polls. |
+| `imapceph_imap_watch_refused_total` | Watch subscriptions refused because the connection was at its bound: `server.imap_max_watches` for IDLE, one less for NOTIFY (one stays free for IDLE). A refused NOTIFY mailbox watch makes `NOTIFY SET` answer `NO [LIMIT]` (the earlier NOTIFY state stays); a refused follow of a selected mailbox is covered by the 60 s look; IDLE is never refused. |
 
 In `commands_total`, POP3 counts only selected events; there `DELE` counts
 deleted messages. ManageSieve counts only the authentication outcomes

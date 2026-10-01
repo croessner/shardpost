@@ -398,8 +398,10 @@ type conn struct {
 	cmdMu  sync.Mutex
 	notify *notifyState
 	// watches counts the hub subscriptions the connection holds
-	// (Options.MaxWatches bounds them).
-	watches atomic.Int32
+	// (Options.MaxWatches bounds them); watchCredit is subtracted while a
+	// NOTIFY SET arms its watches beside those of the state it replaces.
+	watches     atomic.Int32
+	watchCredit int
 
 	// ENABLE; utf8 is UTF8=ACCEPT, rev2 IMAP4rev2. Both switch the
 	// session to UTF-8 mailbox names (see mboxname.go). rev2 also drops
