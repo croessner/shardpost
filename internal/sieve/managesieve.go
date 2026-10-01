@@ -2,6 +2,7 @@ package sieve
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -17,10 +18,21 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"shardpost/internal/auth"
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 	"shardpost/internal/provision"
+	"shardpost/internal/telemetry"
 )
+
+// protoManageSieve is the protocol label of the metrics.
+const protoManageSieve = "managesieve"
+
+// cmdAuthenticate is the AUTHENTICATE command, the label of the
+// authentication outcomes in the command metrics.
+const cmdAuthenticate = "AUTHENTICATE"
 
 // Auth verifies credentials.
 type Auth = auth.Authenticator
@@ -90,8 +102,11 @@ func (s *Server) Serve(ln net.Listener) error {
 		s.mu.Lock()
 		s.conns[nc] = struct{}{}
 		s.mu.Unlock()
+		metrics.Connections.WithLabelValues(protoManageSieve).Inc()
 
 		go func() {
+			defer metrics.Connections.WithLabelValues(protoManageSieve).Dec()
+
 			defer func() {
 				if r := recover(); r != nil {
 					s.o.Log.Error("panic in managesieve session", "panic", r, "stack", string(debug.Stack()))
@@ -140,18 +155,22 @@ func (s *Server) Close() error {
 }
 
 type conn struct {
-	log  *slog.Logger
-	s    *Server
-	nc   net.Conn
-	br   *bufio.Reader
-	bw   *bufio.Writer
-	tls  bool
-	user model.User
-	name string
+	log *slog.Logger
+	// baseLog is the session logger without the account, which log
+	// returns to after UNAUTHENTICATE.
+	baseLog *slog.Logger
+	s       *Server
+	nc      net.Conn
+	br      *bufio.Reader
+	bw      *bufio.Writer
+	tls     bool
+	user    model.User
+	name    string
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
-	c := &conn{s: s, nc: nc, log: logging.Session(s.o.Log, nc)}
+	log := logging.Session(s.o.Log, nc)
+	c := &conn{s: s, nc: nc, log: log, baseLog: log}
 	_, c.tls = nc.(*tls.Conn)
 	c.setIO(nc)
 
@@ -223,6 +242,7 @@ func (c *conn) capabilities() {
 	// 1.7 asks for NOTIFY whenever enotify is).
 	c.printf("\"NOTIFY\" \"mailto\"\r\n")
 	c.printf("\"MAXREDIRECTS\" \"%d\"\r\n", MaxRedirects)
+	c.printf("\"UNAUTHENTICATE\"\r\n")
 	c.printf("\"VERSION\" \"1.0\"\r\n")
 }
 
@@ -384,11 +404,14 @@ func (c *conn) no(text string) { c.printf("NO %s\r\n", quote(text)) }
 // preAuthCommands are available before authentication. A handler
 // returns true to end the session; an error drops the connection.
 var preAuthCommands = map[string]func(*conn, []string) (bool, error){
-	"CAPABILITY":   (*conn).cmdCapability,
-	"NOOP":         (*conn).cmdNoop,
-	"LOGOUT":       (*conn).cmdLogout,
-	"STARTTLS":     (*conn).cmdStartTLS,
-	"AUTHENTICATE": (*conn).cmdAuthenticate,
+	"CAPABILITY":    (*conn).cmdCapability,
+	"NOOP":          (*conn).cmdNoop,
+	"LOGOUT":        (*conn).cmdLogout,
+	"STARTTLS":      (*conn).cmdStartTLS,
+	cmdAuthenticate: (*conn).cmdAuthenticate,
+	// UNAUTHENTICATE answers NO itself when nobody is logged in (RFC
+	// 5804 2.14.1), so it is reachable in every state.
+	"UNAUTHENTICATE": (*conn).cmdUnauthenticate,
 }
 
 // userCommands need an authenticated user.
@@ -426,10 +449,36 @@ func (c *conn) handle(line string) (bool, error) {
 		safeCommand = cmd
 	}
 
+	// One span per command, like IMAP and POP3; it carries the command
+	// name and the account, never arguments (AUTHENTICATE carries
+	// credentials, PUTSCRIPT the script).
+	ctx, span := telemetry.Span(context.Background(), "managesieve."+safeCommand, attribute.String("managesieve.user", c.name))
+
+	// The store records its operations below this command's span.
+	u := c.user
+	model.UseRequest(ctx, u)
+
 	defer func() {
+		if u != nil && c.user == u {
+			model.UseRequest(context.Background(), u)
+		}
+
+		span.End()
+		metrics.CommandLatency.WithLabelValues(protoManageSieve, safeCommand).Observe(time.Since(start).Seconds())
 		c.log.Debug("command completed", "event", "command_complete", "command", safeCommand, "duration_ms", time.Since(start).Milliseconds())
 	}()
 
+	quit, err := c.dispatch(cmd, rest)
+	if err != nil {
+		span.RecordError(err)
+	}
+
+	return quit, err
+}
+
+// dispatch parses the arguments of one command line and runs its
+// handler.
+func (c *conn) dispatch(cmd, rest string) (bool, error) {
 	args, err := c.args(rest)
 	if err != nil {
 		c.no("Syntax error: " + err.Error())
@@ -504,6 +553,35 @@ func (c *conn) cmdStartTLS(_ []string) (bool, error) {
 	c.setIO(tc)
 	c.capabilities()
 	c.ok("TLS active")
+
+	return false, nil
+}
+
+// cmdUnauthenticate returns the session to the non-authenticated state
+// (RFC 5804 2.14.1): the account is closed, TLS stays. Outside the
+// authenticated state it is answered with NO; inside it never fails. It
+// has no parameters: a command with arguments is a syntax error (NO).
+func (c *conn) cmdUnauthenticate(args []string) (bool, error) {
+	if len(args) > 0 {
+		// A syntax error, as Pigeonhole answers it (ManageSieve has no
+		// BAD); the session stays as it is.
+		c.no("UNAUTHENTICATE takes no arguments")
+
+		return false, nil
+	}
+
+	if c.user == nil {
+		c.no("Not authenticated")
+
+		return false, nil
+	}
+
+	// model.User.Close reports nothing; the store view is released.
+	c.user.Close()
+	c.user, c.name = nil, ""
+	c.log = cmp.Or(c.baseLog, slog.Default())
+	c.log.Info("unauthenticated", "event", "unauthenticate")
+	c.ok("Unauthenticate completed")
 
 	return false, nil
 }
@@ -766,6 +844,7 @@ func (c *conn) login(req auth.Request) error {
 
 	res, err := c.s.o.Auth.Authenticate(ctx, req)
 	if errors.Is(err, auth.ErrTemporary) {
+		metrics.Commands.WithLabelValues(protoManageSieve, cmdAuthenticate, "tempfail").Inc()
 		c.log.Warn("authentication unavailable", "event", "auth_unavailable")
 		c.printf("NO (TRYLATER) \"Authentication temporarily unavailable\"\r\n")
 
@@ -773,6 +852,7 @@ func (c *conn) login(req auth.Request) error {
 	}
 
 	if err != nil {
+		metrics.Commands.WithLabelValues(protoManageSieve, cmdAuthenticate, "failed").Inc()
 		c.log.Info("authentication failed", "event", "auth_failed", "mechanism", req.Mechanism)
 		c.no("Authentication failed")
 
@@ -793,6 +873,8 @@ func (c *conn) login(req auth.Request) error {
 	}
 
 	provision.Apply(u, res, c.s.o.Log)
+	metrics.Commands.WithLabelValues(protoManageSieve, cmdAuthenticate, "ok").Inc()
+
 	c.user, c.name = u, account
 	c.log = c.log.With("user", account)
 	c.log.Info("authentication succeeded", "event", "auth_success", "mechanism", req.Mechanism, "tls", c.tls)
@@ -881,7 +963,7 @@ func CompileForDelivery(text string, h Hooks) error {
 // Extensions is the SIEVE capability list (RFC 5804 1.7) of this server.
 const Extensions = "fileinto envelope encoded-character imap4flags variables relational copy reject ereject subaddress environment body " +
 	"vacation vacation-seconds date duplicate editheader mailbox ihave include index regex spamtest spamtestplus virustest " +
-	"mboxmetadata servermetadata special-use enotify foreverypart mime extracttext " +
+	"mboxmetadata servermetadata special-use enotify foreverypart mime extracttext fcc " +
 	"comparator-i;ascii-numeric comparator-i;unicode-casemap"
 
 // hooks are the compile-time hooks of a ManageSieve session: includes

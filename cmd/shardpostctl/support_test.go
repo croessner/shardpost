@@ -68,6 +68,40 @@ func TestSupportCommands(t *testing.T) {
 	}
 }
 
+// TestSieveCheckVacationText: the text output of a check names the
+// effective vacation period.
+func TestSieveCheckVacationText(t *testing.T) {
+	socket := serveFilled(t, admin.RoleDiagnose)
+
+	script := filepath.Join(t.TempDir(), "away.sieve")
+	if err := os.WriteFile(script, []byte(`require "vacation"; vacation :days 3 :subject "Away" "back soon";`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := call(socket, "From: shop@example.net\r\nTo: alice@example.org\r\nSubject: x\r\n\r\nbody\r\n", "sieve", "check", "-file", script, "alice")
+	if code != exOK || !strings.Contains(out, `"Away" every 3 days`) {
+		t.Errorf("vacation period: exit %d, out %q, err %q", code, out, errOut)
+	}
+}
+
+func TestVacationPeriodText(t *testing.T) {
+	for _, c := range []struct {
+		days    int
+		seconds int64
+		want    string
+	}{
+		{7, 7 * 86400, "every 7 days"},
+		{0, 3600, "every 3600 seconds"},
+		{1, 90000, "every 90000 seconds"},
+		{0, 0, "for every message"},
+		{5, 0, "every 5 days"}, // a server that reports days only
+	} {
+		if got := vacationPeriod(c.days, c.seconds); got != c.want {
+			t.Errorf("%d %d: %q, want %q", c.days, c.seconds, got, c.want)
+		}
+	}
+}
+
 // TestPublicFolderCommands: public folders are created and granted with
 // the ordinary commands, using ~public as the account.
 func TestPublicFolderCommands(t *testing.T) {

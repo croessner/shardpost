@@ -51,6 +51,8 @@ var supportedRequires = map[string]struct{}{
 	"foreverypart":   {},
 	"mime":           {},
 	"extracttext":    {},
+	// RFC 8580: :fcc for vacation and notify
+	"fcc": {},
 	// Pigeonhole extension: debug_log writes to the log (here: the test log)
 	"vnd.dovecot.debug": {},
 	// external programs through the server's allowlist (RuntimeData.Program)

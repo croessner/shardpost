@@ -210,15 +210,25 @@ func deliver(client *adminapi.ClientWithResponses, args []string, stdin io.Reade
 		return exOK
 	}
 
-	for _, st := range resp.JSON200.Stored {
-		sayf(stdout, "%s: stored in %s uid %d\n", resp.JSON200.Account, st.Mailbox, st.Uid)
-	}
-
-	if len(resp.JSON200.Stored) == 0 {
-		sayf(stdout, "%s: discarded by sieve\n", resp.JSON200.Account)
-	}
+	printDelivery(stdout, resp.JSON200)
 
 	return exOK
+}
+
+// printDelivery writes the outcome of a delivery as text.
+func printDelivery(stdout io.Writer, res *adminapi.DeliveryResult) {
+	for _, st := range res.Stored {
+		sayf(stdout, "%s: stored in %s uid %d\n", res.Account, st.Mailbox, st.Uid)
+	}
+
+	switch {
+	case res.Disposition == adminapi.DispositionRejected:
+		sayf(stdout, "%s: rejected by sieve, rejection message sent to the sender\n", res.Account)
+	case res.Disposition == adminapi.DispositionDiscarded,
+		// A server without dispositions: nothing stored means discarded.
+		res.Disposition == "" && len(res.Stored) == 0:
+		sayf(stdout, "%s: discarded by sieve\n", res.Account)
+	}
 }
 
 // failure prints the error document and maps its code to an exit code.

@@ -172,17 +172,28 @@ func (r *run) vacation(ctx context.Context, raw []byte, v *sieve.Vacation) {
 	key := v.VacationKey(from)
 	// The period is reserved atomically before the send (two parallel
 	// deliveries cannot both reply); a failed send releases it again.
-	if already, err := u.VacationSeen(key, v.Period()); err != nil {
-		r.log.Warn("vacation record failed", "user", user, "err", err)
-		return
-	} else if already {
-		r.log.Info("vacation already sent within period", "user", user)
-		return
+	// A period of 0 (only with sieve_vacation_min_period 0) answers
+	// every message and records nothing.
+	period := v.Period()
+	if period > 0 {
+		if already, err := u.VacationSeen(key, period); err != nil {
+			r.log.Warn("vacation record failed", "user", user, "err", err)
+			return
+		} else if already {
+			r.log.Info("vacation already sent within period", "user", user)
+			return
+		}
 	}
+
+	v.Host = r.svc.Hostname
 
 	to, reply := v.Compose(hdr, from, rcpt, r.now())
 	if err := r.svc.Relay.Send(ctx, v.EnvelopeSender(rcpt), []string{to}, reply); err != nil {
 		r.log.Error("vacation send failed", "user", user, "err", err)
+
+		if period == 0 {
+			return
+		}
 
 		if _, rerr := u.VacationSeen(key, 0); rerr != nil {
 			r.log.Warn("vacation reservation not released", "user", user, "err", rerr)
@@ -192,6 +203,7 @@ func (r *run) vacation(ctx context.Context, raw []byte, v *sieve.Vacation) {
 	}
 
 	r.log.Info("vacation sent", "user", user, "to", to)
+	r.fcc(v.Fcc, reply)
 }
 
 // notify sends the mailto notifications of the script over the relay.
@@ -220,5 +232,6 @@ func (r *run) notify(ctx context.Context, raw []byte, d *sieve.Delivery) {
 		}
 
 		r.log.Info("notification sent", "user", user, "to", to)
+		r.fcc(n.Fcc, msg)
 	}
 }

@@ -131,7 +131,11 @@ func CompileDir(dir, label string, h Hooks) error {
 // is not carried out but handed on, and the actions of all scripts add
 // up. So a script that files the message somewhere or discards it ends
 // the sequence, and the keep of the last script that ran is the one
-// that stores the message in INBOX. A header edit of one script is what
+// that stores the message in INBOX. An explicit keep is an action of
+// its own, as within one script: once a script asked for it, no later
+// script takes it away — a later fileinto, discard or reject cancels
+// only the implicit keep (a reject fails with an action conflict, see
+// rejectConflict). A header edit of one script is what
 // the next one sees, and so are the flags of the keep handed on: they
 // are what the next script's flag variable (imap4flags) starts with, so
 // a mark survives a later script that just keeps the message, and a
@@ -162,11 +166,31 @@ func RunSequence(ctx context.Context, scripts []Script, from, to, user string, r
 			continue
 		}
 
+		// A reject must not undo what an earlier script already decided
+		// (RFC 5429 2.1): such a script fails like any script with an
+		// action conflict, and the message stays kept.
+		if err := out.rejectConflict(d, keep); err != nil {
+			failed = append(failed, ScriptError{Script: sc.Name, Err: err})
+			continue
+		}
+
 		out.Scripts = append(out.Scripts, sc.Name)
 
+		prev := keep
 		if keep = out.merge(d); keep == nil {
+			// An explicit keep is an action of its own: a later script
+			// that files the message elsewhere or discards it cancels
+			// only the implicit keep, not what an earlier script asked
+			// for.
+			if prev.explicit {
+				keep = prev
+			}
+
 			break
 		}
+
+		// An explicit keep stays one for the scripts after it.
+		keep.explicit = keep.explicit || prev.explicit
 	}
 
 	if keep != nil {
@@ -174,6 +198,40 @@ func RunSequence(ctx context.Context, scripts []Script, from, to, user string, r
 	}
 
 	return out, failed
+}
+
+// actionVacation is the name of the vacation command.
+const actionVacation = "vacation"
+
+// rejectConflict reports a reject or ereject of the next script that
+// conflicts with what the scripts before it did (RFC 5429 2.1, as
+// Pigeonhole checks it within one script): an explicit keep, a fileinto
+// (:copy, or the sequence would have ended), a redirect, a pipe or a
+// vacation reply. A reject in an earlier script ends the sequence, so the
+// other order cannot occur.
+func (d *Delivery) rejectConflict(next *Delivery, keep *FileInto) error {
+	if next.Rejected == "" {
+		return nil
+	}
+
+	var what string
+
+	switch {
+	case keep != nil && keep.explicit:
+		what = "keep"
+	case len(d.FileInto) > 0:
+		what = "fileinto"
+	case len(d.Redirects) > 0:
+		what = "redirect"
+	case len(d.Pipes) > 0:
+		what = "pipe"
+	case d.Vacation != nil:
+		what = actionVacation
+	default:
+		return nil
+	}
+
+	return fmt.Errorf("action conflict: reject after the %s of an earlier script", what)
 }
 
 // merge adds the outcome of the next script of a sequence and returns
@@ -199,7 +257,7 @@ func (d *Delivery) merge(next *Delivery) *FileInto {
 	d.pipeKeep = next.pipeKeep
 
 	if next.Rejected != "" {
-		d.Rejected = next.Rejected
+		d.Rejected, d.EReject = next.Rejected, next.EReject
 	}
 
 	// One reply per message: the first script that asks for one wins.

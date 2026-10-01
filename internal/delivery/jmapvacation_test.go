@@ -112,12 +112,22 @@ func TestJMAPVacationAfterTheActiveScript(t *testing.T) {
 		}
 	}
 
-	svc, _, rec := vacationService(t, `require ["reject"]; reject "no";`, v)
+	svc, _, rec := vacationService(t, `require ["ereject"]; ereject "no";`, v)
 	if _, err := svc.Deliver(context.Background(), request(message)); err == nil {
-		t.Fatal("the reject did not reject")
+		t.Fatal("the ereject did not reject")
 	}
 
 	if sent := rec.Messages(); len(sent) != 0 {
+		t.Errorf("a rejected message was answered: %q", sent)
+	}
+
+	// A reject sends its rejection message, and nothing else.
+	svc, _, rec = vacationService(t, `require ["reject"]; reject "no";`, v)
+	if _, err := svc.Deliver(context.Background(), request(message)); err != nil {
+		t.Fatal(err)
+	}
+
+	if sent := rec.Messages(); len(sent) != 1 || strings.Contains(sent[0], "from jmap") || !strings.Contains(sent[0], "report-type=disposition-notification") {
 		t.Errorf("a rejected message was answered: %q", sent)
 	}
 }

@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-SIEVE 1 "2026-09-30" "ShardPost 0.34.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-SIEVE 1 "2026-10-01" "ShardPost 0.35.2" "ShardPost Manual"
 .SH NAME
 shardpostctl-sieve \- manage Sieve scripts and test them without side effects
 .SH SYNOPSIS
@@ -105,6 +105,25 @@ record is written, and the message is not filed anywhere. Every
 suppressed side effect is listed under
 .IR suppressed ,
 so you can see exactly what would have happened in production.
+.PP
+The message is checked the way a delivery sees it: with the
+.B Return-Path
+and
+.B Delivered-To
+fields a delivery adds on top. Without
+.B \-from
+the envelope sender is the null sender, so the script sees
+.BR "Return-Path: <>" . A vacation reply is reported with its
+effective period, after the vacation period settings
+.RI ( sieve_vacation_min_period ", " sieve_vacation_max_period ", " sieve_vacation_default_period
+in
+.IR sieve.settings ):
+in the JSON output as
+.I days
+and
+.IR seconds ,
+in the text output as "every N days", "every N seconds" or "for every
+message" (a period of 0).
 .PP
 When the server runs global scripts around the account's own
 .RI ( sieve.before_dir ", " sieve.after_dir ),

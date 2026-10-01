@@ -315,7 +315,7 @@ func (e *Engine) apply(ctx context.Context, u model.User, ev Event, d *sieve.Del
 	}
 	// Validate and persist local destinations before any external side effect.
 	// A relay failure leaves the original intact and durable local copies available.
-	if err := e.sideEffects(ctx, ev, d); err != nil {
+	if err := e.sideEffects(ctx, u, ev, d); err != nil {
 		return nil, err
 	}
 
@@ -353,8 +353,8 @@ func scriptFlags(d *sieve.Delivery) []string {
 }
 
 // sideEffects sends redirects and notifications, then runs the pipes.
-func (e *Engine) sideEffects(ctx context.Context, ev Event, d *sieve.Delivery) error {
-	if err := e.send(ctx, ev, d); err != nil {
+func (e *Engine) sideEffects(ctx context.Context, u model.User, ev Event, d *sieve.Delivery) error {
+	if err := e.send(ctx, u, ev, d); err != nil {
 		return err
 	}
 

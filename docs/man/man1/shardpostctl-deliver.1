@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-DELIVER 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-DELIVER 1 "2026-10-01" "ShardPost 0.35.2" "ShardPost Manual"
 .SH NAME
 shardpostctl-deliver \- deliver a message like a local delivery agent
 .SH SYNOPSIS
@@ -19,8 +19,40 @@ uses when it hands mail over locally, and the same path LMTP takes:
 the recipient is resolved in the user database, the account's Sieve
 script runs, and the message is stored where the script decides.
 .PP
+The server puts
+.B Return-Path:
+.RI < sender >
+(\fB<>\fR for the null sender),
+.B Delivered-To:
+.I recipient
+and its own
+.B Received
+field on top of the message, in that order, and removes a
+.B Return-Path
+the message brought along. The settings
+.I server.lmtp_return_path
+and
+.I server.lmtp_delivered_to
+switch the first two off.
+.PP
 The command prints where the message was stored, with mailbox and UID.
-If Sieve discarded the message, nothing is stored and the result says so.
+If Sieve discarded the message, nothing is stored and the output says
+"discarded by sieve". When a Sieve
+.B reject
+sent a rejection message to the sender, nothing is stored either, the
+message counts as delivered, and the output says "rejected by sieve,
+rejection message sent to the sender". A
+.B reject
+of mail from the null sender sends no rejection message and counts as a
+discard. With
+.B \-\-json
+the result carries
+.I disposition
+with the value
+.BR stored ,
+.B discarded
+or
+.BR rejected .
 .PP
 Role:
 .B deliver
@@ -58,7 +90,8 @@ Store even if the account is over its limit. The usage is still counted.
 This is what a local delivery must do when a bounce is not acceptable.
 .TP
 .B \-\-json
-Print the result as JSON.
+Print the result as JSON: the account, the stored copies and the
+disposition.
 .SH EXAMPLES
 Deliver a file as if it had arrived by mail:
 .PP
@@ -108,7 +141,9 @@ The codes follow
 so an MTA can act on them:
 .TP
 .B 0
-Delivered (or deliberately discarded by Sieve).
+Delivered (or deliberately discarded by Sieve, or rejected by a Sieve
+.B reject
+that sent a rejection message to the sender).
 .TP
 .B 64
 Usage error, or the server refused the request as malformed.
@@ -117,7 +152,16 @@ Usage error, or the server refused the request as malformed.
 No such recipient or mailbox.
 .TP
 .B 69
-The message was rejected by Sieve or is too large.
+The message was rejected by a Sieve
+.BR ereject ,
+by a
+.B reject
+that sends no rejection message (automatic or list mail, no relay, a
+relay that refused it, or
+.I sieve_reject_mode=protocol
+in
+.IR sieve.settings ),
+or it is too large.
 .TP
 .B 70
 The server sent an answer the client did not understand.

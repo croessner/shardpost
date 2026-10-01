@@ -22,8 +22,8 @@ root traces. Without an argument the ratio is 1. A different
 
 | Metric | Meaning and limitation |
 | --- | --- |
-| `imapceph_connections{proto}` | Active IMAP/POP3 connections; not a complete connection count for all protocols. |
-| `imapceph_command_seconds` | Histogram of the instrumented IMAP/POP3 commands. `_count` is suitable for the command rate; `_bucket` for quantiles. |
+| `imapceph_connections{proto}` | Active IMAP, POP3 and ManageSieve (`proto="managesieve"`) connections; not a complete connection count for all protocols. |
+| `imapceph_command_seconds` | Histogram of the instrumented IMAP, POP3 and ManageSieve commands. `_count` is suitable for the command rate; `_bucket` for quantiles. |
 | `imapceph_commands_total` | Protocol-specific events. Not a universal request counter. Evaluate IMAP `ok/no/bad` separately from auth, connection and poll events. |
 | `imapceph_lmtp_deliveries_total{outcome}` | Successful and failed instrumented delivery attempts. |
 | `imapceph_lmtp_delivered_bytes_total` | Bytes of successful LMTP deliveries. |
@@ -33,7 +33,8 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_scrub_findings_total{kind}` | Findings in the respective scrubber process. A server scrape is no proof of a successful external scrub run. |
 
 In `commands_total`, POP3 counts only selected events; there `DELE` counts
-deleted messages. With IMAP, auth events can be counted in addition to the
+deleted messages. ManageSieve counts only the authentication outcomes
+(`command="AUTHENTICATE"`, `outcome` `ok`, `failed` or `tempfail`). With IMAP, auth events can be counted in addition to the
 protocol response. Using the sum of all outcomes as the denominator of an
 error rate would mix different events. In the current histogram, IMAP `UID`
 commands are recorded together under `UID`.
@@ -46,8 +47,9 @@ quantiles are not meaningful.
 
 ## Traces and access
 
-One trace is started per unit of work: an IMAP or POP3 command
-(`imap.FETCH`, `pop3.RETR`), a delivery (`lmtp.deliver`,
+One trace is started per unit of work: an IMAP, POP3 or ManageSieve
+command (`imap.FETCH`, `pop3.RETR`, `managesieve.PUTSCRIPT`; an unknown
+command is `managesieve.UNKNOWN`), a delivery (`lmtp.deliver`,
 `delivery.deliver`), an admin request (`admin.<operation>`, the operation
 label carries no account name), a JMAP request and a maintenance job
 (`job.<kind>` with `job.id`). The store reports its own work below them,
@@ -114,16 +116,15 @@ checkpoints remain the way to follow a long run.
 
 Store spans deliberately carry no mailbox names, only object ids, counts
 and sizes; mailbox names are user content. The traces currently also
-contain user attributes (`imap.user`, `pop3.user`,
+contain user attributes (`imap.user`, `pop3.user`, `managesieve.user`,
 `lmtp.user`, `jmap.user`, `jmap.account`), and for IMAP possibly the
 mailbox and the peer (`imap.mailbox`, `net.peer`; JMAP spans carry
 `net.peer` as well). The collector configuration and the access
-rights have to implement the applicable rules for this data. The
-collector filter accepted on 2026-09-15 (below) removes five
-attributes; `jmap.user` and `jmap.account` came later with JMAP tracing
-and have to be added to it in the owner repository, otherwise JMAP
-traces export them. Credentials
-belong neither in dashboards nor in export files or operational reports.
+rights have to implement the applicable rules for this data. ManageSieve
+spans carry the command name and the account only, never arguments:
+`AUTHENTICATE` carries credentials, `PUTSCRIPT` and `CHECKSCRIPT` the
+script. Credentials belong neither in dashboards nor in export files or
+operational reports.
 
 ## Operational responsibility and acceptance
 

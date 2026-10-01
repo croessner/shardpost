@@ -15,7 +15,8 @@ import (
 // the message; ok is false when the original message is automatic mail
 // (RFC 5436 2.7.1) or nothing is left to notify. rcpt is the user's
 // address, envelopeFrom the original sender ("<>" or "" = null), cfg the
-// settings (sieve_notify_mailto_envelope_from, sieve_user_email).
+// settings (sieve_notify_mailto_envelope_from, sieve_user_email,
+// postmaster_address).
 func ComposeNotification(n Notification, hdr textproto.MIMEHeader, envelopeFrom, rcpt string, cfg map[string]string, now time.Time) (from string, to []string, raw []byte, ok bool) {
 	if as := strings.ToLower(hdr.Get("Auto-Submitted")); as != "" && as != valueNo {
 		return "", nil, nil, false
@@ -32,7 +33,7 @@ func ComposeNotification(n Notification, hdr textproto.MIMEHeader, envelopeFrom,
 
 	hdrFrom := n.From
 	if hdrFrom == "" {
-		hdrFrom = "Postmaster <postmaster@" + domainOf(rcpt) + ">"
+		hdrFrom = "Postmaster <" + PostmasterAddress(cfg, rcpt) + ">"
 	}
 
 	fmt.Fprintf(&b, "From: %s\r\n", hdrFrom)
@@ -66,11 +67,11 @@ func ComposeNotification(n Notification, hdr textproto.MIMEHeader, envelopeFrom,
 }
 
 // notificationSender is the envelope sender of a notification: :from or
-// postmaster of the user's domain, overridden by
+// postmaster_address (default postmaster of the user's domain), overridden by
 // sieve_notify_mailto_envelope_from, and null for mail from the null
 // sender.
 func notificationSender(n Notification, envelopeFrom, rcpt string, cfg map[string]string) string {
-	from := "postmaster@" + domainOf(rcpt)
+	from := PostmasterAddress(cfg, rcpt)
 	if n.From != "" {
 		from = n.From
 	}

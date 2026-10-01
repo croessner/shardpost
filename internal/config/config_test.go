@@ -51,6 +51,36 @@ func TestRejectInvalid(t *testing.T) {
 	}
 }
 
+// TestDeliveryHeaderSettings: Return-Path and Delivered-To are on by
+// default, Delivered-To takes final or none, and anything else fails.
+func TestDeliveryHeaderSettings(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.Server.LmtpReturnPath || c.Server.LmtpDeliveredTo != "final" {
+		t.Fatalf("defaults: return path %v, delivered-to %q", c.Server.LmtpReturnPath, c.Server.LmtpDeliveredTo)
+	}
+
+	c, err = Load(configFile(t, "server:\n  lmtp_return_path: false\n  lmtp_delivered_to: none\n"))
+	if err != nil || c.Server.LmtpReturnPath || c.Server.LmtpDeliveredTo != "none" {
+		t.Fatalf("explicit values: %v", err)
+	}
+
+	for _, body := range []string{"server:\n  lmtp_delivered_to: original\n", "server:\n  lmtp_delivered_to: bogus\n", "server:\n  lmtp_return_path: maybe\n"} {
+		if _, err := Load(configFile(t, body)); err == nil {
+			t.Errorf("accepted %q", body)
+		}
+	}
+
+	t.Setenv("LMTP_DELIVERED_TO", "bogus")
+
+	if _, err := Load(""); err == nil {
+		t.Error("accepted LMTP_DELIVERED_TO=bogus")
+	}
+}
+
 // TestIntrospectionNeedsItsClient: a bearer mode that introspects needs
 // the endpoint, and an introspection client needs its secret; either gap
 // would otherwise surface as every bearer login failing at runtime.

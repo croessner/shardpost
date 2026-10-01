@@ -20,13 +20,23 @@ type Vacation struct {
 	Addresses []string
 	Handle    string
 	Mime      bool
+	// Seconds is :days or :seconds as the script gave it, PeriodSet
+	// whether it gave one; Period is the effective period.
 	Seconds   int
-	// Config are the settings the reply honours (subject template).
+	PeriodSet bool
+	// Fcc is where a copy of the sent reply is stored (RFC 8580).
+	Fcc *Fcc
+	// Config are the settings the reply honours (subject template,
+	// vacation periods).
 	Config map[string]string
+	// Host names this server (server.lmtp_hostname, "" for none): the
+	// domain of the reply's Message-ID for a recipient without one.
+	Host string
 }
 
-// DefaultVacationSeconds is the suppression period when the script does
-// not set :days/:seconds (RFC 5230: 7 days).
+// DefaultVacationSeconds is the period the JMAP VacationResponse asks
+// for (RFC 5230 suggests 7 days); the vacation period settings still
+// clamp it.
 const DefaultVacationSeconds = 7 * 86400
 
 // VacationKey identifies a (script, sender) pair for duplicate
@@ -44,13 +54,13 @@ func (v *Vacation) VacationKey(sender string) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// Period is the suppression duration.
+// Period is the suppression duration: the script's :days or :seconds
+// clamped into [sieve_vacation_min_period, sieve_vacation_max_period],
+// sieve_vacation_default_period without either (RFC 5230 4.1, RFC 6131,
+// Pigeonhole semantics). 0 — possible only with a minimum of 0 — means
+// a reply to every message.
 func (v *Vacation) Period() time.Duration {
-	if v.Seconds <= 0 {
-		return DefaultVacationSeconds * time.Second
-	}
-
-	return time.Duration(v.Seconds) * time.Second
+	return interp.VacationPeriod(v.Seconds, v.PeriodSet, v.Config)
 }
 
 // ShouldReply applies the RFC 5230 §4.6 rules: no reply to the null
@@ -59,7 +69,7 @@ func (v *Vacation) Period() time.Duration {
 // always counts as one of the addresses.
 func (v *Vacation) ShouldReply(hdr textproto.MIMEHeader, envelopeFrom, rcpt string) (bool, string) {
 	if strings.Trim(envelopeFrom, " <>") == "" {
-		return false, "null sender"
+		return false, reasonNullSender
 	}
 
 	rcpt = interp.VacationRecipient(rcpt, rcpt, v.Config)
@@ -95,10 +105,11 @@ func (v *Vacation) Compose(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, 
 	fmt.Fprintf(&b, "To: %s\r\n", interp.VacationToHeader(hdr, to, v.Config["sieve_vacation_to_header_ignore_envelope"] == settingYes))
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", now.UTC().Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s.vacation@%s>\r\n", v.VacationKey(to)[:16], domainOf(rcpt))
+	fmt.Fprintf(&b, "Message-ID: <%s.vacation@%s>\r\n", v.VacationKey(to)[:16], reportDomain(rcpt, v.Host, v.Config))
 
 	if id := hdr.Get("Message-ID"); id != "" {
-		fmt.Fprintf(&b, "In-Reply-To: %s\r\nReferences: %s\r\n", id, interp.VacationReferences(hdr))
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", id)
+		b.WriteString(foldField("References", interp.VacationReferences(hdr)))
 	}
 
 	b.WriteString("Auto-Submitted: auto-replied\r\nPrecedence: bulk\r\nX-Auto-Response-Suppress: All\r\n")
@@ -112,7 +123,7 @@ func (v *Vacation) Compose(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, 
 		}
 	} else {
 		b.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
-		b.WriteString(strings.ReplaceAll(strings.ReplaceAll(v.Reason, "\r\n", "\n"), "\n", "\r\n"))
+		b.WriteString(wrapLongLines(crlf(v.Reason)))
 		b.WriteString("\r\n")
 	}
 

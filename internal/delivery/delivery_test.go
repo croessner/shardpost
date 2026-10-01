@@ -65,7 +65,7 @@ func TestDeliverWithoutScript(t *testing.T) {
 	svc, store := testService(t, "")
 
 	res, err := svc.Deliver(context.Background(), request(message))
-	if err != nil || len(res.Stored) != 1 || res.Stored[0].Mailbox != "INBOX" || res.Stored[0].UID == 0 {
+	if err != nil || len(res.Stored) != 1 || res.Stored[0].Mailbox != "INBOX" || res.Stored[0].UID == 0 || res.Disposition != DispositionStored {
 		t.Fatalf("%+v %v", res, err)
 	}
 
@@ -98,7 +98,7 @@ func TestDeliverRejectAndDiscard(t *testing.T) {
 	svc, store = testService(t, `discard;`)
 
 	res, err := svc.Deliver(context.Background(), request(message))
-	if err != nil || len(res.Stored) != 0 || count(t, store, "INBOX") != 0 {
+	if err != nil || len(res.Stored) != 0 || res.Disposition != DispositionDiscarded || count(t, store, "INBOX") != 0 {
 		t.Fatalf("discard: %+v %v", res, err)
 	}
 }

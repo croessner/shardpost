@@ -46,7 +46,11 @@ type Delivery struct {
 	Raw []byte
 	// Redirects are addresses to forward a copy to.
 	Redirects []string
-	Rejected  string // non-empty: reject with this reason
+	// Rejected is non-empty for a reject or ereject with this reason;
+	// EReject tells which (RFC 5429: ereject refuses in the protocol,
+	// reject may send a rejection message instead).
+	Rejected string
+	EReject  bool
 	// Vacation is the requested auto-reply, if any.
 	Vacation *Vacation
 	// Tracked are the duplicate-test keys the script consulted; the
@@ -84,6 +88,30 @@ type Notification struct {
 	Subject     string
 	Body        string
 	Headers     [][2]string
+	// Fcc is where a copy of the sent notification is stored (RFC 8580).
+	Fcc *Fcc
+}
+
+// Fcc is the :fcc argument of vacation or notify (RFC 8580): the
+// generated message is also stored in this mailbox of the user.
+type Fcc struct {
+	Mailbox string
+	// Create creates a missing mailbox (:create); without it a missing
+	// mailbox means no copy.
+	Create bool
+	// Flags are the flags of the copy (lower case, as for fileinto).
+	Flags []string
+	// SpecialUse is :specialuse: the mailbox with this use wins.
+	SpecialUse string
+}
+
+// fccOf converts the interpreter's :fcc target.
+func fccOf(t *interp.FccTarget) *Fcc {
+	if t == nil {
+		return nil
+	}
+
+	return &Fcc{Mailbox: t.Mailbox, Create: t.Create, Flags: lower(t.Flags), SpecialUse: t.SpecialUse}
 }
 
 // Tracked is one duplicate-test key with its tracking period.
@@ -107,6 +135,9 @@ type FileInto struct {
 	// (Flags is lower-case): what the next script of a sequence starts
 	// with, so that its removeflag finds what an earlier addflag set.
 	scriptFlags []string
+	// explicit marks a keep the script asked for, as opposed to the
+	// implicit keep: a later script of a sequence may not reject it.
+	explicit bool
 }
 
 // IMAPContext marks an IMAPSieve run: the RFC 6785 environment and the
@@ -166,11 +197,14 @@ func DefaultConfig() map[string]string {
 }
 
 // ParseSettings reads "key=value;key=value" (an environment variable)
-// on top of DefaultConfig.
+// on top of DefaultConfig. A backslash before a semicolon stands for a
+// ";" inside a value (a rejection_reason, for instance), two backslashes
+// for one (so a value can end in a backslash); every other backslash
+// stays as it is, so a regular expression such as "\." needs no change.
 func ParseSettings(s string) map[string]string {
 	cfg := DefaultConfig()
 
-	for _, kv := range strings.Split(s, ";") {
+	for _, kv := range splitSettings(s) {
 		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
 		if !ok || strings.TrimSpace(k) == "" {
 			continue
@@ -180,6 +214,31 @@ func ParseSettings(s string) map[string]string {
 	}
 
 	return cfg
+}
+
+// splitSettings splits at ";"; a backslash before ";" or another
+// backslash escapes it.
+func splitSettings(s string) []string {
+	var (
+		out []string
+		cur strings.Builder
+	)
+
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s) && (s[i+1] == ';' || s[i+1] == '\\'):
+			cur.WriteByte(s[i+1])
+
+			i++
+		case s[i] == ';':
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+
+	return append(out, cur.String())
 }
 
 func options(h Hooks) gosieve.Options {
@@ -375,7 +434,8 @@ func (d *Delivery) addAction(a interp.AppliedAction, snapshot []byte, imap bool,
 			return
 		}
 
-		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: inboxName, Flags: lower(act.Flags), Keep: true, scriptFlags: act.Flags})
+		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: inboxName, Flags: lower(act.Flags), Keep: true, scriptFlags: act.Flags,
+			explicit: !act.Implicit})
 	case interp.ActionFileInto:
 		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: act.Mailbox, Flags: lower(act.Flags), Create: act.Create, SpecialUse: act.SpecialUse})
 	case interp.ActionPipe:
@@ -389,12 +449,13 @@ func (d *Delivery) addAction(a interp.AppliedAction, snapshot []byte, imap bool,
 
 		d.Redirects = append(d.Redirects, act.Address)
 	case interp.ActionReject:
-		d.Rejected = act.Reason
+		d.Rejected, d.EReject = act.Reason, false
 	case interp.ActionEReject:
-		d.Rejected = act.Reason
+		d.Rejected, d.EReject = act.Reason, true
 	case interp.ActionVacation:
 		d.Vacation = &Vacation{Reason: act.Reason, Subject: act.Subject, From: act.From,
-			Addresses: act.Addresses, Handle: act.Handle, Mime: act.Mime, Seconds: act.Seconds, Config: cfg}
+			Addresses: act.Addresses, Handle: act.Handle, Mime: act.Mime, Seconds: act.Seconds, PeriodSet: act.PeriodSet,
+			Fcc: fccOf(act.Fcc), Config: cfg}
 	}
 }
 
@@ -405,7 +466,8 @@ func (d *Delivery) addNotification(act interp.ActionNotify, snapshot []byte) {
 	}
 
 	d.Notifications = append(d.Notifications, Notification{Raw: snapshot, From: act.From, Importance: act.Importance, Message: act.Message,
-		To: act.Mailto.To, Cc: act.Mailto.Cc, Bcc: act.Mailto.Bcc, Subject: act.Mailto.Subject, Body: act.Mailto.Body, Headers: act.Mailto.Headers})
+		To: act.Mailto.To, Cc: act.Mailto.Cc, Bcc: act.Mailto.Bcc, Subject: act.Mailto.Subject, Body: act.Mailto.Body, Headers: act.Mailto.Headers,
+		Fcc: fccOf(act.Fcc)})
 }
 
 func lower(f interp.Flags) []string {

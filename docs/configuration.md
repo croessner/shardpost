@@ -81,6 +81,14 @@ the account's active script, the way Pigeonhole runs `sieve_before` and
   after script only sees what the user's script left in INBOX, and a
   `fileinto "INBOX"` in a user script — unlike `keep` — ends the
   sequence too.
+- An explicit `keep` is an action of its own, as within one script: once
+  a script asked for it, no later script takes it away. A later
+  `fileinto` or `discard` cancels only the implicit keep, so the message
+  still lands in INBOX (and, with a `fileinto`, in the other mailbox as
+  well); a later `reject` fails with an action conflict and the message
+  stays kept. Policy decisions that must hold whatever the user's script
+  does — a reject, a discard of known spam — therefore belong in
+  `sieve.before_dir`, not in `sieve.after_dir`.
 - A header edit (`editheader`) of one script is what the next one sees.
 - A script that fails at runtime is skipped as if it had kept the message
   and logged; the others still run, and so do the other scripts of a
@@ -106,6 +114,44 @@ the account's active script, the way Pigeonhole runs `sieve_before` and
 
 `shardpostctl sieve check` runs the same sequence, see
 [admin API](admin-api.md).
+
+### Delivery headers
+
+Every copy LMTP or the local delivery API stores gets
+`Return-Path: <envelope sender>` and `Delivered-To: <recipient>` above
+its `Received` field, like Dovecot's LMTP; Return-Path fields the message
+brought along are removed. Details in
+[Sieve during delivery](imapsieve.md#delivery-headers).
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `server.lmtp_return_path` | `LMTP_RETURN_PATH` | `true` | Add `Return-Path` (null sender `<>`) and remove the message's own. |
+| `server.lmtp_delivered_to` | `LMTP_DELIVERED_TO` | `final` | `final`: `Delivered-To` with the envelope recipient; `none`: no field. Other values are a startup error. |
+
+### Sieve settings (`sieve.settings`)
+
+`sieve.settings` (`SIEVE_SETTINGS`) holds the Sieve implementation
+settings as `key=value;key=value`, under Pigeonhole's key names where
+Pigeonhole has the setting. Among them, with their defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `sieve_vacation_min_period` | `1d` | Shortest vacation period; `0` lets `:days 0`/`:seconds 0` answer every message. |
+| `sieve_vacation_max_period` | `60d` | Longest vacation period; `0` is no maximum. |
+| `sieve_vacation_default_period` | `7d` | Period without `:days`/`:seconds`; between minimum and maximum. |
+| `sieve_reject_mode` | `mdn` | `reject` sends a rejection message (MDN) and accepts the message; `protocol` refuses it in the protocol like `ereject`. |
+| `rejection_subject` | `Rejected: %s` | Subject of the rejection message. |
+| `rejection_reason` | `Your message to <%t> was automatically rejected:%n%r` | Text of the rejection message. |
+| `postmaster_address` | `postmaster@%d` | Sender of rejection messages and of notifications without `:from`; `%d` is the recipient's domain. |
+
+A `;` inside a value is written `\;`, a backslash before it or at the
+end of a value `\\`; in YAML, put the whole value in single quotes (in
+double quotes every backslash has to be doubled). The startup and
+`config check`
+refuse periods that do not parse or
+contradict each other, an unknown `sieve_reject_mode` and a
+`postmaster_address` that is no address. What these settings do is
+described in [Sieve during delivery](imapsieve.md#sieve-during-delivery).
 
 Unknown keys, mistyped YAML values, invalid env numbers, invalid boolean values, contradictory TLS pairs and explicit secret files that are missing or read as empty cause a startup error. Env numbers are always interpreted as decimal. A secret file takes precedence over the corresponding direct secret value. Error messages never print values.
 

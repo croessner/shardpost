@@ -14,6 +14,7 @@ import (
 	"shardpost/internal/delivery"
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
+	"shardpost/internal/smtptest"
 )
 
 // serve runs an LMTP server with a memstore and the users "full" (quota
@@ -38,7 +39,8 @@ func serve(t *testing.T) (string, *memstore.Store) {
 		t.Fatal(err)
 	}
 
-	srv := NewServer("127.0.0.1:0", &Backend{Delivery: &delivery.Service{Store: store, Log: log}, Log: log, Host: "test.example",
+	srv := NewServer("127.0.0.1:0", &Backend{Delivery: &delivery.Service{Store: store, Log: log,
+		ReturnPath: true, DeliveredTo: delivery.DeliveredToFinal}, Log: log, Host: "test.example",
 		Auth: auth.Static{"full": "x", "reject": "x", "ok": "x"}}, nil, true)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -138,5 +140,99 @@ func TestLMTPPerRecipientStatus(t *testing.T) {
 	raw, _ := u.Read(&metas[0])
 	if !strings.Contains(string(raw), "by test.example with LMTP") || !strings.Contains(string(raw), "for <ok@example.org>") {
 		t.Fatalf("trace header: %q", raw)
+	}
+
+	// Return-Path and Delivered-To above Received, as Dovecot writes them.
+	if !strings.HasPrefix(string(raw), "Return-Path: <sender@example.org>\r\nDelivered-To: ok@example.org\r\nReceived: from ") {
+		t.Fatalf("delivery headers: %q", raw)
+	}
+}
+
+// TestLMTPRejectPerRecipient: in one transaction a recipient whose
+// script rejects gets 250 and the sender one MDN, a recipient whose
+// script erejects gets 550, and the others get their copy.
+func TestLMTPRejectPerRecipient(t *testing.T) {
+	store := memstore.New()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	activeScripts(t, store, map[string]string{"rej": `require "reject"; reject "go away";`, "erej": `require "ereject"; ereject "not here";`})
+
+	relay, rec := smtptest.Start(t)
+	addr := serveBackend(t, &Backend{Delivery: &delivery.Service{Store: store, Log: log, Relay: relay}, Log: log, Host: "test.example",
+		Auth: auth.Static{"ok": "x", "rej": "x", "erej": "x"}})
+
+	perRcpt, rcptErr := transaction(t, addr, []string{"ok@example.org", "rej@example.org", "erej@example.org"})
+	if len(rcptErr) != 0 {
+		t.Fatalf("RCPT: %v", rcptErr)
+	}
+
+	if e := perRcpt["erej@example.org"]; !hasStatus(e, 550, smtp.EnhancedCode{5, 7, 1}) || !strings.Contains(e.Message, "not here") {
+		t.Errorf("ereject: %v", e)
+	}
+
+	for _, r := range []string{"ok@example.org", "rej@example.org"} {
+		if e, failed := perRcpt[r]; failed {
+			t.Errorf("%s: %v", r, e)
+		}
+	}
+
+	env := rec.Envelopes()
+	if len(env) != 1 || env[0].From != "" || env[0].To[0] != "sender@example.org" || !strings.Contains(env[0].Data, "go away") {
+		t.Fatalf("MDNs: %+v", env)
+	}
+
+	for user, want := range map[string]int{"ok": 1, "rej": 0, "erej": 0} {
+		if n := inboxCount(store, user); n != want {
+			t.Errorf("%s: %d messages, want %d", user, n, want)
+		}
+	}
+}
+
+// serveBackend runs an LMTP server for the backend until the test ends
+// and returns its address.
+func serveBackend(t *testing.T, be *Backend) string {
+	t.Helper()
+
+	srv := NewServer("127.0.0.1:0", be, nil, true)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() { _ = srv.Serve(ln) }()
+
+	t.Cleanup(func() { _ = srv.Close() })
+
+	return ln.Addr().String()
+}
+
+// inboxCount is the number of messages in the INBOX of user.
+func inboxCount(store *memstore.Store, user string) int {
+	u, _ := store.User(user)
+
+	mb, err := u.Lookup("INBOX")
+	if err != nil {
+		return 0
+	}
+
+	metas, _ := u.ListMessages(mb.ID)
+
+	return len(metas)
+}
+
+// activeScripts gives each user the script as the active one.
+func activeScripts(t *testing.T, store *memstore.Store, scripts map[string]string) {
+	t.Helper()
+
+	for user, script := range scripts {
+		u, _ := store.User(user)
+		if err := u.PutScript("s", script); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := u.SetActiveScript("s"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

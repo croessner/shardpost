@@ -206,7 +206,9 @@ Ports 110 with STLS and 995 implicit.
   deep health checks.
 * **Sieve / ManageSieve** is in place (`internal/sieve`, foxcpp/go-sieve):
   scripts as the omap of the per-user object `sieve`, the active script in the
-  xattr; fileinto, keep, discard, reject (550), imap4flags, envelope,
+  xattr; fileinto, keep, discard, reject (then 550; today reject sends an
+  MDN and ereject is the 550, see
+  [Sieve during delivery](docs/imapsieve.md#reject-and-ereject)), imap4flags, envelope,
   variables; redirect is logged and treated as keep (no MTA
   in the POC). ManageSieve: AUTHENTICATE PLAIN, STARTTLS, PUT/GET/LIST/
   SETACTIVE/DELETE/RENAME/CHECKSCRIPT/HAVESPACE.

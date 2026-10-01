@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"net/mail"
 	"net/textproto"
+	"shardpost/internal/model"
 	"shardpost/internal/sieve"
 	"strings"
 	"time"
 )
 
-func (e *Engine) send(ctx context.Context, ev Event, d *sieve.Delivery) error {
+func (e *Engine) send(ctx context.Context, u model.User, ev Event, d *sieve.Delivery) error {
 	if len(d.IMAPRedirects) == 0 && len(d.Notifications) == 0 {
 		return nil
 	}
@@ -34,7 +35,7 @@ func (e *Engine) send(ctx context.Context, ev Event, d *sieve.Delivery) error {
 		return err
 	}
 
-	return e.sendNotifications(ctx, owner.Address, d)
+	return e.sendNotifications(ctx, u, owner.Address, d)
 }
 
 // sendRedirects relays each distinct redirect (at most four) from the
@@ -85,8 +86,9 @@ func checkRedirect(address string, msg []byte, owner string) error {
 	return nil
 }
 
-// sendNotifications relays the composed notify messages.
-func (e *Engine) sendNotifications(ctx context.Context, owner string, d *sieve.Delivery) error {
+// sendNotifications relays the composed notify messages and stores the
+// :fcc copy of each one that went out.
+func (e *Engine) sendNotifications(ctx context.Context, u model.User, owner string, d *sieve.Delivery) error {
 	for _, n := range d.Notifications {
 		h, _ := textproto.NewReader(bufio.NewReader(bytes.NewReader(n.Raw))).ReadMIMEHeader()
 
@@ -98,7 +100,36 @@ func (e *Engine) sendNotifications(ctx context.Context, owner string, d *sieve.D
 		if err := e.Sender.Send(ctx, from, to, raw); err != nil {
 			return err
 		}
+
+		e.fcc(u, owner, n.Fcc, raw)
 	}
 
 	return nil
+}
+
+// fcc stores a copy of a sent notification (RFC 8580) in the owner's
+// mailbox. As for fileinto in this context the mailbox must exist
+// (:create does not create it) and lie in the owner's namespace. A
+// failure is logged; the notification went out, so the run goes on.
+func (e *Engine) fcc(u model.User, owner string, f *sieve.Fcc, raw []byte) {
+	if f == nil || u == nil {
+		return
+	}
+
+	name, err := specialUseTarget(u, sieve.FileInto{Mailbox: f.Mailbox, SpecialUse: f.SpecialUse})
+	if err == nil && e.SharedPrefix != "" && strings.HasPrefix(name, e.SharedPrefix) {
+		err = fmt.Errorf("cross-owner fcc unavailable")
+	}
+
+	if err == nil {
+		_, err = u.Lookup(name)
+	}
+
+	if err == nil {
+		_, err = u.Deliver(name, raw, f.Flags, time.Now())
+	}
+
+	if err != nil && e.Log != nil {
+		e.Log.Warn("imapsieve fcc copy not stored", "user", owner, "mailbox", name, "err", err)
+	}
 }

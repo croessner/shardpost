@@ -93,6 +93,27 @@ func (e AccountStatusLookup) Valid() bool {
 	}
 }
 
+// Defines values for DeliveryResultDisposition.
+const (
+	DispositionDiscarded DeliveryResultDisposition = "discarded"
+	DispositionRejected  DeliveryResultDisposition = "rejected"
+	DispositionStored    DeliveryResultDisposition = "stored"
+)
+
+// Valid indicates whether the value is a known member of the DeliveryResultDisposition enum.
+func (e DeliveryResultDisposition) Valid() bool {
+	switch e {
+	case DispositionDiscarded:
+		return true
+	case DispositionRejected:
+		return true
+	case DispositionStored:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ErrorCode.
 const (
 	BadRequest         ErrorCode = "bad_request"
@@ -373,9 +394,21 @@ type DeliveryResult struct {
 	// Account Canonical account the recipient resolved to.
 	Account string `json:"account"`
 
-	// Stored Stored copies; empty when Sieve discarded the message.
+	// Disposition What became of the message: `stored` (see `stored`),
+	// `discarded` by Sieve (also a Sieve reject of mail from the null
+	// sender, which gets no rejection message), or `rejected` by a
+	// Sieve reject that sent a rejection message to the sender.
+	Disposition DeliveryResultDisposition `json:"disposition"`
+
+	// Stored Stored copies; empty when Sieve discarded or rejected the message.
 	Stored []StoredMessage `json:"stored"`
 }
+
+// DeliveryResultDisposition What became of the message: `stored` (see `stored`),
+// `discarded` by Sieve (also a Sieve reject of mail from the null
+// sender, which gets no rejection message), or `rejected` by a
+// Sieve reject that sent a rejection message to the sender.
+type DeliveryResultDisposition string
 
 // Error defines model for Error.
 type Error struct {
@@ -919,9 +952,16 @@ type SieveScriptInfo struct {
 
 // SieveVacation defines model for SieveVacation.
 type SieveVacation struct {
-	Days    int     `json:"days"`
-	From    *string `json:"from,omitempty"`
-	Subject string  `json:"subject"`
+	// Days The effective period in whole days, after the vacation period
+	// settings (sieve_vacation_min_period, sieve_vacation_max_period,
+	// sieve_vacation_default_period); 0 for a shorter period.
+	Days int     `json:"days"`
+	From *string `json:"from,omitempty"`
+
+	// Seconds The effective period in seconds; 0 means a reply to every
+	// message (only with sieve_vacation_min_period 0).
+	Seconds int64  `json:"seconds"`
+	Subject string `json:"subject"`
 }
 
 // StoreStatus defines model for StoreStatus.

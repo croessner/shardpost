@@ -42,7 +42,9 @@ var (
 	ErrQuotaExemptUnsupported = errors.New("quota exemption not supported by the store")
 )
 
-// RejectedError is a Sieve reject: the message was refused with Reason.
+// RejectedError is a Sieve rejection the caller answers in the protocol
+// (ereject, or reject when no rejection message is sent; see run.reject):
+// the message was refused with Reason.
 type RejectedError struct{ Reason string }
 
 func (e *RejectedError) Error() string { return "rejected by sieve: " + e.Reason }
@@ -84,6 +86,17 @@ type Service struct {
 	// is one account — so a fileinto below it goes to INBOX instead of
 	// creating a mailbox nobody can open.
 	SharedPrefix string
+	// ReturnPath adds "Return-Path: <envelope sender>" to every copy and
+	// removes the Return-Path fields the message brought along
+	// (server.lmtp_return_path).
+	ReturnPath bool
+	// DeliveredTo selects the Delivered-To field of every copy:
+	// DeliveredToFinal is the envelope recipient, DeliveredToNone or ""
+	// none (server.lmtp_delivered_to).
+	DeliveredTo string
+	// Hostname names this server in generated reports (the
+	// Reporting-UA of a rejection); "" uses the recipient's domain.
+	Hostname string
 }
 
 // closeOpened releases the extra namespaces a delivery filed into.
@@ -103,7 +116,9 @@ type Request struct {
 	Rcpt string
 	// From is the envelope sender.
 	From string
-	// Raw is the message, including any trace header the caller adds.
+	// Raw is the message, including any trace header the caller adds
+	// (Received); Deliver puts Return-Path and Delivered-To above it
+	// (see Service.ReturnPath and Service.DeliveredTo).
 	Raw []byte
 	// Lookup is the result of the recipient lookup (userdb attributes
 	// such as the quota limit and the over-quota flag); may be nil.
@@ -129,10 +144,23 @@ type Stored struct {
 	Size    int64
 }
 
+// Dispositions of a successful delivery.
+const (
+	// DispositionStored: the message was stored (Result.Stored).
+	DispositionStored = "stored"
+	// DispositionDiscarded: Sieve discarded the message (also a reject
+	// of mail from the null sender, which gets no rejection message).
+	DispositionDiscarded = "discarded"
+	// DispositionRejected: Sieve rejected the message and a rejection
+	// message went to the sender; nothing was stored.
+	DispositionRejected = "rejected"
+)
+
 // Result is a successful delivery; Stored is empty when Sieve discarded
-// the message.
+// or rejected the message, which Disposition tells apart.
 type Result struct {
-	Stored []Stored
+	Stored      []Stored
+	Disposition string
 }
 
 // run is the state of one delivery.
@@ -167,6 +195,10 @@ func (s *Service) Deliver(ctx context.Context, req Request) (*Result, error) {
 	// The store records its operations below this delivery's span.
 	model.UseRequest(ctx, u)
 	defer model.UseRequest(context.Background(), u)
+
+	// Return-Path and Delivered-To are part of what Sieve sees and what
+	// is stored.
+	req.Raw = s.DeliveryHeaders(req.From, req.Rcpt, req.Raw)
 
 	r := &run{svc: s, req: req, log: req.Log, u: u}
 
@@ -203,7 +235,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 	}
 
 	if d.Rejected != "" {
-		return nil, &RejectedError{d.Rejected}
+		return r.reject(ctx, raw, d)
 	}
 	// A redirect without a local copy goes out now: a relay failure is
 	// a temporary delivery failure (the sender retries, nothing was
@@ -226,7 +258,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 		r.track(d)
 		r.notify(ctx, raw, d)
 
-		return &Result{}, nil
+		return &Result{Disposition: DispositionDiscarded}, nil
 	}
 
 	stored, err := r.store(raw, d)
@@ -239,7 +271,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 	// Side effects only after the message is durably stored.
 	r.afterStore(ctx, raw, d, redirectLater)
 
-	return &Result{Stored: stored}, nil
+	return &Result{Stored: stored, Disposition: DispositionStored}, nil
 }
 
 // checkExplicit verifies a mailbox the caller named itself. Unlike a

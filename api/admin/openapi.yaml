@@ -1429,8 +1429,9 @@ components:
       description: |
         Failure. `code` is stable: `bad_request` (400), `unauthenticated`
         (401), `forbidden` (403), `no_such_user` and `no_such_mailbox`
-        (404), `too_large` (413), `rejected` (422, Sieve reject),
-        `over_quota` (507), `temporary` (503, try again), `internal` (500),
+        (404), `too_large` (413), `rejected` (422, Sieve ereject, or a
+        reject that sends no rejection message: no relay, the relay refused
+        it, or sieve_reject_mode=protocol), `over_quota` (507), `temporary` (503, try again), `internal` (500),
         `conflict` (409, imported data contradicts the target),
         `import_locked` (409, another session holds the account),
         `not_locked` (409, the session does not hold the lock),
@@ -1461,14 +1462,23 @@ components:
           type: string
     DeliveryResult:
       type: object
-      required: [account, stored]
+      required: [account, stored, disposition]
       properties:
         account:
           type: string
           description: Canonical account the recipient resolved to.
+        disposition:
+          type: string
+          enum: [stored, discarded, rejected]
+          x-enum-varnames: [DispositionStored, DispositionDiscarded, DispositionRejected]
+          description: |
+            What became of the message: `stored` (see `stored`),
+            `discarded` by Sieve (also a Sieve reject of mail from the null
+            sender, which gets no rejection message), or `rejected` by a
+            Sieve reject that sent a rejection message to the sender.
         stored:
           type: array
-          description: Stored copies; empty when Sieve discarded the message.
+          description: Stored copies; empty when Sieve discarded or rejected the message.
           items:
             $ref: "#/components/schemas/StoredMessage"
     StoredMessage:
@@ -2537,7 +2547,7 @@ components:
             type: string
     SieveVacation:
       type: object
-      required: [subject, days]
+      required: [subject, days, seconds]
       properties:
         subject:
           type: string
@@ -2545,6 +2555,16 @@ components:
           type: string
         days:
           type: integer
+          description: |
+            The effective period in whole days, after the vacation period
+            settings (sieve_vacation_min_period, sieve_vacation_max_period,
+            sieve_vacation_default_period); 0 for a shorter period.
+        seconds:
+          type: integer
+          format: int64
+          description: |
+            The effective period in seconds; 0 means a reply to every
+            message (only with sieve_vacation_min_period 0).
     LearningState:
       type: string
       enum: [pending, dead, delivered]

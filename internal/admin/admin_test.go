@@ -68,7 +68,8 @@ func serveSocket(t *testing.T, roles ...string) testSetup {
 
 	store := memstore.New()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := newTestServer(t, Options{Delivery: &delivery.Service{Store: store, Log: log}, SocketRoles: roles, MaxMessageBytes: 4096})
+	s := newTestServer(t, Options{Delivery: &delivery.Service{Store: store, Log: log, ReturnPath: true, DeliveredTo: delivery.DeliveredToFinal},
+		SocketRoles: roles, MaxMessageBytes: 4096})
 
 	path := filepath.Join(socketDir(t), "admin.sock")
 
@@ -224,7 +225,10 @@ func TestUnknownCaller(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-func TestDeliverOptionsAndTrace(t *testing.T) {
+// TestDeliverRejectOfNullSender: mail from the null sender gets no
+// rejection at all (RFC 5429 2.1): it is discarded, and the delivery
+// succeeds with nothing stored.
+func TestDeliverRejectOfNullSender(t *testing.T) {
 	ts := serveSocket(t, RoleDeliver)
 
 	u, _ := ts.store.User("user")
@@ -237,6 +241,25 @@ func TestDeliverOptionsAndTrace(t *testing.T) {
 	}
 
 	resp := deliver(t, ts, adminapi.DeliverParams{Recipient: "user@example.org"}, "message/rfc822", message)
+	if resp.StatusCode() != http.StatusOK || len(resp.JSON200.Stored) != 0 || resp.JSON200.Disposition != adminapi.DispositionDiscarded {
+		t.Fatalf("sieve reject of the null sender: %d %s", resp.StatusCode(), resp.Body)
+	}
+}
+
+func TestDeliverOptionsAndTrace(t *testing.T) {
+	ts := serveSocket(t, RoleDeliver)
+
+	u, _ := ts.store.User("user")
+	if err := u.PutScript("main", `require "reject"; reject "no";`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := u.SetActiveScript("main"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a relay a reject is refused in the protocol.
+	resp := deliver(t, ts, adminapi.DeliverParams{Recipient: "user@example.org", From: ptr("sender@example.org")}, "message/rfc822", message)
 	if resp.StatusCode() != http.StatusUnprocessableEntity || errorCode(resp) != adminapi.Rejected {
 		t.Fatalf("sieve reject: %d %s", resp.StatusCode(), resp.Body)
 	}
@@ -250,7 +273,10 @@ func TestDeliverOptionsAndTrace(t *testing.T) {
 	metas, _ := u.ListMessages(mb.ID)
 
 	raw, err := u.Read(&metas[0])
-	if err != nil || !strings.HasPrefix(string(raw), "Received: from unix uid:") || !strings.Contains(string(raw), "with LDA") {
+	// The null sender is "<>"; Return-Path and Delivered-To lie above the
+	// LDA's Received field.
+	if err != nil || !strings.HasPrefix(string(raw), "Return-Path: <>\r\nDelivered-To: user@example.org\r\nReceived: from unix uid:") ||
+		!strings.Contains(string(raw), "with LDA") {
 		t.Fatalf("trace header: %v %q", err, raw)
 	}
 

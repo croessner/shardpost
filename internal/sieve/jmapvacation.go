@@ -172,7 +172,7 @@ func currentDate(relation string, t time.Time) string {
 
 // vacationAction is the vacation command of the settings.
 func vacationAction(v VacationSettings) string {
-	parts := []string{"vacation", ":days", strconv.Itoa(vacationDays), ":handle", QuoteString(vacationHandle(v))}
+	parts := []string{actionVacation, ":days", strconv.Itoa(vacationDays), ":handle", QuoteString(vacationHandle(v))}
 
 	if v.Subject != "" {
 		parts = append(parts, ":subject", QuoteString(v.Subject))

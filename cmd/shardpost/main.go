@@ -280,11 +280,16 @@ func autocreate(folders []config.AutocreateFolder) []imapproto.SpecialFolder {
 	return out
 }
 
-// checkGlobalScripts compiles the scripts that run before and after the
-// account's own for every delivery: a directory that cannot be read or a
-// script that does not compile is a startup error, not a silent gap in
-// the filtering of every account.
+// checkGlobalScripts checks the Sieve settings (sieve.CheckSettings) and
+// compiles the scripts that run before and after the account's own for
+// every delivery: a setting that cannot work, a directory that cannot be
+// read or a script that does not compile is a startup error, not a
+// silent gap in the filtering of every account.
 func checkGlobalScripts(settings *config.Config, sieveCfg map[string]string) error {
+	if err := sieve.CheckSettings(sieveCfg); err != nil {
+		return fmt.Errorf("sieve.settings: %w", err)
+	}
+
 	hooks := sieve.Hooks{Include: sieve.IncludeLoader(nil, settings.Sieve.GlobalDir), Config: sieveCfg}
 
 	if err := sieve.CompileDir(settings.Sieve.BeforeDir, sieve.LabelBefore, hooks); err != nil {
@@ -481,11 +486,17 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 // newDeliveryService builds the delivery pipeline shared by LMTP and the
 // local delivery API.
 func newDeliveryService(log *slog.Logger, settings *config.Config, store *cephstore.Store, programs *extprograms.Runner, sieveCfg map[string]string) *delivery.Service {
+	// The Reporting-UA of a rejection names server.lmtp_hostname, or the
+	// recipient's domain when it is unset — never the pod's host name.
+	host := settings.Server.LmtpHostname
+
 	return &delivery.Service{Store: storeAdapter{store}, Log: log.With("component", "delivery"),
 		GlobalScripts: settings.Sieve.GlobalDir, SieveConfig: sieveCfg, Programs: programs,
 		ScriptsBefore: settings.Sieve.BeforeDir, ScriptsAfter: settings.Sieve.AfterDir,
 		PublicPrefix: settings.Server.PublicPrefix,
 		SharedPrefix: settings.Server.SharedPrefix,
+		ReturnPath:   settings.Server.LmtpReturnPath, DeliveredTo: settings.Server.LmtpDeliveredTo,
+		Hostname: host,
 		Relay: &outbound.Relay{Addr: settings.SMTP.Addr, HELO: settings.SMTP.Helo,
 			StartTLS: settings.SMTP.Starttls, Implicit: settings.SMTP.TLS,
 			User: settings.SMTP.User, Password: settings.SMTP.Password, ServerName: settings.SMTP.ServerName}}

@@ -18,6 +18,8 @@ import (
 //
 //	sieve_notify_max_notifications   per script (default 10, 0 forbids notify)
 //	sieve_notify_mailto_envelope_from sender | recipient | orig_recipient | user_email | <address>
+//
+// The :fcc argument of RFC 8580 is accepted as well (see Fcc).
 
 // ActionNotify is a requested notification.
 type ActionNotify struct {
@@ -27,6 +29,9 @@ type ActionNotify struct {
 	Message    string // :message
 	Options    []string
 	Mailto     *MailtoURI
+	// Fcc is the :fcc argument (RFC 8580): where a copy of the
+	// notification is stored once it was sent; nil for none.
+	Fcc *FccTarget
 }
 
 func (ActionNotify) testActionName() string    { return "notify" }
@@ -151,6 +156,7 @@ type CmdNotify struct {
 	Importance string
 	Message    string
 	Options    []string
+	Fcc        *Fcc
 }
 
 func notifyLimit(o *Options) int {
@@ -171,16 +177,22 @@ func loadNotify(s *Script, pcmd parser.Cmd) (Cmd, error) {
 		return nil, parser.ErrorAt(pcmd.Position, "local policy prohibits the use of a notify action")
 	}
 	cmd := CmdNotify{Importance: "2"}
+	tags := map[string]SpecTag{
+		"from":       {NeedsValue: true, MinStrCount: 1, MaxStrCount: 1, MatchStr: func(v []string) { cmd.From = v[0] }},
+		"importance": {NeedsValue: true, MinStrCount: 1, MaxStrCount: 1, NoVariables: true, MatchStr: func(v []string) { cmd.Importance = v[0] }},
+		"message":    {NeedsValue: true, MinStrCount: 1, MaxStrCount: 1, MatchStr: func(v []string) { cmd.Message = v[0] }},
+		"options":    {NeedsValue: true, MinStrCount: 1, MatchStr: func(v []string) { cmd.Options = v }},
+	}
+	var fcc fccSpec
+	fcc.addTags(tags)
 	err := LoadSpec(s, &Spec{
-		Tags: map[string]SpecTag{
-			"from":       {NeedsValue: true, MinStrCount: 1, MaxStrCount: 1, MatchStr: func(v []string) { cmd.From = v[0] }},
-			"importance": {NeedsValue: true, MinStrCount: 1, MaxStrCount: 1, NoVariables: true, MatchStr: func(v []string) { cmd.Importance = v[0] }},
-			"message":    {NeedsValue: true, MinStrCount: 1, MaxStrCount: 1, MatchStr: func(v []string) { cmd.Message = v[0] }},
-			"options":    {NeedsValue: true, MinStrCount: 1, MatchStr: func(v []string) { cmd.Options = v }},
-		},
-		Pos: []SpecPosArg{{MinStrCount: 1, MaxStrCount: 1, MatchStr: func(v []string) { cmd.Method = v[0] }}},
+		Tags: tags,
+		Pos:  []SpecPosArg{{MinStrCount: 1, MaxStrCount: 1, MatchStr: func(v []string) { cmd.Method = v[0] }}},
 	}, pcmd.Position, pcmd.Args, pcmd.Tests, pcmd.Block)
 	if err != nil {
+		return nil, err
+	}
+	if cmd.Fcc, err = fcc.check(s, pcmd.Position, "notify"); err != nil {
 		return nil, err
 	}
 	if cmd.Importance != "1" && cmd.Importance != "2" && cmd.Importance != "3" {
@@ -207,6 +219,10 @@ func (c CmdNotify) Execute(ctx context.Context, d *RuntimeData) error {
 	m, err := ParseMailto(method)
 	if err != nil {
 		return fmt.Errorf("notify: %v", err)
+	}
+	fcc, err := c.Fcc.expand(d)
+	if err != nil {
+		return err
 	}
 	from := expandVars(d, c.From)
 	if from != "" && !validMailAddress(from) {
@@ -248,6 +264,7 @@ func (c CmdNotify) Execute(ctx context.Context, d *RuntimeData) error {
 		Message:    expandVars(d, c.Message),
 		Options:    expandVarsList(d, c.Options),
 		Mailto:     m,
+		Fcc:        fcc,
 	}, d)
 }
 
