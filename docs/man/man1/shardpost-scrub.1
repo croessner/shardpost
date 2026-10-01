@@ -147,7 +147,11 @@ drop a sweep that stopped (its spill objects included) and start over.
 .BR intents .
 .TP
 .I scrub.grace_seconds
-Objects younger than this are left alone (3600).
+Objects younger than this are left alone (3600); a scrub with
+.B intents
+and a sweep with
+.B \-\-repair
+leave at least the last ten minutes alone whatever it says.
 .TP
 .I scrub.intent_grace_seconds
 How old an intent must be before the scrub takes it for the leftover of

@@ -42,8 +42,32 @@ import (
 var purgeFixedIndexSpaces = []string{attcache.Space}
 
 // purgeProbeShards bounds how many shards above the range of a mailbox a
-// purge probes for (entries of an interrupted import step).
+// purge or a scrub probes for (entries of an interrupted import step, a
+// delivery whose entry landed after its mailbox was deleted).
 const purgeProbeShards = 64
+
+// lastShard is the highest shard of a mailbox: the last of its range, or
+// one above that exists (probed one by one, up to purgeProbeShards).
+func (u *User) lastShard(id string, info *MailboxInfo) uint32 {
+	last := shardOf(max(info.UIDNext-1, 1), info.ShardSize)
+
+	for probe := last + 1; probe <= last+purgeProbeShards && u.objectExists(u.shardOID(id, probe)); probe++ {
+		last = probe
+	}
+
+	return last
+}
+
+// deleteShardRange deletes the shards of a mailbox from last down to 0.
+func (u *User) deleteShardRange(id string, last uint32) error {
+	for s := int64(last); s >= 0; s-- {
+		if err := u.idx.Delete(u.shardOID(id, uint32(s))); err != nil && errCode(err) != syscall.ENOENT {
+			return fmt.Errorf("delete index %s shard %d: %w", id, s, err)
+		}
+	}
+
+	return nil
+}
 
 // namedObjects is what the data model of an account names.
 type namedObjects struct {
@@ -210,14 +234,7 @@ func registryBlobs(k string, v []byte, n *namedObjects) {
 // enumerateMailbox names the shards of a mailbox, highest first, and the
 // blobs of their entries and of the intents on shard 0.
 func (u *User) enumerateMailbox(id string, tomb mailboxIntent, n *namedObjects) error {
-	info := u.deletedRange(id, tomb)
-	last := shardOf(max(info.UIDNext-1, 1), info.ShardSize)
-
-	// Shards above the range exist when an import step wrote entries
-	// above UIDNEXT and stopped.
-	for probe := last + 1; probe <= last+purgeProbeShards && u.objectExists(u.shardOID(id, probe)); probe++ {
-		last = probe
-	}
+	last := u.lastShard(id, u.deletedRange(id, tomb))
 
 	for s := int64(last); s >= 0; s-- {
 		oid := u.shardOID(id, uint32(s))

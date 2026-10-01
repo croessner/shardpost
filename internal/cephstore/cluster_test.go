@@ -21,6 +21,12 @@ import (
 // test-docker does). Without it these tests skip. Every test works in an
 // account namespace of its own, so they need no cleanup between them.
 
+func init() {
+	// The tests take everything they wrote for old (scrubNow sleeps past
+	// the mtime resolution); TestRepairGrace checks the minimum itself.
+	minRepairGrace = 0
+}
+
 var (
 	clusterOnce  sync.Once
 	clusterStore *Store

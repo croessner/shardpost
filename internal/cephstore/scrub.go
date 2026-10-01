@@ -233,6 +233,12 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 		byID[mb.ID] = mb
 	}
 
+	// Without a listing, nothing but the grace period keeps the scrub
+	// from collecting a blob that is being written: it has a minimum.
+	if source == model.OrphanSourceIntents {
+		o.Grace = repairGrace(o.Grace)
+	}
+
 	sr := &scrubRun{u: u, o: o, log: log, rep: rep, cutoff: time.Now().Add(-o.Grace), icut: time.Now().Add(-u.intentGrace()),
 		byID: byID, source: source, intents: newIntentScan()}
 
@@ -258,13 +264,30 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 		return rep, nil
 	}
 
-	// 2. Reference counts.
+	if err := sr.repair(idx); err != nil {
+		return nil, err
+	}
+
+	sr.logDone()
+
+	return rep, nil
+}
+
+// repair runs the steps after the index scan.
+func (sr *scrubRun) repair(idx *scrubIndex) error {
+	// 2. The intents, then the reference counts: a blob a write may still
+	//    be working on keeps its count (a release that is about to come
+	//    would otherwise be applied twice).
+	if _, err := sr.gatherIntents(); err != nil {
+		return err
+	}
+
 	sr.fixRefs(idx.refs)
 
 	// 3. Orphan blobs, unknown index objects, stale marks: by listing or
 	//    by intent (scrubintents.go).
 	if err := sr.orphans(idx); err != nil {
-		return nil, err
+		return err
 	}
 
 	// 4. METADATA of mailboxes that are gone.
@@ -273,18 +296,12 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 	// 5. Quota counters.
 	sr.fixQuota(idx.quota)
 
-	sr.logDone()
-
-	return rep, nil
+	return nil
 }
 
 // orphans finds and removes what nothing points at, from the source the
 // configuration names.
 func (sr *scrubRun) orphans(idx *scrubIndex) error {
-	if _, err := sr.gatherIntents(); err != nil {
-		return err
-	}
-
 	switch sr.source {
 	case model.OrphanSourceIntents:
 		sr.settleIntents(idx.refs, true)
@@ -495,6 +512,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 	u, rep, log, o := sr.u, sr.rep, sr.log, sr.o
 
 	if time.Unix(in.Started, 0).After(sr.cutoff) {
+		sr.protectAll(in.GUIDs) // the MOVE is still running
 		return
 	}
 
@@ -562,6 +580,13 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 	// space. The opposite direction was reserved before the intent.
 	if err := u.moveUsage(&src, &dst, sizeOf(removed)); err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
+	}
+}
+
+// protectAll marks the blobs as ones a write may still be working on.
+func (sr *scrubRun) protectAll(guids []string) {
+	for _, g := range guids {
+		sr.intents.protect(g)
 	}
 }
 
@@ -760,8 +785,16 @@ func (sr *scrubRun) removeUncovered(mb *Mailbox, info *MailboxInfo) {
 	scrubFinding("uncovered_entry")
 
 	// An import that resumed since the scrub started writes such entries
-	// before its header: leave them to it.
+	// before its header: leave them to it. Entries that stay keep their
+	// blobs, which the import's intent names, from being collected.
 	if locked, err := u.ImportLocked(); !sr.o.Allowed(RepairUncovered) || err != nil || locked {
+		for _, v := range seen {
+			var m Meta
+			if json.Unmarshal(v, &m) == nil {
+				sr.intents.protect(m.GUID)
+			}
+		}
+
 		return
 	}
 
@@ -874,6 +907,10 @@ func (sr *scrubRun) fixRefs(refs map[string][]Meta) {
 	u, rep, log := sr.u, sr.rep, sr.log
 
 	for guid, entries := range refs {
+		if sr.intents.young[guid] {
+			continue // a release or a link may still come
+		}
+
 		val, ver, err := u.xattrVer(u.data, chunkOID(guid, 0), xattrRefs)
 		if err != nil {
 			continue

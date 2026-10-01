@@ -241,6 +241,10 @@ func (s *Store) newSweeper(ctx context.Context, o SweepOptions, lost func() bool
 		o.Batch = sweepBatch
 	}
 
+	if o.Repair {
+		o.Grace = repairGrace(o.Grace)
+	}
+
 	sw := &sweeper{s: s, o: o, log: o.Log.With("component", "sweep"), lost: lost, ctx: ctx, acct: acct, pools: pools}
 
 	return sw, func() { acct.Destroy(); r.refs.Done() }, nil
@@ -817,7 +821,7 @@ func (ns *sweepNamespace) blobRemnant(guid string, chunks int) {
 
 	// The postings of an account's blob go with it; a namespace without
 	// registry has no index worth keeping (its objects go as well).
-	gone, cerr := u.collectBlob(guid, size, chunks, size > 0 && ns.named != nil)
+	gone, cerr := u.collectBlob(guid, size, chunks, size > 0 && ns.named != nil, ns.cutoff())
 	if cerr != nil {
 		rep.fail(cerr)
 	}

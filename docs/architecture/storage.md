@@ -139,8 +139,9 @@ mailbox (`h:uidnext` 0, the old value kept as `h:retired`), so that a
 delivery that looked the mailbox up before can no longer allocate a UID
 in it; entries such a delivery added between the read of the messages
 and the retirement are released as well. A delivery whose entry for a
-higher shard was still on its way when the header was retired, or a
-release that failed, keeps the tombstone for the scrub.
+higher shard was still on its way when the header was retired keeps the
+tombstone for the scrub, rewritten with the range the header had then;
+a release that failed keeps the tombstone and the shards.
 
 **What the scrub does with an intent.** An intent older than
 `scrub.intent_grace_seconds` (3600) belongs to a write that will not
@@ -153,13 +154,23 @@ The scrub settles what it names against its index scan of the account
   `scrub.grace_seconds` is an orphan: its reference count is set to 0
   under the object version read (a COPY in between makes this fail, and
   the blob stays), then it is unindexed and its chunks are deleted.
+- a blob that a **young** intent names (a removal whose release may
+  still come, a deletion between its unregistration and its releases, a
+  running MOVE or delivery) keeps its reference count: `fixRefs` leaves
+  it alone, since a release that follows would otherwise be applied on
+  top of the corrected count and could take the blob from a copy. So do
+  the blobs of entries an import left above UIDNEXT that the run did not
+  remove. Without a listing the scrub never collects anything younger
+  than ten minutes, whatever `scrub.grace_seconds` says; the repairing
+  sweep keeps the same minimum.
 - `r:` and `dm:` are **never** settled by releasing again: the scan
   counts every reference anew (`fixRefs`, with the same mtime guard and
   `AssertVersion`), so a release that did happen before the crash is not
   repeated, and a second decrement can never take the blob away from a
   copy in another mailbox. The mailbox of a `dm:` is not registered, so
-  its entries do not count; its range comes from its retired header
-  while shard 0 exists, else from the tombstone.
+  its entries do not count; its range is the larger of its retired
+  header (a shard 0 without header keys says nothing) and the tombstone,
+  and shards above that range that exist are probed one by one.
 - a `dm:` whose blobs are settled loses its shards (highest first,
   shard 0 last), then the tombstone; a `ci:` whose id is not registered
   loses its object; a `ps:` whose folder is gone loses its marks.
@@ -207,6 +218,25 @@ skip-if-idle check of the batch scrub reads the registry intents in one
 read op (one bounded step per prefix) and each mailbox's `i:` and `r:`
 in one more.
 
+Measured on the test cluster (`TestHotPathOps` in
+[opcount_test.go](../../internal/cephstore/opcount_test.go), run with
+`SHARDPOST_TEST_OPCOUNT=1` through `hack/ceph-test-cluster.sh`; the OSD's
+`op_r` and `op_w`; four full-text shards, a 500-byte message), against
+the same test on 0.41.0:
+
+| Operation | Reads 0.41 → 0.42 | Writes 0.41 → 0.42 |
+|---|---|---|
+| LMTP delivery, a view per message | 16.4 → 17.1 | 14.0 → 15.0 |
+| APPEND, ten in one session | 15.6 → 15.6 | 12.2 → 12.2 |
+| EXPUNGE of one message | 15.0 → 15.0 | 12.4 → 13.4 |
+| CREATE and DELETE of an empty mailbox | 16.0 → 18.0 | 9.0 → 12.0 |
+| JMAP upload | 0.0 → 1.2 | 1.0 → 3.2 |
+
+The extra reads of the LMTP delivery are CAS retries: the removal a
+closed view sends in the background meets the next delivery's
+reservation on the same registry object. The full-text index dominates
+a delivery either way (with the default sixteen shards more so).
+
 **The uploads.** A JMAP upload is a blob that nothing points at, so it
 costs an entry in the due queue `ix.uploads` (namespace `~accounts`), the
 intent `up:` and the blob, in that order. The upload expiry worker (one
@@ -250,7 +280,12 @@ objects (the shards of a mailbox highest first), the registry last; a
 purge that starts again finds what is left. The admin store records of
 the account (`jmap/push/acct/`, `jmap/push/seen/`, `jmap/submission/`)
 are removed in a phase of their own after the directory entry, through
-the admin store, which keeps their hint indexes in step.
+the admin store, which keeps their hint indexes in step. The phase is
+the last one on purpose: the phases are checkpointed by number, and an
+older server that takes a purge over knows only the earlier ones. Such a
+takeover (or a crash between the two phases that no server resumes)
+leaves the records; they belong to no account any more and a later
+purge of the same name removes them. Accepted for the rolling update.
 
 `purge.listing` (default `true` in 0.42.0) keeps the purge of earlier
 versions: it lists both namespaces and deletes what it finds, and it

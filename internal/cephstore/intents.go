@@ -402,23 +402,32 @@ func removalSet(now int64, metas []Meta) map[string][]byte {
 }
 
 // releaseRemoved drops the blob references of entries an unlink removed
-// and then the "r:" keys of the removal (rkeys), except those of entries
-// whose release failed: the scrubber recounts their blobs.
+// and then their "r:" keys (of rkeys, the keys the removal set). The key
+// of an entry whose release failed stays (the scrubber recounts its
+// blob), and so does the key of an entry the removal announced but
+// another session removed first: that session releases the blob and
+// drops the key (both set the same one), and dropping it here could take
+// it away before that release.
 func (u *User) releaseRemoved(mb *Mailbox, removed []Meta, rkeys []string) int {
-	failed := map[string]bool{}
+	failed := 0
+	done := map[string]bool{}
 
 	for i := range removed {
 		if err := u.releaseBlob(&removed[i]); err != nil {
 			u.log.Warn("orphan blob", "guid", removed[i].GUID, "err", err)
 
-			failed[removeKey(removed[i].UID)] = true
+			failed++
+
+			continue
 		}
+
+		done[removeKey(removed[i].UID)] = true
 	}
 
 	keep := rkeys[:0:0]
 
 	for _, k := range rkeys {
-		if !failed[k] {
+		if done[k] {
 			keep = append(keep, k)
 		}
 	}
@@ -427,7 +436,7 @@ func (u *User) releaseRemoved(mb *Mailbox, removed []Meta, rkeys []string) int {
 		u.log.Warn("removal intents not dropped", "mailbox", mb.Name, "err", err)
 	}
 
-	return len(failed)
+	return failed
 }
 
 // retiredUIDNext reads UIDNEXT of a header that may be retired: the

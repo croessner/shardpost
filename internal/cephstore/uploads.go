@@ -123,7 +123,8 @@ func (u *User) ExpireUpload(guid string, now time.Time) (done bool, next time.Ti
 		return false, time.Unix(in.Expires, 0), nil
 	}
 
-	gone, err := u.collectBlob(guid, in.Size, in.Chunks, false)
+	// Nothing takes a reference to an upload; the expiry needs no cutoff.
+	gone, err := u.collectBlob(guid, in.Size, in.Chunks, false, time.Time{})
 	if err != nil || !gone {
 		return false, now.Add(time.Hour), err
 	}
@@ -136,7 +137,12 @@ func (u *User) ExpireUpload(guid string, now time.Time) (done bool, next time.Ti
 // took a reference in between makes this fail (gone=false) and the blob
 // stays; with unindex its postings go next, then the chunks. A blob
 // whose chunk 0 is missing has its other chunks deleted.
-func (u *User) collectBlob(guid string, size int64, chunks int, unindex bool) (bool, error) {
+//
+// With a cutoff, chunk 0 must not have been written after it: its mtime
+// is read after the version, so a reference taken before the version
+// read shows in the mtime, and one taken after it fails the version
+// check.
+func (u *User) collectBlob(guid string, size int64, chunks int, unindex bool, cutoff time.Time) (bool, error) {
 	_, ver, err := u.xattrVer(u.data, chunkOID(guid, 0), xattrRefs)
 
 	switch {
@@ -144,6 +150,13 @@ func (u *User) collectBlob(guid string, size int64, chunks int, unindex bool) (b
 		return u.deleteBlobAll(guid, chunks), nil
 	case err != nil:
 		return false, fmt.Errorf("refs of %s: %w", guid, err)
+	}
+
+	if !cutoff.IsZero() {
+		st, err := u.data.Stat(chunkOID(guid, 0))
+		if err != nil || st.ModTime.After(cutoff) {
+			return false, nil // touched within the grace period: next time
+		}
 	}
 
 	op := rados.CreateWriteOp()

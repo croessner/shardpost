@@ -51,6 +51,14 @@ import (
 // for the leftover of a crash, when the configuration does not say.
 const DefaultIntentGrace = time.Hour
 
+// minRepairGrace is the least object age a scrub from the intents and a
+// repairing sweep leave alone, whatever scrub.grace_seconds says (a
+// variable for the tests).
+var minRepairGrace = 10 * time.Minute
+
+// repairGrace is grace, at least minRepairGrace.
+func repairGrace(grace time.Duration) time.Duration { return max(grace, minRepairGrace) }
+
 // blobCand is a blob some intent names.
 type blobCand struct {
 	size    int64
@@ -67,6 +75,8 @@ type deletion struct {
 	id   string
 	old  bool
 	info *MailboxInfo
+	// last is the highest shard that exists or is in the range.
+	last uint32
 	// guids are the blobs of its remaining entries and removal intents;
 	// read is false when a shard could not be read.
 	guids []string
@@ -82,13 +92,37 @@ type intentScan struct {
 	// coveredMbox are the mailbox ids an intent names (any age): their
 	// objects are no unknown ones.
 	coveredMbox map[string]bool
+	// young are the blobs a write may still be working on: named by an
+	// intent younger than its grace period (a removal whose release may
+	// still come, a deletion in progress, a MOVE or delivery in flight),
+	// or by entries an import left above UIDNEXT that this run did not
+	// remove. Their reference counts and the blobs themselves are left
+	// alone.
+	young map[string]bool
+	// live are the mailbox ids of a registry read after the intents.
+	live map[string]bool
 	// drop are the intent keys to remove, by object.
 	drop map[string][]string
 }
 
 func newIntentScan() *intentScan {
 	return &intentScan{removals: map[string]map[string]removeIntent{}, blobs: map[string]*blobCand{},
-		coveredMbox: map[string]bool{}, drop: map[string][]string{}}
+		coveredMbox: map[string]bool{}, young: map[string]bool{}, drop: map[string][]string{}}
+}
+
+// cover records a blob an intent names without making it a candidate
+// (for the comparison with the listing).
+func (in *intentScan) cover(guid string) {
+	if model.ValidGUID(guid) && in.blobs[guid] == nil {
+		in.blobs[guid] = &blobCand{chunks: 1, unindex: true}
+	}
+}
+
+// protect marks a blob as one a write may still be working on.
+func (in *intentScan) protect(guid string) {
+	if model.ValidGUID(guid) {
+		in.young[guid] = true
+	}
 }
 
 // blob records a blob named by an intent.
@@ -106,6 +140,10 @@ func (in *intentScan) blob(guid string, size int64, chunks int, old, unindex boo
 	c.size, c.chunks = max(c.size, size), max(c.chunks, chunks, 1)
 	c.old = c.old || old
 	c.unindex = c.unindex || unindex
+
+	if !old {
+		in.young[guid] = true
+	}
 }
 
 // covers reports whether an intent names the blob.
@@ -154,6 +192,20 @@ func (sr *scrubRun) gatherIntents() (*intentScan, error) {
 
 	in.reg = reg
 
+	// The registry as it is now, after the intents were read: a
+	// tombstone or creation intent is only taken for one of a registered
+	// mailbox when this read says so (the snapshot of the run may be
+	// older than a deletion that started since).
+	live, err := sr.u.ListMailboxes()
+	if err != nil {
+		return nil, err
+	}
+
+	in.live = make(map[string]bool, len(live))
+	for i := range live {
+		in.live[live[i].ID] = true
+	}
+
 	sr.gatherBlobIntents()
 	sr.gatherRemovals()
 
@@ -164,8 +216,13 @@ func (sr *scrubRun) gatherIntents() (*intentScan, error) {
 	for id, v := range reg[regDeletePrefix] {
 		in.coveredMbox[id] = true
 
-		if _, live := sr.byID[id]; live {
-			in.drop[oidRegistry] = append(in.drop[oidRegistry], deleteKey(id)) // a re-created id: nothing to delete
+		if in.live[id] {
+			// An id registered again (an import with the source's id):
+			// nothing to delete; the tombstone goes once it is old.
+			if sr.oldIntent(intentTime(v)) {
+				in.drop[oidRegistry] = append(in.drop[oidRegistry], deleteKey(id))
+			}
+
 			continue
 		}
 
@@ -212,8 +269,14 @@ func (sr *scrubRun) gatherBlobIntents() {
 
 		_ = json.Unmarshal(v, &d)
 
+		running := time.Since(time.Unix(d.Started, 0)) < deliveryIntentMaxAge
+
 		for _, e := range d.Entries {
-			in.blob(e.GUID, 0, 0, false, true)
+			in.cover(e.GUID)
+
+			if running {
+				in.protect(e.GUID)
+			}
 		}
 	}
 }
@@ -245,11 +308,19 @@ func (sr *scrubRun) gatherDeletion(id string, v []byte) {
 
 	d := &deletion{id: id, old: sr.oldIntent(time.Unix(tomb.Time, 0)), read: true}
 	d.info = u.deletedRange(id, tomb)
+	d.last = u.lastShard(id, d.info)
+
+	if !d.old {
+		defer func() {
+			for _, g := range d.guids {
+				in.protect(g)
+			}
+		}()
+	}
 
 	in.deletions = append(in.deletions, d)
 
-	last := shardOf(max(d.info.UIDNext-1, 1), d.info.ShardSize)
-	for s := uint32(0); s <= last; s++ {
+	for s := uint32(0); s <= d.last; s++ {
 		vals, err := u.idx.GetAllOmapValues(u.shardOID(id, s), "", keyMsgPrefix, omapPageSize)
 		if err != nil && errCode(err) != syscall.ENOENT {
 			sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("deleted mailbox %s shard %d: %v", id, s, err))
@@ -278,14 +349,19 @@ func (sr *scrubRun) gatherDeletion(id string, v []byte) {
 	}
 }
 
-// deletedRange is the range of a deleted mailbox: from its (retired)
-// header while shard 0 exists, else from the tombstone.
+// deletedRange is the range of a deleted mailbox: the larger of what its
+// (retired) header of shard 0 and the tombstone say. A shard 0 without
+// header keys (an object a lock or a late write created again) says
+// nothing.
 func (u *User) deletedRange(id string, tomb mailboxIntent) *MailboxInfo {
 	info := &MailboxInfo{Mailbox: Mailbox{Name: tomb.Name, MailboxRec: MailboxRec{ID: id}}, UIDNext: max(tomb.UIDNext, 1), ShardSize: tomb.ShardSize}
 
 	hv, ver, err := u.getKeysVer(u.idx, mboxOID(id), []string{keyUIDNext, keyRetired, keyShardSize})
-	if err == nil && ver != 0 {
-		info.UIDNext = max(retiredUIDNext(hv), 1)
+	_, hasNext := hv[keyUIDNext]
+	_, hasRetired := hv[keyRetired]
+
+	if err == nil && ver != 0 && (hasNext || hasRetired) {
+		info.UIDNext = max(retiredUIDNext(hv), info.UIDNext)
 
 		if ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32); ss > 0 {
 			info.ShardSize = uint32(ss)
@@ -338,7 +414,7 @@ func (sr *scrubRun) settleBlobs(refs map[string][]Meta, act bool) {
 
 	for _, guid := range guids {
 		c := sr.intents.blobs[guid]
-		if !c.old {
+		if !c.old || sr.intents.young[guid] {
 			continue
 		}
 
@@ -392,7 +468,7 @@ func (sr *scrubRun) settleOrphan(guid string, c *blobCand, act bool) {
 		return
 	}
 
-	gone, err := u.collectBlob(guid, c.size, c.chunks, c.unindex)
+	gone, err := u.collectBlob(guid, c.size, c.chunks, c.unindex, sr.cutoff)
 	if err != nil {
 		sr.rep.Errors = append(sr.rep.Errors, err.Error())
 	}
@@ -416,6 +492,10 @@ func (sr *scrubRun) settled(guids []string) bool {
 // listing removed shard 0.
 func (sr *scrubRun) settleDeletions(act bool) {
 	for _, d := range sr.intents.deletions {
+		if d.old && sr.intents.live[d.id] {
+			continue // registered again since the snapshot: not ours to delete
+		}
+
 		if !d.old {
 			continue
 		}
@@ -428,8 +508,7 @@ func (sr *scrubRun) settleDeletions(act bool) {
 
 		switch {
 		case act && sr.o.Allowed(RepairUnknown):
-			mb := Mailbox{Name: d.info.Name, MailboxRec: MailboxRec{ID: d.id}}
-			if err := sr.u.deleteShards(&mb, d.info, d.id); err != nil {
+			if err := sr.u.deleteShardRange(d.id, d.last); err != nil {
 				sr.rep.Errors = append(sr.rep.Errors, err.Error())
 				continue
 			}
@@ -452,7 +531,7 @@ func (sr *scrubRun) settleCreations(act bool) {
 	u, in := sr.u, sr.intents
 
 	for id, v := range in.reg[regCreatePrefix] {
-		_, live := sr.byID[id]
+		live := in.live[id]
 
 		switch {
 		case live:

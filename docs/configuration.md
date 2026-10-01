@@ -417,7 +417,7 @@ and [batches over all accounts](admin-api.md#batches-over-all-accounts).
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `scrub.users` | `SCRUB_USERS` | "" | accounts `shardpost scrub` scrubs, comma-separated; empty: every account (not with `--batch`) |
-| `scrub.grace_seconds` | `SCRUB_GRACE_SECONDS` | 3600 | objects younger than this are left alone (operations in flight); the batch scrub uses the servers' value |
+| `scrub.grace_seconds` | `SCRUB_GRACE_SECONDS` | 3600 | objects younger than this are left alone (operations in flight); the batch scrub uses the servers' value; with `scrub.orphan_source: intents` and for `scrub --sweep --repair` at least 600 apply |
 | `scrub.dry_run` | `SCRUB_DRY_RUN` | false | report only; `scrub --batch` then submits a batch of `index_check` |
 | `scrub.parallel` | `SCRUB_PARALLEL` | 2 | accounts a batch scrub works on at once in the server that runs it (1–32) |
 | `scrub.interval_days` | `SCRUB_INTERVAL_DAYS` | 7 | a batch scrub with `skip_idle` scrubs an idle account again at the latest after this many days (1–365) |

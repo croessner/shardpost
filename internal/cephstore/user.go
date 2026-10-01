@@ -467,13 +467,11 @@ func (u *User) createIntended(rec *MailboxRec, name string, shardSize uint32) er
 		return err
 	}
 
-	if err := u.createIndexObjectSized(rec, shardSize); err != nil {
-		u.dropCreateIntent(rec.ID)
-
-		return err
-	}
-
-	return nil
+	// On an error the intent stays: an object of that id may exist (a
+	// creation by someone else, or this one if the error came after the
+	// write), and the intent may be another creator's of the same id.
+	// The scrubber settles it.
+	return u.createIndexObjectSized(rec, shardSize)
 }
 
 // abandonCreated deletes the index object of a mailbox whose name was
@@ -619,6 +617,15 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 	}
 
 	metas = append(metas, late...)
+
+	if inFlight {
+		// An entry may still land on a higher shard: the tombstone takes
+		// the range the header had when it was retired (shard 0 goes
+		// below) and stays; the scrubber probes above that range.
+		if err := u.setIntent(map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final)}); err != nil {
+			u.log.Warn("delete: tombstone not updated", "mailbox", name, "err", err)
+		}
+	}
 
 	q, failed := u.releaseMessages(metas)
 	if failed > 0 {
