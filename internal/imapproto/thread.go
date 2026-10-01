@@ -72,9 +72,18 @@ func (c *conn) cmdSort(tag string, uid bool) error {
 }
 
 // sortKeys are the SORT criteria (RFC 5256, RFC 5957); any other is BAD.
+// Sort keys used in more than one place.
+const (
+	sortArrival     = "ARRIVAL"
+	sortDisplayFrom = "DISPLAYFROM"
+	sortDisplayTo   = "DISPLAYTO"
+	sortDate        = "DATE"
+	sortReverse     = "REVERSE"
+)
+
 var sortKeys = map[string]bool{
-	"ARRIVAL": true, kwCc: true, "DATE": true, kwFrom: true, "REVERSE": true, kwSize: true,
-	kwSubject: true, kwTo: true, "DISPLAYFROM": true, "DISPLAYTO": true,
+	sortArrival: true, kwCc: true, sortDate: true, kwFrom: true, sortReverse: true, kwSize: true,
+	kwSubject: true, kwTo: true, sortDisplayFrom: true, sortDisplayTo: true,
 }
 
 // parseCharsetSearch reads the charset and the search keys of SORT and
@@ -114,7 +123,7 @@ func sortLess(keys []string, a, b *model.Meta) bool {
 	reverse := false
 
 	for _, k := range keys {
-		if k == "REVERSE" {
+		if k == sortReverse {
 			reverse = true
 			continue
 		}
@@ -137,9 +146,9 @@ func sortLess(keys []string, a, b *model.Meta) bool {
 
 func compareKey(k string, a, b *model.Meta) int {
 	switch k {
-	case "ARRIVAL":
+	case sortArrival:
 		return cmpTime(a.InternalDate, b.InternalDate)
-	case "DATE":
+	case sortDate:
 		return cmpTime(envDate(a), envDate(b))
 	case kwSize:
 		return cmpInt(a.Size, b.Size)
@@ -151,9 +160,9 @@ func compareKey(k string, a, b *model.Meta) int {
 		return strings.Compare(firstLocalpart(envAddrs(a, hdrTo)), firstLocalpart(envAddrs(b, hdrTo)))
 	case kwCc:
 		return strings.Compare(firstLocalpart(envAddrs(a, hdrCc)), firstLocalpart(envAddrs(b, hdrCc)))
-	case "DISPLAYFROM":
+	case sortDisplayFrom:
 		return strings.Compare(displayName(envAddrs(a, hdrFrom)), displayName(envAddrs(b, hdrFrom)))
-	case "DISPLAYTO":
+	case sortDisplayTo:
 		return strings.Compare(displayName(envAddrs(a, hdrTo)), displayName(envAddrs(b, hdrTo)))
 	}
 
