@@ -224,7 +224,7 @@ func TestRejectSendsMDN(t *testing.T) {
 		"Final-Recipient: rfc822; user@example.org\r\n",
 		"Original-Message-ID: <42@example.org>\r\n",
 		"Disposition: automatic-action/MDN-sent-automatically; deleted\r\n",
-		"Content-Type: text/rfc822-headers\r\n\r\nFrom: sender@example.org\r\n",
+		"Content-Type: text/rfc822-headers\r\nContent-Transfer-Encoding: 7bit\r\n\r\nFrom: sender@example.org\r\n",
 	} {
 		if !strings.Contains(mdn, want) {
 			t.Errorf("the MDN lacks %q:\n%s", want, mdn)
@@ -276,6 +276,13 @@ func TestRejectSuppressed(t *testing.T) {
 		{"null sender in brackets", "<>", message},
 		{"auto-submitted", "sender@example.org", "Auto-Submitted: auto-replied\r\n" + message},
 		{"auto-submitted with a comment", "sender@example.org", "Auto-Submitted: auto-generated (bounce)\r\n" + message},
+		{"precedence bulk", "sender@example.org", "Precedence: bulk\r\n" + message},
+		{"precedence junk", "sender@example.org", "Precedence: junk\r\n" + message},
+		{"list mail", "sender@example.org", "List-Id: <l.example.org>\r\n" + message},
+		{"list unsubscribe", "sender@example.org", "List-Unsubscribe: <mailto:u@example.org>\r\n" + message},
+		{"auto-response suppressed", "sender@example.org", "X-Auto-Response-Suppress: All\r\n" + message},
+		{"system sender", "MAILER-DAEMON@example.org", message},
+		{"list owner", "owner-list@example.org", message},
 	}
 
 	for _, c := range cases {
@@ -318,6 +325,113 @@ func TestRejectFallsBackToProtocol(t *testing.T) {
 
 	if _, err := svc.Deliver(context.Background(), request(message)); !errors.As(err, &rej) {
 		t.Fatalf("dead relay: %v", err)
+	}
+}
+
+// TestRejectRelayRefuses: a relay that refuses the rejection message at
+// RCPT or at the end of DATA leads to the protocol-level rejection; one
+// that takes the whole message and then does not answer counts as sent
+// (no 550 on top of an MDN that probably went out).
+func TestRejectRelayRefuses(t *testing.T) {
+	var rej *RejectedError
+
+	for _, mode := range []smtptest.Mode{smtptest.RefuseRcpt, smtptest.RefuseData} {
+		svc, store, rec := rejectService(t, `require "reject"; reject "no";`, false)
+		rec.SetMode(mode)
+
+		if _, err := svc.Deliver(context.Background(), request(message)); !errors.As(err, &rej) || rej.Reason != "no" || count(t, store, "INBOX") != 0 {
+			t.Errorf("mode %d: %v", mode, err)
+		}
+	}
+
+	svc, store, rec := rejectService(t, `require "reject"; reject "no";`, false)
+	svc.Relay.Timeout = 500 * time.Millisecond
+
+	rec.SetMode(smtptest.Silent)
+
+	res, err := svc.Deliver(context.Background(), request(message))
+	if err != nil || len(res.Stored) != 0 || count(t, store, "INBOX") != 0 || len(rec.Messages()) != 1 {
+		t.Fatalf("unconfirmed MDN: %+v %v, relay saw %d", res, err, len(rec.Messages()))
+	}
+}
+
+// TestRejectAndNotify: a script may reject and notify; both messages go
+// out, the notification about the message as the script left it.
+func TestRejectAndNotify(t *testing.T) {
+	svc, store, rec := rejectService(t, `require ["reject", "enotify", "editheader"];
+addheader "X-Marked" "yes";
+notify :message "rejected one" "mailto:watch@example.org";
+reject "no";`, false)
+
+	if _, err := svc.Deliver(context.Background(), request(message)); err != nil {
+		t.Fatal(err)
+	}
+
+	env := rec.Envelopes()
+	if len(env) != 2 || count(t, store, "INBOX") != 0 {
+		t.Fatalf("sent %d messages", len(env))
+	}
+
+	mdn := findEnvelope(env, func(e smtptest.Envelope) bool {
+		return e.From == "" && e.To[0] == "sender@example.org" && strings.Contains(e.Data, "disposition-notification")
+	})
+	note := findEnvelope(env, func(e smtptest.Envelope) bool {
+		return e.To[0] == "watch@example.org" && strings.Contains(e.Data, "rejected one")
+	})
+
+	if mdn == nil || note == nil {
+		t.Fatalf("MDN %v, notification %v: %+v", mdn, note, env)
+	}
+
+	if strings.Contains(mdn.Data, "X-Marked") {
+		t.Error("the MDN reports the edited header instead of the one the sender sent")
+	}
+}
+
+// findEnvelope returns the first envelope that matches, nil for none.
+func findEnvelope(env []smtptest.Envelope, match func(smtptest.Envelope) bool) *smtptest.Envelope {
+	for i := range env {
+		if match(env[i]) {
+			return &env[i]
+		}
+	}
+
+	return nil
+}
+
+// TestRejectMDNEightBit: a non-ASCII recipient and reason are declared:
+// 8bit parts, the utf-8 address type, and the relay is asked for
+// BODY=8BITMIME and SMTPUTF8, which it offers.
+func TestRejectMDNEightBit(t *testing.T) {
+	svc, _, rec := rejectService(t, `require "reject"; reject "nicht erwünscht";`, false)
+
+	req := request("From: sender@example.org\r\nSubject: hi\r\nMessage-ID: <1@example.org>\r\nReferences: <0@example.org>\r\n\r\nbody\r\n")
+	req.Rcpt = "jürgen@example.org"
+
+	if _, err := svc.Deliver(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	env := rec.Envelopes()
+	if len(env) != 1 {
+		t.Fatalf("sent %d", len(env))
+	}
+
+	for _, want := range []string{"BODY=8BITMIME", "SMTPUTF8"} {
+		if !strings.Contains(env[0].Params, want) {
+			t.Errorf("MAIL FROM without %s: %q", want, env[0].Params)
+		}
+	}
+
+	for _, want := range []string{
+		"Final-Recipient: utf-8; jürgen@example.org\r\n",
+		"Content-Transfer-Encoding: 8bit\r\n\r\nThis is a MIME-encapsulated message.",
+		"References: <0@example.org> <1@example.org>\r\n",
+		"nicht erwünscht",
+	} {
+		if !strings.Contains(env[0].Data, want) {
+			t.Errorf("lacks %q:\n%s", want, env[0].Data)
+		}
 	}
 }
 

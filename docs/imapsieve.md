@@ -184,10 +184,11 @@ sieve:
   settings: "sieve_vacation_min_period=1d;sieve_vacation_max_period=60d;sieve_vacation_default_period=7d;sieve_reject_mode=mdn"
 ```
 
-A setting that cannot work — a period that does not parse, periods that
-contradict each other, an unknown `sieve_reject_mode`, a
-`postmaster_address` that is no address — is a startup error and fails
-`config check`.
+A value that needs a `;` (a `rejection_reason` with a semicolon, say)
+writes it as `\;`; every other backslash is taken as it is. A setting
+that cannot work — a period that does not parse, periods that contradict
+each other, an unknown `sieve_reject_mode`, a `postmaster_address` that
+is no address — is a startup error and fails `config check`.
 
 ### Delivery headers
 
@@ -247,16 +248,44 @@ MDN (RFC 8098) with the null sender, `Auto-Submitted: auto-replied
 (rejected)`, `multipart/report; report-type=disposition-notification`
 with three parts — the reason as text, the disposition
 `automatic-action/MDN-sent-automatically; deleted` with `Final-Recipient`
-and `Original-Message-ID`, and the header of the original message (not
-its body, as `text/rfc822-headers`). The message then counts as
-delivered (LMTP `250`, the API `200` with nothing stored).
+(of type `utf-8`, RFC 6533, for a recipient that is not ASCII) and
+`Original-Message-ID`, and the header of the original message (not its
+body, as `text/rfc822-headers`). 8-bit content is declared
+(`Content-Transfer-Encoding: 8bit`), and the relay client asks for
+`BODY=8BITMIME` and `SMTPUTF8` when the relay offers them. The
+`Reporting-UA` names `server.lmtp_hostname`, or the recipient's domain
+when that is unset. The message then counts as delivered (LMTP `250`,
+the API `200` with nothing stored).
 
-Mail from the null sender and automatic mail (`Auto-Submitted` other
-than `no`) get no rejection message — that would answer a bounce or an
-auto-reply; the message is discarded silently. Without an SMTP relay
-(`smtp.addr`), or when the relay does not take the rejection message,
+No rejection message goes where a vacation reply would not go either
+(RFC 3834): to the null sender, for automatic mail (`Auto-Submitted`
+other than `no`), for list mail (`List-*` fields, `Precedence: bulk`,
+`list` or `junk`), to list and system senders (`owner-*`, `*-request`,
+`mailer-daemon`, `no-reply`) and when `X-Auto-Response-Suppress` asks for
+none; the message is then discarded silently. Without an SMTP relay
+(`smtp.addr`), or when the relay refuses the rejection message,
 `reject` falls back to the protocol-level rejection, so the sender still
-learns of it.
+learns of it. When the whole rejection message went out and only the
+relay's answer is missing (a timeout after the end of DATA), it counts as
+sent: a protocol rejection on top would tell the sender twice.
+
+**Backscatter.** A rejection message goes to the envelope sender, and
+the envelope sender of spam is usually forged: `reject` then mails an
+uninvolved third party. For filtering spam use `ereject`, which leaves
+the answer to the sending MTA during the SMTP dialogue, or set
+`sieve_reject_mode=protocol`; keep `reject` for mail whose sender is
+known to be genuine.
+
+In a script sequence (`sieve.before_dir`, the personal script,
+`sieve.after_dir`) a reject must not undo what an earlier script decided
+(RFC 5429 2.1): a script that rejects after an earlier script's explicit
+`keep`, `fileinto :copy`, `redirect`, `pipe` or `vacation` fails with an
+action conflict, like a conflict within one script, and the message stays
+kept. Pigeonhole, which carries out each script's actions before the
+next one runs, lets such a reject through (and turns it into a discard
+after a vacation reply); here nothing is carried out before the sequence
+ends, so the later script gives way. A reject in an earlier script ends
+the sequence.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -114,7 +113,7 @@ func TestComposeRejection(t *testing.T) {
 		"Date: Thu, 01 Oct 2026 12:00:00 +0000\r\n",
 		"line one\r\nline two\r\n",
 		"Reporting-UA: example.org; ShardPost\r\n",
-		"Content-Type: text/rfc822-headers\r\n\r\nFrom: s@example.net\r\nSubject: =?utf-8?q?gr=C3=BC=C3=9Fe?=\r\nMessage-ID: <m1@example.net>\r\n\r\n--",
+		"Content-Type: text/rfc822-headers\r\nContent-Transfer-Encoding: 7bit\r\n\r\nFrom: s@example.net\r\nSubject: =?utf-8?q?gr=C3=BC=C3=9Fe?=\r\nMessage-ID: <m1@example.net>\r\n\r\n--",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("lacks %q:\n%s", want, msg)
@@ -163,6 +162,58 @@ func TestShouldReject(t *testing.T) {
 			t.Errorf("%q %q: %v", c.from, c.autoSubmitted, got)
 		}
 	}
+
+	// The rules every automatic answer follows (RFC 3834).
+	for name, hdr := range map[string]textproto.MIMEHeader{
+		"precedence bulk": {"Precedence": {"bulk"}},
+		"precedence list": {"Precedence": {"List"}},
+		"list id":         {"List-Id": {"<l.example.org>"}},
+		"list post":       {"List-Post": {"<mailto:l@example.org>"}},
+		"suppress oof":    {"X-Auto-Response-Suppress": {"DR, OOF"}},
+	} {
+		if ok, _ := ShouldReject(hdr, "a@example.org"); ok {
+			t.Errorf("%s: a rejection message would go out", name)
+		}
+	}
+
+	for _, sender := range []string{"MAILER-DAEMON@example.org", "owner-list@example.org", "list-request@example.org", "noreply@example.org"} {
+		if ok, _ := ShouldReject(textproto.MIMEHeader{}, sender); ok {
+			t.Errorf("%s: a rejection message would go out", sender)
+		}
+	}
+}
+
+// TestParseSettingsEscape: a backslash before a semicolon keeps it in the
+// value; other backslashes stay as they are.
+func TestParseSettingsEscape(t *testing.T) {
+	cfg := ParseSettings(`rejection_reason=No\; really not.%n%r;sieve_reject_mode=mdn;x=a\.b`)
+
+	if cfg["rejection_reason"] != "No; really not.%n%r" || cfg["sieve_reject_mode"] != RejectMDN || cfg["x"] != `a\.b` {
+		t.Fatalf("%q %q %q", cfg["rejection_reason"], cfg["sieve_reject_mode"], cfg["x"])
+	}
+
+	if cfg["sieve_spamtest_status_header"] != DefaultConfig()["sieve_spamtest_status_header"] {
+		t.Fatal("the defaults are gone")
+	}
+}
+
+// TestRejectConflictInSequence: a script that rejects after an earlier
+// one filed a copy fails with an action conflict and leaves the keep.
+func TestRejectConflictInSequence(t *testing.T) {
+	raw := []byte("From: a@example.org\r\n\r\nbody\r\n")
+	scripts := []Script{
+		{Name: "before/1", Text: `require ["fileinto", "copy"]; fileinto :copy "X";`},
+		{Name: PersonalScript, Text: `require "reject"; reject "no";`},
+	}
+
+	d, failed := RunSequence(context.Background(), scripts, "a@example.org", "u@example.org", "u@example.org", raw, Hooks{})
+	if len(failed) != 1 || failed[0].Script != PersonalScript || !strings.Contains(failed[0].Error(), "action conflict") {
+		t.Fatalf("failed %v", failed)
+	}
+
+	if d.Rejected != "" || len(d.FileInto) != 2 {
+		t.Fatalf("%+v", d)
+	}
 }
 
 // TestFccArguments: :fcc with its companions compiles where RFC 8580
@@ -200,7 +251,7 @@ func TestFccArguments(t *testing.T) {
 // TestFccReachesTheDelivery: the :fcc arguments arrive in the delivery
 // result, flags lower-cased as for fileinto.
 func TestFccReachesTheDelivery(t *testing.T) {
-	raw :=[]byte("From: a@example.org\r\nTo: u@example.org\r\nSubject: x\r\n\r\nbody\r\n")
+	raw := []byte("From: a@example.org\r\nTo: u@example.org\r\nSubject: x\r\n\r\nbody\r\n")
 
 	d, err := Run(context.Background(), `require ["vacation", "fcc", "mailbox", "imap4flags", "enotify"];
 vacation :fcc "Sent" :create :flags ["\\Seen", "$Auto"] "away";
@@ -249,6 +300,14 @@ func TestUnauthenticate(t *testing.T) {
 		t.Fatalf("listscripts: %q", r)
 	}
 
+	if r := c.send(`UNAUTHENTICATE "x"`, false); !strings.HasPrefix(r[len(r)-1], "NO") {
+		t.Fatalf("unauthenticate with an argument: %q", r)
+	}
+
+	if r := c.send("LISTSCRIPTS", false); !strings.HasPrefix(r[len(r)-1], "OK") {
+		t.Fatalf("still logged in after the syntax error: %q", r)
+	}
+
 	if r := c.send("UNAUTHENTICATE", false); !strings.HasPrefix(r[len(r)-1], "OK") {
 		t.Fatalf("unauthenticate: %q", r)
 	}
@@ -267,10 +326,10 @@ func TestUnauthenticate(t *testing.T) {
 func TestManageSieveSpans(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-	old := otel.GetTracerProvider()
+	old := telemetry.Tracer
 	telemetry.Tracer = tp.Tracer("shardpost")
 
-	t.Cleanup(func() { telemetry.Tracer = old.Tracer("shardpost") })
+	t.Cleanup(func() { telemetry.Tracer = old })
 
 	c := dialSieveServer(t)
 

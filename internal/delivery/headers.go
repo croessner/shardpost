@@ -14,33 +14,34 @@ const (
 	DeliveredToNone = "none"
 )
 
-// withDeliveryHeaders returns the copy of a message one recipient gets:
+// DeliveryHeaders returns the copy of a message one recipient gets:
 // "Return-Path: <envelope sender>" (the null sender is "<>") and
 // "Delivered-To: <recipient>" on top, the way Dovecot's LMTP writes them,
 // above the Received field the caller already added. Return-Path fields
 // the message brought along are removed first: only the final delivery
 // sets one (RFC 5321 4.4), so any other is untrustworthy. Without either
-// setting the message is returned as it is.
-func (s *Service) withDeliveryHeaders(req Request) []byte {
+// setting the message is returned as it is. The Sieve dry run of the
+// admin API uses it too, so that a check sees what a delivery sees.
+func (s *Service) DeliveryHeaders(from, rcpt string, msg []byte) []byte {
 	var top []string
 
 	if s.ReturnPath {
-		if from := envelopePath(req.From); !hasControl(from) {
+		if from := envelopePath(from); !hasControl(from) {
 			top = append(top, "Return-Path: <"+from+">\r\n")
 		}
 	}
 
 	if s.DeliveredTo == DeliveredToFinal {
-		if rcpt := envelopePath(req.Rcpt); rcpt != "" && !hasControl(rcpt) {
+		if rcpt := envelopePath(rcpt); rcpt != "" && !hasControl(rcpt) {
 			top = append(top, "Delivered-To: "+rcpt+"\r\n")
 		}
 	}
 
 	if len(top) == 0 {
-		return req.Raw
+		return msg
 	}
 
-	raw := req.Raw
+	raw := msg
 	if s.ReturnPath {
 		raw = removeField(raw, "Return-Path")
 	}
@@ -134,4 +135,3 @@ func isField(line []byte, name string) bool {
 
 	return ok && strings.EqualFold(strings.TrimSpace(string(field)), name)
 }
-

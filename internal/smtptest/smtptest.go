@@ -4,6 +4,7 @@ package smtptest
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -18,15 +19,49 @@ type Relay struct {
 	mu        sync.Mutex
 	sent      []string
 	envelopes []Envelope
+	mode      Mode
+}
+
+// Mode is how the relay answers.
+type Mode int
+
+// The modes of a relay.
+const (
+	// Accept takes every message (the default).
+	Accept Mode = iota
+	// RefuseRcpt answers RCPT TO with 550.
+	RefuseRcpt
+	// RefuseData answers the end of DATA with 554; nothing is recorded.
+	RefuseData
+	// Silent records the message but never answers the end of DATA, as
+	// a relay does that times out after taking the message.
+	Silent
+)
+
+// SetMode changes how the relay answers from the next command on.
+func (r *Relay) SetMode(m Mode) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.mode = m
+}
+
+func (r *Relay) currentMode() Mode {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.mode
 }
 
 // Envelope is one accepted message with its envelope.
 type Envelope struct {
 	// From is the MAIL FROM path without angle brackets ("" is the
-	// null sender), To the RCPT TO paths.
-	From string
-	To   []string
-	Data string
+	// null sender), To the RCPT TO paths, Params the parameters of
+	// MAIL FROM (BODY=8BITMIME, SMTPUTF8).
+	From   string
+	Params string
+	To     []string
+	Data   string
 }
 
 // Start runs a relay until the test ends and returns the outbound
@@ -85,58 +120,97 @@ func path(line string) string {
 }
 
 // serve runs one SMTP session. A message is recorded before the relay
-// accepts it, so it is there when the client's send returns.
+// accepts it, so it is there when the client's send returns. The relay
+// offers 8BITMIME and SMTPUTF8.
 func (r *Relay) serve(c net.Conn) {
 	defer func() { _ = c.Close() }()
 
-	br := bufio.NewReader(c)
-	say := func(s string) { _, _ = c.Write([]byte(s + "\r\n")) }
-
-	say("220 relay")
-
-	var env Envelope
+	ses := &session{r: r, br: bufio.NewReader(c), c: c}
+	ses.say("220 relay")
 
 	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
+		line, err := ses.br.ReadString('\n')
+		if err != nil || ses.command(strings.TrimSpace(line)) {
 			return
-		}
-
-		switch cmd := strings.ToUpper(strings.TrimSpace(line)); {
-		case strings.HasPrefix(cmd, "EHLO"):
-			say("250 relay")
-		case strings.HasPrefix(cmd, "MAIL"):
-			env = Envelope{From: path(strings.TrimSpace(line))}
-
-			say("250 ok")
-		case strings.HasPrefix(cmd, "RCPT"):
-			env.To = append(env.To, path(strings.TrimSpace(line)))
-
-			say("250 ok")
-		case cmd == "DATA":
-			say("354 go")
-
-			msg, ok := readData(br)
-			if !ok {
-				return
-			}
-
-			env.Data = msg
-
-			r.mu.Lock()
-			r.sent = append(r.sent, msg)
-			r.envelopes = append(r.envelopes, env)
-			r.mu.Unlock()
-
-			say("250 queued")
-		case cmd == "QUIT":
-			say("221 bye")
-
-			return
-		default:
-			say("500 what")
 		}
 	}
+}
+
+// session is one SMTP session of the relay.
+type session struct {
+	r   *Relay
+	br  *bufio.Reader
+	c   net.Conn
+	env Envelope
+}
+
+func (s *session) say(line string) { _, _ = s.c.Write([]byte(line + "\r\n")) }
+
+// command answers one command line; true ends the session.
+func (s *session) command(line string) bool {
+	switch cmd := strings.ToUpper(line); {
+	case strings.HasPrefix(cmd, "EHLO"):
+		s.say("250-relay\r\n250-8BITMIME\r\n250 SMTPUTF8")
+	case strings.HasPrefix(cmd, "MAIL"):
+		s.env = Envelope{From: path(line)}
+		if i := strings.IndexByte(line, '>'); i >= 0 {
+			s.env.Params = strings.TrimSpace(line[i+1:])
+		}
+
+		s.say("250 ok")
+	case strings.HasPrefix(cmd, "RCPT"):
+		if s.r.currentMode() == RefuseRcpt {
+			s.say("550 5.1.1 no such user")
+			return false
+		}
+
+		s.env.To = append(s.env.To, path(line))
+		s.say("250 ok")
+	case cmd == "DATA":
+		return s.data()
+	case cmd == "QUIT":
+		s.say("221 bye")
+
+		return true
+	default:
+		s.say("500 what")
+	}
+
+	return false
+}
+
+// data takes a message and answers according to the mode.
+func (s *session) data() bool {
+	s.say("354 go")
+
+	msg, ok := readData(s.br)
+	if !ok {
+		return true
+	}
+
+	mode := s.r.currentMode()
+	if mode == RefuseData {
+		s.say("554 5.7.1 refused")
+		return false
+	}
+
+	s.env.Data = msg
+
+	s.r.mu.Lock()
+	s.r.sent = append(s.r.sent, msg)
+	s.r.envelopes = append(s.r.envelopes, s.env)
+	s.r.mu.Unlock()
+
+	if mode == Silent {
+		// Wait for the client to give up.
+		_, _ = io.Copy(io.Discard, s.br)
+
+		return true
+	}
+
+	s.say("250 queued")
+
+	return false
 }
 
 // readData reads a message up to the terminating dot.

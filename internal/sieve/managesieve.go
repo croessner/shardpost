@@ -559,15 +559,24 @@ func (c *conn) cmdStartTLS(_ []string) (bool, error) {
 
 // cmdUnauthenticate returns the session to the non-authenticated state
 // (RFC 5804 2.14.1): the account is closed, TLS stays. Outside the
-// authenticated state it is answered with NO; inside it never fails (it
-// has no parameters, and stray ones are ignored rather than refused).
-func (c *conn) cmdUnauthenticate(_ []string) (bool, error) {
+// authenticated state it is answered with NO; inside it never fails. It
+// has no parameters: a command with arguments is a syntax error (NO).
+func (c *conn) cmdUnauthenticate(args []string) (bool, error) {
+	if len(args) > 0 {
+		// A syntax error, as Pigeonhole answers it (ManageSieve has no
+		// BAD); the session stays as it is.
+		c.no("UNAUTHENTICATE takes no arguments")
+
+		return false, nil
+	}
+
 	if c.user == nil {
 		c.no("Not authenticated")
 
 		return false, nil
 	}
 
+	// model.User.Close reports nothing; the store view is released.
 	c.user.Close()
 	c.user, c.name = nil, ""
 	c.log = cmp.Or(c.baseLog, slog.Default())

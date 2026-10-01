@@ -246,6 +246,35 @@ func TestSieveCheckRunsGlobalScripts(t *testing.T) {
 	}
 }
 
+// TestSieveCheckSeesDeliveryHeaders: the dry run gives the script the
+// Return-Path and Delivered-To a delivery adds, and reports the
+// effective vacation period in days and seconds.
+func TestSieveCheckSeesDeliveryHeaders(t *testing.T) {
+	_, c := serveOptions(t, auth.Static{"user": "pw"}, func(s *delivery.Service) {
+		s.ReturnPath, s.DeliveredTo = true, delivery.DeliveredToFinal
+		s.SieveConfig = map[string]string{"sieve_vacation_min_period": "0"}
+	}, RoleDiagnose)
+
+	script := `require ["fileinto", "vacation-seconds"];
+if allof (header :is "Return-Path" "<s@example.org>", header :is "Delivered-To" "user@example.org") { fileinto "Seen"; }
+vacation :seconds 3600 "away";`
+	raw := "Return-Path: <forged@example.net>\r\nFrom: s@example.org\r\nTo: user@example.org\r\nSubject: x\r\n\r\nx\r\n"
+	from, to := "s@example.org", "user@example.org"
+
+	a := checkActions(t, c, adminapi.SieveCheck{Script: &script, Raw: &raw, EnvelopeFrom: &from, EnvelopeTo: &to})
+	if len(a.Fileinto) != 1 || a.Fileinto[0].Mailbox != "Seen" {
+		t.Fatalf("the script did not see the delivery headers: %+v", a.Fileinto)
+	}
+
+	if a.Vacation == nil || a.Vacation.Seconds != 3600 || a.Vacation.Days != 0 {
+		t.Fatalf("vacation %+v", a.Vacation)
+	}
+
+	if a.HeaderEdited == nil || *a.HeaderEdited {
+		t.Fatal("the added delivery headers count as a header edit")
+	}
+}
+
 func checkActions(t *testing.T, c *adminapi.ClientWithResponses, req adminapi.SieveCheck) *adminapi.SieveActions {
 	t.Helper()
 

@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,6 +183,49 @@ func TestKeepFlagsAreHandedOn(t *testing.T) {
 				t.Fatalf("%s / %s: %s still in %v", c.personal, c.after, f, metas[0].Flags)
 			}
 		}
+	}
+}
+
+// TestRejectInASequence: a before script that rejects ends the sequence
+// (the personal script does not run); a later script that rejects after
+// an earlier script's delivering action fails with an action conflict
+// (RFC 5429 2.1), and the message stays kept with what the earlier
+// script did.
+func TestRejectInASequence(t *testing.T) {
+	const reject = `require "ereject"; ereject "no";`
+
+	for _, c := range []struct {
+		name, before, personal, after string
+		rejected                      bool
+		inbox, x                      int
+	}{
+		{"a before reject ends the sequence", reject, `require "fileinto"; fileinto "X";`, "", true, 0, 0},
+		{"a reject after an implicit keep", `require "fileinto"; if false { discard; }`, reject, "", true, 0, 0},
+		{"a reject after fileinto :copy", `require ["fileinto", "copy"]; fileinto :copy "X";`, reject, "", false, 1, 1},
+		{"a reject after an explicit keep", `keep;`, reject, "", false, 1, 0},
+		{"a reject after a redirect :copy", `require "copy"; redirect :copy "other@example.org";`, reject, "", false, 1, 0},
+		{"a reject after a vacation", `require "vacation"; vacation "away";`, reject, "", false, 1, 0},
+		{"an explicit keep stays explicit across scripts", `keep;`, `if false { discard; }`, reject, false, 1, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			svc, store := testService(t, c.personal)
+			svc.ScriptsBefore = scriptDir(t, map[string]string{"10-first.sieve": c.before})
+
+			if c.after != "" {
+				svc.ScriptsAfter = scriptDir(t, map[string]string{"90-last.sieve": c.after})
+			}
+
+			_, err := svc.Deliver(context.Background(), request(message))
+
+			var rej *RejectedError
+			if errors.As(err, &rej) != c.rejected || (!c.rejected && err != nil) {
+				t.Fatalf("rejected %v: %v", c.rejected, err)
+			}
+
+			if in, x := count(t, store, "INBOX"), count(t, store, "X"); in != c.inbox || x != c.x {
+				t.Fatalf("INBOX %d, X %d; want %d, %d", in, x, c.inbox, c.x)
+			}
+		})
 	}
 }
 

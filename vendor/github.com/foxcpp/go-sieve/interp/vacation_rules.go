@@ -27,25 +27,8 @@ func VacationShouldReply(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, ad
 		return false, "null sender"
 	}
 	ls := strings.ToLower(sender)
-	if strings.HasPrefix(ls, "owner-") || strings.HasSuffix(strings.SplitN(ls, "@", 2)[0], "-request") || strings.Contains(ls, "mailer-daemon") ||
-		strings.HasPrefix(ls, "no-reply") || strings.HasPrefix(ls, "noreply") {
-		return false, "list or system sender"
-	}
-	if as := strings.ToLower(hdr.Get("Auto-Submitted")); as != "" && as != "no" {
-		return false, "auto-submitted"
-	}
-	for _, h := range []string{"List-Id", "List-Post", "List-Unsubscribe", "List-Help", "List-Subscribe"} {
-		if hdr.Get(h) != "" {
-			return false, "mailing list"
-		}
-	}
-	if p := strings.ToLower(hdr.Get("Precedence")); p == "bulk" || p == "list" || p == "junk" {
-		return false, "precedence " + p
-	}
-	for _, v := range strings.Split(strings.ToLower(hdr.Get("X-Auto-Response-Suppress")), ",") {
-		if v = strings.TrimSpace(v); v == "all" || v == "oof" {
-			return false, "auto-response suppressed"
-		}
+	if why := AutoResponseSuppressed(hdr, sender); why != "" {
+		return false, why
 	}
 	mine := map[string]bool{}
 	if rcpt != "" {
@@ -83,6 +66,49 @@ func VacationShouldReply(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, ad
 		return false, "user not addressed"
 	}
 	return true, ""
+}
+
+// AutoResponseSuppressed applies the rules every automatic answer
+// (vacation reply, rejection message) follows (RFC 3834 2, RFC 5230
+// 4.5): no answer to list or system senders (owner-*, *-request,
+// mailer-daemon, no-reply), to automatic mail (Auto-Submitted other than
+// "no"), to list mail (List-* fields, Precedence bulk/list/junk) or when
+// X-Auto-Response-Suppress asks for none. sender is the envelope sender
+// (not null). It returns the reason, "" when an answer may go out.
+func AutoResponseSuppressed(hdr textproto.MIMEHeader, sender string) string {
+	ls := strings.ToLower(strings.Trim(strings.TrimSpace(sender), "<>"))
+	if strings.HasPrefix(ls, "owner-") || strings.HasSuffix(strings.SplitN(ls, "@", 2)[0], "-request") || strings.Contains(ls, "mailer-daemon") ||
+		strings.HasPrefix(ls, "no-reply") || strings.HasPrefix(ls, "noreply") {
+		return "list or system sender"
+	}
+	if autoSubmitted(hdr.Get("Auto-Submitted")) {
+		return "auto-submitted"
+	}
+	for _, h := range []string{"List-Id", "List-Post", "List-Unsubscribe", "List-Help", "List-Subscribe"} {
+		if hdr.Get(h) != "" {
+			return "mailing list"
+		}
+	}
+	if p := strings.ToLower(strings.TrimSpace(hdr.Get("Precedence"))); p == "bulk" || p == "list" || p == "junk" {
+		return "precedence " + p
+	}
+	for _, v := range strings.Split(strings.ToLower(hdr.Get("X-Auto-Response-Suppress")), ",") {
+		if v = strings.TrimSpace(v); v == "all" || v == "oof" {
+			return "auto-response suppressed"
+		}
+	}
+	return ""
+}
+
+// autoSubmitted reports an Auto-Submitted value other than "no" (RFC
+// 3834 5); a comment or parameters after the keyword do not count.
+func autoSubmitted(v string) bool {
+	v = strings.ToLower(v)
+	if i := strings.IndexAny(v, ";("); i >= 0 {
+		v = v[:i]
+	}
+	v = strings.TrimSpace(v)
+	return v != "" && v != "no"
 }
 
 // VacationReplyFrom is the address the reply is sent from: the user's

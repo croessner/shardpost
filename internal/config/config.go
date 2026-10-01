@@ -97,19 +97,19 @@ type Server struct {
 	// PublicQuotaBytes and PublicQuotaMsgs bound the public namespace as
 	// a whole (0 = unlimited). Public folders do not count against the
 	// quota of the account that files into them.
-	PublicQuotaBytes          int64  `mapstructure:"public_quota_bytes" env:"PUBLIC_QUOTA_BYTES" validate:"gte=0"`
-	PublicQuotaMsgs           int64  `mapstructure:"public_quota_msgs" env:"PUBLIC_QUOTA_MSGS" validate:"gte=0"`
-	KeyPollSeconds            int64  `mapstructure:"key_poll_seconds" env:"KEY_POLL_SECONDS" validate:"gte=0,lte=86400"`
-	MemoryBudgetBytes         int64  `mapstructure:"memory_budget_bytes" env:"MEMORY_BUDGET_BYTES" validate:"gte=0"`
-	InsecureAuth              bool   `mapstructure:"insecure_auth" env:"INSECURE_AUTH"`
-	MaxConnsPerIP             int64  `mapstructure:"max_conns_per_ip" env:"MAX_CONNS_PER_IP" validate:"gte=0"`
-	MaxConnsPerUser           int64  `mapstructure:"max_conns_per_user" env:"MAX_CONNS_PER_USER" validate:"gte=0"`
-	QuotaSelfService          bool   `mapstructure:"quota_self_service" env:"QUOTA_SELF_SERVICE"`
-	QuotaAttribute            string `mapstructure:"quota_attribute" env:"QUOTA_ATTRIBUTE"`
-	LmtpAddr                  string `mapstructure:"lmtp_addr" env:"LMTP_ADDR"`
-	LmtpHostname              string `mapstructure:"lmtp_hostname" env:"LMTP_HOSTNAME"`
-	LmtpAuthUser              string `mapstructure:"lmtp_auth_user" env:"LMTP_AUTH_USER"`
-	LmtpAuthPassword          string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD" secret:"true"`
+	PublicQuotaBytes  int64  `mapstructure:"public_quota_bytes" env:"PUBLIC_QUOTA_BYTES" validate:"gte=0"`
+	PublicQuotaMsgs   int64  `mapstructure:"public_quota_msgs" env:"PUBLIC_QUOTA_MSGS" validate:"gte=0"`
+	KeyPollSeconds    int64  `mapstructure:"key_poll_seconds" env:"KEY_POLL_SECONDS" validate:"gte=0,lte=86400"`
+	MemoryBudgetBytes int64  `mapstructure:"memory_budget_bytes" env:"MEMORY_BUDGET_BYTES" validate:"gte=0"`
+	InsecureAuth      bool   `mapstructure:"insecure_auth" env:"INSECURE_AUTH"`
+	MaxConnsPerIP     int64  `mapstructure:"max_conns_per_ip" env:"MAX_CONNS_PER_IP" validate:"gte=0"`
+	MaxConnsPerUser   int64  `mapstructure:"max_conns_per_user" env:"MAX_CONNS_PER_USER" validate:"gte=0"`
+	QuotaSelfService  bool   `mapstructure:"quota_self_service" env:"QUOTA_SELF_SERVICE"`
+	QuotaAttribute    string `mapstructure:"quota_attribute" env:"QUOTA_ATTRIBUTE"`
+	LmtpAddr          string `mapstructure:"lmtp_addr" env:"LMTP_ADDR"`
+	LmtpHostname      string `mapstructure:"lmtp_hostname" env:"LMTP_HOSTNAME"`
+	LmtpAuthUser      string `mapstructure:"lmtp_auth_user" env:"LMTP_AUTH_USER"`
+	LmtpAuthPassword  string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD" secret:"true"`
 	// LmtpReturnPath adds "Return-Path: <envelope sender>" to every
 	// delivered copy (LMTP and local delivery) and removes the
 	// Return-Path fields the message brought along.
@@ -117,8 +117,8 @@ type Server struct {
 	// LmtpDeliveredTo selects the Delivered-To field of every delivered
 	// copy: "final" the envelope recipient, "none" no field (after
 	// Dovecot's lmtp_hdr_delivery_address).
-	LmtpDeliveredTo string `mapstructure:"lmtp_delivered_to" env:"LMTP_DELIVERED_TO" validate:"oneof=final none"`
-	HTTPAddr                 string `mapstructure:"http_addr" env:"HTTP_ADDR"`
+	LmtpDeliveredTo           string `mapstructure:"lmtp_delivered_to" env:"LMTP_DELIVERED_TO" validate:"oneof=final none"`
+	HTTPAddr                  string `mapstructure:"http_addr" env:"HTTP_ADDR"`
 	ImapAddr                  string `mapstructure:"imap_addr" env:"IMAP_ADDR"`
 	ImapsAddr                 string `mapstructure:"imaps_addr" env:"IMAPS_ADDR"`
 	DrainSeconds              int64  `mapstructure:"drain_seconds" env:"DRAIN_SECONDS" validate:"gte=0,lte=86400"`

@@ -484,10 +484,9 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 // newDeliveryService builds the delivery pipeline shared by LMTP and the
 // local delivery API.
 func newDeliveryService(log *slog.Logger, settings *config.Config, store *cephstore.Store, programs *extprograms.Runner, sieveCfg map[string]string) *delivery.Service {
+	// The Reporting-UA of a rejection names server.lmtp_hostname, or the
+	// recipient's domain when it is unset — never the pod's host name.
 	host := settings.Server.LmtpHostname
-	if host == "" {
-		host, _ = os.Hostname()
-	}
 
 	return &delivery.Service{Store: storeAdapter{store}, Log: log.With("component", "delivery"),
 		GlobalScripts: settings.Sieve.GlobalDir, SieveConfig: sieveCfg, Programs: programs,

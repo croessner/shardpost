@@ -185,7 +185,7 @@ func (s *Service) Deliver(ctx context.Context, req Request) (*Result, error) {
 
 	// Return-Path and Delivered-To are part of what Sieve sees and what
 	// is stored.
-	req.Raw = s.withDeliveryHeaders(req)
+	req.Raw = s.DeliveryHeaders(req.From, req.Rcpt, req.Raw)
 
 	r := &run{svc: s, req: req, log: req.Log, u: u}
 
@@ -222,7 +222,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 	}
 
 	if d.Rejected != "" {
-		return r.reject(ctx, d)
+		return r.reject(ctx, raw, d)
 	}
 	// A redirect without a local copy goes out now: a relay failure is
 	// a temporary delivery failure (the sender retries, nothing was

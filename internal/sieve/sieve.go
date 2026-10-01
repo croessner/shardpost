@@ -135,6 +135,9 @@ type FileInto struct {
 	// (Flags is lower-case): what the next script of a sequence starts
 	// with, so that its removeflag finds what an earlier addflag set.
 	scriptFlags []string
+	// explicit marks a keep the script asked for, as opposed to the
+	// implicit keep: a later script of a sequence may not reject it.
+	explicit bool
 }
 
 // IMAPContext marks an IMAPSieve run: the RFC 6785 environment and the
@@ -194,11 +197,13 @@ func DefaultConfig() map[string]string {
 }
 
 // ParseSettings reads "key=value;key=value" (an environment variable)
-// on top of DefaultConfig.
+// on top of DefaultConfig. A backslash before a semicolon stands for a
+// ";" inside a value (a rejection_reason, for instance); every other
+// backslash stays as it is.
 func ParseSettings(s string) map[string]string {
 	cfg := DefaultConfig()
 
-	for _, kv := range strings.Split(s, ";") {
+	for _, kv := range splitSettings(s) {
 		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
 		if !ok || strings.TrimSpace(k) == "" {
 			continue
@@ -208,6 +213,30 @@ func ParseSettings(s string) map[string]string {
 	}
 
 	return cfg
+}
+
+// splitSettings splits at ";" except after a backslash, which it drops.
+func splitSettings(s string) []string {
+	var (
+		out []string
+		cur strings.Builder
+	)
+
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s) && s[i+1] == ';':
+			cur.WriteByte(';')
+
+			i++
+		case s[i] == ';':
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+
+	return append(out, cur.String())
 }
 
 func options(h Hooks) gosieve.Options {
@@ -403,7 +432,8 @@ func (d *Delivery) addAction(a interp.AppliedAction, snapshot []byte, imap bool,
 			return
 		}
 
-		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: inboxName, Flags: lower(act.Flags), Keep: true, scriptFlags: act.Flags})
+		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: inboxName, Flags: lower(act.Flags), Keep: true, scriptFlags: act.Flags,
+			explicit: !act.Implicit})
 	case interp.ActionFileInto:
 		d.FileInto = append(d.FileInto, FileInto{Raw: snapshot, Mailbox: act.Mailbox, Flags: lower(act.Flags), Create: act.Create, SpecialUse: act.SpecialUse})
 	case interp.ActionPipe:

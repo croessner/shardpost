@@ -275,7 +275,7 @@ func printCheck(stdout io.Writer, a supportArgs, res *adminapi.SieveCheckResult)
 		}
 
 		if x.Vacation != nil {
-			rows = append(rows, [2]string{"vacation", fmt.Sprintf("%q every %d days", x.Vacation.Subject, x.Vacation.Days)})
+			rows = append(rows, [2]string{"vacation", fmt.Sprintf("%q %s", x.Vacation.Subject, vacationPeriod(x.Vacation.Seconds))})
 		}
 
 		if x.Scripts != nil {
@@ -357,4 +357,16 @@ func learningRetry(ctx context.Context, c *adminapi.ClientWithResponses, a suppo
 
 		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 	}, func(j *adminapi.LearningJob) int { return printLearningJob(stdout, a, j) })
+}
+
+// vacationPeriod describes the effective period of a vacation reply.
+func vacationPeriod(seconds int64) string {
+	switch {
+	case seconds == 0:
+		return "for every message"
+	case seconds%86400 == 0:
+		return fmt.Sprintf("every %d days", seconds/86400)
+	default:
+		return fmt.Sprintf("every %d seconds", seconds)
+	}
 }

@@ -913,9 +913,16 @@ type SieveScriptInfo struct {
 
 // SieveVacation defines model for SieveVacation.
 type SieveVacation struct {
-	Days    int     `json:"days"`
-	From    *string `json:"from,omitempty"`
-	Subject string  `json:"subject"`
+	// Days The effective period in whole days, after the vacation period
+	// settings (sieve_vacation_min_period, sieve_vacation_max_period,
+	// sieve_vacation_default_period); 0 for a shorter period.
+	Days int     `json:"days"`
+	From *string `json:"from,omitempty"`
+
+	// Seconds The effective period in seconds; 0 means a reply to every
+	// message (only with sieve_vacation_min_period 0).
+	Seconds int64  `json:"seconds"`
+	Subject string `json:"subject"`
 }
 
 // StoreStatus defines model for StoreStatus.

@@ -162,11 +162,23 @@ func RunSequence(ctx context.Context, scripts []Script, from, to, user string, r
 			continue
 		}
 
+		// A reject must not undo what an earlier script already decided
+		// (RFC 5429 2.1): such a script fails like any script with an
+		// action conflict, and the message stays kept.
+		if err := out.rejectConflict(d, keep); err != nil {
+			failed = append(failed, ScriptError{Script: sc.Name, Err: err})
+			continue
+		}
+
 		out.Scripts = append(out.Scripts, sc.Name)
 
+		explicit := keep.explicit
 		if keep = out.merge(d); keep == nil {
 			break
 		}
+
+		// An explicit keep stays one for the scripts after it.
+		keep.explicit = keep.explicit || explicit
 	}
 
 	if keep != nil {
@@ -174,6 +186,40 @@ func RunSequence(ctx context.Context, scripts []Script, from, to, user string, r
 	}
 
 	return out, failed
+}
+
+// actionVacation is the name of the vacation command.
+const actionVacation = "vacation"
+
+// rejectConflict reports a reject or ereject of the next script that
+// conflicts with what the scripts before it did (RFC 5429 2.1, as
+// Pigeonhole checks it within one script): an explicit keep, a fileinto
+// (:copy, or the sequence would have ended), a redirect, a pipe or a
+// vacation reply. A reject in an earlier script ends the sequence, so the
+// other order cannot occur.
+func (d *Delivery) rejectConflict(next *Delivery, keep *FileInto) error {
+	if next.Rejected == "" {
+		return nil
+	}
+
+	var what string
+
+	switch {
+	case keep != nil && keep.explicit:
+		what = "keep"
+	case len(d.FileInto) > 0:
+		what = "fileinto"
+	case len(d.Redirects) > 0:
+		what = "redirect"
+	case len(d.Pipes) > 0:
+		what = "pipe"
+	case d.Vacation != nil:
+		what = actionVacation
+	default:
+		return nil
+	}
+
+	return fmt.Errorf("action conflict: reject after the %s of an earlier script", what)
 }
 
 // merge adds the outcome of the next script of a sequence and returns

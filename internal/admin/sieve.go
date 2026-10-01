@@ -448,6 +448,11 @@ func (s *Server) dryRun(ctx context.Context, u model.User, account, text, name s
 		scripts = s.o.Delivery.Sequence(text, s.o.Log)
 	}
 
+	// What a delivery adds before Sieve runs: Return-Path, Delivered-To.
+	if s.o.Delivery != nil {
+		raw = s.o.Delivery.DeliveryHeaders(deref(req.EnvelopeFrom), to, raw)
+	}
+
 	d, failed := sieve.RunSequence(ctx, scripts, deref(req.EnvelopeFrom), to, account, raw, hooks)
 
 	for _, f := range failed {
@@ -496,8 +501,9 @@ func describeDelivery(acts *adminapi.SieveActions, d *sieve.Delivery, raw []byte
 
 	if v := d.Vacation; v != nil {
 		// The effective period, after the vacation period settings.
-		days := int(v.Period() / (24 * time.Hour))
-		acts.Vacation = &adminapi.SieveVacation{Days: days, From: optional(v.From), Subject: v.Subject}
+		period := v.Period()
+		acts.Vacation = &adminapi.SieveVacation{Days: int(period / (24 * time.Hour)), Seconds: int64(period / time.Second),
+			From: optional(v.From), Subject: v.Subject}
 		acts.Suppressed = append(acts.Suppressed, "vacation reply (not sent, not recorded)")
 	}
 

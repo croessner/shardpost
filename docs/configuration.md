@@ -131,7 +131,8 @@ Pigeonhole has the setting. Among them, with their defaults:
 | `rejection_reason` | `Your message to <%t> was automatically rejected:%n%r` | Text of the rejection message. |
 | `postmaster_address` | `postmaster@%d` | Sender of rejection messages and of notifications without `:from`; `%d` is the recipient's domain. |
 
-The startup and `config check` refuse periods that do not parse or
+A `;` inside a value is written `\;`. The startup and `config check`
+refuse periods that do not parse or
 contradict each other, an unknown `sieve_reject_mode` and a
 `postmaster_address` that is no address. What these settings do is
 described in [Sieve during delivery](imapsieve.md#sieve-during-delivery).

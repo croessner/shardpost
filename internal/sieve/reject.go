@@ -110,8 +110,8 @@ type Rejection struct {
 // sender or automatic mail (see ShouldReject). cfg holds
 // rejection_subject, rejection_reason and postmaster_address.
 func ComposeRejection(rej Rejection, cfg map[string]string, now time.Time) (to string, raw []byte) {
-	to = strings.Trim(strings.TrimSpace(rej.EnvelopeFrom), "<>")
-	rcpt := strings.Trim(strings.TrimSpace(rej.Rcpt), "<>")
+	to = oneLine(strings.Trim(strings.TrimSpace(rej.EnvelopeFrom), "<>"))
+	rcpt := oneLine(strings.Trim(strings.TrimSpace(rej.Rcpt), "<>"))
 
 	head := headerBlock(rej.Original)
 	hdr, _ := textproto.NewReader(bufio.NewReader(bytes.NewReader(rej.Original))).ReadMIMEHeader()
@@ -125,12 +125,18 @@ func ComposeRejection(rej Rejection, cfg map[string]string, now time.Time) (to s
 	domain := domainOf(rcpt)
 	id := model.NewGUID()
 
+	// Without a configured name the recipient's domain stands in: the
+	// host name of a pod is nothing a sender should see.
 	host := rej.Host
 	if host == "" {
 		host = domain
 	}
 
 	boundary := "=_" + id + "_rejection"
+
+	text := crlf(expand(reason))
+	report := mdnFields(oneLine(host), rcpt, oneLine(hdr.Get("Message-Id")))
+	headers := crlf(string(head))
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: Mail Delivery Subsystem <%s>\r\n", PostmasterAddress(cfg, rcpt))
@@ -139,63 +145,92 @@ func ComposeRejection(rej Rejection, cfg map[string]string, now time.Time) (to s
 	fmt.Fprintf(&b, "Date: %s\r\n", now.UTC().Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "Message-ID: <%s.reject@%s>\r\n", id, domain)
 
-	msgID := oneLine(hdr.Get("Message-Id"))
-	if msgID != "" {
-		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", msgID)
+	if msgID := oneLine(hdr.Get("Message-Id")); msgID != "" {
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\nReferences: %s\r\n", msgID, oneLine(interp.VacationReferences(hdr)))
 	}
 
 	b.WriteString("Auto-Submitted: auto-replied (rejected)\r\nPrecedence: bulk\r\nMIME-Version: 1.0\r\n")
-	fmt.Fprintf(&b, "Content-Type: multipart/report; report-type=disposition-notification;\r\n\tboundary=\"%s\"\r\n\r\n", boundary)
-	b.WriteString("This is a MIME-encapsulated message.\r\n\r\n")
+	fmt.Fprintf(&b, "Content-Type: multipart/report; report-type=disposition-notification;\r\n\tboundary=\"%s\"\r\n", boundary)
+	// 8-bit content is declared, on the parts and on the whole (RFC 2045
+	// 6.4); the relay client asks for BODY=8BITMIME and SMTPUTF8 when the
+	// relay offers them (net/smtp does).
+	b.WriteString(transferEncoding(text + report + headers))
+	b.WriteString("\r\nThis is a MIME-encapsulated message.\r\n\r\n")
 
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: inline\r\nContent-Transfer-Encoding: 8bit\r\n\r\n", boundary)
-	b.WriteString(crlf(expand(reason)))
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: inline\r\n%s\r\n", boundary, transferEncoding(text))
+	b.WriteString(text)
 	b.WriteString("\r\n\r\n")
 
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: message/disposition-notification\r\n\r\n", boundary)
-	fmt.Fprintf(&b, "Reporting-UA: %s; %s\r\n", oneLine(host), Implementation)
-	fmt.Fprintf(&b, "Final-Recipient: rfc822; %s\r\n", rcpt)
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: message/disposition-notification\r\n%s\r\n", boundary, transferEncoding(report))
+	b.WriteString(report)
+	b.WriteString("\r\n")
 
-	if msgID != "" {
-		fmt.Fprintf(&b, "Original-Message-ID: %s\r\n", msgID)
-	}
-
-	b.WriteString("Disposition: automatic-action/MDN-sent-automatically; deleted\r\n\r\n")
-
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/rfc822-headers\r\n\r\n", boundary)
-	b.WriteString(crlf(string(head)))
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/rfc822-headers\r\n%s\r\n", boundary, transferEncoding(headers))
+	b.WriteString(headers)
 	b.WriteString("\r\n")
 	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 
 	return to, []byte(b.String())
 }
 
+// mdnFields is the message/disposition-notification part (RFC 8098 3).
+// A recipient that is not ASCII is of the utf-8 address type (RFC 6533).
+func mdnFields(host, rcpt, msgID string) string {
+	addrType := "rfc822"
+	if !isASCII(rcpt) {
+		addrType = "utf-8"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Reporting-UA: %s; %s\r\n", host, Implementation)
+	fmt.Fprintf(&b, "Final-Recipient: %s; %s\r\n", addrType, rcpt)
+
+	if msgID != "" {
+		fmt.Fprintf(&b, "Original-Message-ID: %s\r\n", msgID)
+	}
+
+	b.WriteString("Disposition: automatic-action/MDN-sent-automatically; deleted\r\n")
+
+	return b.String()
+}
+
+// transferEncoding is the Content-Transfer-Encoding field for content:
+// 8bit when it is not ASCII, 7bit otherwise.
+func transferEncoding(content string) string {
+	if isASCII(content) {
+		return "Content-Transfer-Encoding: 7bit\r\n"
+	}
+
+	return "Content-Transfer-Encoding: 8bit\r\n"
+}
+
+// isASCII reports whether s is 7-bit.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+
+	return true
+}
+
 // ShouldReject reports whether a rejection message may go out for a
-// message (RFC 5429 2.1, RFC 3834): never to the null sender and never
-// for automatic mail. The second value names the reason.
+// message (RFC 5429 2.1, RFC 3834): never to the null sender, and not
+// where a vacation reply would not go either — automatic mail, list
+// mail, list or system senders, X-Auto-Response-Suppress (see
+// interp.AutoResponseSuppressed). The second value names the reason.
 func ShouldReject(hdr textproto.MIMEHeader, envelopeFrom string) (bool, string) {
-	if strings.Trim(strings.TrimSpace(envelopeFrom), "<>") == "" {
+	sender := strings.Trim(strings.TrimSpace(envelopeFrom), "<>")
+	if sender == "" {
 		return false, reasonNullSender
 	}
 
-	if automatic(hdr) {
-		return false, "auto-submitted"
+	if why := interp.AutoResponseSuppressed(hdr, sender); why != "" {
+		return false, why
 	}
 
 	return true, ""
-}
-
-// automatic reports an Auto-Submitted field other than "no" (RFC 3834
-// 5); comments and parameters after the keyword do not count.
-func automatic(hdr textproto.MIMEHeader) bool {
-	v := strings.ToLower(hdr.Get("Auto-Submitted"))
-	if i := strings.IndexAny(v, ";("); i >= 0 {
-		v = v[:i]
-	}
-
-	v = strings.TrimSpace(v)
-
-	return v != "" && v != valueNo
 }
 
 // expandRejection fills a rejection template (%s subject, %t recipient,

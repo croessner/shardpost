@@ -11,11 +11,18 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"time"
 )
 
 // ErrNoRelay means no relay is configured.
 var ErrNoRelay = errors.New("no outbound relay configured")
+
+// ErrMaybeSent marks a failure after the whole message went to the relay:
+// no answer arrived for the end of DATA (a timeout, a dropped
+// connection), so the relay may have taken the message. A caller for
+// which a second copy is worse than a lost one treats it as sent.
+var ErrMaybeSent = errors.New("relay did not confirm the message")
 
 // Relay is an SMTP submission target.
 type Relay struct {
@@ -155,6 +162,13 @@ func (r *Relay) transaction(c *smtp.Client, from string, to []string, raw []byte
 	}
 
 	if err := w.Close(); err != nil {
+		// A reply of the relay is a refusal; anything else leaves open
+		// whether it took the message.
+		var reply *textproto.Error
+		if !errors.As(err, &reply) {
+			return fmt.Errorf("relay DATA end: %w: %w", ErrMaybeSent, err)
+		}
+
 		return fmt.Errorf("relay DATA end: %w", err)
 	}
 

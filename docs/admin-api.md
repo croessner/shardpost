@@ -404,7 +404,11 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
   no external program (`execute`/`filter` count as having run with exit 0,
   without running), no duplicate or vacation record, no filing. The
   response lists what would happen and, under `suppressed`, every
-  suppressed side effect. With a script and a text supplied in the request
+  suppressed side effect. The message carries the `Return-Path` and
+  `Delivered-To` fields a delivery adds, so the script sees what it sees
+  in a delivery. A vacation reply reports its effective period, after the
+  vacation period settings, as `days` and `seconds` (`seconds: 0` is a
+  reply to every message). With a script and a text supplied in the request
   (role `diagnose`), the store tests (`mailboxexists`, `mboxmetadata`,
   `specialuse_exists`) are active. That way `diagnose` learns no more than
   it would through `mailbox list`. This is a deliberate decision.
