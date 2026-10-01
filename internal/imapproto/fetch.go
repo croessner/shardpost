@@ -173,9 +173,11 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 	// before any message is marked; a BINARY.PEEK changes nothing and
 	// is checked message by message as it is written.
 	if markSeen && hasBinaryItem(opts) {
-		if failed := c.binaryPrecheck(metas, opts); failed != nil {
+		done, failed := c.binaryPrecheck(metas, opts)
+		if failed != nil {
 			return nil, failed, nil
 		}
+		defer done()
 	}
 
 	marked := c.markSeenBatch(markSeen, metas, opts)
@@ -743,19 +745,11 @@ func (c *conn) writeFetchSeen(seq int, m *model.Meta, opts *fetchOptions, uidCmd
 		parts = append(parts, "FLAGS ("+c.flagsOut(m)+")")
 	}
 
-	var raw []byte
-
-	if needsRaw(opts, m) {
-		var (
-			rel func()
-			err error
-		)
-
-		if raw, rel, err = c.readMessage(m); err != nil {
-			return err
-		}
-		defer rel()
+	raw, rel, err := c.fetchRaw(opts, m)
+	if err != nil {
+		return err
 	}
+	defer rel()
 
 	if binaryUndecodable(opts, raw) {
 		return errUnknownCTE
@@ -778,6 +772,19 @@ func (c *conn) writeFetchSeen(seq int, m *model.Meta, opts *fetchOptions, uidCmd
 	c.w.untagged("%d FETCH (%s)", seq, strings.Join(parts, " "))
 
 	return nil
+}
+
+// fetchRaw returns the content of m when an item needs it: the one the
+// BINARY check read already, or read now; release returns the memory.
+func (c *conn) fetchRaw(opts *fetchOptions, m *model.Meta) (raw []byte, release func(), err error) {
+	switch {
+	case !needsRaw(opts, m):
+		return nil, func() {}, nil
+	case c.preread != nil && c.preread.uid == m.UID:
+		return c.preread.raw, func() {}, nil
+	}
+
+	return c.readMessage(m)
 }
 
 // needsRaw reports whether any item needs the message content.
@@ -863,31 +870,50 @@ func hasBinaryItem(opts *fetchOptions) bool {
 	return slices.ContainsFunc(opts.items, func(it fetchItem) bool { return it.binary != nil || it.binSize != nil })
 }
 
+// preread is a message the BINARY check read and the FETCH writes, so
+// that it is read once.
+type preread struct {
+	uid uint32
+	raw []byte
+}
+
 // binaryPrecheck reads the messages of a FETCH that sets \Seen and has
 // BINARY items, and returns errUnknownCTE (or errReadFailed) before
-// anything is written or marked.
-func (c *conn) binaryPrecheck(metas []model.Meta, opts *fetchOptions) error {
+// anything is written or marked. A FETCH of one message — what a client
+// opening a part sends — keeps the content for writing the response; for
+// several messages each one is released after its check (keeping them
+// all could exceed the memory budget), and is read again when written.
+// done ends the FETCH's hold on the kept content.
+func (c *conn) binaryPrecheck(metas []model.Meta, opts *fetchOptions) (done func(), err error) {
+	var todo []*model.Meta
+
 	for i := range metas {
-		m := &metas[i]
-		if opts.changedSince != 0 && m.ModSeq <= opts.changedSince {
-			continue
-		}
-
-		raw, rel, err := c.readMessage(m)
-		if err != nil {
-			return err
-		}
-
-		bad := binaryUndecodable(opts, raw)
-
-		rel()
-
-		if bad {
-			return errUnknownCTE
+		if opts.changedSince == 0 || metas[i].ModSeq > opts.changedSince {
+			todo = append(todo, &metas[i])
 		}
 	}
 
-	return nil
+	for _, m := range todo {
+		raw, rel, err := c.readMessage(m)
+		if err != nil {
+			return nil, err
+		}
+
+		if binaryUndecodable(opts, raw) {
+			rel()
+			return nil, errUnknownCTE
+		}
+
+		if len(todo) == 1 {
+			c.preread = &preread{uid: m.UID, raw: raw}
+
+			return func() { c.preread = nil; rel() }, nil
+		}
+
+		rel()
+	}
+
+	return func() {}, nil
 }
 
 // readMessage reads the content of m within the memory budget; release

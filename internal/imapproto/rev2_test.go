@@ -26,7 +26,7 @@ func TestIMAP4rev2Session(t *testing.T) {
 	mustLack(t, lines, `* LIST`)
 
 	lines = rev2.ok("SELECT INBOX")
-	mustHave(t, lines, "* 2 EXISTS", `* LIST () "/" INBOX`)
+	mustHave(t, lines, "* 2 EXISTS", `* LIST (\Subscribed \HasNoChildren) "/" INBOX`)
 	mustLack(t, lines, "RECENT", "[UNSEEN")
 
 	// No \Recent flag.
@@ -63,12 +63,31 @@ func TestIMAP4rev2Session(t *testing.T) {
 }
 
 // TestIMAP4rev2SelectOldName: SELECT of a denormalized name reports the
-// normalized one with OLDNAME (RFC 9051 6.3.2).
+// normalized one with OLDNAME and the LIST attributes (RFC 9051 6.3.2);
+// UID SEARCH without hits is a bare ESEARCH with UID.
 func TestIMAP4rev2SelectOldName(t *testing.T) {
 	c, _ := newTestServer(t)
 	c.ok("LOGIN test test")
 	c.ok("ENABLE IMAP4rev2")
 	c.ok("CREATE \"Grün\"")
 
-	mustHave(t, c.ok("SELECT \"Grün\""), "* LIST () \"/\" \"Grün\" (\"OLDNAME\" (\"Grün\"))")
+	mustHave(t, c.ok("SELECT \"Grün\""), "* LIST (\\HasNoChildren) \"/\" \"Grün\" (\"OLDNAME\" (\"Grün\"))")
+
+	// The attributes are those of LIST: special use included.
+	mustHave(t, c.ok("SELECT Drafts"), `* LIST (\Subscribed \HasNoChildren \Drafts) "/" Drafts`)
+
+	mustHave(t, c.ok("UID SEARCH SUBJECT nothing-like-this"), fmt.Sprintf(`* ESEARCH (TAG "t%d") UID`, c.n))
+}
+
+// TestIMAP4rev2SelectPublic: the LIST of SELECT names a public folder
+// with its namespace prefix.
+func TestIMAP4rev2SelectPublic(t *testing.T) {
+	c, store := newTestServer(t)
+	publicFolder(t, store, "Ankündigungen", map[string]string{"anyone": "lr"})
+
+	c.ok("LOGIN test test")
+	c.ok("ENABLE IMAP4rev2")
+
+	mustHave(t, c.ok("EXAMINE \"Public/Ankündigungen\""), "* 1 EXISTS",
+		"* LIST (\\HasNoChildren) \"/\" \"Public/Ankündigungen\" (\"OLDNAME\" (\"Public/Ankündigungen\"))")
 }

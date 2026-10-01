@@ -374,8 +374,31 @@ converted; `R&D` or `A&B` stay, `A&-B` becomes `A&B`. Check the plan:
 a name a UTF-8 client really chose in that form would be converted too.
 The job locks the account (open sessions are disconnected and
 reconnect), applies only the planned changes that are still needed and
-can be run again. Clients see the renamed mailboxes as new folders once
-and synchronise them again.
+can be run again; when a rename fails, the mailboxes below it stay where
+they are and the job ends `partially_failed`. Clients see the renamed
+mailboxes as new folders once and synchronise them again.
+
+**The typical conflict.** Delivery and Sieve name mailboxes in UTF-8.
+When a Sieve rule (`fileinto :create "Entwürfe"`), an autocreate entry
+or a JMAP client created `Entwürfe` and an IMAP client without UTF-8
+created `Entw&APw-rfe`, the account has two mailboxes for one name, and
+the plan reports a `conflict`. Resolve it by hand: move the messages of
+one into the other (with an IMAP client that shows both, or
+`shardpostctl move <account> "Entw&APw-rfe" <uids> "Entwürfe"`), delete
+the emptied mailbox
+(`mailbox_delete`), and plan again; or rename the old one to a third
+name (`shardpostctl mailbox rename <account> "Entw&APw-rfe" "Entwürfe (old)"`)
+if both are to stay.
+
+**What the job does not rewrite.** Only mailbox names and subscriptions
+change. Other places that name a mailbox keep the old name: Sieve
+scripts (`fileinto "Entw&APw-rfe"` then files into, or with `:create`
+creates, a mailbox of that literal name again), IMAPSieve and learning
+rules in the configuration, client-side filter rules and folder settings
+(sent and drafts folders). Check the account's Sieve scripts
+(`shardpostctl sieve list|show <account>`, or ManageSieve) for names with
+`&` after the conversion and change them to the UTF-8 names; clients ask
+for their folder settings again or are pointed at the new names.
 
 ## Support tools (stage 8d)
 

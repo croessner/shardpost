@@ -28,6 +28,21 @@ type listOptions struct {
 	returnSubscribed, returnChildren, returnSpecialUse  bool
 	returnMyRights                                      bool
 	returnStatus                                        []string
+	// exact lists the one name patterns[0] only, wildcards and all (the
+	// LIST response of SELECT); extended is extended data appended to
+	// its line (OLDNAME).
+	exact    bool
+	extended string
+}
+
+// listMatch reports whether a name is listed: the name itself for an
+// exact listing, otherwise when it matches one of the patterns.
+func listMatch(opts listOptions, name, ref string, patterns []string) bool {
+	if opts.exact {
+		return len(patterns) > 0 && name == patterns[0]
+	}
+
+	return matchAny(name, ref, patterns)
 }
 
 func (c *conn) cmdList(tag string, lsub bool) error {
@@ -85,6 +100,8 @@ func (c *conn) readListNames(t token) (ref string, patterns []string, err error)
 		}
 	}
 
+	ref, patterns = nfcListArgs(ref, patterns)
+
 	return ref, patterns, nil
 }
 
@@ -107,32 +124,73 @@ func (c *conn) listRun(tag string, lsub bool, opts listOptions, ref string, patt
 		return nil
 	}
 
+	if err := c.listLines(lsub, opts, ref, patterns); err != nil {
+		c.storeErr(tag, err)
+		return nil
+	}
+
+	c.ok(tag, "", "LIST completed")
+
+	return nil
+}
+
+// listLines writes the LIST/LSUB lines of every namespace.
+func (c *conn) listLines(lsub bool, opts listOptions, ref string, patterns []string) error {
 	// The other namespaces are collected first: an account whose own
 	// mailbox is named like the root of one of them gets a single LIST
 	// line, and that line has to say \HasChildren.
 	public, publicNodes, err := c.collectPublic()
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return err
 	}
 
 	shared, sharedNodes, err := c.collectSharedRefs()
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return err
 	}
 
 	if err := c.listOwn(lsub, opts, ref, patterns, namespaceRoots(ref, patterns, public, shared)); err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return err
 	}
 
 	c.listForeign(public, publicNodes, lsub, opts, ref, patterns)
 	c.listForeign(shared, sharedNodes, lsub, opts, ref, patterns)
 
-	c.ok(tag, "", "LIST completed")
-
 	return nil
+}
+
+// selectList writes the LIST response of SELECT/EXAMINE for an IMAP4rev2
+// session (RFC 9051 6.3.2): the line LIST would give for the mailbox,
+// with \Subscribed and the special-use attributes, and OLDNAME when the
+// name the client gave was normalized. If the listing fails, a line
+// without attributes stands in: the response is required.
+func (c *conn) selectList(t *target, given string) {
+	opts := listOptions{exact: true, returnSubscribed: true, returnSpecialUse: true}
+	if t.normalized {
+		opts.extended = c.oldNameData(given)
+	}
+
+	mark := c.w.bw.Buffered()
+
+	if err := c.listLines(false, opts, "", []string{t.full}); err == nil && c.w.bw.Buffered() > mark {
+		return
+	}
+
+	c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), opts.extended)
+}
+
+// oldNameData is the OLDNAME extended data item (RFC 9051 6.3.9.7) for a
+// name the client gave that was normalized. It goes to every session,
+// IMAP4rev1 ones with UTF8=ACCEPT as well: they were told LIST-EXTENDED,
+// whose extended data items a client has to accept (RFC 5258 6).
+func (c *conn) oldNameData(given string) string {
+	return fmt.Sprintf(` ("OLDNAME" (%s))`, c.mailboxString(given))
+}
+
+// oldNameList announces the normalized name of a CREATE or RENAME with
+// the name the client gave (RFC 9051 6.3.4, 6.3.5).
+func (c *conn) oldNameList(t *target, given string) {
+	c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), c.oldNameData(given))
 }
 
 // listVerb is the response name of LIST or LSUB.
@@ -420,7 +478,7 @@ func (c *conn) listOwn(lsub bool, opts listOptions, ref string, patterns []strin
 	sort.Strings(sorted)
 
 	for _, name := range sorted {
-		if !matchAny(name, ref, patterns) {
+		if !listMatch(opts, name, ref, patterns) {
 			continue
 		}
 
@@ -449,7 +507,7 @@ func (c *conn) listOwnEntry(lt *listTree, name string, lsub bool, opts listOptio
 	}
 
 	attrs := lt.attrs(mb, name, viaChild, lsub, opts)
-	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo)
+	c.w.untagged(`%s (%s) "/" %s%s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo, opts.extended)
 	c.listOwnExtras(mb, name, opts)
 }
 
@@ -678,7 +736,7 @@ func (c *conn) listForeign(entries []sharedEntry, nodes map[string]bool, lsub bo
 	sort.Strings(names)
 
 	for _, name := range names {
-		if matchAny(name, ref, patterns) {
+		if listMatch(opts, name, ref, patterns) {
 			c.listSharedEntry(st, name, lsub, opts)
 		}
 	}
@@ -866,7 +924,7 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 	}
 
 	attrs := st.attrs(e, isBox, name, lsub, opts)
-	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo)
+	c.w.untagged(`%s (%s) "/" %s%s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo, opts.extended)
 	c.listSharedExtras(e, isBox, name, opts)
 }
 
@@ -952,7 +1010,7 @@ func (c *conn) cmdCreate(tag string) error {
 	// RFC 9051 6.3.4: a name that was normalized is announced with the
 	// name the client gave.
 	if t.normalized {
-		c.w.untagged(`LIST () "/" %s ("OLDNAME" (%s))`, c.mailboxOut(t.full), c.mailboxString(name))
+		c.oldNameList(t, name)
 	}
 
 	// RFC 8474 4.1: the id of the new mailbox comes with the OK.
@@ -1086,21 +1144,8 @@ func (c *conn) cmdRename(tag string) error {
 		return nil
 	}
 
-	if ot.shared() {
-		if !c.needRight(tag, ot, 'x') {
-			return nil
-		}
-
-		rights, err := c.parentRights(nt, nt.name)
-		if err != nil {
-			c.storeErr(tag, err)
-			return nil
-		}
-
-		if !model.HasRight(rights, 'k') {
-			c.no(tag, "NOPERM", "Permission denied")
-			return nil
-		}
+	if ot.shared() && !c.mayRenameShared(tag, ot, nt) {
+		return nil
 	}
 
 	if err := ot.u.RenameMailbox(ot.name, nt.name); err != nil {
@@ -1108,9 +1153,37 @@ func (c *conn) cmdRename(tag string) error {
 		return nil
 	}
 
+	// RFC 9051 6.3.5: a new name that was normalized is announced with
+	// the name the client gave.
+	if nt.normalized {
+		c.oldNameList(nt, newName)
+	}
+
 	c.ok(tag, "", "RENAME completed")
 
 	return nil
+}
+
+// mayRenameShared checks the rights a RENAME in another namespace needs:
+// x on the mailbox, k on the new parent; it answers the client when one
+// is missing.
+func (c *conn) mayRenameShared(tag string, ot, nt *target) bool {
+	if !c.needRight(tag, ot, 'x') {
+		return false
+	}
+
+	rights, err := c.parentRights(nt, nt.name)
+	if err != nil {
+		c.storeErr(tag, err)
+		return false
+	}
+
+	if !model.HasRight(rights, 'k') {
+		c.no(tag, "NOPERM", "Permission denied")
+		return false
+	}
+
+	return true
 }
 
 func (c *conn) cmdSubscribe(tag string, on bool) error {
@@ -1770,12 +1843,7 @@ func (c *conn) selectUntagged(rights string, t *target, given string) {
 	c.w.untagged("%d EXISTS", len(c.msgs))
 
 	if c.rev2 {
-		oldName := ""
-		if t.normalized {
-			oldName = fmt.Sprintf(` ("OLDNAME" (%s))`, c.mailboxString(given))
-		}
-
-		c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), oldName)
+		c.selectList(t, given)
 	} else {
 		c.w.untagged("%d RECENT", c.recentCount())
 

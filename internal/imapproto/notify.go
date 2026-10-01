@@ -2,6 +2,7 @@ package imapproto
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,14 +75,8 @@ func (c *conn) cmdNotify(tag string) error {
 		return err
 	}
 
-	// The mailboxes of SUBTREE and MAILBOXES are names in the session's
-	// wire form.
-	for i := range groups {
-		for j := range groups[i].mailboxes {
-			if groups[i].mailboxes[j], err = c.fromWire(groups[i].mailboxes[j]); err != nil {
-				return err
-			}
-		}
+	if err := c.notifyNames(groups); err != nil {
+		return err
 	}
 
 	st, ok := c.buildNotifyState(tag, groups)
@@ -104,6 +99,30 @@ func (c *conn) cmdNotify(tag string) error {
 	go c.notifyLoop(st)
 
 	c.ok(tag, "", "NOTIFY completed")
+
+	return nil
+}
+
+// notifyNames converts the mailboxes of SUBTREE and MAILBOXES from the
+// session's wire form; a name not in NFC also names the NFC mailbox
+// (see target).
+func (c *conn) notifyNames(groups []notifyGroup) error {
+	for i := range groups {
+		for j := range groups[i].mailboxes {
+			name, err := c.fromWire(groups[i].mailboxes[j])
+			if err != nil {
+				return err
+			}
+
+			groups[i].mailboxes[j] = name
+		}
+
+		for _, n := range groups[i].mailboxes {
+			if nfc, changed := nfcName(n); changed && !slices.Contains(groups[i].mailboxes, nfc) {
+				groups[i].mailboxes = append(groups[i].mailboxes, nfc)
+			}
+		}
+	}
 
 	return nil
 }

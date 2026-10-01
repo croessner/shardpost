@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
+	"fmt"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -193,12 +193,19 @@ func (k *mailboxNameConvert) Plan(_ context.Context, _ *Env, u model.User, _ str
 // Run applies the planned renames and subscription rewrites that are
 // still needed, parents first. A mailbox is found by its id: renaming a
 // parent has already moved its children, so a child is renamed from
-// where it is now. Conflicts and invalid names are reported, not
-// touched.
+// where it is now. The children of a mailbox whose rename failed stay
+// where they are. Conflicts and invalid names are reported, not touched.
 func (k *mailboxNameConvert) Run(_ context.Context, run *Run) (any, error) {
 	var planned nameSummary
 	if run.Plan != nil {
-		_ = json.Unmarshal(run.Plan.Summary, &planned)
+		if err := json.Unmarshal(run.Plan.Summary, &planned); err != nil {
+			return nil, fmt.Errorf("plan summary: %w", err)
+		}
+	}
+
+	rn, err := newRenamer(run.User)
+	if err != nil {
+		return nil, err
 	}
 
 	res := nameResult{Applied: []nameChange{}}
@@ -208,16 +215,13 @@ func (k *mailboxNameConvert) Run(_ context.Context, run *Run) (any, error) {
 			return res, err
 		}
 
-		var (
-			done bool
-			err  error
-		)
+		var done bool
 
 		switch c.Action {
 		case nameRename:
-			done, err = renameByID(run.User, c)
+			done, err = rn.rename(c)
 		case nameSubscription:
-			done, err = moveSubscription(run.User, c)
+			done, err = rn.moveSubscription(c)
 		default:
 			continue
 		}
@@ -235,40 +239,95 @@ func (k *mailboxNameConvert) Run(_ context.Context, run *Run) (any, error) {
 	return res, nil
 }
 
-// errNameTaken is a rename whose target appeared after the plan.
-var errNameTaken = errors.New("a mailbox of the new name exists")
+// Errors of a planned rename that can no longer be done.
+var (
+	errNameTaken     = errors.New("a mailbox of the new name exists")
+	errParentSkipped = errors.New("the rename of a parent mailbox failed")
+)
 
-// renameByID renames the mailbox of c to c.To from its current name;
-// done is false when it is gone or already there.
-func renameByID(u model.User, c nameChange) (bool, error) {
+// renamer applies renames to one listing of the account's mailboxes,
+// which it keeps up to date, instead of listing them for every rename.
+type renamer struct {
+	u       model.User
+	byID    map[string]string // mailbox id -> current name
+	names   map[string]bool   // current names
+	failed  []string          // current names of mailboxes whose rename failed
+	missing map[string]bool   // subscriptions without a mailbox
+}
+
+func newRenamer(u model.User) (*renamer, error) {
 	boxes, err := u.ListMailboxes()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	i := slices.IndexFunc(boxes, func(mb model.Mailbox) bool { return mb.ID == c.MailboxID })
-	if i < 0 || boxes[i].Name == c.To {
+	missing, err := u.ListSubscribedMissing()
+	if err != nil {
+		return nil, err
+	}
+
+	r := &renamer{u: u, byID: map[string]string{}, names: map[string]bool{}, missing: map[string]bool{}}
+	for _, mb := range boxes {
+		r.byID[mb.ID], r.names[mb.Name] = mb.Name, true
+	}
+
+	for _, n := range missing {
+		r.missing[n] = true
+	}
+
+	return r, nil
+}
+
+// rename renames the mailbox of c to c.To from its current name; done
+// is false when it is gone or already there.
+func (r *renamer) rename(c nameChange) (bool, error) {
+	cur, ok := r.byID[c.MailboxID]
+	if !ok || cur == c.To {
 		return false, nil
 	}
 
-	if slices.ContainsFunc(boxes, func(mb model.Mailbox) bool { return mb.Name == c.To }) {
+	if below(cur, r.failed) {
+		return false, errParentSkipped
+	}
+
+	if r.names[c.To] {
+		r.failed = append(r.failed, cur)
 		return false, errNameTaken
 	}
 
-	return true, u.RenameMailbox(boxes[i].Name, c.To)
+	if err := r.u.RenameMailbox(cur, c.To); err != nil {
+		r.failed = append(r.failed, cur)
+		return false, err
+	}
+
+	// The mailbox and its children carry the new prefix now.
+	for id, n := range r.byID {
+		if n == cur || strings.HasPrefix(n, cur+model.Delim) {
+			moved := c.To + n[len(cur):]
+			delete(r.names, n)
+			r.byID[id], r.names[moved] = moved, true
+		}
+	}
+
+	return true, nil
 }
 
 // moveSubscription moves a subscription without a mailbox to the UTF-8
 // name; done is false when it is gone.
-func moveSubscription(u model.User, c nameChange) (bool, error) {
-	missing, err := u.ListSubscribedMissing()
-	if err != nil || !slices.Contains(missing, c.From) {
+func (r *renamer) moveSubscription(c nameChange) (bool, error) {
+	if !r.missing[c.From] {
+		return false, nil
+	}
+
+	if err := r.u.SetSubscribed(c.To, true); err != nil {
 		return false, err
 	}
 
-	if err := u.SetSubscribed(c.To, true); err != nil {
+	if err := r.u.SetSubscribed(c.From, false); err != nil {
 		return false, err
 	}
 
-	return true, u.SetSubscribed(c.From, false)
+	delete(r.missing, c.From)
+
+	return true, nil
 }

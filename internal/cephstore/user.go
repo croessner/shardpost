@@ -125,17 +125,17 @@ func HasFlag(flags []string, f string) bool { return model.HasFlag(flags, f) }
 
 // User is a per-user view of the store (namespace-scoped IOContexts).
 type User struct {
-	learningHook  func(model.Mailbox, model.Meta) (string, error)
-	name          string
-	store         *Store // to open other namespaces (shared folder pointers)
-	idx           *rados.IOContext
-	data          *rados.IOContext
-	log           *slog.Logger
-	chunkSize     int64
-	ftsShards     int
+	learningHook func(model.Mailbox, model.Meta) (string, error)
+	name         string
+	store        *Store // to open other namespaces (shared folder pointers)
+	idx          *rados.IOContext
+	data         *rados.IOContext
+	log          *slog.Logger
+	chunkSize    int64
+	ftsShards    int
 	// legacyDict caches whether the account still has the dictionary
 	// objects of the layout before 0.35.0 (see legacyDictMatches).
-	legacyDict int
+	legacyDict    int
 	acctRetention int
 	shardSize     uint32
 	limit         QuotaLimit

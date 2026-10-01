@@ -1,8 +1,10 @@
 package jobs
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +128,75 @@ func TestUTF8Name(t *testing.T) {
 		got, ok := utf8Name(in)
 		if (want == "") == ok || (ok && got != want) {
 			t.Errorf("%q: %q %v, want %q", in, got, ok, want)
+		}
+	}
+}
+
+// stalePlan plans the conversion, then changes the account: one rename
+// is done by hand, the target of another appears.
+func stalePlan(t *testing.T, m *Manager, k Kind, alice model.User) *Plan {
+	t.Helper()
+
+	p, err := m.CreatePlan(context.Background(), k, "alice", nil, "tester", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if s := planSummary(t, p); s.Renames != 3 || s.Invalid != 1 {
+		t.Fatalf("plan: %s", p.Summary)
+	}
+
+	if err := alice.RenameMailbox("Entw&APw-rfe", "Entwürfe"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := alice.EnsureMailbox("Ärger", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	return p
+}
+
+// TestMailboxNameConvertStalePlan: a rename the plan names but that was
+// done meanwhile counts as nothing to do; one whose new name was taken
+// meanwhile fails, and so do the renames below it, the job ending
+// partially failed. Names that are not UTF-8 are reported.
+func TestMailboxNameConvertStalePlan(t *testing.T) {
+	store := memstore.New()
+	alice, _ := store.User("alice")
+
+	for _, name := range []string{"INBOX", "Entw&APw-rfe", "&AMQ-rger", "&AMQ-rger/&ANY-l", "bad\xff"} {
+		if err := alice.EnsureMailbox(name, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := newTestManager(memstore.NewAdminKV(), store, "pod-a", Kinds(time.Hour)...)
+	runManager(t, m)
+
+	k, _ := m.Kind(KindMailboxName)
+	p := stalePlan(t, m, k, alice)
+
+	j, _, err := m.Submit(k, "alice", nil, p.ID, "tester", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	j = waitState(t, m, j.ID, StatePartiallyFailed)
+
+	var res nameResult
+	if err := json.Unmarshal(j.Result, &res); err != nil || len(res.Applied) != 0 {
+		t.Fatalf("applied: %s %v", j.Result, err)
+	}
+
+	if len(j.Errors) != 2 || !strings.Contains(j.Errors[0], "new name exists") || !strings.Contains(j.Errors[1], "parent") {
+		t.Fatalf("errors: %q", j.Errors)
+	}
+
+	names := mailboxNames(alice)
+	for _, want := range []string{"Entwürfe", "&AMQ-rger", "&AMQ-rger/&ANY-l", "Ärger", "bad\xff"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("missing %q: %v", want, names)
 		}
 	}
 }

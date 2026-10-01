@@ -176,6 +176,19 @@ func TestNewNameIsNetUnicode(t *testing.T) {
 		t.Fatalf("rename not normalized: %v", err)
 	}
 
+	// RENAME to a denormalized name announces the NFC one too.
+	mustHave(t, c.ok("RENAME \"Grün\" \"Blätter\""), "* LIST () \"/\" \"Blätter\" (\"OLDNAME\" (\"Blätter\"))")
+
+	// LIST patterns and references in either form find the NFC name.
+	mustHave(t, c.ok("LIST \"\" \"Entwür*\""), "\"/\" \""+nfc+"\"")
+	c.ok("CREATE \"Blätter/Eiche\"")
+	mustHave(t, c.ok("LIST \"Blätter\" \"%%\""), "\"/\" \"Blätter/Eiche\"")
+	mustHave(t, c.ok("LIST \"Blätter/\" \"%%\""), "\"/\" \"Blätter/Eiche\"")
+
+	// NOTIFY names in either form.
+	mustHave(t, c.ok(`NOTIFY SET STATUS (MAILBOXES "%s" (MessageNew MessageExpunge))`, nfd), "* STATUS \""+nfc+"\" (MESSAGES 0")
+	c.ok("NOTIFY NONE")
+
 	// A name stored denormalized before stays reachable as it is.
 	if err := u.EnsureMailbox("Alt/Süd", nil); err != nil {
 		t.Fatal(err)
@@ -215,6 +228,25 @@ func TestMUTF7Namespaces(t *testing.T) {
 	alice.ok("ENABLE UTF8=ACCEPT")
 	mustHave(t, alice.ok("NAMESPACE"), `(("Shared/" "/")) (("Öffentlich/" "/"))`)
 	mustHave(t, alice.ok(`GETACL "Entwürfe/Ärger"`), `* ACL "Entwürfe/Ärger" alice lrswipkxtea bob lr`)
+}
+
+// TestNFCOtherNamespaces: a denormalized name finds a public folder and
+// a mailbox another account shares.
+func TestNFCOtherNamespaces(t *testing.T) {
+	alice, bob := twoUsersWith(t, func(o *Options) { o.PublicPrefix = DefaultPublicPrefix })
+
+	alice.ok("CREATE \"Grün\"")
+	alice.ok("SETACL \"Grün\" bob lr")
+
+	bob.ok("ENABLE UTF8=ACCEPT")
+	mustHave(t, bob.ok("STATUS \"Shared/alice/Grün\" (MESSAGES)"), "* STATUS \"Shared/alice/Grün\" (MESSAGES 0)")
+	mustHave(t, bob.ok("LIST \"\" \"Shared/alice/Grü*\""), "\"/\" \"Shared/alice/Grün\"")
+
+	c, store := newTestServer(t)
+	publicFolder(t, store, "Grün", map[string]string{"anyone": "lr"})
+	c.ok("LOGIN test test")
+	c.ok("ENABLE UTF8=ACCEPT")
+	mustHave(t, c.ok("STATUS \"Public/Grün\" (MESSAGES)"), "* STATUS \"Public/Grün\" (MESSAGES 1)")
 }
 
 // TestMUTF7PublicFolder: a public folder with a non-ASCII name.
@@ -464,4 +496,7 @@ func TestBinaryUnknownCTE(t *testing.T) {
 	// A FETCH that would set \Seen fails before it marks anything.
 	mustHave(t, c.cmd("FETCH 1:2 BINARY[1]"), "NO [UNKNOWN-CTE]")
 	mustLack(t, c.ok("FETCH 1:2 FLAGS"), `\Seen`)
+
+	// One message that decodes: read once for the check and the answer.
+	mustHave(t, c.ok("FETCH 2 BINARY[1]"), "hallo", `\Seen`)
 }

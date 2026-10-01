@@ -3,12 +3,14 @@ package imapproto
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
+	"shardpost/internal/model"
 	"shardpost/internal/mutf7"
 )
 
@@ -163,6 +165,66 @@ func checkNewName(name string) error {
 	}
 
 	return nil
+}
+
+// nfcListArgs lets LIST find NFC names with a reference or patterns in
+// another normalization form, as target does for a single name: a
+// pattern that is not in NFC is kept and joined by its NFC form, so a
+// mailbox stored under either form matches. The reference is a literal
+// prefix; one that is not in NFC is folded into the patterns first, so
+// that both forms of it are tried too. A reference with wildcard
+// characters, or a LIST with an empty pattern (which asks for the
+// hierarchy delimiter), is left as it is.
+func nfcListArgs(ref string, patterns []string) (string, []string) {
+	if _, changed := nfcName(ref); changed && !strings.ContainsAny(ref, "*%") && !slices.Contains(patterns, "") {
+		for i, p := range patterns {
+			patterns[i] = foldReference(ref, p)
+		}
+
+		ref = ""
+	}
+
+	out := patterns
+	for _, p := range patterns {
+		if nfc := nfcPattern(p); nfc != p && !slices.Contains(out, nfc) {
+			out = append(out, nfc)
+		}
+	}
+
+	return ref, out
+}
+
+// foldReference joins a LIST reference and a pattern into one pattern,
+// the way the reference is applied when matching (a pattern that starts
+// with the delimiter ignores the reference).
+func foldReference(ref, pattern string) string {
+	if strings.HasPrefix(pattern, model.Delim) {
+		return strings.TrimPrefix(pattern, model.Delim)
+	}
+
+	if ref != "" && !strings.HasSuffix(ref, model.Delim) {
+		ref += model.Delim
+	}
+
+	return ref + pattern
+}
+
+// nfcPattern normalizes the literal parts of a LIST pattern to NFC; the
+// wildcards stay where they are.
+func nfcPattern(p string) string {
+	var b strings.Builder
+
+	for {
+		i := strings.IndexAny(p, "*%")
+		if i < 0 {
+			b.WriteString(norm.NFC.String(p))
+			return b.String()
+		}
+
+		b.WriteString(norm.NFC.String(p[:i]))
+		b.WriteByte(p[i])
+		p = p[i+1:]
+	}
 }
 
 // nfcName returns name in Normalization Form C and whether that differs.

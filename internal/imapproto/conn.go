@@ -397,7 +397,10 @@ type conn struct {
 	readOnly   bool
 	examine    bool     // selected with EXAMINE
 	searchRes  []uint32 // saved SEARCH result (UIDs)
-	searchErr  error    // read failure during brute-force matching
+	// preread is the message a FETCH read for its BINARY check, written
+	// without a second read (see binaryPrecheck).
+	preread   *preread
+	searchErr error // read failure during brute-force matching
 }
 
 // maxLiteralsPerCommand bounds the number of literals in one command

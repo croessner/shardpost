@@ -191,6 +191,16 @@ is not valid UTF-8 is reported. The plan lists every change; check it
 before applying, since a mailbox that a UTF-8 client really named
 .I Entw&APw-rfe
 would be renamed as well.
+The usual conflict is a mailbox that delivery, Sieve or a JMAP client
+created in UTF-8 next to the one an older IMAP client created in modified
+UTF-7: merge the two by hand (move the messages, delete the empty one
+with
+.BR mailbox_delete )
+and plan again. Sieve scripts, configured rules and client settings that
+name the old form are not rewritten; a
+.I fileinto
+of the old name creates that mailbox again, so change them to the UTF-8
+names.
 .TP
 .B mailbox_delete
 Role
