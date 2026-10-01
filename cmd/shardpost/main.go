@@ -105,6 +105,10 @@ const (
 	commandScrub = "scrub"
 	commandCheck = "check"
 	commandPush  = "push"
+	// commandBackfillAccounts fills the account directory and repairs it
+	// ("shardpost index backfill accounts [--restart]").
+	commandBackfillAccounts = "index backfill accounts"
+	commandBackfillRestart  = "index backfill accounts --restart"
 )
 
 // capabilityEnabled is the ManageSieve capability value for enabled features.
@@ -162,6 +166,10 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	// "shardpost scrub" runs the scrubber over all users and exits.
 	if command == commandScrub {
 		return scrub(store, log, settings)
+	}
+
+	if command == commandBackfillAccounts || command == commandBackfillRestart {
+		return backfillAccounts(store, log, command == commandBackfillRestart)
 	}
 
 	// "shardpost push" runs the JMAP push worker.

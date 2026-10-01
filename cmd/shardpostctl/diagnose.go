@@ -32,7 +32,7 @@ const diagnoseUsage = `usage: shardpostctl server status | account show <account
   quota show <account> | shared list <account>   (each with --json) |
   mailbox create [-special-use \Archive] <account> <name> | mailbox rename [-if-match E] <account> <mailbox> <new> |
   mailbox subscribe|unsubscribe <account> <mailbox> | acl set [-mode add|remove] [-if-match E] <account> <mailbox> <identifier> <rights> |
-  acl delete [-if-match E] <account> <mailbox> <identifier>`
+  acl delete [-if-match E] <account> <mailbox> <identifier> | account repair <account>`
 
 // labelStore labels the store row.
 const labelStore = "store"

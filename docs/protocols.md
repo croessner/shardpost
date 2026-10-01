@@ -265,7 +265,7 @@ to `k` and `d` to `x t e`.
 
 | Feature | Status | Notes |
 |---|---|---|
-| `SETACL` with `+`/`-`, `DELETEACL` | ✅ | Need `a`. Both record a share notification for the grantee (RFC 9670 §3; not for `anyone`). |
+| `SETACL` with `+`/`-`, `DELETEACL` | ✅ | Need `a`. Both record a share notification for the grantee (RFC 9670 §3; not for `anyone`). A grant to an account whose purge already deleted its data answers `NO [UNAVAILABLE]` and changes nothing; removing rights still works. |
 | `GETACL`, `LISTRIGHTS` | ✅ | Need `a`. |
 | `MYRIGHTS` | ✅ | |
 | Identifier `anyone` | ✅ | Effective rights are the user's entry plus `anyone`. |
@@ -671,7 +671,7 @@ under `/admin/v1`, and the command-line client `shardpostctl`; see
 | Roles | `diagnose`, `deliver`, `deliver:noenforce`, `import`, `trace`, `provision`, `repair`, `delete`, `content`, `support`, `export`; optional account patterns per client. |
 | Concurrency | ETags with `If-Match` on mailbox, ACL and Sieve writes; `Idempotency-Key` on `POST /jobs`. |
 | Audit | One audit log line per request; request metrics. |
-| Endpoint groups | Server version and status; accounts, mailboxes, ACL (including `explain`), quota, shared folders; messages (list, show, export, flags, copy, move, and search bounded by `admin.search_scan_limit`, default 50000, continued with a cursor); Sieve (including a check dry run that sees the `Return-Path` and `Delivered-To` a delivery adds and reports the vacation period in days and seconds); learning queue; deliveries; plans and jobs (including cancel); export; import (session lock, mailboxes, messages, changes, ACL, public-folder readers, metadata, Sieve, finalize); protocol trace. |
+| Endpoint groups | Server version and status; accounts, mailboxes, ACL (including `explain`), quota, shared folders; messages (list, show, export, flags, copy, move, and search bounded by `admin.search_scan_limit`, default 50000, continued with a cursor); Sieve (including a check dry run that sees the `Return-Path` and `Delivered-To` a delivery adds and reports the vacation period in days and seconds); learning queue; deliveries; plans and jobs (including cancel); export; import (session lock, mailboxes, messages, changes, ACL, public-folder readers, metadata, Sieve, finalize); protocol trace; repair of an account's directory entry. |
 | Jobs | `index_check` (role `diagnose`, runs directly); `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`, `fts_dict_convert`, `mailbox_name_convert` (renames mailboxes stored under modified UTF-7 names, after an upgrade from 0.35.2 or earlier), `attachment_backfill` (fills in `hasAttachment` for messages stored by earlier versions) (role `repair`) and `mailbox_delete`, `expunge`, `purge` (role `delete`): plan, then apply. Any server with `jobs.enabled` (default on) claims queued jobs; a plan can be applied for `jobs.plan_ttl_seconds` (default 3600); finished jobs are kept `jobs.retention_days` (default 14). |
 | shardpostctl groups | version, server, account (including quota and shared), mailbox, acl, message, sieve, job (plan, apply, check), learning, export (archive verify, restore), deliver, migrate, trace. |
 

@@ -49,7 +49,7 @@ func serveFilled(t *testing.T, roles ...string) string {
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw", "carol": "pw"},
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr,
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Directory: store,
 		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000,
 		SharedPrefix: "Shared/", PublicPrefix: "Public/"})
 

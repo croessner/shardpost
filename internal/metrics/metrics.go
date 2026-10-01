@@ -24,6 +24,7 @@ const (
 	labelProto   = "proto"
 	labelCommand = "command"
 	labelOutcome = "outcome"
+	labelSite    = "site"
 )
 
 var (
@@ -38,6 +39,14 @@ var (
 		Namespace: namespace, Subsystem: subsystemRados, Name: "cas_retries_total",
 		Help: "Compare-and-swap conflicts that led to a retry, by object kind.",
 	}, []string{labelKind})
+	// RadosListings counts RADOS object listings by call site. A listing
+	// visits every placement group of the pool, so its cost grows with
+	// the whole pool; running paths must not list (scaling plan,
+	// guideline 1), and this counter shows where they still do.
+	RadosListings = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemRados, Name: "listings_total",
+		Help: "RADOS object listings (each visits every placement group of the pool), by call site.",
+	}, []string{labelSite})
 	// NotifyLatency is the time until all watchers acknowledged a notify.
 	NotifyLatency = promauto.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: subsystemRados, Name: "notify_seconds",

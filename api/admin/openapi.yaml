@@ -329,6 +329,30 @@ paths:
                 $ref: "#/components/schemas/SharedList"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/directory/repair:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    post:
+      operationId: repairAccountDirectory
+      summary: Repair the account's directory entry
+      description: |
+        Applies the repair rules of the account directory to one account.
+        An entry the purge job left in the state `purging` (the job
+        failed or was cancelled) while no purge job of that lock session
+        still runs is removed when the account's registry is gone, and set
+        back to `active` when the registry exists. Any other entry is left
+        as it is (action `none`; `purge_running` while the purge job still
+        runs). The account is not resolved through Nauthilus: a purged
+        account may no longer exist there. Requires the role `repair`.
+      responses:
+        "200":
+          description: What was found and done.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectoryRepair"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/plans:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1730,6 +1754,45 @@ components:
           type: integer
           minimum: 1
           description: How long the trace lasts (capped at the configured maximum).
+    DirectoryEntry:
+      type: object
+      description: The account's entry in the account directory.
+      required: [created, state]
+      properties:
+        created:
+          type: string
+          format: date-time
+          description: When the entry was written (for accounts a backfill entered, the registry's last change).
+        state:
+          type: string
+          enum: [active, purging]
+        session:
+          type: string
+          description: Lock session of the purge job (only while purging).
+        cluster:
+          type: string
+          description: Ceph cluster (fsid) that holds the account.
+    DirectoryRepair:
+      type: object
+      required: [account, action, found]
+      properties:
+        account:
+          type: string
+        action:
+          type: string
+          enum: [none, purge_running, removed, activated]
+          description: |
+            `none`: nothing to repair (or the account has no entry);
+            `purge_running`: a purge job still works on the account;
+            `removed`: purging without registry, the entry was removed;
+            `activated`: purging with registry, the entry is active again.
+        found:
+          type: boolean
+          description: Whether the account had an entry.
+        before:
+          $ref: "#/components/schemas/DirectoryEntry"
+        after:
+          $ref: "#/components/schemas/DirectoryEntry"
     TraceStatus:
       type: object
       required: [account, active]

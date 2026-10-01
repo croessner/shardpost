@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"shardpost/internal/fts"
@@ -31,6 +32,7 @@ func New() *Store { return &Store{users: map[string]*User{}} }
 type Store struct {
 	mu    sync.Mutex
 	users map[string]*User
+	ix    indexes
 }
 
 func (s *Store) user(name string) *User {
@@ -48,8 +50,15 @@ func (s *Store) user(name string) *User {
 
 // User returns a view of the named user's namespace, creating it on
 // first use. Views share the data; per-view settings (quota
-// enforcement) do not leak into other views.
-func (s *Store) User(name string) (model.User, error) { return &view{User: s.user(name)}, nil }
+// enforcement) do not leak into other views. Names are checked as in
+// cephstore (model.CheckNamespace).
+func (s *Store) User(name string) (model.User, error) {
+	if err := model.CheckNamespace(name); err != nil {
+		return nil, err
+	}
+
+	return &view{User: s.user(name)}, nil
+}
 
 // view is one opened user (model.User) with its own settings.
 type view struct {
@@ -109,6 +118,8 @@ type User struct {
 	active  string
 	imp     *importLock
 	trace   model.TraceState
+	// registered: the user has a registry (directory.go).
+	registered atomic.Bool
 }
 
 // Close is a no-op; a memstore user holds no resources.
@@ -192,6 +203,10 @@ func (u *User) Lookup(name string) (*model.Mailbox, error) {
 // CreateMailbox creates a mailbox with the given special-use attributes;
 // ErrMailboxExists if it exists.
 func (u *User) CreateMailbox(name string, use []string) error {
+	if err := u.register(""); err != nil {
+		return err
+	}
+
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -332,6 +347,10 @@ func (u *User) RenameMailbox(oldName, newName string) error {
 // SetSubscribed changes the subscription flag of a mailbox; a missing
 // mailbox is subscribed by name.
 func (u *User) SetSubscribed(name string, sub bool) error {
+	if err := u.register(""); err != nil {
+		return err
+	}
+
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -501,6 +520,10 @@ func (u *User) newGUID() string {
 
 // deliver stores a message; enforce checks the storage limit first.
 func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.Time, enforce bool) (*model.Meta, error) {
+	if err := u.register(""); err != nil {
+		return nil, err
+	}
+
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -989,6 +1012,10 @@ func (u *User) QuotaLimit() (model.Quota, error) { return u.limit, nil }
 // one per namespace, and what is recorded in it is resolved there, so a
 // delivery across namespaces behaves as it does in the real store.
 func (u *User) BeginDelivery() (string, error) {
+	if err := u.register(""); err != nil {
+		return "", err
+	}
+
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -1018,10 +1045,26 @@ func (u *User) RecordDelivery(id, mailbox, _ string) error {
 func (u *User) EndDelivery(string) error { return nil }
 
 // SetQuotaLimit stores the user's limit.
-func (u *User) SetQuotaLimit(q model.Quota) error { u.limit = q; return nil }
+func (u *User) SetQuotaLimit(q model.Quota) error {
+	if err := u.register(""); err != nil {
+		return err
+	}
+
+	u.limit = q
+
+	return nil
+}
 
 // SetStorageLimit stores the user's storage limit.
-func (u *User) SetStorageLimit(bytes int64) error { u.limit.Bytes = bytes; return nil }
+func (u *User) SetStorageLimit(bytes int64) error {
+	if err := u.register(""); err != nil {
+		return err
+	}
+
+	u.limit.Bytes = bytes
+
+	return nil
+}
 
 type watch struct{ ch chan struct{} }
 
@@ -1184,6 +1227,15 @@ func (u *User) SetACL(name, identifier, rights string) error {
 		rights = r
 	}
 
+	blocked, err := u.grantBlocked(identifier)
+	if err != nil {
+		return err
+	}
+
+	if blocked && rights != "" {
+		return model.ErrImportLocked
+	}
+
 	u.mu.Lock()
 
 	b, canon, err := u.lookup(name)
@@ -1199,7 +1251,9 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	gen := b.ACLGen
 	u.mu.Unlock()
 
-	u.syncPointer(canon, identifier, rights, gen)
+	if !blocked {
+		u.syncPointer(canon, identifier, rights, gen)
+	}
 
 	return nil
 }
@@ -1215,6 +1269,14 @@ func (u *User) syncPointer(canon, identifier, rights string, gen uint64) {
 	}
 
 	g := u.store.user(identifier)
+
+	// Writing a pointer (or its removal's tombstone) creates the
+	// grantee's registry in the RADOS store; a refused registration
+	// leaves the pointer unwritten.
+	if g.register("") != nil {
+		return
+	}
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -1272,28 +1334,57 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 		return "", 0, fmt.Errorf("invalid identifier")
 	}
 
-	u.mu.Lock()
-
-	b, canon, err := u.lookup(name)
+	blocked, err := u.grantBlocked(identifier)
 	if err != nil {
-		u.mu.Unlock()
 		return "", 0, err
 	}
 
+	c, err := u.modifyEntry(name, identifier, expectGen, change, blocked)
+	if err != nil {
+		return "", 0, err
+	}
+
+	if !blocked && (c.changed || c.rights != "") {
+		u.syncPointer(c.canon, identifier, c.rights, c.gen)
+	}
+
+	return c.rights, c.gen, nil
+}
+
+// aclChange is what one ModifyACL changed.
+type aclChange struct {
+	rights, canon string
+	gen           uint64
+	changed       bool
+}
+
+// modifyEntry applies a ModifyACL to the mailbox under the lock; a grant
+// is refused when blocked (the grantee is under purge).
+func (u *User) modifyEntry(name, identifier string, expectGen int64, change func(old string) string, blocked bool) (aclChange, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	b, canon, err := u.lookup(name)
+	if err != nil {
+		return aclChange{}, err
+	}
+
 	if expectGen >= 0 && b.ACLGen != uint64(expectGen) {
-		u.mu.Unlock()
-		return "", 0, model.ErrVersionConflict
+		return aclChange{}, model.ErrVersionConflict
 	}
 
 	rights := change(b.ACL[identifier])
 	if rights != "" {
 		r, ok := model.NormalizeRights(rights)
 		if !ok {
-			u.mu.Unlock()
-			return "", 0, fmt.Errorf("invalid rights %q", rights)
+			return aclChange{}, fmt.Errorf("invalid rights %q", rights)
 		}
 
 		rights = r
+	}
+
+	if blocked && rights != "" {
+		return aclChange{}, model.ErrImportLocked
 	}
 
 	changed := setACLEntry(b, identifier, rights)
@@ -1301,14 +1392,7 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 		u.mailboxChange(model.OpUpdated, b, canon)
 	}
 
-	gen := b.ACLGen
-	u.mu.Unlock()
-
-	if changed || rights != "" {
-		u.syncPointer(canon, identifier, rights, gen)
-	}
-
-	return rights, gen, nil
+	return aclChange{rights: rights, canon: canon, gen: b.ACLGen, changed: changed}, nil
 }
 
 // ListShared returns the pointers to mailboxes other users shared.

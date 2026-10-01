@@ -27,6 +27,7 @@ import (
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
+	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/telemetry"
 )
@@ -114,6 +115,9 @@ type Options struct {
 	// Jobs is the maintenance job system (nil: the job operations answer
 	// 403).
 	Jobs *jobs.Manager
+	// Directory is the account directory of the store (nil: its repair
+	// answers 403).
+	Directory model.AccountDirectory
 	// Learning is the learning queue (nil: its operations answer 503).
 	Learning LearningAdmin
 	// SearchScanLimit bounds the messages one search request examines.
@@ -426,6 +430,10 @@ func accountOperation(path string, parts []string) string {
 	case "trace", "quota", "shared", "plans":
 		if len(parts) == 2 {
 			return parts[1]
+		}
+	case "directory":
+		if len(parts) == 3 && parts[2] == "repair" {
+			return "directory_repair"
 		}
 	case segMailboxes:
 		return mailboxOperation(parts[2:])

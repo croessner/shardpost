@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,4 +46,24 @@ func TestConfigPathCompatibility(t *testing.T) {
 	check([]string{"--config", flag, "config", "check"}, "error")
 	t.Setenv("SHARDPOST_CONFIG", "")
 	check([]string{"config", "check"}, "info")
+}
+
+func TestBackfillCommandLine(t *testing.T) {
+	t.Setenv("SHARDPOST_CONFIG", "")
+	t.Setenv("IMAP_CONFIG", "")
+
+	for args, want := range map[string]string{
+		"index backfill accounts":           commandBackfillAccounts,
+		"index backfill accounts --restart": commandBackfillRestart,
+	} {
+		if _, command, err := loadConfig(strings.Fields(args)); err != nil || command != want {
+			t.Errorf("%q: %q %v", args, command, err)
+		}
+	}
+
+	for _, bad := range []string{"index", "index backfill", "index backfill kv", "--restart", "scrub --restart"} {
+		if _, _, err := loadConfig(strings.Fields(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
 }

@@ -310,7 +310,7 @@ func (u *User) PurgeNamespace(fence func() error) (int, error) {
 func purgeObjects(ioctx *rados.IOContext, fence func() error, keep string) (int, error) {
 	const batch = 100
 
-	it, err := ioctx.Iter()
+	it, err := listObjects(ioctx, listPurgeObjects)
 	if err != nil {
 		return 0, err
 	}

@@ -49,14 +49,17 @@ func (q LearningQueue) Put(j imapsieve.Job, raw []byte) error {
 }
 
 // All returns every job of the queue, due or not, dead ones included.
-func (q LearningQueue) All() ([]imapsieve.Job, error) {
+func (q LearningQueue) All() ([]imapsieve.Job, error) { return q.all(listLearningAll) }
+
+// all is All, its listing counted under site.
+func (q LearningQueue) all(site string) ([]imapsieve.Job, error) {
 	u, err := q.Store.User("~learning")
 	if err != nil {
 		return nil, err
 	}
 	defer u.Close()
 
-	it, err := u.data.Iter()
+	it, err := listObjects(u.data, site)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +126,7 @@ func (q LearningQueue) List() ([]imapsieve.Job, error) {
 
 // PurgeOwner deletes every learning job of an account (account purge).
 func (q LearningQueue) PurgeOwner(account string) (int, error) {
-	all, err := q.All()
+	all, err := q.all(listLearningPurge)
 	if err != nil {
 		return 0, err
 	}

@@ -115,6 +115,7 @@ func (u *User) PurgeNamespace(fence func() error) (int, error) {
 	u.boxes, u.blobs, u.terms = map[string]*box{}, map[string][]byte{}, map[string]map[string]bool{}
 	u.scripts, u.active, u.shared = nil, "", map[string]*model.SharedRef{}
 	u.usage, u.imp = model.Quota{}, nil
+	u.registered.Store(false) // the registry goes last
 
 	return n, nil
 }

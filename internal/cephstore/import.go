@@ -61,20 +61,22 @@ func (u *User) ImportLock(session string, ttl time.Duration) (time.Time, error) 
 
 	var held bool
 
-	err := casOmap(u, u.idx, oidRegistry, []string{regImportLock}, func(cur map[string][]byte) (map[string][]byte, []string) {
+	// The session goes along: a purge job that restarts after it deleted
+	// the registry takes its lock again (see casOmapOpAs).
+	err := casOmapOpAs(u, u.idx, oidRegistry, []string{regImportLock}, session, func(cur map[string][]byte) (map[string][]byte, []string, func(*rados.WriteOp)) {
 		held = false
 
 		if v, ok := cur[regImportLock]; ok {
 			var l importLock
 			if json.Unmarshal(v, &l) == nil && l.Session != session && time.Unix(l.Expires, 0).After(now) {
 				held = true
-				return nil, nil
+				return nil, nil, nil
 			}
 		}
 
 		b, _ := json.Marshal(importLock{Session: session, Expires: exp.Unix()})
 
-		return map[string][]byte{regImportLock: b}, nil
+		return map[string][]byte{regImportLock: b}, nil, nil
 	})
 	if err != nil {
 		return time.Time{}, fmt.Errorf("import lock: %w", err)

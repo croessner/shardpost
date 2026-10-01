@@ -111,7 +111,7 @@ func (s *Store) ListUsers() ([]string, error) {
 
 	ioctx.SetNamespace(rados.AllNamespaces)
 
-	iter, err := ioctx.Iter()
+	iter, err := listObjects(ioctx, listUsers)
 	if err != nil {
 		return nil, err
 	}
@@ -780,7 +780,7 @@ func (sr *scrubRun) fixRefs(refs map[string][]Meta) {
 // collectOrphans lists the blobs no index entry references: guid ->
 // number of chunks (highest chunk seen + 1).
 func (sr *scrubRun) collectOrphans(refs map[string][]Meta) (map[string]int, error) {
-	iter, err := sr.u.data.Iter()
+	iter, err := listObjects(sr.u.data, listScrubOrphans)
 	if err != nil {
 		return nil, err
 	}
@@ -924,7 +924,7 @@ func (sr *scrubRun) deleteOrphan(guid string, chunks int, st rados.ObjectStat) {
 // registering its name, or between unregistering and deleting. Nothing
 // can reach them (mailbox ids are random).
 func (sr *scrubRun) collectUnknownIndex(known map[string]bool) ([]string, error) {
-	iter, err := sr.u.idx.Iter()
+	iter, err := listObjects(sr.u.idx, listScrubUnknown)
 	if err != nil {
 		return nil, err
 	}

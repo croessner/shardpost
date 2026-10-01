@@ -16,6 +16,10 @@ import (
 //	acl set [-mode replace|add|remove] [-if-match E] <account> <mailbox> <identifier> <rights>
 //	acl delete [-if-match E] <account> <mailbox> <identifier>
 //
+// Repair (role repair):
+//
+//	account repair <account>
+//
 // Changes print the new state like the matching show command and the
 // ETag to pass as -if-match next time.
 
@@ -34,9 +38,45 @@ func provisionCommand(verb string) (diagFunc, int) {
 		return aclSet, 4
 	case "acl delete":
 		return aclDelete, 3
+	case "account repair":
+		return accountRepair, 1
 	default:
 		return nil, 0
 	}
+}
+
+// accountRepair repairs the account's directory entry (role repair).
+func accountRepair(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs, stdout, stderr io.Writer) int {
+	resp, err := c.RepairAccountDirectoryWithResponse(ctx, a.args[0])
+	if err != nil {
+		return transportError(stderr, err)
+	}
+
+	rep := resp.JSON200
+	if rep == nil {
+		return failure(stderr, resp.JSONDefault, resp.StatusCode())
+	}
+
+	if a.asJSON {
+		return printJSON(stdout, rep)
+	}
+
+	entryState := func(e *adminapi.DirectoryEntry) string {
+		if e == nil {
+			return "(no entry)"
+		}
+
+		if e.Session != nil {
+			return string(e.State) + " (" + *e.Session + ")"
+		}
+
+		return string(e.State)
+	}
+
+	table(stdout, [][2]string{{cmdAccount, rep.Account}, {"action", string(rep.Action)},
+		{"entry before", entryState(rep.Before)}, {"entry after", entryState(rep.After)}})
+
+	return exOK
 }
 
 func mailboxCreate(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs, stdout, stderr io.Writer) int {

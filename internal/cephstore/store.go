@@ -75,6 +75,8 @@ type Store struct {
 	cur *connRef
 	cfg Config
 	log *slog.Logger
+	// fsid identifies the cluster in the account directory.
+	fsid string
 }
 
 // connRef is a reference-counted librados connection.
@@ -92,7 +94,9 @@ func Open(cfg Config, log *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{cur: &connRef{conn: conn}, cfg: cfg, log: log}, nil
+	fsid, _ := conn.GetFSID()
+
+	return &Store{cur: &connRef{conn: conn}, cfg: cfg, log: log, fsid: fsid}, nil
 }
 
 // Rotate replaces the cephx key (and optionally the mon list) by opening a
@@ -200,8 +204,15 @@ func (s *Store) Ping() error {
 
 // User returns a view on the given user's data. The two IOContexts are
 // pinned to the user's RADOS namespace, so an object id can never leak
-// into another user's data by accident.
+// into another user's data by accident. The empty name and reserved
+// names other than the store's own namespaces are refused
+// (model.CheckNamespace): a registry in the default namespace would
+// belong to nobody.
 func (s *Store) User(name string) (*User, error) {
+	if err := model.CheckNamespace(name); err != nil {
+		return nil, err
+	}
+
 	r := s.ref()
 	s.mu.RLock()
 	scfg := s.cfg

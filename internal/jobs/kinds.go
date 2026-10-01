@@ -1095,7 +1095,7 @@ func (k *purge) Run(_ context.Context, run *Run) (any, error) {
 
 	_ = json.Unmarshal(run.Plan.Summary, &plan)
 
-	steps := []func(*Run, purgeSummary, *purgeCheckpoint) error{revokeGrantsOut, revokeGrantsIn, purgeLearning, purgeObjects}
+	steps := []func(*Run, purgeSummary, *purgeCheckpoint) error{revokeGrantsOut, revokeGrantsIn, purgeLearning, purgeObjects, purgeDirectory}
 
 	for cp.Phase < len(steps) {
 		if err := run.Fence(); err != nil {
@@ -1208,6 +1208,16 @@ func purgeObjects(run *Run, _ purgeSummary, cp *purgeCheckpoint) error {
 		return err
 	}
 
+	// Still under the maintenance lock, the directory entry turns
+	// purging: from the moment the registry (and the lock in it) is gone,
+	// no late session or delivery can create the account again, only
+	// this job's own lock session (a restart).
+	if dp, ok := run.User.(model.DirectoryPurger); ok {
+		if err := dp.MarkPurging(lockSession(run.Job.ID)); err != nil {
+			return fmt.Errorf("account directory: %w", err)
+		}
+	}
+
 	// The registry with the maintenance lock goes last; renewing the lock
 	// after that would fail and stop the job.
 	run.DropLock()
@@ -1216,4 +1226,27 @@ func purgeObjects(run *Run, _ purgeSummary, cp *purgeCheckpoint) error {
 	cp.Removed += n
 
 	return err
+}
+
+// purgeDirectory is the last phase: a restart after the registry was
+// deleted took the maintenance lock again and so created an empty
+// registry (only the lock key); it goes once more, then the directory
+// entry. A name used again after this is a new account.
+func purgeDirectory(run *Run, _ purgeSummary, _ *purgeCheckpoint) error {
+	dp, ok := run.User.(model.DirectoryPurger)
+	if !ok {
+		return nil
+	}
+
+	run.DropLock()
+
+	if err := run.Fence(); err != nil {
+		return err
+	}
+
+	if err := dp.FinishPurge(); err != nil {
+		return fmt.Errorf("account directory: %w", err)
+	}
+
+	return nil
 }

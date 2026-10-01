@@ -7,6 +7,24 @@ import (
 	"shardpost/internal/admin"
 )
 
+func TestAccountRepair(t *testing.T) {
+	socket := serveFilled(t, "repair")
+
+	code, out, errOut := call(socket, "", "account", "repair", "alice")
+	if code != exOK || !strings.Contains(out, "none") || !strings.Contains(out, "active") {
+		t.Fatalf("exit %d: %s %s", code, out, errOut)
+	}
+
+	code, out, _ = call(socket, "", "account", "repair", "--json", "nobody")
+	if code != exOK || !strings.Contains(out, `"found": false`) {
+		t.Fatalf("unknown account: exit %d %s", code, out)
+	}
+
+	if code, _, _ := call(serveFilled(t, admin.RoleDiagnose), "", "account", "repair", "alice"); code != exNoPerm {
+		t.Fatalf("without role: exit %d", code)
+	}
+}
+
 func TestProvisionCommands(t *testing.T) {
 	socket := serveFilled(t, admin.RoleDiagnose, admin.RoleProvision)
 

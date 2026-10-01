@@ -70,7 +70,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
 		ClientScopes:         scopes, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
-		StorePing: store.Ping, Jobs: a.jobs, Learning: cephstore.LearningQueue{Store: store}, SearchScanLimit: c.SearchScanLimit,
+		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: cephstore.LearningQueue{Store: store}, SearchScanLimit: c.SearchScanLimit,
 		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices})
 
 	if c.Addr != "" {

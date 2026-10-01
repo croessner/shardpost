@@ -6,6 +6,10 @@ var _ model.Tracer = (*User)(nil)
 
 // SetTrace implements model.Tracer.
 func (u *User) SetTrace(t model.TraceState) error {
+	if err := u.register(""); err != nil {
+		return err
+	}
+
 	u.mu.Lock()
 	defer u.mu.Unlock()
 

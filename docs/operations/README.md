@@ -94,6 +94,46 @@ A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
 the header can reach the server as a protocol command.
 
+## Account directory backfill
+
+Servers with the account directory register an account when they create
+its registry (see
+[storage](../architecture/storage.md#store-wide-sorted-indexes-and-the-account-directory)).
+Accounts that already existed are entered by a backfill, run once the
+rollout is complete and no older server is left:
+
+```sh
+shardpost index backfill accounts             # same image and configuration as the server
+shardpost index backfill accounts --restart   # ignore the position of an interrupted run
+```
+
+It takes the cls_lock `backfill` on `ix.accounts/lock` in `~accounts`
+(a second run at the same time fails with "another account backfill is
+running"), lists the namespaces of the index pool once, stats each
+registry and writes the missing entries as `active` with the registry's
+last change as `created`. Existing entries stay as they are, so it may be
+repeated. It then applies the repair rules to every entry that is
+`purging` (see [admin API](../admin-api.md#repairing-the-account-directory)).
+At the end it records a completion marker with the start and end times
+and the counts in the directory head (`mark:backfill.accounts`). Every 500
+namespaces it records its position; a run that was interrupted continues
+from there and keeps the original start time, unless `--restart` is
+given. Only a backfill that started after the last server without the
+directory stopped makes the directory complete; if in doubt, run it again
+with `--restart`.
+
+The backfill lists the pool (it shows as `list_users` in
+`imapceph_rados_listings_total`), so it costs as much as a scrub's
+namespace listing plus one stat per account. Run it like the scrub: one
+at a time, outside peak hours.
+
+A purge that failed or was cancelled can leave an account `purging`.
+`shardpostctl account repair <account>` (role `repair`) clears it for one
+account; the next backfill does it for all of them.
+
+**Rollback** is safe: older servers ignore `~accounts`, and an older
+purge does not set `purging`.
+
 ## Scrub, backup and observability
 
 Scrub can change data. For an investigation, first define a dry run and the

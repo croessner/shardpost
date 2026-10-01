@@ -6,7 +6,12 @@ The server loads its configuration once, before it opens Ceph, authentication an
 shardpost --config /etc/shardpost/server.yaml
 shardpost --config /etc/shardpost/server.yaml config check
 shardpost --config /etc/shardpost/server.yaml scrub
+shardpost --config /etc/shardpost/server.yaml index backfill accounts [--restart]
 ```
+
+`index backfill accounts` fills the account directory once after a
+rollout (see [Operations](operations/README.md#account-directory-backfill));
+it has no configuration keys of its own.
 
 Alternatively, `SHARDPOST_CONFIG` determines the file path. `IMAP_CONFIG`
 is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An

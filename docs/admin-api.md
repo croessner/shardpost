@@ -362,6 +362,39 @@ only the repairs that were planned and are still needed.
 - **purge** removes only the data in the store. The identity (LDAP)
   belongs to its owner. If the account logs in again afterwards, ShardPost
   creates an empty INBOX.
+- **Purge phases** (checkpointed, a takeover continues with the next
+  one): 1 withdraw the account's grants to others, 2 withdraw the grants
+  others gave it (public folders included), 3 delete its learning jobs,
+  4 mark the account `purging` in the account directory (still under the
+  account lock) and delete every object of its namespaces, the registry
+  last, 5 remove the directory entry. From phase 4 on, while the registry
+  is gone, nothing can create the account again: deliveries are deferred
+  (`451 4.2.1`), sessions get `NO [UNAVAILABLE]`, and a grant to the
+  account is refused (`409 import_locked` here, `NO [UNAVAILABLE]` for
+  SETACL) before the ACL is written. Only the job's own lock session gets
+  through, so that a takeover can take the account lock again; that
+  leaves an empty registry, which phase 5 deletes once more before it
+  removes the entry. After phase 5 the name is free. See
+  [storage](architecture/storage.md#store-wide-sorted-indexes-and-the-account-directory).
+
+### Repairing the account directory
+
+```sh
+shardpostctl account repair user@example.org      # role repair
+shardpostctl account repair --json user@example.org
+```
+
+`POST /admin/v1/accounts/{account}/directory/repair` (role `repair`)
+applies the repair rules to one account. A purge that failed or was
+cancelled after phase 4 leaves the entry `purging`; as long as no purge
+job of the recorded lock session still runs (`queued`, `running` or
+`cancel_requested`), the entry is removed when the account's registry is
+gone and set back to `active` when it exists. The answer names the
+action (`none`, `purge_running`, `removed`, `activated`) and the entry
+before and after. The account is not resolved through Nauthilus: a
+purged account may no longer exist there. The same rules run for every
+entry in `shardpost index backfill accounts` (see
+[Operations](operations/README.md#account-directory-backfill)).
 - Finished jobs and plans stay retrievable for `jobs.retention_days`.
 
 ### Upgrade: modified UTF-7 mailbox names
