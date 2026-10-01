@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -167,6 +168,7 @@ func TestCacheKeyDistinguishes(t *testing.T) {
 		func(r *Request) { r.Mechanism = "LOGIN" },
 		func(r *Request) { r.Username = "Alice" },
 		func(r *Request) { r.Password, r.Token = "", "secret" },
+		func(r *Request) { r.Local = &net.TCPAddr{IP: net.IPv4(10, 0, 9, 9), Port: 993} },
 	}
 
 	for i, v := range variants {
@@ -693,6 +695,43 @@ func TestCacheAuthWaitShared(t *testing.T) {
 
 	if calls.Load() != 1 {
 		t.Fatalf("%d backend calls", calls.Load())
+	}
+}
+
+// TestCachePanickingBackend: a panic in the shared backend call is a
+// temporary failure for every caller, not the end of the process, and
+// leaves no flight behind.
+func TestCachePanickingBackend(t *testing.T) {
+	f := &fakeBackend{auth: func(Request) (*Result, error) { panic("boom") }}
+	c := testCache(f, nil)
+
+	for range 2 {
+		if _, err := c.Authenticate(context.Background(), login()); !errors.Is(err, ErrTemporary) {
+			t.Fatalf("got %v", err)
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.calls) != 0 || f.auths.Load() != 2 {
+		t.Fatalf("flights left %d, calls %d", len(c.calls), f.auths.Load())
+	}
+}
+
+func TestClaimTime(t *testing.T) {
+	want := time.Unix(1_800_000_000, 0)
+
+	for _, v := range []any{float64(1_800_000_000), json.Number("1800000000"), "1800000000"} {
+		if got := claimTime(v); !got.Equal(want) {
+			t.Errorf("%T %v: %v", v, v, got)
+		}
+	}
+
+	for _, v := range []any{nil, "soon", float64(0), "-5", true} {
+		if got := claimTime(v); !got.IsZero() {
+			t.Errorf("%v gave %v", v, got)
+		}
 	}
 }
 

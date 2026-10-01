@@ -29,6 +29,10 @@ type session struct {
 	srv    *Server
 	// remote is the client's IP address, for the relay (XCLIENT ADDR).
 	remote string
+	// releaseAddress gives the request's slot of the bound per client
+	// address back early (an event source, which stays open for hours,
+	// does that once it holds its own slot); calling it again is a no-op.
+	releaseAddress func()
 	// auth is the authentication result, whose attributes provisioning
 	// reads (the quota).
 	auth *auth.Result
@@ -154,7 +158,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		others := &views{store: s.o.Store, ctx: r.Context()}
 		defer others.close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r), releaseAddress: release,
 			log: s.o.Log.With("account", res.Account), auth: res, views: others,
 			principals: &principalCache{}})
 		next(w, r.WithContext(ctx))
@@ -194,7 +198,7 @@ func (s *Server) addressSlot(w http.ResponseWriter, r *http.Request) (func(), bo
 		return func() {}, true
 	}
 
-	return s.slot(w, r, s.perIP, clientIP(r), false, "too many requests in flight from this address", "maxConcurrentRequests")
+	return s.slot(w, r, s.perIP, clientIP(r), false, "too many requests in flight from this address", "")
 }
 
 // authFailed answers a rejected or undecidable authentication. A backend

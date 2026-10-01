@@ -42,8 +42,8 @@ Roles: `diagnose` (version, server status and read-only diagnosis), `deliver` (d
 `deliver:noenforce` (additionally required for `enforce_quota=false`),
 `import` (account import), `trace` (protocol trace of an account, see
 below), `provision` (create, rename and subscribe mailboxes; change
-ACLs), `repair` (maintenance jobs that repair; retry learning jobs),
-`repair` also flushes the auth cache (below),
+ACLs), `repair` (maintenance jobs that repair; retry learning jobs;
+flush the auth cache, see below),
 `delete` (permanently delete a mailbox, messages and an account),
 `content` (read message content: search, headers, export, Sieve scripts)
 and `support` (flags, copy/move, change and activate Sieve scripts) and

@@ -1728,9 +1728,13 @@ the next free slot. The queue of an account and limit is first come,
 first served — a freed slot goes to the oldest waiter, never to
 whoever asks next — and holds at most twice the limit; a request beyond
 that, or one whose wait runs out, is answered 429 with `Retry-After:
-jmap.retry_after` (default 1 s) and the RFC 8620 3.6.1 problem
-`urn:ietf:params:jmap:error:limit` naming the limit. An event source
-never waits: it stays open for hours, so it is answered 429 at once. A
+jmap.retry_after` (default 1 s). For the limits the session advertises
+(`maxConcurrentRequests`, `maxConcurrentUpload`) the problem is the
+RFC 8620 3.6.1 `urn:ietf:params:jmap:error:limit` naming the limit; RFC
+8620 reserves that error for those, so a download, an event source and
+the bound per address below get a plain problem (`about:blank`, status
+429) without a `limit` property. An event source never waits: it stays
+open for hours, so it is answered 429 at once. A
 `Blob/upload` inside an API request that finds the uploads full answers
 `serverUnavailable` for that call, as before, rather than holding the
 API slot while it waits. Waiting happens after the authentication, and
@@ -1742,7 +1746,12 @@ longer than `jmap.limit_wait` plus the time a request takes.
 `jmap.max_concurrent_per_ip` (default 0, off) bounds the requests one
 client address has in flight, checked before the authentication, so a
 flood from one address does not reach Nauthilus at all; past it the
-answer is 429 with `Retry-After` at once. Behind the Director the
+answer is 429 with `Retry-After` at once. An event source holds its
+address slot only until it is authenticated and has its own slot;
+the stream that stays open for hours does not count against the
+address, so a client with event sources open can still send requests
+(event sources are bounded per account by `jmap.max_event_sources`).
+Behind the Director the
 address is the Director's unless the PROXY protocol passes the
 client's (`server.proxy_protocol_trusted_cidrs`); the server warns at
 startup when the bound is set without it.

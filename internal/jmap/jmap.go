@@ -521,8 +521,12 @@ func (s *Server) Close() {
 
 // slot takes a slot of a limit for key. A request that waits (wait
 // true) queues up to jmap.limit_wait for a free one; without a slot it
-// is answered 429 with Retry-After and the RFC 8620 3.6.1 limit error
-// naming limitName, and slot reports false.
+// is answered 429 with Retry-After, and slot reports false. A limit the
+// session advertises (limitName, such as maxConcurrentRequests) gets
+// the RFC 8620 3.6.1 limit error naming it; RFC 8620 reserves that
+// error for those, so a limit it does not know (limitName empty:
+// downloads, event sources, the bound per address) gets a plain problem
+// (type about:blank).
 func (s *Server) slot(w http.ResponseWriter, r *http.Request, lim *limiter, key string, wait bool, detail, limitName string) (func(), bool) {
 	d := time.Duration(0)
 	if wait {
@@ -531,14 +535,23 @@ func (s *Server) slot(w http.ResponseWriter, r *http.Request, lim *limiter, key 
 
 	release, ok := lim.acquire(r.Context(), key, d)
 	if !ok {
+		urn := errURNLimit
+		if limitName == "" {
+			urn = problemAboutBlank
+		}
+
 		s.retryAfter(w)
-		writeProblem(w, http.StatusTooManyRequests, errURNLimit, detail, limitName)
+		writeProblem(w, http.StatusTooManyRequests, urn, detail, limitName)
 
 		return nil, false
 	}
 
 	return release, true
 }
+
+// problemAboutBlank is the problem type of an error that is described
+// by its status alone (RFC 7807 4.2).
+const problemAboutBlank = "about:blank"
 
 // retryAfter sets the Retry-After of a 429 or a 503 (whole seconds, at
 // least one).

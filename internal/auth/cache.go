@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"log/slog"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -256,8 +258,11 @@ func isAdminLookup(ctx context.Context) bool {
 }
 
 // authKey is the HMAC of everything an authentication's answer depends
-// on. Attempt is left out: it is the connection's count, not part of
-// the credentials.
+// on, including the local address and port Nauthilus is told (rules may
+// depend on the listener). Attempt is left out: it is the connection's
+// count, not part of the credentials. The mechanism is kept as it is, so
+// PLAIN and LOGIN with the same password are two entries; Nauthilus may
+// treat them differently.
 func (c *Cache) authKey(r Request) string {
 	m := hmac.New(sha256.New, c.key)
 
@@ -278,7 +283,9 @@ func (c *Cache) authKey(r Request) string {
 		ip, _ = hostPort(r.Client)
 	}
 
-	for _, part := range []string{strings.ToLower(r.Mechanism), r.Username, secretKind, secret, r.Protocol, tls, ip} {
+	localIP, localPort := hostPort(r.Local)
+
+	for _, part := range []string{strings.ToLower(r.Mechanism), r.Username, secretKind, secret, r.Protocol, tls, ip, localIP, localPort} {
 		writePart(m, part)
 	}
 
@@ -531,6 +538,21 @@ func (c *Cache) do(ctx context.Context, op, key string, fn func(context.Context)
 	}
 }
 
+// callRecovered runs fn and turns a panic into a temporary failure: the
+// call runs in a goroutine of its own, where a panic would end the
+// process instead of the one connection or request it came from.
+func callRecovered(ctx context.Context, fn func(context.Context) (*Result, error)) (res *Result, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("auth: backend call panicked", "panic", p, "stack", string(debug.Stack()))
+
+			res, err = nil, fmt.Errorf("%w: backend call failed", ErrTemporary)
+		}
+	}()
+
+	return fn(ctx)
+}
+
 // lead performs the backend call of a flight.
 func (c *Cache) lead(ctx context.Context, op, fkey string, f *flight, gen uint64, fn func(context.Context) (*Result, error),
 	store func(gen uint64, res *Result, err error),
@@ -539,7 +561,7 @@ func (c *Cache) lead(ctx context.Context, op, fkey string, f *flight, gen uint64
 	defer cancel()
 
 	start := time.Now()
-	res, err := fn(lctx)
+	res, err := callRecovered(lctx, fn)
 
 	metrics.AuthBackend.WithLabelValues(op).Observe(time.Since(start).Seconds())
 

@@ -30,7 +30,8 @@ type AuthCache struct {
 	// from the cache; 0 caches no lookup.
 	LookupTTL int64 `mapstructure:"lookup_ttl" env:"AUTH_CACHE_LOOKUP_TTL" validate:"gte=0,lte=600"`
 	// LookupNegativeTTL is how long a lookup that found no account is
-	// answered from the cache; at most LookupTTL.
+	// answered from the cache; at most LookupTTL, and ignored when
+	// LookupTTL is 0.
 	LookupNegativeTTL int64 `mapstructure:"lookup_negative_ttl" env:"AUTH_CACHE_LOOKUP_NEGATIVE_TTL" validate:"gte=0,lte=600"`
 	// LeaderBudget bounds one backend call made for every caller waiting
 	// on it (a bearer login is up to three requests); 0 takes twice
@@ -38,9 +39,11 @@ type AuthCache struct {
 	LeaderBudget int64 `mapstructure:"leader_budget" env:"AUTH_CACHE_LEADER_BUDGET" validate:"gte=0,lte=600"`
 }
 
-// Validate checks what the field tags cannot.
+// Validate checks what the field tags cannot. With lookup_ttl 0 no
+// lookup is cached, the negative ones neither, so lookup_negative_ttl
+// does not matter then.
 func (c AuthCache) Validate() error {
-	if c.LookupNegativeTTL > c.LookupTTL {
+	if c.LookupTTL > 0 && c.LookupNegativeTTL > c.LookupTTL {
 		return fmt.Errorf("auth.cache.lookup_negative_ttl must not exceed auth.cache.lookup_ttl")
 	}
 

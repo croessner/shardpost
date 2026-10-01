@@ -182,6 +182,10 @@ func TestEventSourceNeverWaits(t *testing.T) {
 		t.Fatalf("event source answered %d after %s", w.Code, time.Since(start))
 	}
 
+	if strings.Contains(w.Body.String(), "maxConcurrentRequests") || !strings.Contains(w.Body.String(), problemAboutBlank) {
+		t.Fatalf("event source problem names a session limit: %s", w.Body.String())
+	}
+
 	// The API is counted apart.
 	if w := do(t, s, http.MethodPost, PathAPI, `{"using":["urn:ietf:params:jmap:core"],"methodCalls":[]}`); w.Code != http.StatusOK {
 		t.Fatalf("api beside a full event source limit: %d", w.Code)
@@ -234,6 +238,49 @@ func TestPerIPLimitBeforeAuthentication(t *testing.T) {
 	w := do(t, s, http.MethodGet, PathSession, "")
 	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" || backend.calls.Load() != 0 {
 		t.Fatalf("answered %d, backend calls %d", w.Code, backend.calls.Load())
+	}
+
+	// No session limit applies, so no RFC 8620 limit error either.
+	var p problem
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil || p.Type != problemAboutBlank || p.Limit != "" {
+		t.Fatalf("problem %+v (%v)", p, err)
+	}
+}
+
+// TestEventSourceGivesItsAddressSlotBack: an open event source does not
+// hold a slot of the bound per client address, so an address with one
+// open can still send requests.
+func TestEventSourceGivesItsAddressSlotBack(t *testing.T) {
+	s := newTestServer(t, func(o *Options) { o.Load.MaxConcurrentPerIP = 1 })
+	srv := httptest.NewServer(s)
+
+	t.Cleanup(func() { s.Close(); srv.Close() })
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+PathEvents+"?types=*&closeafter=no&ping=0", nil)
+	req.SetBasicAuth("test", "secret")
+
+	resp, err := srv.Client().Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("event source: %v %v", resp, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The stream is open, holds its event source slot and has given the
+	// address slot back.
+	waitUntil(t, func() bool { return s.inEvents.inFlight("test") == 1 && s.perIP.inFlight("127.0.0.1") == 0 })
+
+	api, _ := http.NewRequest(http.MethodPost, srv.URL+PathAPI, strings.NewReader(`{"using":["urn:ietf:params:jmap:core"],"methodCalls":[]}`))
+	api.SetBasicAuth("test", "secret")
+
+	got, err := srv.Client().Do(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = got.Body.Close()
+
+	if got.StatusCode != http.StatusOK {
+		t.Fatalf("a request beside an open event source answered %d", got.StatusCode)
 	}
 }
 

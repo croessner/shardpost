@@ -66,13 +66,10 @@ pods() { $K get pods -l "$SELECTOR" -o name; }
 
 # metric <name> <labels> sums a series over all server pods.
 metric() {
-	local pod sum=0 v
+	local pod
 	for pod in $(pods); do
-		v=$($K exec "$pod" -c server -- sh -c 'wget -qO- http://127.0.0.1:8080/metrics 2>/dev/null || curl -s http://127.0.0.1:8080/metrics' |
-			awk -v series="$1{$2}" '$1 == series { print $2 }')
-		sum=$(python3 -c "print(int($sum + float('${v:-0}')))")
-	done
-	echo "$sum"
+		$K exec "$pod" -c server -- sh -c 'wget -qO- http://127.0.0.1:8080/metrics 2>/dev/null || curl -s http://127.0.0.1:8080/metrics'
+	done | awk -v series="$1{$2}" '$1 == series { sum += $2 } END { printf "%d\n", sum }'
 }
 
 hits() { metric imapceph_auth_cache_total 'op="authenticate",result="hit"'; }

@@ -237,6 +237,11 @@ func (l *FlushLog) start(lost bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	return l.startLocked(lost)
+}
+
+// startLocked is start with l.mu held.
+func (l *FlushLog) startLocked(lost bool) error {
 	if lost {
 		l.cache.flush(FlushAll, "resync")
 	}
@@ -303,6 +308,13 @@ func (l *FlushLog) apply() {
 	defer l.mu.Unlock()
 
 	if !l.started {
+		// The generation could not be read when the watch was set up:
+		// read it now. Flushes may have gone by meanwhile, unseen, so
+		// everything goes.
+		if err := l.startLocked(true); err != nil {
+			l.log.Warn("auth flush log: read failed", "err", err)
+		}
+
 		return
 	}
 

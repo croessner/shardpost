@@ -655,7 +655,7 @@ are described in [JMAP: Configuration](jmap.md#configuration).
 | `jmap.max_event_sources` | `JMAP_MAX_EVENT_SOURCES` | 4 | open event sources |
 | `jmap.limit_wait` | `JMAP_LIMIT_WAIT` | 2 | seconds a request queues for a slot at a full limit (0–10; 0 answers 429 at once); event sources never wait |
 | `jmap.retry_after` | `JMAP_RETRY_AFTER` | 1 | `Retry-After` in seconds of a 429 and of a 503 from an undecided authentication (1–3600) |
-| `jmap.max_concurrent_per_ip` | `JMAP_MAX_CONCURRENT_PER_IP` | 0 | requests one client address has in flight, checked before authentication; 0 is off |
+| `jmap.max_concurrent_per_ip` | `JMAP_MAX_CONCURRENT_PER_IP` | 0 | requests one client address has in flight, checked before authentication; an event source gives its slot back once it holds its own, so open streams do not count; 0 is off |
 
 For the four limits `0` takes the default. A queue holds at most twice
 its limit; a request past it is answered 429 at once. `jmap.limit_wait`
@@ -694,7 +694,7 @@ auth:
     max_entries: 10000       # per operation (logins, lookups)
     key_client_ip: true      # the client IP is part of a login's key
     lookup_ttl: 30
-    lookup_negative_ttl: 5   # at most lookup_ttl
+    lookup_negative_ttl: 5   # at most lookup_ttl; ignored with lookup_ttl 0
     leader_budget: 0         # seconds for one shared backend call; 0 = 2 × nauthilus.timeout
 ```
 
@@ -705,14 +705,15 @@ auth:
 | `auth.cache.max_entries` | `AUTH_CACHE_MAX_ENTRIES` | 10000 | > 0 | entries of logins and of lookups, each; the least recently used go first |
 | `auth.cache.key_client_ip` | `AUTH_CACHE_KEY_CLIENT_IP` | true | | the client's IP address is part of a login's key, so that address rules in Nauthilus see every address. Off, one entry serves an account from every address |
 | `auth.cache.lookup_ttl` | `AUTH_CACHE_LOOKUP_TTL` | 30 | 0–600 | how long a lookup that found an account (LMTP recipient, master-user target, JMAP identity, admin API, push worker) is answered from memory; `0` caches no lookup |
-| `auth.cache.lookup_negative_ttl` | `AUTH_CACHE_LOOKUP_NEGATIVE_TTL` | 5 | 0–`lookup_ttl` | how long a lookup that found no account is answered from memory; keep it at or below the Nauthilus LDAP negative cache (20 s) |
+| `auth.cache.lookup_negative_ttl` | `AUTH_CACHE_LOOKUP_NEGATIVE_TTL` | 5 | 0–`lookup_ttl` | how long a lookup that found no account is answered from memory; keep it at or below the Nauthilus LDAP negative cache (20 s). Ignored, and no unknown name cached, with `lookup_ttl` 0 |
 | `auth.cache.leader_budget` | `AUTH_CACHE_LEADER_BUDGET` | 0 | 0–600 | seconds one backend call made for every waiting caller may take in all (a bearer login is up to three requests: introspection, identity lookup, user name check); `0` takes twice `nauthilus.timeout` |
 
 What a login's entry is found by: an HMAC-SHA256, under a random key
 that lives in the process only, over the mechanism, the user name, the
-secret (password or token), the protocol, the TLS state and, with
-`key_client_ip`, the client's address. The login attempt ordinal is not
-part of it. Results are copied on the way in and out. A lookup's entry is
+secret (password or token), the protocol, the TLS state, the local
+address and port Nauthilus is told and, with `key_client_ip`, the
+client's address. The login attempt ordinal is not part of it; PLAIN
+and LOGIN with the same password are two entries. Results are copied on the way in and out. A lookup's entry is
 found by the normalised name (without angle brackets, the domain in
 lower case) and the protocol: Nauthilus picks its search per protocol,
 and the `jmap` search returns more attributes.

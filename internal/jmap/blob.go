@@ -97,7 +97,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// client streaming an attachment must not lock itself out of the API.
 	// The session advertises no such limit, so the error names the one
 	// that comes closest.
-	release, ok := s.slot(w, r, s.inDown, sess.account, true, "too many downloads in flight for this account", "maxConcurrentRequests")
+	release, ok := s.slot(w, r, s.inDown, sess.account, true, "too many downloads in flight for this account", "")
 	if !ok {
 		return
 	}

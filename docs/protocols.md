@@ -539,10 +539,12 @@ Not advertised: downloads (`jmap.max_concurrent_downloads`, 8) and event
 sources (`jmap.max_event_sources`, 4) per account. A request at a full
 limit queues first come, first served for up to `jmap.limit_wait`
 (2 s, at most twice the limit waiting), then gets 429 with
-`Retry-After` (`jmap.retry_after`, 1 s) and the
-`urn:ietf:params:jmap:error:limit` problem; an event source gets 429 at
+`Retry-After` (`jmap.retry_after`, 1 s): the
+`urn:ietf:params:jmap:error:limit` problem for an advertised limit, a
+plain `about:blank` problem for the others; an event source gets 429 at
 once. An optional bound per client address before the authentication:
-`jmap.max_concurrent_per_ip` (default off). Blob
+`jmap.max_concurrent_per_ip` (default off; open event sources do not
+count against it). Blob
 limits: `max_size_blob_set`, `max_data_sources`, `max_size_blob_get`
 (10 MiB). Search limits: `jmap.search.snippet_read_bytes` (default 256 KiB),
 `jmap.search.max_attachment_reads` (default 1000).

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,6 +204,49 @@ func TestFlushLogWatchLoss(t *testing.T) {
 	}
 
 	waitFor(t, "a flush after the new watch", func() bool { return b.cache.Len() == 2 })
+}
+
+// flakyOmap fails the first reads of the generation.
+type flakyOmap struct {
+	model.AdminOmap
+	failures atomic.Int64
+}
+
+func (o *flakyOmap) ReadKeys(oid string, keys []string) (map[string][]byte, uint64, error) {
+	if o.failures.Add(-1) >= 0 {
+		return nil, 0, errors.New("rados: timed out")
+	}
+
+	return o.AdminOmap.ReadKeys(oid, keys)
+}
+
+// TestFlushLogStartRetried: a failed read of the generation when the
+// watch is set up is retried on the poll; the server is not deaf to the
+// flushes after it.
+func TestFlushLogStartRetried(t *testing.T) {
+	omap := &flakyOmap{AdminOmap: memstore.NewAdminKV().Omap()}
+	omap.failures.Store(1)
+
+	c := testCache(&fakeBackend{}, nil)
+	l := NewFlushLog(omap, c, 20*time.Millisecond, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() { defer close(done); l.Run(ctx) }()
+
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitFor(t, "the start to be retried", func() bool { l.mu.Lock(); defer l.mu.Unlock(); return l.started })
+
+	b := &pod{cache: c, log: l}
+	b.fill(t)
+
+	a := NewFlushLog(omap, testCache(&fakeBackend{}, nil), time.Hour, nil)
+	if err := a.Flush("bob@example.org"); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "the flush to reach the retried log", func() bool { return b.cache.Len() == 2 })
 }
 
 func TestFlushLogPrunes(t *testing.T) {

@@ -29,6 +29,15 @@ func TestAuthCacheAndLoadDefaults(t *testing.T) {
 	}
 }
 
+// TestAuthCacheLookupOff: with no lookup cache the default negative ttl
+// does not stand in the way.
+func TestAuthCacheLookupOff(t *testing.T) {
+	c, err := Load(configFile(t, "auth:\n  cache:\n    lookup_ttl: 0\n"))
+	if err != nil || c.Auth.Cache.LookupTTL != 0 {
+		t.Errorf("lookup_ttl 0: %+v, %v", c.Auth.Cache, err)
+	}
+}
+
 // TestAuthCacheEnv: the auth cache keys have environment names.
 func TestAuthCacheEnv(t *testing.T) {
 	t.Setenv("AUTH_CACHE_NEGATIVE_TTL", "3")

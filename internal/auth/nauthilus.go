@@ -531,13 +531,26 @@ func (n *Nauthilus) introspect(ctx context.Context, token string) (string, time.
 }
 
 // claimTime reads a NumericDate claim (seconds since the epoch, RFC 7519
-// 2); zero when it is absent or not a positive number.
+// 2), as a JSON number or, as some servers send it, a string of digits;
+// zero when it is absent or not a positive number, and the cache then
+// keeps its own ttl.
 func claimTime(v any) time.Time {
-	if x, ok := v.(float64); ok && x > 0 {
-		return time.Unix(int64(x), 0)
+	var secs int64
+
+	switch x := v.(type) {
+	case float64:
+		secs = int64(x)
+	case json.Number:
+		secs, _ = x.Int64()
+	case string:
+		secs, _ = strconv.ParseInt(strings.TrimSpace(x), 10, 64)
 	}
 
-	return time.Time{}
+	if secs <= 0 {
+		return time.Time{}
+	}
+
+	return time.Unix(secs, 0)
 }
 
 // introspectClaims queries the introspection endpoint and decodes the
