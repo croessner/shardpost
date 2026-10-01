@@ -211,15 +211,16 @@ that contains the token is listed under each of its trigrams, so one
 complete range, filtered for the token, is the whole answer. A shorter
 token is looked up as a prefix in the posting shards.
 
-The field `h` (every header value) has posting lists but no dictionary
-keys. Most of its vocabulary occurs once — message IDs, timestamps,
-queue IDs — and a substring index over it would grow with the number of
-messages rather than with their words. A token searched in `h` (IMAP
-`TEXT` and `HEADER <other name>`, the JMAP `header` filter, the admin
-`text` search) matches a header word exactly, by its stem or as a
-prefix (a prefix lookup reads at most 64 terms per posting shard), and as a substring where the word is in the subject or an
-address (`s`, `f`, `t`), which have dictionary keys. Subject, addresses
-and body match by substring as before.
+The field `h` (every header name and value) has posting lists but no
+dictionary keys. Most of its vocabulary occurs once — message IDs,
+timestamps, queue IDs — and a substring index over it would grow with
+the number of messages rather than with their words. In a word search
+(the JMAP `header` filter, the admin `text` search, IMAP with
+`fts.imap_search: word`) a token searched in `h` matches a header word
+exactly, by its stem or as a prefix (a prefix lookup reads every
+matching term, 64 per round trip and shard), and as a substring where
+the word is in the subject or an address (`s`, `f`, `t`), which have
+dictionary keys. Subject, addresses and body match by substring.
 
 Up to 0.34.6 the dictionary was `ftsd/<nn>` (as many shards as `fts/`)
 with one key per trigram and the newline-separated list of its terms as
@@ -233,11 +234,92 @@ lists and deleted the old objects; `fts_rebuild` does the same from the
 messages. A server older than 0.35.0 does not read `ftst/`: after a
 downgrade, substring search needs an `fts_rebuild`.
 
-Not every SEARCH combination can be answered completely from this
-index. The protocol layer can read message data on demand; the
-historical claim "no mail is read for a search" is too sweeping.
-See [search.go](../../internal/imapproto/search.go) and the
-[tokenizer](../../internal/fts/tokenize.go).
+What is indexed is UTF-8 text, prepared by the `fts` package
+([body.go](../../internal/fts/body.go), `HeaderValue`, `HeaderText`)
+for the index, for IMAP `SEARCH` keys checked against the message and
+for the cached preview, so they agree: header names and values
+(unfolded, RFC 2047 words in any charset of the WHATWG list, raw 8-bit
+text in `fts.fallback_charset`), every `text/*` part converted from its
+charset (`text/html` reduced to its visible text, `fts.html`), the file
+names of all parts and the header and text of attached messages, at
+most 4 MiB of text per message. Details are in the
+[configuration](../configuration.md#full-text-index-fts).
+
+A word of more than 40 characters has no term of its own
+([query.go](../../internal/fts/query.go) states and proves the rules,
+`TestLongWordWindows` checks them). Its first 40 characters are a term
+in every field, so every word start stays findable. In the fields with
+the dictionary it also gets the 40-character windows that start at
+every multiple of 20 and the window that ends with the word, at most
+eight: every inner part of up to 21 characters lies in one of them.
+Two marker terms stand for what the windows do not cover: `<field>:~~`
+(a word of more than 40 characters, for inner parts of 22–40
+characters) and `<field>:~+` (a word longer than its eight windows,
+180 characters). Neither can be a query token, and neither has
+dictionary keys.
+
+The header store `ftsh/<nn>` keeps `HeaderText` per message — the
+decoded header lines that IMAP `SEARCH` checks header keys against —
+compressed with DEFLATE, at most 64 KiB of text (a longer header is not
+kept). It is written with the posting lists (delivery, `APPEND`, JMAP,
+import, `fts_rebuild`) and removed with them (expunge, purge, mailbox
+deletion, the scrubber's orphans, `DeleteFTS`); keyed by GUID, it is not
+touched by `COPY` or `MOVE`. Like the rest of the index it does not
+count against the quota.
+
+| Object | omap key | Value |
+|---|---|---|
+| `ftsh/<nn>`, `server.fts_shards` of them, shard = fnv1a(GUID) | GUID | format byte 1, DEFLATE of the header text |
+| `ftsmap` | `v`, `r` | index version marker `2`; `r` (empty) while `fts_rebuild` runs |
+
+IMAP `SEARCH` matches substrings (RFC 9051 6.4.4). The index cannot
+answer that alone — stems, words in any order and the missing
+dictionary of `h` make it find too much or too little — so by default
+(`fts.imap_search: substring`) it supplies candidates and every
+candidate is checked. `SearchCandidates`
+([ftssearch.go](../../internal/cephstore/ftssearch.go)) returns a
+superset of the messages that contain the value, or nothing when it
+cannot narrow. Each word of the value is looked up by how it can occur:
+a word between two separators of the value as that term; the last word
+as the start of a term, by a scan of the posting shards for keys with
+that prefix (keys only, a page of 1024 per round trip, complete because
+every term has its key in exactly one posting shard); the first word,
+which may be the end of a longer word, through the dictionary. The last
+two add the messages with the marker the word needs. A word does not
+narrow when it cannot be looked up completely: an inner part in `h`, of
+fewer than three characters, a lookup of more than 4096 terms, an
+account still on the dictionary layout before 0.35.0.
+
+The version marker `v` in `ftsmap` says that every message of the
+account was indexed by this version. A fresh index gets it with its
+first document ID — only when the id map has no `n` yet, no rebuild is
+running and no posting shard exists (an index from before document IDs
+has posting lists of GUIDs and no `n`). `fts_rebuild` sets `r` right
+after deleting the old index and, when every message is indexed again,
+sets `v` and removes `r` in one compare-and-swap; a rebuild that stops
+midway, or a delivery into the index it is rebuilding, leaves no
+trusted marker. Without `v`, or with `r`, `SearchCandidates` does not
+narrow at all — an older index (markup, undecoded words, no file
+names) cannot be trusted even for whole words — and every message is
+checked: correct, but slow, until the rebuild.
+
+The protocol layer ([searchtext.go](../../internal/imapproto/searchtext.go))
+asks for candidates separately for the header and the body of every
+text key, wherever it is in the tree, and combines them: `AND`
+intersects, `OR` unites, `NOT` does not narrow. It checks the
+candidates `fts.verify_parallel` at a time: header keys against the
+header store (one omap read per shard for 256 messages; a message
+without a stored header has the first 16 KiB to 1 MiB of its blob
+read), the body by reading the message under the memory budget, only
+where the body candidates include it. The cost of a search is
+therefore index lookups, header-store reads for the messages a header
+key cannot narrow — at worst every message of the mailbox, as for a
+`TEXT` value that may begin inside a header word — and message reads
+for the messages whose body may match. A key the index cannot narrow at
+all (`BODY ab`) reads every message. With `fts.imap_search: word` the
+index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, as
+earlier versions did. JMAP and the admin `text` search always use the
+index alone.
 
 ## Repair and its limits
 

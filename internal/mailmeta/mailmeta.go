@@ -84,7 +84,7 @@ func Parse(raw []byte) Parsed {
 		}
 	}
 
-	p.Preview = Preview(fts.BodyText(raw))
+	p.Preview = Preview(fts.ReadableText(raw))
 
 	return p
 }

@@ -8,15 +8,14 @@ package fts
 import (
 	"bufio"
 	"bytes"
-	"io"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/emersion/go-message"
-	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
+
+	"shardpost/internal/charset"
 )
 
 // Fields of the index. A term is stored as "<field>:<token>".
@@ -76,16 +75,16 @@ func Tokenize(text string) []string {
 	return out
 }
 
-// Span is the byte range of one word of a text.
-type Span struct {
+// Word is the byte range of one word of a text.
+type Word struct {
 	Start, End int
 }
 
 // Words returns the words of a text in order: the runs of Unicode letters
 // and digits Tokenize makes its tokens of, including the ones too short
 // or too long to be a token.
-func Words(text string) []Span {
-	var out []Span
+func Words(text string) []Word {
+	var out []Word
 
 	start := -1
 
@@ -99,13 +98,13 @@ func Words(text string) []Span {
 		}
 
 		if start >= 0 {
-			out = append(out, Span{start, i})
+			out = append(out, Word{start, i})
 			start = -1
 		}
 	}
 
 	if start >= 0 {
-		out = append(out, Span{start, len(text)})
+		out = append(out, Word{start, len(text)})
 	}
 
 	return out
@@ -123,8 +122,19 @@ func token(word string) (string, bool) {
 }
 
 // Terms extracts all index terms of a raw message: every token and its
-// stems, qualified by field.
+// stems, qualified by field, and the window terms and markers of words
+// too long to be a term (see LongWord). Header values are taken as
+// HeaderValue returns them, every value of a field; the body text is
+// what BodyText returns.
 func Terms(raw []byte) []Term {
+	terms, _ := IndexText(raw)
+
+	return terms
+}
+
+// IndexText returns the terms of a message (Terms) and its HeaderText,
+// parsing and decoding the header once for both.
+func IndexText(raw []byte) ([]Term, string) {
 	set := map[Term]struct{}{}
 	add := func(field, text string) {
 		for _, tok := range Tokenize(text) {
@@ -132,30 +142,35 @@ func Terms(raw []byte) []Term {
 				set[field+":"+t] = struct{}{}
 			}
 		}
+
+		longWords(text, func(w []rune) {
+			for _, t := range longWordTerms(field, w) {
+				set[field+":"+t] = struct{}{}
+			}
+		})
 	}
+
+	var htext strings.Builder
 
 	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
 	if err == nil {
-		mh := mail.Header{Header: message.Header{Header: hdr}}
 		for _, kv := range []struct{ key, field string }{
 			{"Subject", FieldSubject}, {"From", FieldFrom}, {"Sender", FieldFrom}, {"Reply-To", FieldFrom},
 			{"To", FieldTo}, {"Cc", FieldTo}, {"Bcc", FieldTo},
 		} {
-			if v, err := mh.Text(kv.key); err == nil && v != "" {
-				add(kv.field, v)
-			} else if v := hdr.Get(kv.key); v != "" {
-				add(kv.field, v)
+			for _, v := range hdr.Values(kv.key) {
+				add(kv.field, HeaderValue(v))
 			}
 		}
 
-		fields := mh.Fields()
+		// names and values: IMAP TEXT matches the header as a whole
+		fields := hdr.Fields()
 		for fields.Next() {
-			v, err := fields.Text()
-			if err != nil {
-				v = fields.Value()
-			}
+			v := HeaderValue(fields.Value())
 
+			add(FieldHeader, fields.Key())
 			add(FieldHeader, v)
+			headerLine(&htext, fields.Key(), v)
 		}
 	}
 
@@ -168,48 +183,55 @@ func Terms(raw []byte) []Term {
 
 	sort.Strings(out)
 
-	return out
+	return out, htext.String()
 }
 
-// BodyText returns the concatenated, decoded text/* parts of a message
-// (bounded by MaxBodyBytes). Non-text parts are skipped. If the message
-// cannot be parsed, the raw body after the header is used.
-func BodyText(raw []byte) string {
-	var buf bytes.Buffer
+// MaxHeaderTextBytes bounds the HeaderText the store keeps per message;
+// a longer one is not kept, and its header is read from the message.
+const MaxHeaderTextBytes = 64 << 10
 
-	ent, err := message.Read(bytes.NewReader(raw))
-	if err != nil && ent == nil {
-		if i := bytes.Index(raw, []byte("\r\n\r\n")); i >= 0 {
-			return string(raw[i+4:])
-		}
-
-		return string(raw)
+// HeaderText returns the header of a raw message as IMAP SEARCH matches
+// it: lower-cased "name: value" lines, each preceded by CRLF, with the
+// value as HeaderValue returns it (line breaks that decoding put into a
+// value become spaces). The field FieldHeader of the index has the
+// words of this text, and the stores keep it per message so that a
+// search can check headers without reading messages.
+func HeaderText(raw []byte) string {
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		return ""
 	}
 
-	walk(ent, &buf)
+	var b strings.Builder
 
-	return buf.String()
+	fields := hdr.Fields()
+	for fields.Next() {
+		headerLine(&b, fields.Key(), HeaderValue(fields.Value()))
+	}
+
+	return b.String()
 }
 
-func walk(e *message.Entity, buf *bytes.Buffer) {
-	if buf.Len() >= MaxBodyBytes {
-		return
-	}
+// headerLine appends one line of HeaderText.
+func headerLine(b *strings.Builder, name, value string) {
+	b.WriteString("\r\n")
+	b.WriteString(strings.ToLower(name))
+	b.WriteString(": ")
+	b.WriteString(strings.ToLower(unbreak.Replace(value)))
+}
 
-	if mr := e.MultipartReader(); mr != nil {
-		for {
-			p, err := mr.NextPart()
-			if err != nil {
-				return
-			}
+// unbreak turns line breaks that decoding put into a value into spaces,
+// so that a value stays on its line.
+var unbreak = strings.NewReplacer("\r", " ", "\n", " ")
 
-			walk(p, buf)
-		}
-	}
+// unfoldHeader removes the line breaks of a folded header value
+// (RFC 5322 2.2.3); the white space after them stays.
+var unfoldHeader = strings.NewReplacer("\r\n", "", "\r", "", "\n", "")
 
-	ct, _, _ := e.Header.ContentType()
-	if ct == "" || strings.HasPrefix(ct, "text/") {
-		_, _ = io.Copy(buf, io.LimitReader(e.Body, int64(MaxBodyBytes-buf.Len())))
-		buf.WriteByte(' ')
-	}
+// HeaderValue is a header field value as the index and the direct
+// matching of IMAP SEARCH see it: unfolded and decoded to UTF-8 by
+// charset.DecodeHeader (encoded words in any charset of the WHATWG
+// list, raw 8-bit text in the fallback charset).
+func HeaderValue(v string) string {
+	return charset.DecodeHeader(unfoldHeader.Replace(v))
 }

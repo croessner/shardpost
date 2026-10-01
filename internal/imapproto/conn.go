@@ -13,6 +13,7 @@ import (
 	"shardpost/internal/logging"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -71,6 +72,14 @@ type Options struct {
 	ServerID     map[string]string
 	// QuotaSelfService lets users change their own quota limits (SETQUOTA).
 	QuotaSelfService bool
+	// WordSearch lets the full-text index answer SUBJECT, BODY, TEXT and
+	// HEADER Subject alone, by its word semantics, instead of only
+	// narrowing the candidates of the substring matching RFC 9051
+	// specifies (fts.imap_search: word).
+	WordSearch bool
+	// VerifyParallel bounds the messages one SEARCH checks against its
+	// text keys at the same time (0 = 8; fts.verify_parallel).
+	VerifyParallel int
 	// Limits (0 = unlimited).
 	MaxConnsPerIP   int
 	MaxConnsPerUser int
@@ -253,6 +262,7 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 
 	s.mu.Lock()
 	for c := range s.conns {
+		c.closing.Store(true)
 		_ = c.nc.Close()
 	}
 	s.mu.Unlock()
@@ -369,6 +379,9 @@ type conn struct {
 	utf8       bool
 	rev2       bool
 	compressed bool
+	// closing is set when the server closes the connection (bye,
+	// shutdown), so that a running search stops.
+	closing atomic.Bool
 
 	// per-command memory accounting for literals
 	cmdBytes int64
@@ -399,8 +412,7 @@ type conn struct {
 	searchRes  []uint32 // saved SEARCH result (UIDs)
 	// preread is the message a FETCH read for its BINARY check, written
 	// without a second read (see binaryPrecheck).
-	preread   *preread
-	searchErr error // read failure during brute-force matching
+	preread *preread
 }
 
 // maxLiteralsPerCommand bounds the number of literals in one command
@@ -689,6 +701,7 @@ func (c *conn) bye(text string) {
 	defer c.wmu.Unlock()
 
 	_ = c.nc.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	c.closing.Store(true)
 	_, _ = fmt.Fprintf(c.nc, "* BYE [UNAVAILABLE] %s\r\n", text)
 	_ = c.nc.Close()
 }

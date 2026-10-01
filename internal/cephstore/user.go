@@ -133,6 +133,11 @@ type User struct {
 	log          *slog.Logger
 	chunkSize    int64
 	ftsShards    int
+	// ftsCurrent caches whether the index can be trusted
+	// (ftsIndexCurrent); ftsHasIDs that the id map has ids, so that the
+	// index is not fresh (freshIndexOnce).
+	ftsCurrent int
+	ftsHasIDs  bool
 	// legacyDict caches whether the account still has the dictionary
 	// objects of the layout before 0.35.0 (see legacyDictMatches).
 	legacyDict    int

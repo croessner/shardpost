@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -189,7 +190,7 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		return err
 	}
 
-	docsOf, terms := termDocs(docs, ids)
+	docsOf, terms, headers := termDocs(docs, ids)
 
 	var (
 		mu       sync.Mutex
@@ -211,6 +212,10 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 	}
 
 	if err := parallel(groupBy(terms, u.ftsShardOID), add); err != nil {
+		return err
+	}
+
+	if err := u.putHeaderTexts(headers); err != nil {
 		return err
 	}
 
@@ -284,12 +289,17 @@ func docGUIDs(docs []ftsDoc) (guids []string, size int, err error) {
 }
 
 // termDocs tokenizes the messages and returns, for every term, the ids
-// of the messages that contain it, and the terms.
-func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []string) {
+// of the messages that contain it, the terms, and the header text of
+// every message (fts.IndexText decodes the header once for both).
+func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []string, map[string]string) {
 	docsOf := map[string][]uint64{}
+	headers := make(map[string]string, len(docs))
 
 	for _, d := range docs {
-		for _, t := range fts.Terms(d.raw) {
+		terms, header := fts.IndexText(d.raw)
+		headers[d.guid] = header
+
+		for _, t := range terms {
 			docsOf[t] = append(docsOf[t], ids[d.guid])
 		}
 	}
@@ -299,7 +309,7 @@ func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []stri
 		terms = append(terms, t)
 	}
 
-	return docsOf, terms
+	return docsOf, terms, headers
 }
 
 // casPostings is casOmap over posting lists with legacy conversion: fn
@@ -404,6 +414,12 @@ func legacyConverter(known map[string]uint64) func([]byte) ([]byte, bool) {
 // document id. It re-tokenises the blob, which is cheaper than storing a
 // per-message term list.
 func (u *User) ftsRemove(m *Meta) error {
+	// first: it needs no blob, and a stale header text would be checked
+	// for a GUID that a later message cannot have
+	if err := u.dropHeaderText(m.GUID); err != nil {
+		u.log.Warn("fts header text removal failed", "guid", m.GUID, "err", err)
+	}
+
 	raw, err := u.readBlob(m)
 	if err != nil {
 		return err
@@ -499,27 +515,23 @@ func idKey(id uint64) string    { return "i:" + strconv.FormatUint(id, 10) }
 // one compare-and-swap on the map object.
 func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 	// Deduplicate: a GUID named twice must not get two ids.
-	seen := map[string]bool{}
+	guids = slices.Compact(slices.Sorted(slices.Values(guids)))
 
-	uniq := guids[:0:0]
-	for _, g := range guids {
-		if !seen[g] {
-			seen[g] = true
-			uniq = append(uniq, g)
-		}
-	}
-
-	guids = uniq
-
-	keys := make([]string, 0, len(guids)+1)
+	keys := make([]string, 0, len(guids)+len(freshIndexKeys))
 	for _, g := range guids {
 		keys = append(keys, docKey(g))
 	}
 
-	keys = append(keys, "n")
+	keys = append(keys, freshIndexKeys...)
+
+	fresh, err := u.freshIndexOnce()
+	if err != nil {
+		return nil, err
+	}
+
 	out := map[string]uint64{}
 
-	err := casOmap(u, u.idx, oidFTSMap, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+	err = casOmap(u, u.idx, oidFTSMap, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
 		for k := range out {
 			delete(out, k)
 		}
@@ -548,6 +560,7 @@ func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 		}
 
 		set["n"] = []byte(strconv.FormatUint(next, 10))
+		markFreshIndex(cur, set, fresh)
 
 		return set, nil
 	})
@@ -813,7 +826,7 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 
 // substringTerms adds the terms of field that contain tok to set.
 func (u *User) substringTerms(set map[string]struct{}, field, tok string, tris []string) error {
-	terms, err := u.dictMatches(field, tok, tris)
+	terms, _, err := dictMatches(u.lister(), field, tok, tris)
 	if err != nil {
 		return err
 	}
@@ -850,8 +863,8 @@ func (s *dictScan) take(key, tok string) {
 }
 
 // page reads the next page of the range.
-func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
-	more, err := listOmapKeys(ioctx, s.oid, s.after, s.prefix, omapPageSize, func(key string) { s.take(key, tok) })
+func (s *dictScan) page(list omapLister, tok string) error {
+	more, err := list(s.oid, s.after, s.prefix, omapPageSize, func(key string) { s.take(key, tok) })
 	if err != nil {
 		return fmt.Errorf("fts dictionary shard %s: %w", s.oid, err)
 	}
@@ -862,7 +875,7 @@ func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
 }
 
 // dictMatches returns the terms of field that contain tok, at most about
-// maxCandidates of them.
+// maxCandidates of them, and whether they are all of them.
 //
 // Every such term is listed under each trigram of tok, so the key range
 // of any one trigram, read to its end and filtered, is the whole answer.
@@ -871,7 +884,7 @@ func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
 // most the shortest range times the number of trigrams. That is one
 // round for a token with any trigram that is not among the most common
 // ones.
-func (u *User) dictMatches(field, tok string, tris []string) ([]string, error) {
+func dictMatches(list omapLister, field, tok string, tris []string) ([]string, bool, error) {
 	scans := make([]*dictScan, len(tris))
 	for i, tri := range tris {
 		scans[i] = newDictScan(tri, field)
@@ -888,7 +901,7 @@ func (u *User) dictMatches(field, tok string, tris []string) ([]string, error) {
 			go func() {
 				defer wg.Done()
 
-				errs[i] = s.page(u.idx, tok)
+				errs[i] = s.page(list, tok)
 			}()
 		}
 
@@ -896,12 +909,12 @@ func (u *User) dictMatches(field, tok string, tris []string) ([]string, error) {
 
 		for _, err := range errs {
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
 		if s := finishedScan(scans); s != nil {
-			return s.found, nil
+			return s.found, s.done, nil
 		}
 	}
 }
@@ -961,16 +974,15 @@ const (
 	legacyDictAbsent
 )
 
-// legacyDictMatches adds the terms of field that contain tok and are
-// listed in the old dictionary layout to set. An account without the
-// old objects has none.
-func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tris []string) error {
-	// Looked up once per view: a converted account must not pay sixteen
-	// reads of objects that are gone for every token of every query.
+// hasLegacyDict reports whether the account still has objects of the
+// old dictionary layout. It is looked up once per view: a converted
+// account must not pay sixteen reads of objects that are gone for every
+// token of every query.
+func (u *User) hasLegacyDict() (bool, error) {
 	if u.legacyDict == legacyDictUnknown {
 		n, err := u.LegacyFTSDict()
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		u.legacyDict = legacyDictAbsent
@@ -979,8 +991,16 @@ func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tri
 		}
 	}
 
-	if u.legacyDict == legacyDictAbsent {
-		return nil
+	return u.legacyDict == legacyDictPresent, nil
+}
+
+// legacyDictMatches adds the terms of field that contain tok and are
+// listed in the old dictionary layout to set. An account without the
+// old objects has none.
+func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tris []string) error {
+	legacy, err := u.hasLegacyDict()
+	if err != nil || !legacy {
+		return err
 	}
 
 	inter, capped, err := u.legacyDictIntersect(tris)
@@ -1177,9 +1197,10 @@ func keys(set map[string]struct{}) []string {
 }
 
 // DeleteFTS removes all index and dictionary shard objects (of both
-// dictionary layouts) and the id map.
+// dictionary layouts), the header store and the id map (with the
+// version marker).
 func (u *User) DeleteFTS() error {
-	oids := u.legacyDictOIDs()
+	oids := append(u.legacyDictOIDs(), u.headerOIDs()...)
 
 	for i := 0; i < u.ftsShards; i++ {
 		oids = append(oids, fmt.Sprintf("%s%02d", ftsPrefix, i))

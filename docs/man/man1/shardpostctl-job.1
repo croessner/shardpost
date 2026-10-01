@@ -156,8 +156,13 @@ no longer carry rights.
 .B fts_rebuild
 Role
 .BR repair ,
-locks the account. Drops the full-text index and builds it again from
-every message. It has no checkpoint: after a takeover it starts over.
+locks the account. Drops the full-text index (with its stored headers)
+and builds it again from every message. When it completes it sets the
+index version marker; without it, and while a rebuild runs or after
+one stopped midway, IMAP substring search does not use the index and
+checks every message of the mailbox. Run it for every account after an
+upgrade that changes how text is indexed. It has no checkpoint: after a
+takeover it starts over.
 .TP
 .B fts_dict_convert
 Role

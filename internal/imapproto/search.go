@@ -12,7 +12,6 @@ import (
 	"golang.org/x/text/encoding/htmlindex"
 
 	"shardpost/internal/fts"
-	"shardpost/internal/membudget"
 	"shardpost/internal/model"
 )
 
@@ -34,15 +33,22 @@ type criteria struct {
 	modseq                  uint64
 	emailIDs                []string
 	threadIDs               []string
-	text                    []textCrit // resolved via FTS at top level, brute force nested
+	text                    []textCrit // narrowed by the index, checked per message (searchtext.go)
 	not                     []*criteria
 	or                      [][2]*criteria
 }
 
 type textCrit struct {
-	fields []string // fts fields, nil = brute force header key
+	fields []string // fts fields
 	key    string   // header key for HEADER <key> <value>
 	value  string
+
+	// Set by prepareText. hdrCand and bodyCand are supersets of the
+	// messages whose header or body can match (nil: not narrowed);
+	// exact is the index's own answer in word search (Options.WordSearch).
+	hdrCand, bodyCand map[string]bool
+	exact             map[string]bool
+	byIndex           bool
 }
 
 // parseSearchKeys parses keys until end of line or closing paren.
@@ -696,86 +702,6 @@ func convertCriteria(cr *criteria, dec *encoding.Decoder) {
 	}
 }
 
-// runSearch evaluates criteria against the snapshot. Top-level text keys
-// are answered by the full-text index, which yields GUID candidates.
-func (c *conn) runSearch(cr *criteria) ([]int, []model.Meta, error) {
-	candidates, err := c.ftsCandidates(cr)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	c.searchErr = nil
-
-	var (
-		seqs  []int
-		metas []model.Meta
-	)
-
-	for i, m := range c.msgs {
-		if candidates != nil && !candidates[m.GUID] {
-			continue
-		}
-
-		if c.match(i+1, &m, cr) {
-			seqs = append(seqs, i+1)
-			metas = append(metas, m)
-		}
-
-		if c.searchErr != nil {
-			return nil, nil, c.searchErr // a message could not be read: no partial result
-		}
-	}
-
-	return seqs, metas, nil
-}
-
-// ftsCandidates resolves the top-level text criteria against the index and
-// removes them from cr. It returns nil when there are none.
-func (c *conn) ftsCandidates(cr *criteria) (map[string]bool, error) {
-	var (
-		result map[string]bool
-		rest   []textCrit
-	)
-
-	for _, t := range cr.text {
-		if len(fts.Tokenize(t.value)) == 0 {
-			rest = append(rest, t) // "header exists" stays brute force
-			continue
-		}
-
-		hits, err := c.mu.SearchFields(t.fields, t.value)
-		if err != nil {
-			return nil, err
-		}
-		// The index answers SUBJECT, FROM, BODY and TEXT exactly enough
-		// (token semantics, documented). HEADER <other> shares the "all
-		// headers" field and TO/CC/BCC share one field: for those the
-		// index only prunes candidates and the header line is verified.
-		if t.key != "" && headerFields(t.key)[0] == fts.FieldHeader || t.fields[0] == fts.FieldTo || t.fields[0] == fts.FieldFrom {
-			rest = append(rest, t)
-		}
-
-		if hits == nil {
-			continue
-		}
-
-		if result == nil {
-			result = hits
-			continue
-		}
-
-		for g := range result {
-			if !hits[g] {
-				delete(result, g)
-			}
-		}
-	}
-
-	cr.text = rest
-
-	return result, nil
-}
-
 // headerFieldContains checks the header lines that belong to an fts field
 // (subject, from-like, to-like, or any) for a substring.
 func headerFieldContains(hdr, field, v string) bool {
@@ -805,30 +731,6 @@ func headerFieldContains(hdr, field, v string) bool {
 
 func dateOnly(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-}
-
-func (c *conn) match(seq int, m *model.Meta, cr *criteria) bool {
-	if !c.matchPlain(seq, m, cr) {
-		return false
-	}
-
-	if len(cr.text) > 0 && !c.textMatch(m, cr.text) {
-		return false
-	}
-
-	for _, n := range cr.not {
-		if c.match(seq, m, n) {
-			return false
-		}
-	}
-
-	for _, or := range cr.or {
-		if !c.match(seq, m, or[0]) && !c.match(seq, m, or[1]) {
-			return false
-		}
-	}
-
-	return true
 }
 
 // matchPlain checks the criteria that need no message content, in order:
@@ -987,88 +889,6 @@ func matchIDs(m *model.Meta, cr *criteria) bool {
 	}
 
 	return true
-}
-
-// textMatch is the brute-force path for text keys nested in NOT/OR and for
-// "header exists" checks: it reads the message and does RFC 3501
-// substring matching.
-func (c *conn) textMatch(m *model.Meta, crits []textCrit) bool {
-	ok, err := c.textMatchErr(m, crits)
-	if err != nil {
-		c.searchErr = err
-		return false
-	}
-
-	return ok
-}
-
-func (c *conn) textMatchErr(m *model.Meta, crits []textCrit) (bool, error) {
-	rel, err := membudget.Acquire(m.Size)
-	if err != nil {
-		return false, err
-	}
-	defer rel()
-
-	raw, err := c.mu.Read(m)
-	if err != nil {
-		return false, err
-	}
-
-	tm := &textMessage{m: m, raw: raw, lower: strings.ToLower(string(raw))}
-
-	hdrEnd := strings.Index(tm.lower, "\r\n\r\n")
-	if hdrEnd < 0 {
-		hdrEnd = len(tm.lower)
-	}
-	// unfold: continuation lines belong to the preceding field
-	tm.hdr = strings.ReplaceAll(strings.ReplaceAll(tm.lower[:hdrEnd], "\r\n ", " "), "\r\n\t", " ")
-
-	for _, t := range crits {
-		if !tm.matches(t) {
-			return false, nil
-		}
-	}
-
-	return true, nil
-}
-
-// textMessage is a message prepared for brute-force text matching.
-type textMessage struct {
-	m     *model.Meta
-	raw   []byte
-	lower string // the whole message, lower-cased
-	hdr   string // the lower-cased, unfolded header
-	body  string // lower-cased body text, computed on first use
-}
-
-// matches checks one text criterion (RFC 3501 substring matching).
-func (tm *textMessage) matches(t textCrit) bool {
-	v := strings.ToLower(t.value)
-
-	switch {
-	case t.key != "":
-		key := strings.ToLower(t.key) + ":"
-		found := false
-
-		for _, line := range strings.Split(tm.hdr, "\r\n") {
-			if strings.HasPrefix(line, key) && strings.Contains(line, v) {
-				found = true
-				break
-			}
-		}
-
-		return found || envAddrContains(tm.m, strings.ToLower(t.key), v)
-	case len(t.fields) == 2: // TEXT
-		return strings.Contains(tm.lower, v)
-	case t.fields[0] == fts.FieldBody:
-		if tm.body == "" {
-			tm.body = strings.ToLower(fts.BodyText(tm.raw))
-		}
-
-		return strings.Contains(tm.body, v)
-	}
-
-	return headerFieldContains(tm.hdr, t.fields[0], v) || envAddrContains(tm.m, t.fields[0], v)
 }
 
 // envAddrContains matches an address search key against the parsed

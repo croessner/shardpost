@@ -71,6 +71,7 @@ func recordSpans(t *testing.T) *tracetest.SpanRecorder {
 // attributes.
 func TestTracing(t *testing.T) {
 	rec := recordSpans(t)
+
 	telemetry.SetPersonal(true)
 	t.Cleanup(func() { telemetry.SetPersonal(false) })
 

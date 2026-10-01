@@ -13,7 +13,7 @@ is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
 explicit `--config` takes precedence over both variables. An explicitly
 empty `SHARDPOST_CONFIG` disables the old fallback. Precedence: built-in defaults, explicit YAML file, explicitly set legacy env variables. There is no implicit file lookup and no automatic reload. Changes in Kubernetes are applied through a controlled deployment rollout. Go runtime settings such as `GOMEMLIMIT` remain environment variables; additional standardized OTEL SDK options are still evaluated by the SDK.
 
-The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin` and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
+The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin`, `fts` and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go`, `internal/config/fts.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
 
 ```yaml
 server:
@@ -391,6 +391,107 @@ YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#mai
 | `admin.search_scan_limit` | 50000 | a search request examines at most this many messages (role `content`); a longer search resumes with its cursor |
 
 YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
+
+### Full-text index (`fts`)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `fts.fallback_charset` | `windows-1252` | charset of text that is not valid UTF-8 and has no charset label, is labelled US-ASCII or names a charset that is not known (body parts, file names, raw 8-bit header values); any ASCII-compatible charset of the WHATWG list, e.g. `iso-8859-15`, `iso-8859-2`, `koi8-r`; UTF-8, UTF-16 and `replacement` are refused |
+| `fts.html` | `text` | what is made of a `text/html` part: `text` its visible text (tags, comments, `script`, `style`, `template` and `title` dropped, character references decoded, a line break at every block element), `raw` the markup as it is (what earlier versions indexed), `skip` nothing |
+| `fts.imap_search` | `substring` | how IMAP `SEARCH` matches text: `substring` as RFC 3501 and RFC 9051 specify (the index narrows the candidates, every candidate is checked); `word` lets the index answer `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by word, stem and part of a word |
+| `fts.verify_parallel` | 8 | how many messages one IMAP `SEARCH` checks against its text keys at the same time (1–64), each read under `server.memory_budget_bytes` |
+
+YAML only.
+
+**The text.** One preparation serves the index, IMAP `SEARCH` keys
+checked against the message, the JMAP `header` filter and the cached
+preview, so they agree:
+
+- Header values are unfolded and decoded: RFC 2047 encoded words in
+  any charset of the WHATWG list, raw 8-bit text in
+  `fts.fallback_charset`. The index has the header field names as
+  well, because IMAP `TEXT` covers the whole header. The JMAP Text
+  form of a header value (`header:…:asText`) is decoded the same way.
+- Every `text/*` part is converted from its charset parameter to
+  UTF-8. A `text/html` part whose label is missing, US-ASCII or
+  unknown is read in the charset its `<meta charset>` or
+  `<meta http-equiv="Content-Type">` names. A part labelled with a
+  single-byte charset (ISO-8859-x, Windows-125x, KOI8, …) whose bytes
+  are valid UTF-8 with at least one non-ASCII character is kept as
+  UTF-8: that is UTF-8 under a wrong label, which is common, far more
+  often than Latin-1 text that happens to be valid UTF-8.
+- The file name of every part (`Content-Type` `name`,
+  `Content-Disposition` `filename`, RFC 2231 in any charset, RFC 2047
+  words) and an attached message (`message/rfc822`,
+  `message/global`) — its header as `Name: value` lines and its body
+  text — belong to the body text. Other MIME part header fields do not.
+- Bounds: at most 4 MiB of text per message; a part is read up to
+  4 MiB, a part other than HTML only as far as there is room left for
+  its text, and all parts of a message together up to 8 MiB, before
+  conversion. Words of more than 40 characters are indexed as
+  overlapping pieces (see [storage](architecture/storage.md)).
+
+**The preview** is cut from the text parts alone (no file names, no
+attached messages), and of a `multipart/alternative` from one part: the
+plain text where it has text, else the HTML text (RFC 8970). It follows
+`fts.html`: with `text` an HTML part gives its visible text (without its
+title), with `raw` its markup, with `skip` nothing, so an HTML-only
+message has an empty preview.
+
+**IMAP SEARCH and what it costs.** With `substring`, a text key matches
+when its value is a substring of the decoded text, without regard to
+case. The index supplies candidates — never fewer than the messages
+that match — separately for the header and the body of a key, and
+combines them over `AND`, `OR` and `NOT`. Each candidate is checked:
+
+- the header against the decoded header the index keeps per message
+  (read for 256 messages at a time, no message is read);
+- the body by reading the message, only where the body candidates
+  include it.
+
+A word of the value narrows the candidates when the index can look it
+up completely: a whole word always; the start of a word unless more
+than 4096 index terms begin with it; the inside of a word in the
+subject, the addresses and the body when it has three or more
+characters and lies inside at most 4096 index terms. The inside of a word of another header
+field cannot be looked up, so a `TEXT` or `HEADER <name>` value that
+may begin inside a header word (any value not starting with a space or
+punctuation) checks the stored header of every message of the mailbox —
+a few omap reads per 256 messages, cheap next to reading them — and
+reads only the messages the body index allows. A key with no word the
+index can narrow by (`BODY ab`, a single letter) reads every message of
+the mailbox. `fts.verify_parallel` messages are checked at once, each
+under the memory budget; a message that is expunged meanwhile is no
+match, and a read the budget refuses is retried before the command
+fails. `word` costs index lookups only and answers what earlier versions
+answered: all words of the value in any order, by stem and by part of
+a word.
+
+**Existing messages.** The index keeps what a message was indexed
+with. An account indexed entirely by this version carries a version
+marker in its index (set for a new account with its first message and
+by `fts_rebuild` when it completes; a rebuild that stops midway leaves
+the account without it). Without the marker, substring search does not
+use the index at all — an older index (HTML markup, undecoded words, no
+file names) cannot be trusted even for whole words — and checks every
+message of the mailbox, reading the headers of messages without a
+stored header from the messages themselves: correct, but slow, until
+the rebuild. A changed `fts.fallback_charset` or `fts.html` reaches
+messages stored before only when they are indexed again; until then
+substring search can miss such a message where the index lacks its new
+words. Removing a message indexed
+under other rules leaves terms it was indexed with behind (harmless;
+the rebuild drops them). Run the rebuild for every account after the
+upgrade, see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c):
+
+```sh
+shardpostctl plan fts_rebuild user@example.org
+shardpostctl apply -wait <plan-id>
+```
+
+The rebuild does not recompute the cached preview of an existing
+message. The index, including the stored headers, is in the index pool
+and does not count against the quota.
 
 ### JMAP search bounds (`jmap.search`)
 
