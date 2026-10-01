@@ -420,7 +420,8 @@ func TestManageSieveSpans(t *testing.T) {
 	old := telemetry.Tracer
 	telemetry.Tracer = tp.Tracer("shardpost")
 
-	t.Cleanup(func() { telemetry.Tracer = old })
+	telemetry.SetPersonal(true)
+	t.Cleanup(func() { telemetry.Tracer = old; telemetry.SetPersonal(false) })
 
 	c := dialSieveServer(t)
 

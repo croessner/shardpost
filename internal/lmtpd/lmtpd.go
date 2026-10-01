@@ -269,7 +269,8 @@ func (s *session) deliveryError(user string, err error) error {
 
 // deliver hands one recipient's copy to the delivery service.
 func (s *session) deliver(ctx context.Context, user, rcpt string, raw []byte, res *auth.Result) error {
-	ctx, span := telemetry.Span(ctx, "lmtp.deliver", attribute.String("lmtp.user", user), attribute.Int("lmtp.size", len(raw)))
+	ctx, span := telemetry.Span(ctx, "lmtp.deliver",
+		append(telemetry.Personal(attribute.String("lmtp.user", user)), attribute.Int("lmtp.size", len(raw)))...)
 	defer span.End()
 
 	_, err := s.be.Delivery.Deliver(ctx, delivery.Request{Account: user, Rcpt: rcpt, From: s.from, Raw: raw, Lookup: res, Log: s.log})

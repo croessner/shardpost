@@ -318,7 +318,7 @@ func (c *conn) dispatch(line string) (quit bool, err error) {
 	mname := metricName(cmd)
 	start := time.Now()
 	_ = c.nc.SetWriteDeadline(time.Now().Add(2 * time.Minute))
-	ctx, span := telemetry.Span(context.Background(), "pop3."+mname, attribute.String("pop3.user", c.name))
+	ctx, span := telemetry.Span(context.Background(), "pop3."+mname, telemetry.Personal(attribute.String("pop3.user", c.name))...)
 
 	// The store records its operations below this command's span.
 	model.UseRequest(ctx, c.user)

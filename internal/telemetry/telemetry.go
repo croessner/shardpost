@@ -10,6 +10,7 @@ import (
 	"os"
 	"shardpost/internal/config"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -27,9 +28,29 @@ import (
 // Tracer is the process-wide tracer.
 var Tracer = otel.Tracer("shardpost")
 
+// personal decides whether spans carry personal data: account names,
+// mailbox names and client addresses (telemetry.user_attributes).
+var personal atomic.Bool
+
+// SetPersonal switches personal span attributes on or off.
+func SetPersonal(on bool) { personal.Store(on) }
+
+// Personal returns attrs when personal span attributes are switched on,
+// and nothing otherwise. Every attribute that names a user, an account,
+// a mailbox or a client address goes through it.
+func Personal(attrs ...attribute.KeyValue) []attribute.KeyValue {
+	if !personal.Load() {
+		return nil
+	}
+
+	return attrs
+}
+
 // Setup configures the global tracer provider from the standard OTEL_*
 // environment variables. Returns a shutdown function.
 func Setup(ctx context.Context, service string, log *slog.Logger, cfg config.Telemetry) func(context.Context) error {
+	SetPersonal(cfg.UserAttributes)
+
 	endpoint := cfg.Endpoint
 	if endpoint == "" {
 		return func(context.Context) error { return nil }

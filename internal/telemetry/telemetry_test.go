@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"shardpost/internal/config"
 	"testing"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestHTTPBaseEndpointAppendsSignalPath(t *testing.T) {
@@ -36,5 +38,20 @@ func TestHTTPBaseEndpointAppendsSignalPath(t *testing.T) {
 		}
 	default:
 		t.Fatal("no trace exported")
+	}
+}
+
+// TestPersonal: personal span attributes are dropped unless switched on.
+func TestPersonal(t *testing.T) {
+	kv := attribute.String("imap.user", "alice")
+	if got := Personal(kv); got != nil {
+		t.Fatalf("personal attributes leak by default: %v", got)
+	}
+
+	SetPersonal(true)
+	t.Cleanup(func() { SetPersonal(false) })
+
+	if got := Personal(kv); len(got) != 1 || got[0] != kv {
+		t.Fatalf("personal attributes missing when switched on: %v", got)
 	}
 }

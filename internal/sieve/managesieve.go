@@ -452,7 +452,7 @@ func (c *conn) handle(line string) (bool, error) {
 	// One span per command, like IMAP and POP3; it carries the command
 	// name and the account, never arguments (AUTHENTICATE carries
 	// credentials, PUTSCRIPT the script).
-	ctx, span := telemetry.Span(context.Background(), "managesieve."+safeCommand, attribute.String("managesieve.user", c.name))
+	ctx, span := telemetry.Span(context.Background(), "managesieve."+safeCommand, telemetry.Personal(attribute.String("managesieve.user", c.name))...)
 
 	// The store records its operations below this command's span.
 	u := c.user

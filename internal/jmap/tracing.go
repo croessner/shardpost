@@ -62,7 +62,7 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 func traced(name string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := telemetry.Span(r.Context(), name,
-			attribute.String("http.method", r.Method), attribute.String("net.peer", clientIP(r)))
+			append(telemetry.Personal(attribute.String("net.peer", clientIP(r))), attribute.String("http.method", r.Method))...)
 		defer span.End()
 
 		rec := &statusRecorder{ResponseWriter: w}
@@ -83,7 +83,7 @@ func traced(name string, next http.HandlerFunc) http.HandlerFunc {
 
 // tracedUser names the authenticated account on the request's span.
 func tracedUser(ctx context.Context, account string) {
-	trace.SpanFromContext(ctx).SetAttributes(attribute.String(attrUser, account))
+	trace.SpanFromContext(ctx).SetAttributes(telemetry.Personal(attribute.String(attrUser, account))...)
 }
 
 // callTrace is the span of one method call, and the store views it
@@ -107,7 +107,7 @@ func startCall(ctx context.Context, name string) (context.Context, *callTrace) {
 // views of the call at it.
 func (c *callTrace) attach(ctx context.Context, sess *session) {
 	c.sess = sess
-	c.span.SetAttributes(attribute.String(attrAcct, sess.accountID()))
+	c.span.SetAttributes(telemetry.Personal(attribute.String(attrAcct, sess.accountID()))...)
 
 	for _, u := range sess.storeViews() {
 		model.UseRequest(ctx, u)

@@ -48,6 +48,7 @@ telemetry:
   protocol: http/protobuf
   endpoint: http://collector:4318
   sample_ratio: 0.1
+  user_attributes: false   # account, mailbox and client address in spans
 ```
 
 `server.insecure_auth` (default `false`) decides whether IMAP, POP3,

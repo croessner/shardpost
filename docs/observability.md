@@ -115,13 +115,16 @@ the rest of the work is not traced. The job's own progress and
 checkpoints remain the way to follow a long run.
 
 Store spans deliberately carry no mailbox names, only object ids, counts
-and sizes; mailbox names are user content. The traces currently also
-contain user attributes (`imap.user`, `pop3.user`, `managesieve.user`,
-`lmtp.user`, `jmap.user`, `jmap.account`), and for IMAP possibly the
-mailbox and the peer (`imap.mailbox`, `net.peer`; JMAP spans carry
-`net.peer` as well). The collector configuration and the access
-rights have to implement the applicable rules for this data. ManageSieve
-spans carry the command name and the account only, never arguments:
+and sizes; mailbox names are user content. Personal attributes — the
+account (`imap.user`, `pop3.user`, `managesieve.user`, `lmtp.user`,
+`jmap.user`, `jmap.account`), the IMAP mailbox (`imap.mailbox`) and the
+client address (`net.peer`, IMAP and JMAP) — are only added with
+`telemetry.user_attributes: true` (env `TELEMETRY_USER_ATTRIBUTES`,
+default off). Off, a trace holds no personal data and the collector
+filter accepted on 2026-09-15 (below) is a second line of defence, not
+the only one; on, the collector configuration and the access rights have
+to implement the applicable rules for this data. ManageSieve spans carry
+the command name and, if switched on, the account, never arguments:
 `AUTHENTICATE` carries credentials, `PUTSCRIPT` and `CHECKSCRIPT` the
 script. Credentials belong neither in dashboards nor in export files or
 operational reports.

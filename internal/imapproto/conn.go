@@ -571,9 +571,9 @@ func (c *conn) handleLine() error {
 	defer c.releaseCommand()
 
 	ctx, span := telemetry.Span(context.Background(), "imap."+c.cmdName,
-		attribute.String("imap.user", c.name), attribute.String("net.peer", c.nc.RemoteAddr().String()))
+		telemetry.Personal(attribute.String("imap.user", c.name), attribute.String("net.peer", c.nc.RemoteAddr().String()))...)
 	if c.mbox != nil {
-		span.SetAttributes(attribute.String("imap.mailbox", c.mbox.Name))
+		span.SetAttributes(telemetry.Personal(attribute.String("imap.mailbox", c.mbox.Name))...)
 	}
 
 	// The store records its operations below this command's span.

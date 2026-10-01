@@ -54,6 +54,9 @@ type Telemetry struct {
 	Endpoint    string  `mapstructure:"endpoint" env:"OTEL_EXPORTER_OTLP_ENDPOINT"`
 	Protocol    string  `mapstructure:"protocol" env:"OTEL_EXPORTER_OTLP_PROTOCOL" validate:"oneof=grpc http/protobuf"`
 	SampleRatio float64 `mapstructure:"sample_ratio" env:"OTEL_TRACES_SAMPLER_ARG" validate:"gte=0,lte=1"`
+	// UserAttributes lets spans carry account and mailbox names and
+	// client addresses. Off by default: traces then hold no personal data.
+	UserAttributes bool `mapstructure:"user_attributes" env:"TELEMETRY_USER_ATTRIBUTES"`
 }
 
 // Ceph configures the RADOS connection and pools.
@@ -309,6 +312,7 @@ var defaults = []struct {
 	{"telemetry.endpoint", ""},
 	{"telemetry.protocol", defaultOTLPProtocol},
 	{"telemetry.sample_ratio", 1.0},
+	{"telemetry.user_attributes", false},
 	{"server.pop3_addr", ":1110"},
 	{"server.pop3s_addr", ":1995"},
 	{"server.pop3_mark_seen", true},
