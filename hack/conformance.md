@@ -46,6 +46,16 @@ The planned run, once stage 4 is in: the `jmap-samples`/`jmap-client`
 corpus, the Stalwart JMAP test set, and Thunderbird against the
 Director, with its results recorded here like the IMAP ones.
 
+## Results 0.37.0 (2026-10-01)
+
+```
+72 test groups: 0 failed, 8 skipped due to missing capabilities
+base protocol: 0/460 individual commands failed
+extensions: 0/272 individual commands failed
+```
+
+ESORT adds one group (one fewer skipped) and five extension commands.
+
 ## Results 0.36.1 (2026-10-01)
 
 imaptest against `shardpost:993`, image 0.36.1, after `fts_rebuild` of

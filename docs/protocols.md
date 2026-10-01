@@ -3,7 +3,7 @@
 This document lists, protocol by protocol, what ShardPost implements:
 the standards it follows, the extensions it advertises, the commands
 and methods it answers, and where it deliberately or knowingly deviates.
-It describes **ShardPost 0.36.1** as of 2026-10-01 and was written from
+It describes **ShardPost 0.37.0** as of 2026-10-01 and was written from
 the code, not from earlier documentation.
 
 How to read the tables:
@@ -317,9 +317,9 @@ IMAPSieve script entry.
 
 ### Conformance
 
-The full Dovecot imaptest run against 0.36.1 on 2026-10-01 covered 72
+The full Dovecot imaptest run against 0.37.0 on 2026-10-01 covered 72
 test groups: none failed (base protocol 0 of 460 commands, extensions 0
-of 267), 9 groups were skipped for capabilities the server does not
+of 272), 8 groups were skipped for capabilities the server does not
 offer. Earlier runs and their assessment are in the
 [conformance results](../hack/conformance.md).
 
