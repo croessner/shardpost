@@ -112,8 +112,10 @@ contrib-ucm-renew-build:
 test-static-cluster:
 	CONTEXT=$(CONTEXT) hack/test.sh
 
-# Full test suite including the librados packages, in the lint image.
+# Full test suite including the librados packages, in the lint image. The
+# cephstore tests that need a cluster run against a throwaway single-node
+# cluster that hack/ceph-test-cluster.sh starts inside the container.
 test-docker: lint-image
 	docker run --rm --platform linux/amd64 --user $$(id -u):$$(id -g) \
-		-v $(CURDIR):/src -v shardpost-lint-cache:/cache -w /src --entrypoint go \
-		$(LINT_IMAGE) test -race -tags tentacle ./...
+		-v $(CURDIR):/src -v shardpost-lint-cache:/cache -w /src --entrypoint sh \
+		$(LINT_IMAGE) hack/ceph-test-cluster.sh go test -race -tags tentacle ./...

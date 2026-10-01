@@ -44,9 +44,9 @@ func (u *User) ScrubState() (model.ScrubState, error) {
 }
 
 // ScrubPending implements model.ScrubProber: any key of the scrub object
-// (orphan candidates "o:", the quota count), a delivery intent in the
-// registry, or a MOVE intent on a mailbox (one read per mailbox, no
-// listing).
+// (orphan candidates "o:", the quota count), an intent in the registry
+// (d:, bi:, bimp:, up:, ci:, dm:; one read op), or a MOVE or removal
+// intent on a mailbox (i:, r:; one read op per mailbox, no listing).
 func (u *User) ScrubPending() (string, error) {
 	switch n, err := u.firstKeys(oidScrub, ""); {
 	case err != nil:
@@ -55,11 +55,11 @@ func (u *User) ScrubPending() (string, error) {
 		return "scrub candidates", nil
 	}
 
-	switch n, err := u.firstKeys(oidRegistry, regDeliveryPrefix); {
+	switch p, err := u.anyKey(oidRegistry, intentPrefixes...); {
 	case err != nil:
-		return "", fmt.Errorf("read delivery intents: %w", err)
-	case n > 0:
-		return "delivery intents", nil
+		return "", fmt.Errorf("read intents: %w", err)
+	case p != "":
+		return "intents " + p, nil
 	}
 
 	boxes, err := u.ListMailboxes()
@@ -68,11 +68,11 @@ func (u *User) ScrubPending() (string, error) {
 	}
 
 	for i := range boxes {
-		switch n, err := u.firstKeys(mboxOID(boxes[i].ID), keyIntentPrefix); {
+		switch p, err := u.anyKey(mboxOID(boxes[i].ID), keyIntentPrefix, keyRemovePrefix); {
 		case err != nil:
-			return "", fmt.Errorf("read move intents of %q: %w", boxes[i].Name, err)
-		case n > 0:
-			return "move intents", nil
+			return "", fmt.Errorf("read intents of %q: %w", boxes[i].Name, err)
+		case p != "":
+			return "mailbox intents " + p, nil
 		}
 	}
 

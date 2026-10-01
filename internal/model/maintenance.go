@@ -77,3 +77,30 @@ type FTSDictConverter interface {
 type NamespacePurger interface {
 	PurgeNamespace(fence func() error) (int, error)
 }
+
+// OrphanSource is where a scrub finds what a crash left behind: objects
+// that nothing points at (scaling plan B6, B7).
+type OrphanSource string
+
+// Orphan sources of the scrub.
+const (
+	// OrphanSourceListing lists the account's namespace in both pools
+	// (the behaviour before 0.42.0).
+	OrphanSourceListing OrphanSource = "listing"
+	// OrphanSourceShadow lists as before and acts on what the listing
+	// finds, and also works out what the intents name; differences are
+	// reported (a migration aid: the listing stays authoritative).
+	OrphanSourceShadow OrphanSource = "shadow"
+	// OrphanSourceIntents reads the intents only and lists nothing.
+	OrphanSourceIntents OrphanSource = "intents"
+)
+
+// Valid reports whether s is a known orphan source ("" is not).
+func (s OrphanSource) Valid() bool {
+	switch s {
+	case OrphanSourceListing, OrphanSourceShadow, OrphanSourceIntents:
+		return true
+	}
+
+	return false
+}

@@ -421,9 +421,13 @@ and [batches over all accounts](admin-api.md#batches-over-all-accounts).
 | `scrub.dry_run` | `SCRUB_DRY_RUN` | false | report only; `scrub --batch` then submits a batch of `index_check` |
 | `scrub.parallel` | `SCRUB_PARALLEL` | 2 | accounts a batch scrub works on at once in the server that runs it (1–32) |
 | `scrub.interval_days` | `SCRUB_INTERVAL_DAYS` | 7 | a batch scrub with `skip_idle` scrubs an idle account again at the latest after this many days (1–365) |
+| `scrub.orphan_source` | `SCRUB_ORPHAN_SOURCE` | `shadow` | where a scrub finds what a crash left behind: `listing` lists the account's namespace in both pools (before 0.42.0), `shadow` lists and repairs from the listing and reports where the intents differ, `intents` reads the intents only and lists nothing |
+| `scrub.intent_grace_seconds` | `SCRUB_INTENT_GRACE_SECONDS` | 3600 | how old an intent must be before a scrub takes it for the leftover of a crash (600–604800) |
 
-`scrub.parallel` and `scrub.interval_days` take effect in the servers
-that run the batch, not in the pod that submits it.
+`scrub.parallel`, `scrub.interval_days`, `scrub.orphan_source` and
+`scrub.intent_grace_seconds` take effect in the servers that run the
+batch, not in the pod that submits it. For the switch from `shadow` to
+`intents` see [operations](operations/README.md#scrub-without-listings).
 
 ### IMAP watches (`server.imap_max_watches`)
 

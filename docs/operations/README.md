@@ -367,6 +367,45 @@ cancelled with `shardpostctl job cancel`.
 `scrub.users`, else every account of the directory (once its backfill
 completed), else every namespace of an index pool listing.
 
+## Scrub without listings
+
+From 0.42.0 every write that can leave debris records an intent, and the
+scrub can find what a crash left from the intents instead of listing the
+account's namespace in both pools (see
+[storage](../architecture/storage.md#intents-debris-that-a-scrub-finds-without-listing)).
+Where it looks is `scrub.orphan_source`; the release ships with
+`shadow`: the scrub lists and repairs from the listing as before, but
+also works out what the intents name and reports where they differ.
+Nothing has to be done for the rollout itself, and servers of different
+versions may run side by side (older servers ignore the intents; their
+writes leave none, which the listing still covers).
+
+**Before the switch to `intents`**, after every server runs 0.42.0:
+
+1. Let the nightly batch scrub run for a few nights. Watch
+   `imapceph_scrub_shadow_differences_total{kind}`:
+   `orphan_extra` (blobs the intents take for orphans that the listing
+   does not) must stay 0; `orphan_missed`, `unknown_missed` and
+   `marks_missed` count debris without an intent — debris from before
+   0.42.0, which the listing removes in the same runs. They must fall to
+   0 once that is gone. The scrub report of an account names samples
+   (`Shadow.Samples`).
+2. `hack/r3-smoke.sh` checks a cluster: it creates and deletes a
+   mailbox with messages on the throwaway account and scrubs it in shadow
+   mode; the report must show no difference.
+
+**The switch** is `scrub.orphan_source: intents` (or
+`SCRUB_ORPHAN_SOURCE=intents`) in the servers' configuration (the batch
+scrub runs there) and in the scrub CronJob's environment (for a scrub
+without `--batch`). From then on `imapceph_rados_listings_total` stays
+flat for `scrub_orphans` and `scrub_unknown_index`. Rollback: back to
+`shadow` or `listing`; the intents keep being written either way.
+
+`scrub.intent_grace_seconds` (3600) is how old an intent must be before
+the scrub takes it for the leftover of a crash; it must exceed the
+longest write (a large delivery, an import step), which is far below
+the default.
+
 ## Auth cache
 
 Every server keeps the logins and lookups Nauthilus answered for a

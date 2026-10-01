@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/ceph/go-ceph/rados"
 
 	"shardpost/internal/learnindex"
 	"shardpost/internal/model"
 	"shardpost/internal/quota"
+	"shardpost/internal/sortedindex"
 )
 
 // Config describes how to reach the cluster.
@@ -78,6 +80,18 @@ type Config struct {
 	LearningQueueShards int
 	// Limits bounds what one account can grow (0 fields: unlimited).
 	Limits model.Limits
+	// UploadTTL is how long a JMAP upload is kept (0: DefaultUploadTTL).
+	UploadTTL time.Duration
+	// OrphanSource is where a scrub finds what a crash left behind
+	// ("" = model.OrphanSourceShadow, see scrubintents.go).
+	OrphanSource model.OrphanSource
+	// IntentGrace is how old an intent must be before a scrub takes it for
+	// the leftover of a crash (0: DefaultIntentGrace).
+	IntentGrace time.Duration
+	// PurgeListing makes a purge delete what a listing of the account's
+	// namespaces finds (the behaviour before 0.42.0) instead of what the
+	// data model names; see purge.go.
+	PurgeListing bool
 }
 
 // Store owns the librados connection and hands out per-user views. The
@@ -103,6 +117,11 @@ type Store struct {
 	learnOnce sync.Once
 	learnQ    *learnindex.Queue
 	learnErr  error
+
+	// uploadsQ is the due queue of the JMAP uploads (uploads.go).
+	uploadsOnce sync.Once
+	uploadsQ    *sortedindex.Queue
+	uploadsErr  error
 }
 
 // connRef is a reference-counted librados connection.
@@ -293,5 +312,15 @@ func (s *Store) User(name string) (*User, error) {
 		chunkSize: cfg.ChunkSize, ftsShards: cfg.FTSShards, shardSize: cfg.ShardSize, limit: limit,
 		acctRetention: acctRetention(cfg.AccountLogRetention),
 		limits:        cfg.Limits,
+		uploadTTL:     orDefault(cfg.UploadTTL, DefaultUploadTTL),
 		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange}, nil
+}
+
+// orDefault is d unless d is zero, then def.
+func orDefault(d, def time.Duration) time.Duration {
+	if d <= 0 {
+		return def
+	}
+
+	return d
 }

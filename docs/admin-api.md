@@ -323,7 +323,7 @@ only the repairs that were planned and are still needed.
 | Kind | Role | Account lock | Effect |
 | --- | --- | --- | --- |
 | `index_check` (no plan) | `diagnose` | no | scrubber without repair, findings as the result |
-| `scrub` | `repair` | no | scrubber with the chosen classes: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (all of them if none are given) |
+| `scrub` | `repair` | no | scrubber with the chosen classes: `deliveries`, `moves`, `retired`, `uncovered`, `entries`, `refs`, `orphans`, `unknown`, `quota` (all of them if none are given); with `scrub.orphan_source: intents`, `orphans` covers the blobs of open intents and `unknown` the objects of abandoned creations, unfinished deletions, the private `\Seen` marks of public folders that are gone and the METADATA of deleted mailboxes (see [storage](architecture/storage.md#intents-debris-that-a-scrub-finds-without-listing)); the report carries `OrphanSource`, `IntentsOpen`, `IntentsDropped`, `DeletionsFinished`, `CreationsUndone`, `StaleMetadata` and, in shadow mode, `Shadow` |
 | `quota_recalc` | `repair` | yes | recount the usage from the index and set it |
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index (with the header store) and rebuild it from all messages; when it completes it sets the index version marker that IMAP substring search needs to narrow fully, see [configuration](configuration.md#full-text-index-fts) |

@@ -282,10 +282,10 @@ func (u *User) importCreate(name string, spec model.ImportMailbox) (*Mailbox, er
 
 	size := u.importShardSize(spec)
 
-	err = u.createIndexObjectSized(&rec, size)
+	err = u.createIntended(&rec, name, size)
 	if errCode(err) == syscall.EEXIST {
 		rec.ID = newGUID() // the preferred id is in use
-		err = u.createIndexObjectSized(&rec, size)
+		err = u.createIntended(&rec, name, size)
 	}
 
 	if err != nil {
@@ -301,10 +301,10 @@ func (u *User) importCreate(name string, spec model.ImportMailbox) (*Mailbox, er
 		}
 
 		return map[string][]byte{regKey(name): b, regLastValidity + name: []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10))},
-			[]string{regSubMissing + name}
+			[]string{regSubMissing + name, createKey(rec.ID)}
 	})
 	if err != nil || taken {
-		_ = u.idx.Delete(mboxOID(rec.ID))
+		u.abandonCreated(rec.ID)
 
 		if taken {
 			return nil, model.ImportConflict("mailbox %q was created concurrently", name)
@@ -372,16 +372,18 @@ func (u *User) importReplace(mb *Mailbox, spec model.ImportMailbox) (*Mailbox, e
 
 	size := u.importShardSize(spec)
 
-	if err := u.createIndexObjectSized(&rec, size); err != nil {
+	if err := u.createIntended(&rec, mb.Name, size); err != nil {
 		rec.ID = newGUID()
-		if err := u.createIndexObjectSized(&rec, size); err != nil {
+		if err := u.createIntended(&rec, mb.Name, size); err != nil {
 			u.unretire(mb, info)
 			return nil, fmt.Errorf("import mailbox %q: %w", mb.Name, err)
 		}
 	}
 
-	if err := u.swapRecord(mb, rec); err != nil {
-		_ = u.idx.Delete(mboxOID(rec.ID))
+	// The swap drops the creation intent of the new object and leaves a
+	// deletion tombstone for the old one (intents.go).
+	if err := u.swapRecord(mb, rec, info); err != nil {
+		u.abandonCreated(rec.ID)
 		u.unretire(mb, info)
 
 		return nil, err
@@ -389,6 +391,8 @@ func (u *User) importReplace(mb *Mailbox, spec model.ImportMailbox) (*Mailbox, e
 
 	if err := u.deleteShards(mb, info, mb.Name); err != nil {
 		u.log.Warn("import: old index objects not removed", "mailbox", mb.Name, "err", err)
+	} else if err := rmKeys(u.idx, oidRegistry, []string{deleteKey(mb.ID)}); err != nil {
+		u.log.Warn("import: tombstone of the old index object not removed", "mailbox", mb.Name, "err", err)
 	}
 
 	return &Mailbox{Name: mb.Name, MailboxRec: rec}, nil
@@ -427,12 +431,14 @@ func (u *User) retireEmpty(mb *Mailbox, spec model.ImportMailbox) (*MailboxInfo,
 		}
 	}
 
+	// UIDNEXT is kept under h:retired: the shards up to it are what a
+	// deletion of the retired object has to remove.
 	_, _, err = u.casHeader(mb, func(cur *MailboxInfo, _ uint64) (*headerChange, error) {
 		if cur.UIDNext != info.UIDNext || cur.HighestModSeq != info.HighestModSeq {
 			return nil, model.ImportConflict("mailbox %q changed while it was replaced", mb.Name)
 		}
 
-		return &headerChange{set: map[string][]byte{keyUIDNext: []byte("0")}}, nil
+		return &headerChange{set: map[string][]byte{keyUIDNext: []byte("0"), keyRetired: []byte(strconv.FormatUint(uint64(cur.UIDNext), 10))}}, nil
 	})
 
 	return info, err
@@ -440,10 +446,11 @@ func (u *User) retireEmpty(mb *Mailbox, spec model.ImportMailbox) (*MailboxInfo,
 
 // retired reports whether the index object of mb exists with UIDNEXT 0
 // (retired by a replacement); info then describes it for deleteShards
-// (it was empty: shard 0 is all there is to delete, higher empty shards
-// are reaped by the scrubber as unknown objects).
+// with the UIDNEXT it had (h:retired). An object retired before that key
+// existed reads as UIDNEXT 1, shard 0 only; its empty higher shards are
+// left to the listing scrub or the sweep.
 func (u *User) retired(mb *Mailbox) (*MailboxInfo, bool) {
-	hv, ver, err := u.getKeysVer(u.idx, mboxOID(mb.ID), []string{keyUIDNext, keyShardSize})
+	hv, ver, err := u.getKeysVer(u.idx, mboxOID(mb.ID), []string{keyUIDNext, keyShardSize, keyRetired})
 	if err != nil || ver == 0 {
 		return nil, false
 	}
@@ -454,14 +461,16 @@ func (u *User) retired(mb *Mailbox) (*MailboxInfo, bool) {
 
 	ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32)
 
-	return &MailboxInfo{Mailbox: *mb, UIDNext: 1, ShardSize: uint32(max(ss, 1))}, true
+	return &MailboxInfo{Mailbox: *mb, UIDNext: max(retiredUIDNext(hv), 1), ShardSize: uint32(max(ss, 1))}, true
 }
 
 // swapRecord replaces the registry record of mb (still pointing at mb's
-// id) with rec.
-func (u *User) swapRecord(mb *Mailbox, rec MailboxRec) error {
+// id) with rec, drops the creation intent of rec's object and leaves a
+// deletion tombstone for mb's (with the range of info).
+func (u *User) swapRecord(mb *Mailbox, rec MailboxRec, info *MailboxInfo) error {
 	swapped := false
 	b, _ := json.Marshal(&rec)
+	tomb := deletionTombstone(mb, info)
 
 	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		var old MailboxRec
@@ -473,7 +482,8 @@ func (u *User) swapRecord(mb *Mailbox, rec MailboxRec) error {
 			return nil, nil
 		}
 
-		return map[string][]byte{regKey(mb.Name): b, regLastValidity + mb.Name: []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10))}, nil
+		return map[string][]byte{regKey(mb.Name): b, regLastValidity + mb.Name: []byte(strconv.FormatUint(uint64(rec.UIDValidity), 10)),
+			deleteKey(mb.ID): tomb}, []string{createKey(rec.ID)}
 	})
 	if err == nil && !swapped {
 		err = model.ImportConflict("mailbox %q changed while it was replaced", mb.Name)
@@ -526,18 +536,12 @@ func (u *User) ImportMessages(id string, msgs []model.ImportMessage) (*model.Imp
 		return nil, err
 	}
 
-	var size Quota
-	for i := range todo {
-		size.Bytes += int64(len(todo[i].Raw))
-		size.Msgs++
-	}
-
-	resv, err := u.reserve(mb, size)
+	resv, guids, intent, err := u.reserveImport(mb, todo)
 	if err != nil {
 		return nil, err
 	}
 
-	prepared, err := u.prepareImport(todo)
+	prepared, err := u.prepareImport(todo, guids)
 	if err != nil {
 		resv.settle(Quota{})
 		return nil, err
@@ -559,7 +563,69 @@ func (u *User) ImportMessages(id string, msgs []model.ImportMessage) (*model.Imp
 		return nil, err
 	}
 
+	if err := rmKeys(u.idx, oidRegistry, []string{intent}); err != nil {
+		u.log.Warn("import: blob intent not removed", "mailbox", mb.Name, "err", err)
+	}
+
 	return res, nil
+}
+
+// reserveImport reserves the quota of an import step and announces the
+// blobs it may write in the same CAS ("bimp:", intents.go); it returns
+// the GUIDs per message and the intent's key. The intent goes after the
+// header write of the step; a step that fails leaves it to the scrubber.
+func (u *User) reserveImport(mb *Mailbox, todo []model.ImportMessage) (*reservation, [][]string, string, error) {
+	var size Quota
+	for i := range todo {
+		size.Bytes += int64(len(todo[i].Raw))
+		size.Msgs++
+	}
+
+	guids := importGUIDs(todo)
+	intent := regImportBlobPrefix + newGUID()
+
+	resv, err := u.reserveWith(mb, size, map[string][]byte{intent: u.importIntent(mb.ID, todo, guids)})
+
+	return resv, guids, intent, err
+}
+
+// importFallbacks is how many fresh GUIDs a message of an import step
+// may fall back to (see importBlob).
+const importFallbacks = 2
+
+// importGUIDs returns, per message, the GUIDs its blob may be stored
+// under: the source GUID (or a fresh one) first, then the fallbacks.
+func importGUIDs(msgs []model.ImportMessage) [][]string {
+	out := make([][]string, len(msgs))
+
+	for i := range msgs {
+		first := msgs[i].GUID
+		if !model.ValidGUID(first) {
+			first = newGUID()
+		}
+
+		out[i] = []string{first}
+		for range importFallbacks {
+			out[i] = append(out[i], newGUID())
+		}
+	}
+
+	return out
+}
+
+// importIntent is the "bimp:" value of an import step.
+func (u *User) importIntent(mailbox string, msgs []model.ImportMessage, guids [][]string) []byte {
+	in := importIntent{Time: time.Now().Unix(), Mailbox: mailbox}
+
+	for i := range msgs {
+		size := int64(len(msgs[i].Raw))
+
+		for _, g := range guids[i] {
+			in.Blobs = append(in.Blobs, blobRef{GUID: g, Size: size, Chunks: u.chunkCount(size)})
+		}
+	}
+
+	return encode(in)
 }
 
 // newImports returns the messages whose UIDs are not taken yet; a UID
@@ -706,13 +772,13 @@ func checkFlags(uid uint32, flags []string) error {
 // say that it is indexed. A run that was killed between the blob writes
 // and the indexing leaves blobs the next run finds and shares, and
 // indexing a message that is indexed already changes nothing.
-func (u *User) prepareImport(msgs []model.ImportMessage) ([]preparedImport, error) {
+func (u *User) prepareImport(msgs []model.ImportMessage, guids [][]string) ([]preparedImport, error) {
 	out := make([]preparedImport, 0, len(msgs))
 
 	var docs []ftsDoc
 
 	for i := range msgs {
-		p, err := u.prepareOne(&msgs[i])
+		p, err := u.prepareOne(&msgs[i], guids[i])
 		if err != nil {
 			u.unprepare(out)
 			return nil, err
@@ -731,9 +797,10 @@ func (u *User) prepareImport(msgs []model.ImportMessage) ([]preparedImport, erro
 	return out, nil
 }
 
-// prepareOne stores one message's blob and builds its entry.
-func (u *User) prepareOne(m *model.ImportMessage) (preparedImport, error) {
-	guid, shared, err := u.importBlob(m)
+// prepareOne stores one message's blob under one of guids and builds its
+// entry.
+func (u *User) prepareOne(m *model.ImportMessage, guids []string) (preparedImport, error) {
+	guid, shared, err := u.importBlob(m, guids)
 	if err != nil {
 		return preparedImport{}, err
 	}
@@ -754,14 +821,18 @@ func (u *User) prepareOne(m *model.ImportMessage) (preparedImport, error) {
 		Envelope: p.Envelope, Routes: p.Routes, References: p.Refs, Preview: p.Preview, HasAttachment: mailmeta.HasAttachment(m.Raw), POP3UIDL: m.POP3UIDL}}, nil
 }
 
-// importBlob stores the blob of m: a source GUID whose blob already
-// exists with the same size is shared (one more reference), otherwise a
-// new blob is written under the source GUID (or a fresh one). The caller
+// importBlob stores the blob of m: a source GUID (guids[0]) whose blob
+// already exists with the same size is shared (one more reference),
+// otherwise a new blob is written under it or, where that cannot be, the
+// next of guids (the step's intent announced them all). The caller
 // indexes the blob in both cases.
-func (u *User) importBlob(m *model.ImportMessage) (guid string, shared bool, err error) {
-	guid = m.GUID
-	if !model.ValidGUID(guid) {
-		guid = newGUID()
+func (u *User) importBlob(m *model.ImportMessage, guids []string) (guid string, shared bool, err error) {
+	next := 0
+	guid = guids[next]
+
+	fallback := func() string {
+		next = min(next+1, len(guids)-1)
+		return guids[next]
 	}
 
 	ok, err := u.blobMatches(guid, int64(len(m.Raw)))
@@ -779,15 +850,15 @@ func (u *User) importBlob(m *model.ImportMessage) (guid string, shared bool, err
 			return "", false, err
 		}
 
-		guid = newGUID() // being deleted: store a copy
+		guid = fallback() // being deleted: store a copy
 	case u.blobExists(guid):
-		guid = newGUID() // same id, different content: do not share
+		guid = fallback() // same id, different content: do not share
 	}
 
 	if _, err := u.writeBlob(guid, m.Raw); err != nil {
 		// A chunk of an interrupted earlier write may occupy the
 		// source id: fall back to a fresh one.
-		guid = newGUID()
+		guid = fallback()
 		if _, err := u.writeBlob(guid, m.Raw); err != nil {
 			return "", false, fmt.Errorf("write blob: %w", err)
 		}

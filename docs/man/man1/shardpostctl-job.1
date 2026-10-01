@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-JOB 1 "2026-10-01" "ShardPost 0.36.1" "ShardPost Manual"
+.TH SHARDPOSTCTL-JOB 1 "2026-10-01" "ShardPost 0.42.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-job \- plan, apply and watch maintenance jobs
 .SH SYNOPSIS
@@ -131,12 +131,13 @@ account once, one after another. An account an import or another job
 holds is tried again at the end, up to three times a lease period
 apart, and then counted as failed. A scrub with
 .B \-skip-idle
-does not look at the leftovers only the per-account listings find
-(unreferenced JMAP upload blobs, marks of deleted public folders) for
-the accounts it skips; they wait until the account is scrubbed again, at
+does not look at the private \eSeen marks of deleted public folders, nor
+at debris that servers before 0.42.0 left without an intent, for the
+accounts it skips; they wait until the account is scrubbed again, at
 most
 .I scrub.interval_days
-later. A cancel stops
+later. An account with an open intent (what a crash left) is never
+skipped. A cancel stops
 the batch between two accounts. A server that takes the batch over
 continues after the last page done.
 .PP
@@ -206,7 +207,30 @@ Checks and repairs.
 selects what may be repaired:
 .IR deliveries ", " moves ", " retired ", " uncovered ", " entries ", "
 .IR refs ", " orphans ", " unknown ", " quota .
-Without the flag every class is repaired.
+Without the flag every class is repaired. Where the scrub looks for what
+nothing points at is
+.I scrub.orphan_source
+in the servers' configuration:
+.B listing
+lists the account's namespace in both pools,
+.B shadow
+(the default) does that and also works out what the intents name,
+reporting the differences in the field
+.B Shadow
+of the result,
+.B intents
+reads the intents only. With
+.BR intents ,
+.I orphans
+covers the blobs of open intents and
+.I unknown
+the objects of abandoned creations and unfinished deletions, the marks
+of deleted public folders and the METADATA of deleted mailboxes. The
+result counts, besides the findings, the intents older than
+.I scrub.intent_grace_seconds
+.RB ( IntentsOpen )
+and those removed
+.RB ( IntentsDropped ).
 .TP
 .B quota_recalc
 Role

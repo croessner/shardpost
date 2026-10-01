@@ -222,6 +222,10 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		LearningIndex:       model.KVIndexMode(settings.IMAPSieve.Learning.Index),
 		LearningQueueShards: settings.IMAPSieve.Learning.QueueShards,
 		Limits:              accountLimits(settings.Limits),
+		UploadTTL:           time.Duration(settings.JMAP.UploadTTLSeconds) * time.Second,
+		OrphanSource:        model.OrphanSource(settings.Scrub.OrphanSource),
+		IntentGrace:         time.Duration(settings.Scrub.IntentGraceSeconds) * time.Second,
+		PurgeListing:        settings.Purge.Listing,
 	}
 }
 
@@ -471,6 +475,8 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	}
 	defer stopWorker()
 
+	defer startUploadExpiry(ctx, store)()
+
 	srv := newServers(log, settings, store, authn, tlsCfg, imapSieve, programs, sieveCfg)
 	logRelay(log, settings)
 
@@ -498,6 +504,29 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	log.Info("shutdown complete")
 
 	return nil
+}
+
+// uploadExpiryPoll is how often the upload expiry worker looks for
+// expired JMAP uploads, and how often the other servers try its lease.
+const uploadExpiryPoll = time.Minute
+
+// startUploadExpiry runs the upload expiry worker (one server of the
+// cluster holds its lease at a time) until the returned function is
+// called.
+func startUploadExpiry(ctx context.Context, store *cephstore.Store) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		store.RunUploadExpiry(ctx, uploadExpiryPoll)
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // shutdown drains the listeners, then the quota programs, then the

@@ -91,9 +91,13 @@ work; `GOMEMLIMIT` does not replace this application-level budget.
 
 Durable mail data, change journals, scripts and learning jobs live in RADOS.
 Changes to individual objects use compare-and-swap; across several objects,
-intents, pending markers and repair paths do the work. POP3 maildrop and
-learning operations additionally use renewable leases. There is no general
-promise of a transactional database spanning all objects.
+intents, pending markers and repair paths do the work. Every write that can
+leave an object nothing points at records an intent first, so the scrub
+finds crash debris without listing the pools
+([intents](docs/architecture/storage.md#intents-debris-that-a-scrub-finds-without-listing)).
+POP3 maildrop and learning operations additionally use renewable leases.
+There is no general promise of a transactional database spanning all
+objects.
 
 Watch/notify wakes IMAP sessions after changes made by other pods. Notifications
 are hints; header, MODSEQ and the change journal remain the basis for

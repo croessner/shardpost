@@ -1411,14 +1411,19 @@ endpoint serves any of them, with HTTP ranges. Blobs live in the
 account's own namespace of the store, so a blob id of another account is
 not found rather than refused, whoever knows it.
 
-**Lifetime.** An uploaded blob that nothing references is debris: the
-scrubber removes it once two consecutive runs have seen it
-unreferenced, which is the expiry RFC 8620 6.1 allows. Two consequences
-an operator should know: the expiry is the scrub cadence, not a time, so
-a deployment that does not schedule `shardpost scrub` never collects
-them; and an upload is only refused when the account is already over its
-quota, because an unreferenced blob is counted nowhere until something
-references it.
+**Lifetime.** An upload lives `jmap.upload_ttl_seconds` (86400, at least
+3600 as RFC 8620 6.1 asks): it is recorded in a due queue and as an
+intent of the account, and the upload expiry worker (one server of the
+cluster) deletes it once that time is up; the scrub does the same for an
+upload the worker did not get to (see
+[storage](architecture/storage.md#intents-debris-that-a-scrub-finds-without-listing)).
+With `scrub.orphan_source` `listing` or `shadow` the scrub's listing can
+also take an upload for an orphan blob and remove it after two runs,
+which may be earlier. A message built from an upload never shares its
+blob (`Email/import` and `Email/set` store a copy), so expiring the
+upload takes nothing from a message. An upload is only refused when the
+account is already over its quota, because an unreferenced blob is
+counted nowhere until something references it.
 
 **The blob methods** (RFC 9404, `urn:ietf:params:jmap:blob`) are always
 offered. The capability is empty in the session; the account's says
@@ -1829,6 +1834,7 @@ jmap:
   shard_attribute: mailShard
   shard: shardpost
   max_size_upload: 52428800
+  upload_ttl_seconds: 86400      # how long an upload is kept; 3600..2592000
   max_size_request: 10485760
   max_concurrent_upload: 4
   max_concurrent_requests: 8     # advertised as maxConcurrentRequests

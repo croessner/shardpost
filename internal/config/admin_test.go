@@ -74,6 +74,35 @@ func TestScrubAndBatchDefaults(t *testing.T) {
 	}
 }
 
+// TestScrubIntents: the orphan source starts in shadow mode, the purge
+// with the listing; both switch, and the bounds hold.
+func TestScrubIntents(t *testing.T) {
+	c, err := Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil || c.Scrub.OrphanSource != "shadow" || c.Scrub.IntentGraceSeconds != 3600 || c.Scrub.SweepSpillShards != 256 ||
+		!c.Purge.Listing || c.JMAP.UploadTTLSeconds != 86400 {
+		t.Fatalf("defaults: %+v %+v %d %v", c.Scrub, c.Purge, c.JMAP.UploadTTLSeconds, err)
+	}
+
+	c, err = Load(configFile(t, "scrub:\n  orphan_source: intents\n  intent_grace_seconds: 7200\npurge:\n  listing: false\n"))
+	if err != nil || c.Scrub.OrphanSource != "intents" || c.Scrub.IntentGraceSeconds != 7200 || c.Purge.Listing {
+		t.Fatalf("switched: %+v %+v %v", c.Scrub, c.Purge, err)
+	}
+
+	refused(t, "scrub:\n  orphan_source: none\n", "scrub:\n  intent_grace_seconds: 60\n",
+		"scrub:\n  sweep_spill_shards: 0\n", "jmap:\n  upload_ttl_seconds: 600\n")
+}
+
+// refused fails for every configuration that loads.
+func refused(t *testing.T, bodies ...string) {
+	t.Helper()
+
+	for _, bad := range bodies {
+		if _, err := Load(configFile(t, bad)); err == nil {
+			t.Errorf("accepted: %q", bad)
+		}
+	}
+}
+
 func TestAdminKVIndex(t *testing.T) {
 	c, err := Load(configFile(t, "logging:\n  level: info\n"))
 	if err != nil || c.Admin.KVIndex != "read" || c.Admin.KVQueueShards != 4 || c.Jobs.ExpirySeconds != 60 {
