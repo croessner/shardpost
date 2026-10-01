@@ -15,27 +15,20 @@ import (
 
 // --- SORT (RFC 5256) --------------------------------------------------------
 
-// cmdSort: SORT (criteria) charset search-keys. Everything it needs comes
-// from the cached envelope in the index record, so no blob is read.
+// cmdSort: SORT [RETURN (options)] (criteria) charset search-keys.
+// Everything it needs comes from the cached envelope in the index record,
+// so no blob is read. With RETURN the result is an ESEARCH response in
+// sort order (ESORT, RFC 5267 3); without it the plain SORT response, in
+// an IMAP4rev2 session too (RFC 9051 does not change RFC 5256).
 func (c *conn) cmdSort(tag string, uid bool) error {
-	t, err := c.r.next()
+	ret, err := c.parseSortReturn()
 	if err != nil {
 		return err
 	}
 
-	if t.kind != tokList || len(t.list) == 0 {
-		return fmt.Errorf("%w: SORT needs a criteria list", errSyntax)
-	}
-
-	var keys []string
-
-	for _, k := range t.list {
-		key := strings.ToUpper(k.str)
-		if !sortKeys[key] {
-			return fmt.Errorf("%w: unknown sort key %s", errSyntax, k.str)
-		}
-
-		keys = append(keys, key)
+	keys, err := c.parseSortKeys()
+	if err != nil {
+		return err
 	}
 
 	cr, ok, err := c.parseCharsetSearch(tag)
@@ -48,6 +41,68 @@ func (c *conn) cmdSort(tag string, uid bool) error {
 		return c.searchFailed(tag, err)
 	}
 
+	seqs, metas = sortMatches(keys, seqs, metas)
+	nums, highest := searchNums(seqs, metas, uid)
+
+	if ret.save {
+		c.searchRes = savedResult(ret, metas)
+	}
+
+	if ret.esearch {
+		c.writeESearch(tag, ret, cr, nums, metas, highest, uid)
+		c.ok(tag, "", "SORT completed")
+
+		return nil
+	}
+
+	line := kwSort
+	for _, n := range nums {
+		line += fmt.Sprintf(" %d", n)
+	}
+
+	// RFC 7162 3.1.9: a SORT with a MODSEQ key carries the highest modseq.
+	if hasModseq(cr) && len(nums) > 0 {
+		line += fmt.Sprintf(" (MODSEQ %d)", highest)
+	}
+
+	c.w.untagged("%s", line)
+	c.ok(tag, "", "SORT completed")
+
+	return nil
+}
+
+// parseSortReturn reads the optional RETURN (options) that ESORT puts
+// right after SORT (RFC 5267 3); without it the result is a plain SORT.
+func (c *conn) parseSortReturn() (searchReturn, error) {
+	var ret searchReturn
+
+	c.r.skipSpaces()
+
+	if c.r.peek() == '(' {
+		return ret, nil
+	}
+
+	kw, err := c.r.atom()
+	if err != nil {
+		return ret, err
+	}
+
+	if !strings.EqualFold(kw, "RETURN") {
+		return ret, fmt.Errorf("%w: SORT needs a criteria list", errSyntax)
+	}
+
+	if err := c.parseSearchReturn(&ret); err != nil {
+		return ret, err
+	}
+
+	ret.sorted = true
+
+	return ret, nil
+}
+
+// sortMatches orders the matches of a search by the sort keys; equal
+// messages keep their mailbox order.
+func sortMatches(keys []string, seqs []int, metas []model.Meta) ([]int, []model.Meta) {
 	idx := make([]int, len(metas))
 	for i := range idx {
 		idx[i] = i
@@ -55,20 +110,40 @@ func (c *conn) cmdSort(tag string, uid bool) error {
 
 	sort.SliceStable(idx, func(a, b int) bool { return sortLess(keys, &metas[idx[a]], &metas[idx[b]]) })
 
-	line := kwSort
+	sortedSeqs := make([]int, len(idx))
+	sortedMetas := make([]model.Meta, len(idx))
 
-	for _, i := range idx {
-		if uid {
-			line += fmt.Sprintf(" %d", metas[i].UID)
-		} else {
-			line += fmt.Sprintf(" %d", seqs[i])
-		}
+	for n, i := range idx {
+		sortedSeqs[n], sortedMetas[n] = seqs[i], metas[i]
 	}
 
-	c.w.untagged("%s", line)
-	c.ok(tag, "", "SORT completed")
+	return sortedSeqs, sortedMetas
+}
 
-	return nil
+// parseSortKeys reads the sort criteria list of SORT; an unknown key is
+// BAD.
+func (c *conn) parseSortKeys() ([]string, error) {
+	t, err := c.r.next()
+	if err != nil {
+		return nil, err
+	}
+
+	if t.kind != tokList || len(t.list) == 0 {
+		return nil, fmt.Errorf("%w: SORT needs a criteria list", errSyntax)
+	}
+
+	keys := make([]string, 0, len(t.list))
+
+	for _, k := range t.list {
+		key := strings.ToUpper(k.str)
+		if !sortKeys[key] {
+			return nil, fmt.Errorf("%w: unknown sort key %s", errSyntax, k.str)
+		}
+
+		keys = append(keys, key)
+	}
+
+	return keys, nil
 }
 
 // sortKeys are the SORT criteria (RFC 5256, RFC 5957); any other is BAD.
