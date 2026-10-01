@@ -728,8 +728,8 @@ func TestMIMEEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(root.children) != 1 || string(root.children[0].body) != "just text" {
-		t.Errorf("a part without an empty line is %#v, want its line as body", root.children)
+	if len(root.Children) != 1 || string(root.Children[0].Body) != "just text" {
+		t.Errorf("a part without an empty line is %#v, want its line as body", root.Children)
 	}
 
 	noBoundary, err := parseMessage([]byte("Content-Type: multipart/mixed\r\n\r\ncontent\r\n"))
@@ -737,7 +737,7 @@ func TestMIMEEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if noBoundary.mediaType != mediaOctetStream || noBoundary.children != nil || len(noBoundary.body) == 0 {
+	if noBoundary.MediaType != mediaOctetStream || noBoundary.Children != nil || len(noBoundary.Body) == 0 {
 		t.Errorf("a multipart without a boundary is %#v, want its content kept as one part", noBoundary)
 	}
 }

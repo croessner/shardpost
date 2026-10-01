@@ -153,7 +153,12 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		}
 		defer u.Close()
 
-		others := &views{store: s.o.Store}
+		// The store hangs its operations below the request's span, and
+		// below a method call's once one runs (callSpan).
+		tracedUser(r.Context(), res.Account)
+		model.UseRequest(r.Context(), u)
+
+		others := &views{store: s.o.Store, ctx: r.Context()}
 		defer others.close()
 
 		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r),

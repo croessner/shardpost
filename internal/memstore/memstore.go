@@ -527,7 +527,7 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 	}
 
 	env, refs, preview := mailmeta.Extract(raw)
-	m := model.Meta{UID: b.uidNext, GUID: guid, Size: int64(len(raw)), Chunks: 1, Flags: flags, InternalDate: when, SaveDate: time.Now(), ModSeq: b.bump(), Envelope: env, References: refs, Preview: preview}
+	m := model.Meta{UID: b.uidNext, GUID: guid, Size: int64(len(raw)), Chunks: 1, Flags: flags, InternalDate: when, SaveDate: time.Now(), ModSeq: b.bump(), Envelope: env, References: refs, Preview: preview, HasAttachment: mailmeta.HasAttachment(raw)}
 	b.changes = append(b.changes, model.Change{ModSeq: m.ModSeq, UIDs: []uint32{m.UID}})
 	b.uidNext++
 

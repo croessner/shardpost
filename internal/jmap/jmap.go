@@ -76,6 +76,14 @@ type Limits struct {
 	// before the base64 or JSON encoding. A client that wants more asks
 	// for a range, or downloads the blob.
 	MaxSizeBlobGet int64
+	// SnippetReadBytes bounds how much of a message SearchSnippet/get
+	// reads to find a match in the body: the front of the message, where
+	// the text parts are. A match beyond it gives no preview snippet.
+	SnippetReadBytes int64
+	// MaxAttachmentReads bounds the messages one Email/query reads to
+	// answer hasAttachment for an index record that does not carry it
+	// (stored before the record had the field).
+	MaxAttachmentReads int
 }
 
 // DefaultLimits are the values a configuration that says nothing gets.
@@ -91,6 +99,8 @@ var DefaultLimits = Limits{
 	MaxObjectsInSet:       500,
 	MaxDataSources:        minDataSources,
 	MaxSizeBlobGet:        10 << 20,
+	SnippetReadBytes:      256 << 10,
+	MaxAttachmentReads:    1000,
 }
 
 // minDataSources is the fewest data sources per Blob/upload creation RFC
@@ -295,10 +305,12 @@ func New(o Options) *Server {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	s.mux.HandleFunc("GET "+PathSession, s.authenticated(s.handleSession))
-	s.mux.HandleFunc("POST "+PathAPI, s.authenticated(s.handleAPI))
-	s.mux.HandleFunc("POST "+PathUpload+"{accountId}/", s.authenticated(s.handleUpload))
-	s.mux.HandleFunc("GET "+PathDownload+"{accountId}/{blobId}/{name}", s.authenticated(s.handleDownload))
+	s.mux.HandleFunc("GET "+PathSession, traced("jmap.session", s.authenticated(s.handleSession)))
+	s.mux.HandleFunc("POST "+PathAPI, traced("jmap.api", s.authenticated(s.handleAPI)))
+	s.mux.HandleFunc("POST "+PathUpload+"{accountId}/", traced("jmap.upload", s.authenticated(s.handleUpload)))
+	s.mux.HandleFunc("GET "+PathDownload+"{accountId}/{blobId}/{name}",
+		traced("jmap.download", s.authenticated(s.handleDownload)))
+	// Not traced: an event source stays open for hours (see tracing.go).
 	s.mux.HandleFunc("GET "+PathEvents, s.authenticated(s.handleEvents))
 
 	return s
@@ -334,6 +346,14 @@ func withDefaults(l Limits) Limits {
 
 	if l.MaxObjectsInSet <= 0 {
 		l.MaxObjectsInSet = d.MaxObjectsInSet
+	}
+
+	if l.SnippetReadBytes <= 0 {
+		l.SnippetReadBytes = d.SnippetReadBytes
+	}
+
+	if l.MaxAttachmentReads <= 0 {
+		l.MaxAttachmentReads = d.MaxAttachmentReads
 	}
 
 	return blobDefaults(l)

@@ -115,6 +115,7 @@ var methods = map[string]method{
 	"Email/copy":                   {capability: CapMail, run: emailCopy, shared: true},
 	"Email/import":                 {capability: CapMail, run: emailImport, shared: true},
 	"Email/parse":                  {capability: CapMail, run: emailParse, shared: true},
+	"SearchSnippet/get":            {capability: CapMail, run: searchSnippetGet, shared: true},
 	"Thread/get":                   {capability: CapMail, run: threadGet, shared: true},
 	"Thread/changes":               {capability: CapMail, run: threadChanges, shared: true},
 	"Quota/get":                    {capability: CapQuota, run: quotaGet},
@@ -279,7 +280,8 @@ func (s *Server) runCalls(ctx context.Context, sess *session, req *apiRequest) [
 	return out
 }
 
-// runCall executes one method call against the responses so far.
+// runCall executes one method call against the responses so far, in a
+// span of its own.
 func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bool,
 	call invocation, done []invocation,
 ) []invocation {
@@ -288,20 +290,11 @@ func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bo
 		return []invocation{errorResponse(call.CallID, errUnknownMethod, "")}
 	}
 
-	args, merr := resolveReferences(call.Args, done)
-	if merr != nil {
-		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
-	}
+	cctx, span := startCall(ctx, call.Name)
 
-	callSess := sess
+	res, merr := s.execute(cctx, sess, m, call, done, span)
+	span.end(merr)
 
-	if m.shared {
-		if callSess, merr = s.callSession(sess, args); merr != nil {
-			return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
-		}
-	}
-
-	res, merr := m.run(ctx, callSess, args)
 	if merr != nil {
 		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
 	}
@@ -319,6 +312,29 @@ func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bo
 	}
 
 	return out
+}
+
+// execute resolves the arguments of a method call, opens the account it
+// names and runs it.
+func (s *Server) execute(ctx context.Context, sess *session, m method, call invocation, done []invocation,
+	span *callTrace,
+) (any, *methodError) {
+	args, merr := resolveReferences(call.Args, done)
+	if merr != nil {
+		return nil, merr
+	}
+
+	callSess := sess
+
+	if m.shared {
+		if callSess, merr = s.callSession(sess, args); merr != nil {
+			return nil, merr
+		}
+	}
+
+	span.attach(ctx, callSess)
+
+	return m.run(ctx, callSess, args)
 }
 
 // followUp is implemented by a method result that carries the responses

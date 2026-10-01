@@ -334,3 +334,16 @@ YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#mai
 | `admin.search_scan_limit` | 50000 | a search request examines at most this many messages (role `content`); a longer search resumes with its cursor |
 
 YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
+
+### JMAP search bounds (`jmap.snippet_read_bytes`, `jmap.max_attachment_reads`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `jmap.snippet_read_bytes` | `JMAP_SNIPPET_READ_BYTES` | 262144 | how much of each message, from its front, `SearchSnippet/get` reads to find a match in the body; a match beyond it gives no preview |
+| `jmap.max_attachment_reads` | `JMAP_MAX_ATTACHMENT_READS` | 1000 | messages one `Email/query` may read to answer `hasAttachment` for a message stored by an earlier version, whose index record does not carry it; a query past the bound answers `serverUnavailable` and gets further on the next attempt, because what it read is remembered |
+
+`0` takes the default. A `SearchSnippet/get` reads at most
+`jmap.max_objects_in_get` messages, so one call reads at most that many
+times `snippet_read_bytes`. See [JMAP: Search snippets](jmap.md#search-snippets)
+and [JMAP: hasAttachment](jmap.md#hasattachment). The other `jmap.*` keys
+are described in [JMAP: Configuration](jmap.md#configuration).

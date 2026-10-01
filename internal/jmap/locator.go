@@ -28,6 +28,8 @@ import (
 //	"h:seq"        the account log sequence folded so far
 //	"e:<guid>"     emailRec: the placements of the message, its thread
 //	"t:<thread>"   threadRec: the messages of a conversation
+//	"a:<guid>"     hasAttachment of a message whose index record lacks it
+//	               (see attachment.go)
 const (
 	locSpace     = "jmaploc"
 	locWatermark = "h:seq"

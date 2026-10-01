@@ -300,6 +300,8 @@ func jmapLimits(c config.JMAP) jmap.Limits {
 		MaxSizeBlobSet:        c.MaxSizeBlobSet,
 		MaxDataSources:        int(c.MaxDataSources),
 		MaxSizeBlobGet:        c.MaxSizeBlobGet,
+		SnippetReadBytes:      c.SnippetReadBytes,
+		MaxAttachmentReads:    int(c.MaxAttachmentReads),
 	}
 }
 

@@ -736,7 +736,7 @@ func (u *User) prepareOne(m *model.ImportMessage) (preparedImport, error) {
 
 	return preparedImport{shared: shared, meta: Meta{UID: m.UID, GUID: guid, Size: int64(len(m.Raw)), Chunks: u.chunkCount(int64(len(m.Raw))),
 		Flags: append([]string(nil), m.Flags...), InternalDate: idate.UTC(), SaveDate: sdate.UTC(), ModSeq: m.ModSeq,
-		Envelope: env, References: refs, Preview: preview, POP3UIDL: m.POP3UIDL}}, nil
+		Envelope: env, References: refs, Preview: preview, HasAttachment: mailmeta.HasAttachment(m.Raw), POP3UIDL: m.POP3UIDL}}, nil
 }
 
 // importBlob stores the blob of m: a source GUID whose blob already

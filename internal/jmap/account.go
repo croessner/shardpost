@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -663,6 +664,9 @@ func (a *account) setSubscribed(mb *model.Mailbox, on bool) error {
 type views struct {
 	store Store
 	open  map[string]model.User
+	// ctx is the context the views' store operations are traced under
+	// until a method call points them at its own; nil traces nothing.
+	ctx context.Context
 }
 
 // get opens a namespace once per request.
@@ -678,6 +682,10 @@ func (v *views) get(name string) (model.User, error) {
 
 	if v.open == nil {
 		v.open = map[string]model.User{}
+	}
+
+	if v.ctx != nil {
+		model.UseRequest(v.ctx, u)
 	}
 
 	v.open[name] = u

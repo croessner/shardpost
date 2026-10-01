@@ -130,9 +130,12 @@ func (q *emailQuery) compile(f *emailFilter) (*cnode, *methodError) {
 	}
 
 	if f.HasAttachment != nil {
-		// Answering it means parsing every candidate message; the index
-		// record does not carry it yet. Refused rather than made slow.
-		return nil, &methodError{Type: errUnsupportedFilter, Description: "hasAttachment is not supported in a query"}
+		// Last among the conditions of the node, so that a message the
+		// others exclude never needs its attachments looked at.
+		want := *f.HasAttachment
+		q.needAttach = true
+
+		n.preds = append(n.preds, func(it *emailItem) bool { return q.hasAttachment(it) == want })
 	}
 
 	return n, nil

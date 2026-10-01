@@ -1921,7 +1921,8 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 
 	env, refs, preview := mailmeta.Extract(raw)
 	m := Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks, Flags: flags,
-		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: env, References: refs, Preview: preview}
+		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: env, References: refs, Preview: preview,
+		HasAttachment: mailmeta.HasAttachment(raw)}
 
 	meta, err := u.linkLogged(mb, m)
 	if err != nil {

@@ -42,6 +42,16 @@ type JMAP struct {
 	MaxSizeBlobSet int64 `mapstructure:"max_size_blob_set" env:"JMAP_MAX_SIZE_BLOB_SET" validate:"gte=0"`
 	MaxDataSources int64 `mapstructure:"max_data_sources" env:"JMAP_MAX_DATA_SOURCES" validate:"gte=0"`
 	MaxSizeBlobGet int64 `mapstructure:"max_size_blob_get" env:"JMAP_MAX_SIZE_BLOB_GET" validate:"gte=0"`
+	// SnippetReadBytes bounds how much of each message SearchSnippet/get
+	// reads to find a match in the body (its front, where the text parts
+	// are); 0 takes 256 KiB. A match beyond it gives no preview snippet.
+	SnippetReadBytes int64 `mapstructure:"snippet_read_bytes" env:"JMAP_SNIPPET_READ_BYTES" validate:"gte=0"`
+	// MaxAttachmentReads bounds the messages one Email/query may read to
+	// answer hasAttachment for messages whose index record does not carry
+	// it (stored before the record had the field); 0 takes 1000. What is
+	// read is remembered, so a query that reaches the bound answers
+	// serverUnavailable and gets further on the next attempt.
+	MaxAttachmentReads int64 `mapstructure:"max_attachment_reads" env:"JMAP_MAX_ATTACHMENT_READS" validate:"gte=0"`
 	// ShardAttribute and Shard restrict JMAP to the accounts the
 	// authentication backend assigns to this shard (for Nauthilus with the
 	// Director, mailShard). A proxy in front that does not route JMAP per

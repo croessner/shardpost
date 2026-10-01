@@ -1,4 +1,4 @@
-package mailmeta
+package mimepart
 
 import (
 	"fmt"

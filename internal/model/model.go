@@ -122,6 +122,10 @@ type Meta struct {
 	Envelope     *imap.Envelope `json:"env,omitempty"`
 	References   []string       `json:"refs,omitempty"` // Message-IDs from References/In-Reply-To
 	Preview      string         `json:"preview,omitempty"`
+	// HasAttachment is JMAP's hasAttachment (RFC 8621 4.1.4), computed
+	// when the message is stored (mailmeta.HasAttachment). Nil in a
+	// record written before the field existed: unknown, not false.
+	HasAttachment *bool `json:"att,omitempty"`
 	// POP3UIDL is the POP3 unique-id kept from an imported source; ""
 	// means the GUID (see UIDL).
 	POP3UIDL string `json:"pop3uidl,omitempty"`

@@ -55,22 +55,3 @@ func readHeader(blobs model.Blobs, guid string, size int64) (textproto.Header, e
 		want *= 4
 	}
 }
-
-// headerEnd is the offset just past the empty line that ends a header,
-// or -1 when raw does not contain it yet. Both CRLF and bare LF occur,
-// and the first empty line is the end whichever it is: a header in bare
-// LF followed by a body that contains a CRLF blank line ends at the LF
-// one.
-func headerEnd(raw []byte) int {
-	crlf := bytes.Index(raw, []byte("\r\n\r\n"))
-	lf := bytes.Index(raw, []byte("\n\n"))
-
-	switch {
-	case crlf >= 0 && (lf < 0 || crlf < lf):
-		return crlf + 4
-	case lf >= 0:
-		return lf + 2
-	}
-
-	return -1
-}

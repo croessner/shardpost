@@ -1,7 +1,6 @@
 package jmap
 
 import (
-	"mime"
 	"strings"
 	"unicode/utf8"
 
@@ -90,6 +89,15 @@ func bodyProperties(sess *session, m *model.Meta, raw []byte, props []string, re
 	need := false
 
 	for _, p := range props {
+		// hasAttachment is kept in the index record of every message
+		// stored since the record has the field; only an older record
+		// needs the message.
+		if p == propHasAttachment && m.HasAttachment != nil {
+			out[p] = *m.HasAttachment
+
+			continue
+		}
+
 		need = need || contentProperties[p]
 	}
 
@@ -181,13 +189,13 @@ func (r *rendering) part(p *mimePart, props []string) map[string]any {
 
 // partProperty renders one property of a body part.
 func (r *rendering) partProperty(p *mimePart, prop string, props []string) (any, bool) {
-	leaf := p.children == nil
+	leaf := p.Children == nil
 
 	switch prop {
 	case partPartID:
-		return ifLeaf(leaf, p.path), true
+		return ifLeaf(leaf, p.Path), true
 	case partBlobID:
-		return ifLeaf(leaf, partBlob(r.guid, p.path)), true
+		return ifLeaf(leaf, partBlob(r.guid, p.Path)), true
 	case partSize:
 		if !leaf {
 			return 0, true
@@ -195,13 +203,13 @@ func (r *rendering) partProperty(p *mimePart, prop string, props []string) (any,
 
 		return len(r.body(p)), true
 	case partHeaders:
-		return headerList(p.header, true), true
+		return headerList(p.Header, true), true
 	case partSubParts:
 		if leaf {
 			return nil, true
 		}
 
-		return r.parts(p.children, props), true
+		return r.parts(p.Children, props), true
 	}
 
 	if v, ok := partHeaderProperty(p, prop); ok {
@@ -209,7 +217,7 @@ func (r *rendering) partProperty(p *mimePart, prop string, props []string) (any,
 	}
 
 	if hp, ok := parseHeaderProperty(prop); ok {
-		return hp.value(p.header, true), true
+		return hp.value(p.Header, true), true
 	}
 
 	return nil, false
@@ -222,19 +230,19 @@ func partHeaderProperty(p *mimePart, prop string) (any, bool) {
 	case partName:
 		return nilIfEmpty(partFileName(p)), true
 	case partType:
-		return p.mediaType, true
+		return p.MediaType, true
 	case partCharset:
 		return partCharsetOf(p), true
 	case partDisposition:
 		return nilIfEmpty(dispositionOf(p)), true
 	case partCID:
-		cid := strings.Trim(strings.TrimSpace(p.header.Get("Content-Id")), "<>")
+		cid := strings.Trim(strings.TrimSpace(p.Header.Get("Content-Id")), "<>")
 
 		return nilIfEmpty(cid), true
 	case partLanguage:
 		return languagesOf(p), true
 	case partLocation:
-		return nilIfEmpty(strings.TrimSpace(p.header.Get("Content-Location"))), true
+		return nilIfEmpty(strings.TrimSpace(p.Header.Get("Content-Location"))), true
 	}
 
 	return nil, false
@@ -255,69 +263,25 @@ func (r *rendering) body(p *mimePart) []byte {
 		return b
 	}
 
-	b, _ := p.decodedBody()
+	b, _ := p.Decoded()
 	r.decoded[p] = b
 
 	return b
-}
-
-// partFileName is the file name of a part: the filename parameter of its
-// Content-Disposition, or the name parameter of its Content-Type (RFC
-// 2231 continuations are joined by the MIME parser, RFC 2047 words are
-// decoded here).
-func partFileName(p *mimePart) string {
-	name := ""
-
-	if _, params, err := parseDisposition(p); err == nil {
-		name = params["filename"]
-	}
-
-	if name == "" {
-		name = p.params[partName]
-	}
-
-	if dec, err := wordDecoder.DecodeHeader(name); err == nil {
-		name = dec
-	}
-
-	return name
-}
-
-// dispositionOf is the lower-cased disposition type of a part.
-func dispositionOf(p *mimePart) string {
-	d, _, err := parseDisposition(p)
-	if err != nil {
-		return ""
-	}
-
-	return d
-}
-
-// parseDisposition parses a part's Content-Disposition.
-func parseDisposition(p *mimePart) (string, map[string]string, error) {
-	v := p.header.Get(fieldDisposition)
-	if v == "" {
-		return "", map[string]string{}, nil
-	}
-
-	d, params, err := parseMediaTypeLoose(v)
-
-	return strings.ToLower(d), params, err
 }
 
 // partCharsetOf is the charset of a part as RFC 8621 4.1.4 defines it:
 // the parameter of a text part, us-ascii for a text part without one or
 // a part without Content-Type, and null for anything else.
 func partCharsetOf(p *mimePart) any {
-	if !strings.HasPrefix(p.mediaType, "text/") {
-		if p.header.Get(fieldContentType) == "" {
+	if !strings.HasPrefix(p.MediaType, "text/") {
+		if p.Header.Get(fieldContentType) == "" {
 			return charsetASCII
 		}
 
 		return nil
 	}
 
-	if cs := p.params[partCharset]; cs != "" {
+	if cs := p.Params[partCharset]; cs != "" {
 		return cs
 	}
 
@@ -326,7 +290,7 @@ func partCharsetOf(p *mimePart) any {
 
 // languagesOf is the Content-Language of a part as a list of tags.
 func languagesOf(p *mimePart) any {
-	v := p.header.Get("Content-Language")
+	v := p.Header.Get("Content-Language")
 	if strings.TrimSpace(v) == "" {
 		return nil
 	}
@@ -340,18 +304,6 @@ func languagesOf(p *mimePart) any {
 	}
 
 	return out
-}
-
-// hasAttachment is what RFC 8621 4.1.4 suggests: an attachment that is
-// not marked inline is one a client should offer for download.
-func hasAttachment(attached []*mimePart) bool {
-	for _, p := range attached {
-		if dispositionOf(p) != dispInline {
-			return true
-		}
-	}
-
-	return false
 }
 
 // bodyValue is a JMAP EmailBodyValue (RFC 8621 4.1.4).
@@ -368,8 +320,8 @@ func (r *rendering) values(req *emailGetRequest) map[string]bodyValue {
 
 	add := func(list []*mimePart) {
 		for _, p := range list {
-			if p.children == nil && strings.HasPrefix(p.mediaType, "text/") {
-				out[p.path] = r.value(p, req.MaxBodyValueBytes)
+			if p.Children == nil && strings.HasPrefix(p.MediaType, "text/") {
+				out[p.Path] = r.value(p, req.MaxBodyValueBytes)
 			}
 		}
 	}
@@ -393,8 +345,8 @@ func (r *rendering) values(req *emailGetRequest) map[string]bodyValue {
 // value decodes one text part to UTF-8 and cuts it to the requested
 // size, on a character boundary.
 func (r *rendering) value(p *mimePart, limit uint64) bodyValue {
-	raw, decodedOK := p.decodedBody()
-	text, charsetOK := toUTF8(raw, p.params[partCharset])
+	raw, decodedOK := p.Decoded()
+	text, charsetOK := toUTF8(raw, p.Params[partCharset])
 
 	v := bodyValue{Value: text, IsEncodingProblem: !decodedOK || !charsetOK}
 
@@ -436,20 +388,6 @@ func toUTF8(b []byte, charset string) (string, bool) {
 	return string(out), true
 }
 
-// leaves are the parts of a message that are not multiparts, in order.
-func leaves(p *mimePart) []*mimePart {
-	if p.children == nil {
-		return []*mimePart{p}
-	}
-
-	var out []*mimePart
-	for _, c := range p.children {
-		out = append(out, leaves(c)...)
-	}
-
-	return out
-}
-
 // partBlob is the blob id of a body part: the message's GUID and the
 // section number, with the dots of the number replaced, because a JMAP
 // id is limited to letters, digits, "-" and "_" (RFC 8620 1.2). A part of
@@ -468,144 +406,4 @@ func parsePartBlob(id string) (guid, path string, ok bool) {
 	}
 
 	return guid, strings.ReplaceAll(rest, "-", "."), true
-}
-
-// flatten derives textBody, htmlBody and attachments from the part tree,
-// with the algorithm RFC 8621 4.1.4 gives. It is ported as written,
-// including the one thing that is easy to get wrong in a port: the
-// reference algorithm stops collecting into a list by setting its own
-// variable to null, which affects the rest of that call and the calls it
-// makes, but not its caller. A nil pointer here is that null.
-func flatten(root *mimePart) (text, html, attached []*mimePart) {
-	var t, h, a []*mimePart
-
-	walkStructure([]*mimePart{root}, "mixed", false, &h, &t, &a)
-
-	return t, h, a
-}
-
-// walkStructure is parseStructure of RFC 8621 4.1.4.
-func walkStructure(parts []*mimePart, multipartType string, inAlternative bool, htmlBody, textBody, attachments *[]*mimePart) {
-	textLength, htmlLength := sliceLen(textBody), sliceLen(htmlBody)
-
-	for i, part := range parts {
-		switch {
-		case strings.HasPrefix(part.mediaType, "multipart/"):
-			sub := strings.TrimPrefix(part.mediaType, "multipart/")
-			walkStructure(part.children, sub, inAlternative || sub == subAlternative, htmlBody, textBody, attachments)
-		case !isInlinePart(part, i, multipartType):
-			push(attachments, part)
-		case multipartType == subAlternative:
-			placeAlternative(part, htmlBody, textBody, attachments)
-		default:
-			htmlBody, textBody = placeInline(part, inAlternative, htmlBody, textBody, attachments)
-		}
-	}
-
-	if multipartType == subAlternative && textBody != nil && htmlBody != nil {
-		balanceAlternative(textBody, htmlBody, textLength, htmlLength)
-	}
-}
-
-// placeInline puts an inline part outside a multipart/alternative into
-// the lists, and returns them as the rest of the walk is to see them:
-// inside an alternative a plain part ends the collection of HTML and an
-// HTML part ends the collection of plain text, for this call and the
-// ones after it, as the reference algorithm's nulling does.
-func placeInline(part *mimePart, inAlternative bool, htmlBody, textBody, attachments *[]*mimePart) (html, text *[]*mimePart) {
-	if inAlternative {
-		if part.mediaType == mediaTextPlain {
-			htmlBody = nil
-		}
-
-		if part.mediaType == mediaTextHTML {
-			textBody = nil
-		}
-	}
-
-	push(textBody, part)
-	push(htmlBody, part)
-
-	if (textBody == nil || htmlBody == nil) && isInlineMedia(part.mediaType) {
-		push(attachments, part)
-	}
-
-	return htmlBody, textBody
-}
-
-// isInlinePart is the isInline test of the reference algorithm: a body
-// part rather than an attachment.
-func isInlinePart(part *mimePart, i int, multipartType string) bool {
-	if dispositionOf(part) == dispAttachment {
-		return false
-	}
-
-	if part.mediaType != mediaTextPlain && part.mediaType != mediaTextHTML && !isInlineMedia(part.mediaType) {
-		return false
-	}
-
-	// In multipart/related only the first part can be inline; a text part
-	// with a file name that is not first is taken for an attachment.
-	return i == 0 || (multipartType != "related" && (isInlineMedia(part.mediaType) || partFileName(part) == ""))
-}
-
-// placeAlternative puts one inline part of a multipart/alternative into
-// the list of its kind.
-func placeAlternative(part *mimePart, htmlBody, textBody, attachments *[]*mimePart) {
-	switch part.mediaType {
-	case mediaTextPlain:
-		push(textBody, part)
-	case mediaTextHTML:
-		push(htmlBody, part)
-	default:
-		push(attachments, part)
-	}
-}
-
-// balanceAlternative fills in the kind an alternative lacks: an
-// alternative with only an HTML part gives it to textBody as well, and
-// one with only a text part gives it to htmlBody.
-func balanceAlternative(textBody, htmlBody *[]*mimePart, textLength, htmlLength int) {
-	if textLength == len(*textBody) && htmlLength != len(*htmlBody) {
-		*textBody = append(*textBody, (*htmlBody)[htmlLength:]...)
-	}
-
-	if htmlLength == len(*htmlBody) && textLength != len(*textBody) {
-		*htmlBody = append(*htmlBody, (*textBody)[textLength:]...)
-	}
-}
-
-// push appends to a list that is still being collected.
-func push(list *[]*mimePart, part *mimePart) {
-	if list != nil {
-		*list = append(*list, part)
-	}
-}
-
-// sliceLen is the length of a list, or -1 for one that is not collected.
-func sliceLen(list *[]*mimePart) int {
-	if list == nil {
-		return -1
-	}
-
-	return len(*list)
-}
-
-// isInlineMedia is the isInlineMediaType of the reference algorithm.
-func isInlineMedia(mt string) bool {
-	return strings.HasPrefix(mt, "image/") || strings.HasPrefix(mt, "audio/") || strings.HasPrefix(mt, "video/")
-}
-
-// parseMediaTypeLoose parses a Content-Disposition, and recovers what it
-// can when the parameters do not parse: a broken filename must not turn
-// an attachment into an inline part, nor lose the name of one.
-func parseMediaTypeLoose(v string) (string, map[string]string, error) {
-	d, params, err := mime.ParseMediaType(v)
-	if err == nil {
-		return d, params, nil
-	}
-
-	token, _, _ := strings.Cut(v, ";")
-
-	return strings.TrimSpace(token), looseParams(v), nil
 }

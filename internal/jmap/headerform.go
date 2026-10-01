@@ -438,12 +438,12 @@ func readPart(blobs model.Blobs, guid, path string, limit int64) ([]byte, bool, 
 			return nil, false, err
 		}
 
-		part := root.find(section)
+		part := root.Find(section)
 		if part == nil {
 			return nil, false, nil
 		}
 
-		body, _ = part.decodedBody()
+		body, _ = part.Decoded()
 	}
 
 	return body, true, nil

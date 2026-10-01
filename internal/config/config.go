@@ -332,6 +332,8 @@ var defaults = []struct {
 	{"jmap.max_size_blob_set", 0},
 	{"jmap.max_data_sources", 0},
 	{"jmap.max_size_blob_get", 0},
+	{"jmap.snippet_read_bytes", 0},
+	{"jmap.max_attachment_reads", 0},
 	{"jmap.max_shared_accounts", 0},
 	{"jmap.max_shared_mailboxes", 0},
 	{"jmap.max_session_pointers", 0},
