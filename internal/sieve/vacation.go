@@ -29,6 +29,9 @@ type Vacation struct {
 	// Config are the settings the reply honours (subject template,
 	// vacation periods).
 	Config map[string]string
+	// Host names this server (server.lmtp_hostname, "" for none): the
+	// domain of the reply's Message-ID for a recipient without one.
+	Host string
 }
 
 // DefaultVacationSeconds is the period the JMAP VacationResponse asks
@@ -102,7 +105,7 @@ func (v *Vacation) Compose(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, 
 	fmt.Fprintf(&b, "To: %s\r\n", interp.VacationToHeader(hdr, to, v.Config["sieve_vacation_to_header_ignore_envelope"] == settingYes))
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", now.UTC().Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s.vacation@%s>\r\n", v.VacationKey(to)[:16], domainOf(rcpt))
+	fmt.Fprintf(&b, "Message-ID: <%s.vacation@%s>\r\n", v.VacationKey(to)[:16], reportDomain(rcpt, v.Host, v.Config))
 
 	if id := hdr.Get("Message-ID"); id != "" {
 		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", id)

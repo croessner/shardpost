@@ -74,5 +74,10 @@ func wrapLine(l string) string {
 		l = strings.TrimPrefix(l[cut:], " ")
 	}
 
+	// A fold at the very end leaves nothing for another line.
+	if l == "" && len(parts) > 0 {
+		return strings.Join(parts, "\r\n")
+	}
+
 	return strings.Join(append(parts, l), "\r\n")
 }

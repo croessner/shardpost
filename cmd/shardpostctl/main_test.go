@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"shardpost/internal/admin"
+	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/memstore"
@@ -88,6 +89,29 @@ func TestDeliverCommand(t *testing.T) {
 
 	if code, _, _ := call(filepath.Join(filepath.Dir(socket), "absent.sock"), msg, "deliver", "-d", "user@example.org"); code != exTempFail {
 		t.Fatalf("unreachable socket: %d", code)
+	}
+}
+
+// TestPrintDelivery: the text output names stored copies, a rejection
+// and a discard; an answer without a disposition (an older server) with
+// nothing stored is a discard.
+func TestPrintDelivery(t *testing.T) {
+	stored := []adminapi.StoredMessage{{Mailbox: "INBOX", Uid: 7}}
+
+	for _, c := range []struct {
+		res  adminapi.DeliveryResult
+		want string
+	}{
+		{adminapi.DeliveryResult{Account: "u", Stored: stored, Disposition: adminapi.DispositionStored}, "u: stored in INBOX uid 7\n"},
+		{adminapi.DeliveryResult{Account: "u", Disposition: adminapi.DispositionRejected}, "u: rejected by sieve, rejection message sent to the sender\n"},
+		{adminapi.DeliveryResult{Account: "u", Disposition: adminapi.DispositionDiscarded}, "u: discarded by sieve\n"},
+		{adminapi.DeliveryResult{Account: "u"}, "u: discarded by sieve\n"},
+		{adminapi.DeliveryResult{Account: "u", Stored: stored}, "u: stored in INBOX uid 7\n"},
+	} {
+		var out bytes.Buffer
+		if printDelivery(&out, &c.res); out.String() != c.want {
+			t.Errorf("%+v: %q", c.res, out.String())
+		}
 	}
 }
 

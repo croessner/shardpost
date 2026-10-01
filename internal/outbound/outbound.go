@@ -22,7 +22,10 @@ var ErrNoRelay = errors.New("no outbound relay configured")
 // taken the message. A caller for which a second copy is worse than a
 // lost one treats it as sent. A refusal (a reply) or a connection the
 // relay closed or reset is no ErrMaybeSent: a relay that took the
-// message answers before it hangs up.
+// message answers before it hangs up. The final flush of the data writer
+// is no evidence either way: net/smtp ignores its error and only reports
+// what reading the reply returns, so the timeout of that read is what
+// decides.
 var ErrMaybeSent = errors.New("relay did not confirm the message")
 
 // Relay is an SMTP submission target.

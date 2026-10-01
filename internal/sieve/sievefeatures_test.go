@@ -175,6 +175,14 @@ func TestLongLinesFolded(t *testing.T) {
 	if got := foldField("References", "<a> <b>"); got != "References: <a> <b>\r\n" {
 		t.Errorf("short field folded: %q", got)
 	}
+
+	// A fold right at the end leaves no empty line behind.
+	long := strings.Repeat("a", maxLine)
+	for in, want := range map[string]string{long + " ": long, long + " b": long + "\r\nb", long + "b": long + "\r\nb"} {
+		if got := wrapLine(in); got != want {
+			t.Errorf("wrapLine(%d octets): %q", len(in), got[max(0, len(got)-8):])
+		}
+	}
 }
 
 // TestReportDomain: a rejection for a recipient without a domain names
@@ -201,6 +209,15 @@ func TestReportDomain(t *testing.T) {
 	_, mdn := ComposeRejection(Rejection{Reason: "no", Original: []byte("From: s@example.net\r\n\r\nx\r\n"), EnvelopeFrom: "s@example.net", Rcpt: "alice"}, nil, time.Now())
 	if strings.Contains(string(mdn), "localhost") || !strings.Contains(string(mdn), "Reporting-UA: "+fallbackDomain+"; ShardPost") {
 		t.Errorf("bare recipient:\n%s", mdn)
+	}
+
+	// A vacation reply for a bare recipient takes the same domain.
+	hdr := textproto.MIMEHeader{"To": {"alice"}}
+	for host, want := range map[string]string{"": fallbackDomain, "mx.example.net": "mx.example.net"} {
+		_, reply := (&Vacation{Reason: "away", Host: host}).Compose(hdr, "s@example.net", "alice", time.Now())
+		if strings.Contains(string(reply), "localhost") || !strings.Contains(string(reply), ".vacation@"+want+">") {
+			t.Errorf("vacation, host %q:\n%s", host, reply)
+		}
 	}
 }
 

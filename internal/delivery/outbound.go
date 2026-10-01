@@ -185,6 +185,8 @@ func (r *run) vacation(ctx context.Context, raw []byte, v *sieve.Vacation) {
 		}
 	}
 
+	v.Host = r.svc.Hostname
+
 	to, reply := v.Compose(hdr, from, rcpt, r.now())
 	if err := r.svc.Relay.Send(ctx, v.EnvelopeSender(rcpt), []string{to}, reply); err != nil {
 		r.log.Error("vacation send failed", "user", user, "err", err)
