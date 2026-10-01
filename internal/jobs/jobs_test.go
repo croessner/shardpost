@@ -241,7 +241,7 @@ func TestTakeoverResumesFromCheckpoint(t *testing.T) {
 	j, _, _ := a.Submit(k, "alice", nil, "", "tester", "")
 
 	// pod-a claims, does one step and dies (no heartbeat, no finish).
-	claimed, gen, err := a.claim(j.ID)
+	claimed, gen, err := a.claim(j.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

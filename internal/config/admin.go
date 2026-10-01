@@ -30,6 +30,15 @@ type Admin struct {
 	// SearchScanLimit bounds the messages one message search examines
 	// (role content); a longer search continues with its cursor.
 	SearchScanLimit int `mapstructure:"search_scan_limit" validate:"gte=100,lte=10000000"`
+	// KVIndex is the mode of the admin store's hint indexes and due
+	// queues (scaling plan B3): off writes none, write keeps them up to
+	// date while readers list the namespace, read also reads from them.
+	// read needs a completed "shardpost index backfill kv" that started
+	// after the last server without the indexes stopped.
+	KVIndex string `mapstructure:"kv_index" env:"ADMIN_KV_INDEX" validate:"oneof=off write read"`
+	// KVQueueShards is the shard count of a due queue when its first
+	// writer creates it; an existing queue keeps the count in its head.
+	KVQueueShards int `mapstructure:"kv_queue_shards" validate:"gte=1,lte=8"`
 }
 
 // Jobs configures the durable maintenance jobs (admin API, roadmap 8c).
@@ -51,6 +60,11 @@ type Jobs struct {
 	// maintenance lock for deliveries and sessions that opened the
 	// account before (sessions re-check the lock every 5 seconds).
 	SettleSeconds int `mapstructure:"settle_seconds" validate:"gte=0,lte=300"`
+	// ExpirySeconds is how often the expiry worker (one server of the
+	// cluster, admin.kv_index write or read) deletes the jobs, plans and
+	// idempotency keys whose retention ended, and how often the other
+	// servers try to take its lease.
+	ExpirySeconds int `mapstructure:"expiry_seconds" validate:"gte=5,lte=3600"`
 }
 
 // Trace configures the per-account protocol trace (role trace): an

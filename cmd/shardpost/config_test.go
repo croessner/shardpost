@@ -55,13 +55,15 @@ func TestBackfillCommandLine(t *testing.T) {
 	for args, want := range map[string]string{
 		"index backfill accounts":           commandBackfillAccounts,
 		"index backfill accounts --restart": commandBackfillRestart,
+		"index backfill kv":                 commandBackfillKV,
+		"index backfill kv --restart":       commandBackfillKVRestart,
 	} {
 		if _, command, err := loadConfig(strings.Fields(args)); err != nil || command != want {
 			t.Errorf("%q: %q %v", args, command, err)
 		}
 	}
 
-	for _, bad := range []string{"index", "index backfill", "index backfill kv", "--restart", "scrub --restart"} {
+	for _, bad := range []string{"index", "index backfill", "index backfill jobs", "--restart", "scrub --restart"} {
 		if _, _, err := loadConfig(strings.Fields(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

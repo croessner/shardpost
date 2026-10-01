@@ -25,6 +25,10 @@ const (
 	labelCommand = "command"
 	labelOutcome = "outcome"
 	labelSite    = "site"
+	labelQueue   = "queue"
+	labelAction  = "action"
+	labelColl    = "collection"
+	labelCause   = "cause"
 )
 
 var (
@@ -84,6 +88,33 @@ var (
 		Namespace: namespace, Subsystem: subsystemScrub, Name: "findings_total",
 		Help: "Scrubber findings by kind.",
 	}, []string{labelKind})
+	// QueueOps counts the operations on due queues (scaling plan B1) by
+	// queue, operation (move, due) and outcome (ok, error).
+	QueueOps = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "queue_ops_total",
+		Help: "Operations on due queues by queue, operation and outcome.",
+	}, []string{labelQueue, labelOp, labelOutcome})
+	// QueueStale counts queue entries a reader found not matching their
+	// record (two writers moved it without compare-and-swap, or a crash
+	// fell between the record and the queue write), by queue and what
+	// the reader did: rescheduled to the record's position, removed, or
+	// skipped (within the grace).
+	QueueStale = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "queue_stale_entries_total",
+		Help: "Queue entries that did not match their record, by queue and action.",
+	}, []string{labelQueue, labelAction})
+	// KVIndexErrors counts failed writes of an admin store hint index
+	// (the record was written; the backfill repairs the entry).
+	KVIndexErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "kv_index_errors_total",
+		Help: "Failed hint index writes of the admin store, by collection.",
+	}, []string{labelColl})
+	// JobWakeups counts the times a job runner looked for claimable jobs,
+	// by cause: poll (the interval) or notify (a writer woke it).
+	JobWakeups = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "job_wakeups_total",
+		Help: "Job runner looks for claimable jobs by cause (poll, notify).",
+	}, []string{labelCause})
 )
 
 // Timer measures one RADOS operation.

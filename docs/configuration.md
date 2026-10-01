@@ -7,11 +7,15 @@ shardpost --config /etc/shardpost/server.yaml
 shardpost --config /etc/shardpost/server.yaml config check
 shardpost --config /etc/shardpost/server.yaml scrub
 shardpost --config /etc/shardpost/server.yaml index backfill accounts [--restart]
+shardpost --config /etc/shardpost/server.yaml index backfill kv [--restart]
 ```
 
 `index backfill accounts` fills the account directory once after a
 rollout (see [Operations](operations/README.md#account-directory-backfill));
-it has no configuration keys of its own.
+it has no configuration keys of its own. `index backfill kv` fills the
+admin store's hint indexes and due queues (see
+[Operations](operations/README.md#admin-store-backfill)); it uses
+`admin.kv_index` (refuses `off`) and `jobs.retention_days`.
 
 Alternatively, `SHARDPOST_CONFIG` determines the file path. `IMAP_CONFIG`
 is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
@@ -380,9 +384,10 @@ and granted through the admin API, see
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `jobs.enabled` | true | runner in this server (all servers share the jobs) |
-| `jobs.poll_seconds` | 5 | interval between scans for new jobs |
-| `jobs.lease_seconds` | 60 | how long a claim holds without renewal (another server may take over afterwards) |
-| `jobs.retention_days` | 14 | retention of finished jobs and plans |
+| `jobs.poll_seconds` | 5 | interval between scans for new jobs; with `admin.kv_index` `write` or `read` a runner is also woken at once when a job is submitted or handed over at shutdown, and the poll is the fallback |
+| `jobs.lease_seconds` | 60 | how long a claim holds without renewal (another server may take over afterwards); also the TTL of the expiry worker's lock |
+| `jobs.retention_days` | 14 | retention of finished jobs, their idempotency keys and plans (after `expires`) |
+| `jobs.expiry_seconds` | 60 | how often the expiry worker (one server of the cluster, `admin.kv_index` `write` or `read`) deletes the jobs, idempotency keys and plans whose retention ended, and how often the other servers try to take its lock (5–3600) |
 | `jobs.plan_ttl_seconds` | 3600 | how long a plan stays valid |
 | `jobs.max_parallel` | 2 | concurrent jobs per server |
 | `jobs.settle_seconds` | 10 | how long an exclusive job waits after setting the maintenance lock, so that running deliveries can finish and open IMAP/POP3 sessions notice the lock (they check it at most every 5 s when a command starts and disconnect with BYE) |
@@ -396,6 +401,20 @@ YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#mai
 | `admin.search_scan_limit` | 50000 | a search request examines at most this many messages (role `content`); a longer search resumes with its cursor |
 
 YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
+
+### Admin store indexes (`admin.kv_index`)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `admin.kv_index` | `write` | `off`: no hint indexes, no due queues, no expiry worker (the behaviour before the indexes); `write`: keep them up to date while readers still list the admin namespace; `read`: also read from them (job runner, job lists, expiry of old records, push subscription scan). Environment: `ADMIN_KV_INDEX` |
+| `admin.kv_queue_shards` | 4 | shard objects of a due queue (1–8) when its first writer creates it; an existing queue keeps its count |
+
+Switch to `read` only after `shardpost index backfill kv` completed with
+a start after the last server without the indexes stopped, and set it
+on every server (a server in `read` mode does not see what a server in
+`off` mode writes). Back to `write` is always possible. See
+[Storage: admin store](architecture/storage.md#admin-store-hint-indexes-and-due-queues)
+and [Operations](operations/README.md#admin-store-backfill).
 
 ### Full-text index (`fts`)
 

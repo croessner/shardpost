@@ -51,16 +51,24 @@ func loadConfig(args []string) (*config.Config, string, error) {
 	return c, command, err
 }
 
-// indexCommand parses what follows "index": "backfill accounts" and an
-// optional "--restart". It returns the number of arguments it used.
+// indexCommand parses what follows "index": "backfill accounts" or
+// "backfill kv" and an optional "--restart". It returns the number of
+// arguments it used.
 func indexCommand(args []string) (int, string, error) {
-	if len(args) < 2 || args[0] != "backfill" || args[1] != "accounts" {
-		return 0, "", fmt.Errorf("expected index backfill accounts")
+	const accounts, kv = "accounts", "kv"
+
+	if len(args) < 2 || args[0] != "backfill" || (args[1] != accounts && args[1] != kv) {
+		return 0, "", fmt.Errorf("expected index backfill accounts or index backfill kv")
+	}
+
+	plain, restart := commandBackfillAccounts, commandBackfillRestart
+	if args[1] == kv {
+		plain, restart = commandBackfillKV, commandBackfillKVRestart
 	}
 
 	if len(args) > 2 && args[2] == "--restart" {
-		return 3, commandBackfillRestart, nil
+		return 3, restart, nil
 	}
 
-	return 2, commandBackfillAccounts, nil
+	return 2, plain, nil
 }

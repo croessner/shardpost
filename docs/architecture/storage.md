@@ -307,6 +307,152 @@ directory write in that phase, so creating an account then fails with a
 temporary error (LMTP 451). A reshard therefore requires every server to
 run a version that writes during the copy phase first.
 
+## Admin store: hint indexes and due queues
+
+The admin store ([adminkv](../../internal/cephstore/adminkv.go)) keeps
+one object per record, `kv.<key>` in the namespace `~admin`: jobs
+(`job/<id>`), plans (`plan/<id>`), idempotency keys (`idem/<hash>`), the
+JMAP push subscriptions of an account (`jmap/push/acct/<account>`) and
+smaller state. Records stay objects in every mode. Next to them live
+sorted indexes ([kvindex](../../internal/kvindex/kvindex.go)) that spare
+the job runner, the expiry of old records and the push worker the
+listing of the namespace (which visits every placement group of the
+pool).
+
+| Object | Content |
+|---|---|
+| `ix.job/…` (1 shard) | hint index of `job/`: `{state, account, kind, finished}` |
+| `ix.plan/…` (1 shard) | hint index of `plan/`: `{kind, account, expires}` |
+| `ix.idem/…` (16 shards) | hint index of `idem/`: `{job_id}` |
+| `ix.jmap/push/acct/…` (64 shards) | hint index of `jmap/push/acct/`: `{verified, expires}` (any subscription verified, the latest expiry) |
+| `ix.jobs/claimable/…` | due queue of the jobs a runner may have to claim |
+| `ix.jobs/expiry/…` | due queue of the jobs, plans and idempotency keys that expire |
+| `ix.jobs/expiry/lock` | cls_lock of the expiry worker |
+| `ix.kv/lock` | cls_lock of `shardpost index backfill kv` |
+
+The head of `ix.job` carries the backfill markers `backfill.kv` (the
+report of the last completed backfill, with its start time) and
+`backfill.kv.progress`.
+
+**Hint index.** An entry carries what its readers need of the record,
+so a reader that filters (jobs by account and state) reads only the
+records that match. The hint rule orders the two writes: on create the
+record first, then the entry; on delete the entry first, then the
+record. A crash in between leaves a record without entry, which the
+backfill adds, or an entry without record, which readers skip and
+remove. The entry is written after a write that created the record or
+changed its index value (a heartbeat does not), and it is computed from
+the record as it is then: the index update reads the record inside its
+compare-and-swap on the shard object, so of two writers of one record
+the later index write reflects the later record. A failed index write
+does not fail the record write; it is logged and counted
+(`imapceph_kv_index_errors_total`), and the backfill repairs it.
+
+**Due queue.** A completeness index of what becomes due at a time
+([duequeue](../../internal/sortedindex/duequeue.go)): every record that
+has to be visited has an entry, so a worker finds what is due by
+reading the heads of at most eight shard objects instead of listing.
+The omap key is `<due>/<id>/<gen>`: the due time as 20-digit Unix
+nanoseconds (keys sort by due time), the id, and the generation of the
+record it was written for. The shard is `FNV-1a(id) mod n` of the id
+alone, so all entries of one id live in one shard object and moving an
+entry is one write op (`RmOmapKeys` of the old key plus `SetOmap` of the
+new one). `n` is `admin.kv_queue_shards` (default 4, at most 8) when
+the first writer creates the queue; the head keeps it after that. `Due`
+reads the first page of every shard, keeps the keys up to now and
+merges them, earliest first. Writers create an entry before its record
+and remove it after the record. Moves are not compare-and-swap (go-ceph
+has no omap comparison); the record stays the fence, and readers
+compare an entry with its record: an entry without record or with a
+generation newer than the record's is skipped for a grace of ten
+minutes (its writer may be between the two writes) and removed after
+it; an entry that does not match its record's position is moved there.
+
+**Jobs queue** (`jobs/claimable`). A queued job is due at its creation
+time (generation 0), a running one at the end of its lease (generation
+`Lease.Gen`). Every write that changes the lease end or the state moves
+the entry after the record, from the position computed from the record
+as it was read in the compare-and-swap to the one of the record as
+written:
+
+| Writer | Record | Queue |
+|---|---|---|
+| submit | created (`Created` is the entry's time, same nanosecond) | entry at `Created` written before the record; notify |
+| claim | `Lease.Gen`+1, `Lease.Until` = now + lease | moved to the new lease end and generation |
+| heartbeat | `Lease.Until` extended | moved |
+| postpone (account locked) | `Lease.Until` = now + lease | moved |
+| release at shutdown | `Lease.Until` = now | moved to now; notify |
+| cancel of a queued job | ended at once | removed |
+| cancel of a running job | `cancel_requested` | unchanged (`claimable()` does not change) |
+| end | final state | removed after the record |
+
+So the entries due now are the jobs `claimable()` selects. A reader
+(`admin.kv_index=read`) that finds an entry whose record is not
+claimable (a heartbeat's record write succeeded, the process died before
+the move) moves it to the record's lease end; an entry of an ended job
+is removed; a claim removes the entry it came from together with the
+record's own. The compare-and-swap on the record stays the fence.
+
+**Wake instead of poll.** Every runner watches shard 0 of
+`jobs/claimable`. A writer notifies it when an entry becomes due earlier
+than before: a submit, and a release at shutdown. The runner then looks
+for claimable jobs at once; its poll (`jobs.poll_seconds`) stays as the
+fallback, and a broken watch is set up again on the next poll.
+`imapceph_job_wakeups_total{cause}` counts both. In `write` mode the
+look is still the listing.
+
+**Expiry** (`jobs/expiry`). The entries carry the retention of
+`cleanup()`:
+
+| Record | Entry |
+|---|---|
+| job | placeholder at `Created + retention` (generation 0) at submit; at the end moved to `Finished + retention` (generation 1) |
+| idempotency key | the same positions as its job (the job record names the key, `idem_key`); the placeholder is written before the key itself |
+| plan | `Expires + retention` |
+
+One server of the cluster runs the expiry worker: it holds the
+cls_lock `ix.jobs/expiry/lock` (renewed with `MAY_RENEW` every third of
+`jobs.lease_seconds`) instead of taking it per step, and every
+`jobs.expiry_seconds` deletes what is due. For a job it deletes the
+idempotency key first (only while the key still names this job; absent
+is fine), then the job (a compare-and-swap that checks the job is still
+ended and expired), then the entries. A job that has not ended when its
+placeholder is due is rescheduled one retention later; an idempotency
+key whose job was never stored (a crash between the two creates, which
+used to block the key for good) is deleted when its placeholder is due.
+A plan is deleted at `Expires + retention`. The lock is advisory: every
+deletion is a compare-and-swap on the record. When the store rotates
+its cephx key (`Store.Rotate`), the worker's lock is unlocked through
+the old connection while its key is still valid and reported lost; the
+worker takes it again on the new connection. A lock whose holder died
+stays held until its TTL (`jobs.lease_seconds`) ran out.
+
+In this version `cleanup()` keeps running beside the expiry worker,
+because `jobs/expiry` knows only the records written since the rollout
+until the backfill ran (and `cleanup()` itself looks at the first 100
+jobs of each listing only).
+
+**Modes** (`admin.kv_index`):
+
+| Mode | Writes | Reads |
+|---|---|---|
+| `off` | no index, no queue, no expiry worker | listings (the behaviour before) |
+| `write` (default) | hint indexes, both queues, expiry worker, notifies | listings; the runner claims from the listing |
+| `read` | as `write` | listings of an indexed collection come from its hint index (key order, merged across shards; entries without record are removed); job lists filter on the index values; the runner claims from `Due` |
+
+`read` is only correct after `shardpost index backfill kv` completed
+with a start after the last server without the indexes stopped: records
+such a server wrote are missing from the indexes until then. The server
+warns at start when `read` is set without a completion marker. See
+[Operations](../operations/README.md#admin-store-backfill).
+
+**Rollback.** Older servers ignore the `ix.*` objects (they list only
+`kv.*`) and keep reading by listing; the records are unchanged, the job
+record only gains the field `idem_key`. A job that an older server ends
+leaves its queue entries behind; the readers of this version remove
+them (claimable: the record has ended; expiry: the record is gone or is
+rescheduled to its real expiry).
+
 ## Notifications and search
 
 Watch/notify is a wake-up signal. The mailbox header, the

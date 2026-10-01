@@ -64,6 +64,12 @@ type Config struct {
 	// log of an account keeps (0: DefaultAccountLogRetention). A client
 	// that was away for longer than that resynchronises.
 	AccountLogRetention int
+	// KVIndex is the mode of the admin store's hint indexes and queues
+	// ("" = model.KVIndexWrite).
+	KVIndex model.KVIndexMode
+	// KVQueueShards is the shard count of a due queue its first writer
+	// creates (0: model.DefaultQueueShards).
+	KVQueueShards int
 }
 
 // Store owns the librados connection and hands out per-user views. The
@@ -77,6 +83,10 @@ type Store struct {
 	log *slog.Logger
 	// fsid identifies the cluster in the account directory.
 	fsid string
+
+	// held are the worker locks Rotate gives up (holdLock).
+	heldMu sync.Mutex
+	held   map[*lease]struct{}
 }
 
 // connRef is a reference-counted librados connection.
@@ -119,6 +129,10 @@ func (s *Store) Rotate(key, monHost string) error {
 	s.cur = &connRef{conn: conn}
 	s.cfg = cfg
 	s.mu.Unlock()
+
+	// Worker locks are unlocked through the old connection while its key
+	// is still valid; their holders take them again on the new one.
+	s.releaseHeld()
 
 	old.old = true
 	go func() {

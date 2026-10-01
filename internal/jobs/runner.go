@@ -12,6 +12,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 	"shardpost/internal/telemetry"
 )
@@ -59,7 +60,7 @@ func (r *Run) Fence() error {
 
 // guarded updates the job only while this server holds it.
 func (r *Run) guarded(fn func(j *Job)) error {
-	_, err := r.m.st.updateJob(r.Job.ID, func(j *Job) error {
+	_, err := r.m.updateJob(r.Job.ID, nil, func(j *Job) error {
 		if j.Lease.Owner != r.m.instance || j.Lease.Gen != r.gen {
 			return ErrLeaseLost
 		}
@@ -101,7 +102,12 @@ func (r *Run) LoadCheckpoint(v any) bool {
 	return len(r.Job.Checkpoint) > 0 && json.Unmarshal(r.Job.Checkpoint, v) == nil
 }
 
-// Run claims and executes jobs until ctx ends.
+// Run claims and executes jobs until ctx ends. It looks for claimable
+// jobs every Config.Poll and whenever a writer notifies the claimable
+// queue (a job was submitted or handed over); with the queues it also
+// runs the expiry worker when this server holds its lease. cleanup()
+// keeps running on the poll beside it until the readers switch to the
+// indexes.
 func (m *Manager) Run(ctx context.Context) {
 	sem := make(chan struct{}, m.cfg.MaxParallel)
 
@@ -109,23 +115,69 @@ func (m *Manager) Run(ctx context.Context) {
 
 	defer wg.Wait()
 
+	if m.q != nil {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			m.runExpiry(ctx)
+		}()
+	}
+
 	tick := time.NewTicker(m.cfg.Poll)
 	defer tick.Stop()
 
+	events, errs, unwatch := m.watchClaimable()
+	defer func() { unwatch() }()
+
+	cause := wakePoll
+
 	for {
+		metrics.JobWakeups.WithLabelValues(cause).Inc()
 		m.pollOnce(ctx, sem, &wg)
-		m.cleanup()
+
+		if cause == wakePoll {
+			m.cleanup()
+		}
 
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			cause = wakePoll
+
+			if events == nil && m.q != nil {
+				events, errs, unwatch = m.watchClaimable()
+			}
+		case <-events:
+			cause = wakeNotify
+		case err := <-errs:
+			// The watch broke (the OSD dropped it): watch again on the
+			// next poll, which looks for jobs meanwhile.
+			m.env.Log.Warn("jobs: claimable queue watch lost", "err", err)
+			unwatch()
+
+			events, errs, unwatch, cause = nil, nil, func() {}, wakePoll
 		}
 	}
 }
 
-// pollOnce claims every claimable job there is room for.
+// Causes of a look for claimable jobs (label "cause" of
+// imapceph_job_wakeups_total).
+const (
+	wakePoll   = "poll"
+	wakeNotify = "notify"
+)
+
+// pollOnce claims every claimable job there is room for: from the
+// claimable queue in read mode, else from a listing of the jobs.
 func (m *Manager) pollOnce(ctx context.Context, sem chan struct{}, wg *sync.WaitGroup) {
+	if m.q.reads() {
+		m.pollDue(ctx, sem, wg)
+		return
+	}
+
 	after := ""
 
 	for {
@@ -148,7 +200,7 @@ func (m *Manager) pollOnce(ctx context.Context, sem chan struct{}, wg *sync.Wait
 				return // busy; later polls continue
 			}
 
-			j, gen, err := m.claim(page[i].ID)
+			j, gen, err := m.claim(page[i].ID, nil)
 			if err != nil {
 				<-sem
 				continue // another server was faster
@@ -171,10 +223,10 @@ func (m *Manager) pollOnce(ctx context.Context, sem chan struct{}, wg *sync.Wait
 }
 
 // claim takes a claimable job over with a new lease generation.
-func (m *Manager) claim(id string) (*Job, uint64, error) {
+func (m *Manager) claim(id string, extra []model.DueKey) (*Job, uint64, error) {
 	var gen uint64
 
-	j, err := m.st.updateJob(id, func(j *Job) error {
+	j, err := m.updateJob(id, extra, func(j *Job) error {
 		now := m.now()
 		if !j.claimable(now) {
 			return errors.New("not claimable")
@@ -432,7 +484,7 @@ func (m *Manager) finish(run *Run, j *Job, gen uint64, result any, runErr error,
 		run.mu.Unlock()
 	}
 
-	_, err := m.st.updateJob(j.ID, func(cur *Job) error {
+	_, err := m.updateJob(j.ID, nil, func(cur *Job) error {
 		if cur.Lease.Owner != m.instance || cur.Lease.Gen != gen {
 			return ErrLeaseLost
 		}

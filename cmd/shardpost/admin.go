@@ -11,10 +11,12 @@ import (
 
 	"shardpost/internal/admin"
 	"shardpost/internal/auth"
+	"shardpost/internal/backfill"
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
+	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/version"
 )
@@ -108,10 +110,32 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 	a.jobsKV = kv
 	a.jobs = jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),
 		Retention: time.Duration(c.RetentionDays) * 24 * time.Hour, PlanTTL: sec(c.PlanTTLSeconds), MaxParallel: c.MaxParallel,
-		Settle: sec(c.SettleSeconds)},
+		Settle: sec(c.SettleSeconds), ExpiryPoll: sec(c.ExpirySeconds)},
 		instance, jobs.Kinds(time.Duration(settings.Scrub.GraceSeconds)*time.Second)...)
 
+	warnUnbackfilled(log, kv)
+
 	return nil
+}
+
+// warnUnbackfilled warns when the job system reads from the indexes
+// without a completed "shardpost index backfill kv": records written by
+// older servers are then missing from them.
+func warnUnbackfilled(log *slog.Logger, kv *cephstore.AdminKV) {
+	if kv.IndexMode() != model.KVIndexRead {
+		return
+	}
+
+	rep, ok, err := backfill.KVBackfilled(kv)
+
+	switch {
+	case err != nil:
+		log.Warn("admin.kv_index=read: backfill marker unreadable", "err", err)
+	case !ok:
+		log.Warn("admin.kv_index=read without a completed \"shardpost index backfill kv\": records of older servers are not found")
+	default:
+		log.Info("admin.kv_index=read", "backfill_started", rep.Started, "backfill_finished", rep.Finished)
+	}
 }
 
 // start serves the configured listeners; fatal errors go to errc.

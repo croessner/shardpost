@@ -4,6 +4,7 @@ package cephstore
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,7 +50,7 @@ func TestListingsAreCounted(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{"listUsers", "listScrubOrphans", "listScrubUnknown", "listPurgeObjects", "listAdminKV",
+	for _, want := range []string{"listUsers", "listScrubOrphans", "listScrubUnknown", "listPurgeObjects", "listAdminKV", "listAdminBackfill",
 		"listLearningAll", "listLearningPurge"} {
 		if !sites[want] {
 			t.Errorf("listing site %s is not used", want)
@@ -116,4 +117,44 @@ func TestIndexObjectNames(t *testing.T) {
 	if strings.HasPrefix(sortedindex.HeadOID("x"), "kv.") || strings.HasPrefix(sortedindex.ShardOID("x", 0), "ix/") {
 		t.Error("index objects collide with other layouts")
 	}
+
+	// The admin store's queues and their worker lock, and the account
+	// directory lock taken before R1b, keep their names.
+	for got, want := range map[string]string{
+		sortedindex.ShardOID(model.JobsClaimableQueue, 0): "ix.jobs/claimable/00",
+		sortedindex.HeadOID(model.JobsExpiryQueue):        "ix.jobs/expiry/head",
+		sortedindex.LockOID(model.JobsExpiryQueue):        "ix.jobs/expiry/lock",
+		sortedindex.LockOID(model.AccountIndexName):       "ix.accounts/lock",
+		sortedindex.ShardOID("jmap/push/acct", 63):        "ix.jmap/push/acct/63",
+	} {
+		if got != want {
+			t.Errorf("object %q, want %q", got, want)
+		}
+	}
+}
+
+// TestRotateReleasesWorkerLocks: a key rotation unlocks the tracked
+// worker locks through their own handles and marks them lost; a later
+// release does not unlock twice.
+func TestRotateReleasesWorkerLocks(t *testing.T) {
+	s := &Store{log: slog.New(slog.DiscardHandler)}
+
+	unlocked := 0
+	l := &lease{stop: make(chan struct{})}
+	l.unlock = func() { unlocked++; s.forgetHeld(l) }
+
+	s.rememberHeld(l)
+	s.releaseHeld()
+
+	if !l.Lost() || unlocked != 1 || len(s.held) != 0 {
+		t.Fatalf("after rotation: lost=%v unlocked=%d held=%d", l.Lost(), unlocked, len(s.held))
+	}
+
+	l.Release()
+
+	if unlocked != 1 {
+		t.Fatalf("unlocked %d times", unlocked)
+	}
+
+	s.releaseHeld() // nothing left
 }

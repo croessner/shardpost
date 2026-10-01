@@ -152,6 +152,56 @@ checks that the entry is gone, runs the backfill and prints its marker.
 **Rollback** is safe: older servers ignore `~accounts`, and an older
 purge does not set `purging`.
 
+## Admin store backfill
+
+Servers with `admin.kv_index` `write` (the default) or `read` keep hint
+indexes and due queues next to the admin records (jobs, plans,
+idempotency keys, JMAP push subscriptions; see
+[storage](../architecture/storage.md#admin-store-hint-indexes-and-due-queues)).
+Records that older servers wrote are not in them. After the rollout of
+the version that writes them, once no older server is left, run the
+backfill:
+
+```sh
+shardpost index backfill kv             # same image and configuration as the server
+shardpost index backfill kv --restart   # ignore the position of an interrupted run
+```
+
+It takes the cls_lock `backfill` on `ix.kv/lock` in `~admin` (a second
+run at the same time fails with "another admin store backfill is
+running"), lists the admin namespace once (it shows as
+`admin_kv_backfill` in `imapceph_rados_listings_total`) and, for every
+record, writes its hint index entry from the record as it is and the
+queue entries the record needs: a job its claimable position (unless it
+ended) and its expiry, an idempotency key the expiry of its job (ten
+minutes from now when the job was never stored), a plan its expiry.
+Every write sets what the record implies, so it may be repeated. Every
+500 records it records its position in the head of `ix.job`
+(`mark:backfill.kv.progress`); an interrupted run continues from there
+and keeps the original start time, unless `--restart` is given. At the
+end it records `mark:backfill.kv` with the start and end times and the
+counts (records, indexed, queued). It refuses to run with
+`admin.kv_index: off`.
+
+**When `read` may be switched on.** Only after a backfill completed
+whose start lies after the last server without the indexes (an older
+version, or one with `admin.kv_index: off`) stopped; if in doubt, run it
+again with `--restart` first. Then set `admin.kv_index: read` on every
+server. A server in `read` mode that finds no completion marker warns
+at start ("admin.kv_index=read without a completed …"). Going back to
+`write` is always possible.
+
+**Expiry.** With `write` or `read`, one server (the holder of the lock
+`ix.jobs/expiry/lock`) deletes jobs and their idempotency keys
+`jobs.retention_days` after they ended, and plans that long after they
+expired, every `jobs.expiry_seconds`. The listing cleanup of earlier
+versions keeps running beside it in this version. Idempotency keys used
+to stay forever; records from before the backfill expire once it ran.
+
+**Rollback** is safe: older servers ignore the `ix.*` objects and keep
+reading by listing; the records are unchanged. Queue entries of jobs an
+older server ended are removed by the readers of this version later.
+
 ## Scrub, backup and observability
 
 Scrub can change data. For an investigation, first define a dry run and the
