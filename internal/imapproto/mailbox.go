@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-imap/v2/imapserver"
 
@@ -935,7 +936,7 @@ func (c *conn) cmdCreate(tag string) error {
 	}
 
 	if checkNewName(t.name) != nil {
-		c.no(tag, "CANNOT", "Mailbox name has control characters or is not in Unicode Normalization Form C")
+		c.no(tag, "CANNOT", "Mailbox name has control characters")
 		return nil
 	}
 
@@ -946,6 +947,12 @@ func (c *conn) cmdCreate(tag string) error {
 	if err := t.u.CreateMailbox(t.name, use); err != nil {
 		c.storeErr(tag, err)
 		return nil
+	}
+
+	// RFC 9051 6.3.4: a name that was normalized is announced with the
+	// name the client gave.
+	if t.normalized {
+		c.w.untagged(`LIST () "/" %s ("OLDNAME" (%s))`, c.mailboxOut(t.full), c.mailboxString(name))
 	}
 
 	// RFC 8474 4.1: the id of the new mailbox comes with the OK.
@@ -1075,7 +1082,7 @@ func (c *conn) cmdRename(tag string) error {
 	}
 
 	if checkNewName(nt.name) != nil {
-		c.no(tag, "CANNOT", "Mailbox name has control characters or is not in Unicode Normalization Form C")
+		c.no(tag, "CANNOT", "Mailbox name has control characters")
 		return nil
 	}
 
@@ -1235,15 +1242,25 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 		d.unseen = unseen
 	}
 
+	return fmt.Sprintf("STATUS %s (%s)", c.mailboxOut(t.display(info.Name)), strings.Join(c.statusOut(d, items), " ")), nil
+}
+
+// statusOut renders the requested STATUS items; unknown ones are left
+// out, and so is RECENT for an IMAP4rev2 session (RFC 9051 appendix E 12).
+func (c *conn) statusOut(d *statusData, items []string) []string {
 	var out []string
 
 	for _, it := range items {
+		if it == kwRecent && c.rev2 {
+			continue
+		}
+
 		if f, ok := statusItems[it]; ok {
 			out = append(out, f(d))
 		}
 	}
 
-	return fmt.Sprintf("STATUS %s (%s)", c.mailboxOut(t.display(info.Name)), strings.Join(out, " ")), nil
+	return out
 }
 
 // statusData is what the STATUS items are computed from.
@@ -1614,7 +1631,7 @@ func (c *conn) cmdSelect(tag string, examine bool) error {
 		c.w.untagged("OK [CLOSED] Previous mailbox is now closed")
 	}
 
-	rights, ok := c.openSelected(tag, name, examine)
+	rights, st, ok := c.openSelected(tag, name, examine)
 	if !ok {
 		return nil
 	}
@@ -1622,7 +1639,7 @@ func (c *conn) cmdSelect(tag string, examine bool) error {
 	c.state = stateSelected
 	c.notifyReselect()
 	c.initRecent(examine)
-	c.selectUntagged(rights)
+	c.selectUntagged(rights, st, name)
 
 	if qr != nil {
 		if err := c.qresyncReplay(qr); err != nil {
@@ -1689,17 +1706,17 @@ func (c *conn) parseSelectParams(tag string) (condstore bool, qr *qresyncParams,
 }
 
 // openSelected makes mailbox name the selected one and loads its
-// snapshot; it returns the account's rights on it. ok is false when the
-// client was answered with an error.
-func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
+// snapshot; it returns the account's rights on it and the resolved
+// target. ok is false when the client was answered with an error.
+func (c *conn) openSelected(tag, name string, examine bool) (string, *target, bool) {
 	st, err := c.target(name)
 	if err != nil {
 		c.storeErr(tag, err)
-		return "", false
+		return "", nil, false
 	}
 
 	if !c.needRight(tag, st, 'r') {
-		return "", false
+		return "", nil, false
 	}
 
 	rights, _ := c.rightsOf(st)
@@ -1707,7 +1724,7 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
 	mb, err := st.u.Lookup(st.name)
 	if err != nil {
 		c.storeErr(tag, err)
-		return "", false
+		return "", nil, false
 	}
 
 	c.mu, c.mowner, c.mrights = st.u, st.owner, rights
@@ -1720,12 +1737,12 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, bool) {
 		c.mbox = nil
 		c.storeErr(tag, err)
 
-		return "", false
+		return "", nil, false
 	}
 
 	c.prunePrivateSeen()
 
-	return rights, true
+	return rights, st, true
 }
 
 // initRecent sets the session's \Recent watermark: everything from the
@@ -1746,14 +1763,27 @@ func (c *conn) initRecent(examine bool) {
 }
 
 // selectUntagged writes the untagged responses of SELECT/EXAMINE.
-func (c *conn) selectUntagged(rights string) {
+// For a session that enabled IMAP4rev2 there is no RECENT response and
+// no [UNSEEN] code, but a LIST response with the mailbox name (RFC 9051
+// 6.3.2, appendix E 10-12), with OLDNAME when the name was normalized.
+func (c *conn) selectUntagged(rights string, t *target, given string) {
 	c.w.untagged("%d EXISTS", len(c.msgs))
-	c.w.untagged("%d RECENT", c.recentCount())
 
-	for i, m := range c.msgs {
-		if !model.HasFlag(m.Flags, flagSeen) {
-			c.w.untagged("OK [UNSEEN %d] First unseen", i+1)
-			break
+	if c.rev2 {
+		oldName := ""
+		if t.normalized {
+			oldName = fmt.Sprintf(` ("OLDNAME" (%s))`, c.mailboxString(given))
+		}
+
+		c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), oldName)
+	} else {
+		c.w.untagged("%d RECENT", c.recentCount())
+
+		for i, m := range c.msgs {
+			if !model.HasFlag(m.Flags, flagSeen) {
+				c.w.untagged("OK [UNSEEN %d] First unseen", i+1)
+				break
+			}
 		}
 	}
 
@@ -2243,15 +2273,25 @@ func (c *conn) utf8Literal(t token) (string, error) {
 	return t.list[0].str, nil
 }
 
+// maxBadURL bounds the URL echoed in a BADURL response code; the client
+// sent it, and a response line should not grow with it.
+const maxBadURL = 1024
+
 // badURLText renders a URL for the BADURL response code, whose text may
 // hold any TEXT-CHAR but "]" and octet 0xFF (RFC 4469 5); those, and
 // control characters, are percent-encoded, which leaves the URL the same
-// URL.
+// URL. A URL longer than maxBadURL is cut at a character boundary and
+// ends in "...".
 func badURLText(u string) string {
 	var b strings.Builder
 
 	for i := 0; i < len(u); i++ {
 		ch := u[i]
+		if b.Len() >= maxBadURL && utf8.RuneStart(ch) {
+			b.WriteString("...")
+			break
+		}
+
 		if ch == ']' || ch == 0xff || ch < 0x20 || ch == 0x7f {
 			fmt.Fprintf(&b, "%%%02X", ch)
 			continue

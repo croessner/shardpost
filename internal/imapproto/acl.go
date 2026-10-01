@@ -39,6 +39,9 @@ type target struct {
 	prefix string // the namespace prefix it was addressed with
 	name   string // name inside the namespace
 	full   string // name as the client sees it
+	// normalized: the client's name was not in NFC and stands for the
+	// NFC name (see conn.target).
+	normalized bool
 }
 
 // shared is true when rights come from the ACL rather than from
@@ -58,8 +61,29 @@ func (t *target) display(name string) string {
 	}
 }
 
-// target resolves a client-visible mailbox name.
+// target resolves a client-visible mailbox name. A name not in Unicode
+// Normalization Form C stands for its NFC form (RFC 9051 5.1: a server
+// that accepts denormalized names accepts them in every command) —
+// unless a mailbox of exactly that name exists: names stored before new
+// names were normalized stay reachable as they are.
 func (c *conn) target(full string) (*target, error) {
+	t, err := c.resolveTarget(full)
+	if err != nil {
+		return nil, err
+	}
+
+	if nfc, changed := nfcName(t.name); changed {
+		if _, err := t.u.Lookup(t.name); errors.Is(err, model.ErrNoMailbox) {
+			t.name, t.full, t.normalized = nfc, t.display(nfc), true
+		}
+	}
+
+	return t, nil
+}
+
+// resolveTarget splits a client-visible mailbox name into namespace and
+// name.
+func (c *conn) resolveTarget(full string) (*target, error) {
 	if prefix := c.publicPrefix(); prefix != "" && strings.HasPrefix(full, prefix) {
 		name := strings.TrimPrefix(full, prefix)
 		if name == "" {

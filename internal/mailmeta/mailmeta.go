@@ -63,13 +63,6 @@ type Parsed struct {
 	Preview string
 }
 
-// Extract returns envelope, referenced Message-IDs and preview of a raw
-// message (Parse without the routes).
-func Extract(raw []byte) (*imap.Envelope, []string, string) {
-	p := Parse(raw)
-	return p.Envelope, p.Refs, p.Preview
-}
-
 // Parse derives the cached metadata of a raw message.
 func Parse(raw []byte) Parsed {
 	var p Parsed

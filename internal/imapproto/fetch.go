@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -166,6 +167,17 @@ func fetchSetsSeen(opts *fetchOptions) bool {
 // read failure wins).
 func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions, uid bool) (flagEvents []model.Meta, failed, err error) {
 	markSeen := fetchSetsSeen(opts)
+
+	// A BINARY section that cannot be decoded fails the whole FETCH
+	// (RFC 3516 4.2). When the FETCH sets \Seen, that is found out
+	// before any message is marked; a BINARY.PEEK changes nothing and
+	// is checked message by message as it is written.
+	if markSeen && hasBinaryItem(opts) {
+		if failed := c.binaryPrecheck(metas, opts); failed != nil {
+			return nil, failed, nil
+		}
+	}
+
 	marked := c.markSeenBatch(markSeen, metas, opts)
 
 	for i, m := range metas {
@@ -173,31 +185,41 @@ func (c *conn) fetchMessages(seqs []int, metas []model.Meta, opts *fetchOptions,
 			continue
 		}
 
-		seenSet := false
-
-		if markSeen {
-			var changed bool
-
-			m, seenSet, changed = c.fetchSetSeen(seqs[i], m, marked)
-			if changed {
-				flagEvents = append(flagEvents, m)
-			}
+		event, err := c.fetchOne(seqs[i], m, opts, uid, markSeen, marked)
+		if event != nil {
+			flagEvents = append(flagEvents, *event)
 		}
 
-		if err := c.writeFetchSeen(seqs[i], &m, opts, uid, seenSet); err != nil {
-			if errors.Is(err, errReadFailed) || errors.Is(err, errUnknownCTE) {
-				if failed == nil || errors.Is(err, errReadFailed) {
-					failed = err
-				}
-
-				continue
+		switch {
+		case errors.Is(err, errReadFailed):
+			failed = err
+		case errors.Is(err, errUnknownCTE):
+			if failed == nil {
+				failed = err
 			}
-
+		case err != nil:
 			return flagEvents, failed, err
 		}
 	}
 
 	return flagEvents, failed, nil
+}
+
+// fetchOne sets \Seen on message seq when the FETCH does (event is the
+// message when this session changed its flags) and writes its response.
+func (c *conn) fetchOne(seq int, m model.Meta, opts *fetchOptions, uid, markSeen bool, marked map[uint32]bool) (event *model.Meta, err error) {
+	seenSet := false
+
+	if markSeen {
+		var changed bool
+
+		m, seenSet, changed = c.fetchSetSeen(seq, m, marked)
+		if changed {
+			event = &m
+		}
+	}
+
+	return event, c.writeFetchSeen(seq, &m, opts, uid, seenSet)
 }
 
 // fetchSetSeen sets \Seen on message seq when the session may. It
@@ -724,16 +746,15 @@ func (c *conn) writeFetchSeen(seq int, m *model.Meta, opts *fetchOptions, uidCmd
 	var raw []byte
 
 	if needsRaw(opts, m) {
-		rel, err := membudget.Acquire(m.Size)
-		if err != nil {
-			return errReadFailed
+		var (
+			rel func()
+			err error
+		)
+
+		if raw, rel, err = c.readMessage(m); err != nil {
+			return err
 		}
 		defer rel()
-
-		if raw, err = c.mu.Read(m); err != nil {
-			c.log.Error("read message", "guid", m.GUID, "err", err)
-			return errReadFailed
-		}
 	}
 
 	if binaryUndecodable(opts, raw) {
@@ -836,10 +857,64 @@ func (c *conn) fetchItemOut(it fetchItem, m *model.Meta, raw []byte) (string, bo
 	return "", false
 }
 
+// hasBinaryItem reports whether the FETCH has a BINARY or BINARY.SIZE
+// item.
+func hasBinaryItem(opts *fetchOptions) bool {
+	return slices.ContainsFunc(opts.items, func(it fetchItem) bool { return it.binary != nil || it.binSize != nil })
+}
+
+// binaryPrecheck reads the messages of a FETCH that sets \Seen and has
+// BINARY items, and returns errUnknownCTE (or errReadFailed) before
+// anything is written or marked.
+func (c *conn) binaryPrecheck(metas []model.Meta, opts *fetchOptions) error {
+	for i := range metas {
+		m := &metas[i]
+		if opts.changedSince != 0 && m.ModSeq <= opts.changedSince {
+			continue
+		}
+
+		raw, rel, err := c.readMessage(m)
+		if err != nil {
+			return err
+		}
+
+		bad := binaryUndecodable(opts, raw)
+
+		rel()
+
+		if bad {
+			return errUnknownCTE
+		}
+	}
+
+	return nil
+}
+
+// readMessage reads the content of m within the memory budget; release
+// returns the reservation.
+func (c *conn) readMessage(m *model.Meta) (raw []byte, release func(), err error) {
+	rel, err := membudget.Acquire(m.Size)
+	if err != nil {
+		return nil, nil, errReadFailed
+	}
+
+	if raw, err = c.mu.Read(m); err != nil {
+		rel()
+		c.log.Error("read message", "guid", m.GUID, "err", err)
+
+		return nil, nil, errReadFailed
+	}
+
+	return raw, rel, nil
+}
+
 // binaryUndecodable reports whether a BINARY or BINARY.SIZE item asks
 // for a section whose Content-Transfer-Encoding is not one the server
-// decodes (RFC 3516 4.2).
+// decodes (RFC 3516 4.2). Each section is looked at once, however many
+// items name it.
 func binaryUndecodable(opts *fetchOptions, raw []byte) bool {
+	checked := map[string]bool{}
+
 	for _, it := range opts.items {
 		var part []int
 
@@ -851,6 +926,13 @@ func binaryUndecodable(opts *fetchOptions, raw []byte) bool {
 		default:
 			continue
 		}
+
+		key := fmt.Sprint(part)
+		if checked[key] {
+			continue
+		}
+
+		checked[key] = true
 
 		if !knownCTE(sectionCTE(raw, part)) {
 			return true

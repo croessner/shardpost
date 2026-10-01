@@ -248,8 +248,8 @@ func emailParse(_ context.Context, sess *session, args json.RawMessage) (any, *m
 // from the blob the way a delivery makes one; the blob id stands in for
 // the GUID, so that the parts get blob ids under it.
 func parsedEmail(sess *session, id string, raw []byte, props []string, req *emailGetRequest) (map[string]any, *methodError) {
-	env, refs, preview := mailmeta.Extract(raw)
-	m := model.Meta{GUID: id, Size: int64(len(raw)), Envelope: env, References: refs, Preview: preview}
+	p := mailmeta.Parse(raw)
+	m := model.Meta{GUID: id, Size: int64(len(raw)), Envelope: p.Envelope, Routes: p.Routes, References: p.Refs, Preview: p.Preview}
 
 	obj, merr := emailObject(sess, id, &found{metas: []model.Meta{m}, raw: raw}, props, req)
 	if merr != nil {
@@ -267,7 +267,7 @@ func parsedEmail(sess *session, id string, raw []byte, props []string, req *emai
 		// with neither is a thread of its own, named after an id it does
 		// not have yet.
 		obj[propThreadID] = nil
-		if len(refs) > 0 || (env != nil && len(mailmeta.MessageIDs(env.MessageID)) > 0) {
+		if len(p.Refs) > 0 || (p.Envelope != nil && len(mailmeta.MessageIDs(p.Envelope.MessageID)) > 0) {
 			obj[propThreadID] = mailmeta.ThreadID(&m)
 		}
 	}

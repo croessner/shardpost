@@ -72,7 +72,7 @@ func TestParseRoutes(t *testing.T) {
 }
 
 func TestExtractDefaultsSenderReplyTo(t *testing.T) {
-	env, _, _ := Extract([]byte("From: user@domain\r\nSender: \r\nSubject: x\r\n\r\nbody\r\n"))
+	env := Parse([]byte("From: user@domain\r\nSender: \r\nSubject: x\r\n\r\nbody\r\n")).Envelope
 	if env == nil || len(env.Sender) != 1 || env.Sender[0].Mailbox != "user" || len(env.ReplyTo) != 1 {
 		t.Fatalf("got %+v", env)
 	}

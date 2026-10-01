@@ -27,8 +27,12 @@ import (
 // anything else is answered NO [CANNOT], whatever the command, since the
 // name cannot be stored in its exact form and listed back as such. A
 // name with 8-bit octets is UTF-8 in either mode — modified UTF-7 never
-// has them — and is taken as is when it is valid UTF-8; octets that are
-// not UTF-8 are a syntax error (RFC 6855 3: BAD).
+// has them — and is taken as is when it is valid UTF-8. Octets that are
+// not UTF-8 fit neither form and are answered BAD, as RFC 6855 3 asks
+// for UTF-8 quoted strings that are not well-formed.
+//
+// A new name is put into Unicode Normalization Form C (RFC 9051 5.1);
+// see target for how a name in another form is looked up.
 
 // mailboxNameError is a mailbox argument the session's wire form does
 // not allow; the command is answered NO [CANNOT] (bad: BAD) after the
@@ -50,6 +54,11 @@ func (c *conn) utf8Names() bool { return c.utf8 || c.rev2 }
 // fromWire converts a mailbox name (or LIST reference or pattern) as the
 // client sent it to its stored UTF-8 form.
 func (c *conn) fromWire(s string) (string, error) {
+	// 8-bit octets are UTF-8 even in a session that speaks modified
+	// UTF-7, whose names are 7-bit: a client that sends "Grüße & Co"
+	// without having enabled UTF-8 means exactly that, and its "&" is an
+	// ampersand, not the start of an encoded sequence. Such a name is
+	// not decoded.
 	if hasNonASCII(s) {
 		if !utf8.ValidString(s) {
 			return "", errNotUTF8
@@ -144,18 +153,23 @@ var errNewName = errors.New("mailbox name is not Net-Unicode")
 
 // checkNewName refuses a name a new mailbox must not get: RFC 6855 3 and
 // RFC 9051 5.1 want Net-Unicode (RFC 5198) without control characters,
-// line or paragraph separators, in Normalization Form C. Existing names
-// are not checked: whatever the store holds stays reachable.
+// line or paragraph separators. Existing names are not checked: whatever
+// the store holds stays reachable.
 func checkNewName(name string) error {
 	for _, r := range name {
-		if unicode.IsControl(r) || r == ' ' || r == ' ' {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			return errNewName
 		}
 	}
 
-	if !norm.NFC.IsNormalString(name) {
-		return errNewName
+	return nil
+}
+
+// nfcName returns name in Normalization Form C and whether that differs.
+func nfcName(name string) (string, bool) {
+	if norm.NFC.IsNormalString(name) {
+		return name, false
 	}
 
-	return nil
+	return norm.NFC.String(name), true
 }

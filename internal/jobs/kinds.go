@@ -30,6 +30,7 @@ const (
 	KindACLReconcile  = "acl_reconcile"
 	KindFTSRebuild    = "fts_rebuild"
 	KindFTSDict       = "fts_dict_convert"
+	KindMailboxName   = "mailbox_name_convert"
 	KindMailboxDelete = "mailbox_delete"
 	KindExpunge       = "expunge"
 	KindPurge         = "purge"
@@ -66,6 +67,7 @@ func Kinds(grace time.Duration) []Kind {
 		&aclReconcile{kindBase{KindACLReconcile, RoleRepair, true, false}},
 		&ftsRebuild{kindBase{KindFTSRebuild, RoleRepair, true, true}},
 		&ftsDictConvert{kindBase{KindFTSDict, RoleRepair, true, false}},
+		&mailboxNameConvert{kindBase{KindMailboxName, RoleRepair, true, true}},
 		&mailboxDelete{kindBase{KindMailboxDelete, RoleDelete, true, true}},
 		&expunge{kindBase{KindExpunge, RoleDelete, true, false}},
 		&purge{kindBase{KindPurge, RoleDelete, true, true}},

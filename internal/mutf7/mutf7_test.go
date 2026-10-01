@@ -20,6 +20,7 @@ func TestRoundTrip(t *testing.T) {
 		"emoji 😀":                "emoji &2D3eAA-",
 		"üü":                     "&APwA,A-",
 		"Entw&APw-rfe (literal)": "Entw&-APw-rfe (literal)",
+		"del\x7f":                "del&AH8-",
 	} {
 		if got := Encode(utf8); got != wire {
 			t.Errorf("Encode(%q) = %q, want %q", utf8, got, wire)
@@ -47,10 +48,19 @@ func TestDecodeCanonicalRefuses(t *testing.T) {
 		"&2D0-":         ErrNotCanonical, // unpaired high surrogate
 		"Entw\xc3\xbc":  ErrNotASCII,
 		"&AGEAYgBj-xyz": ErrNotCanonical,
+		"abc&":          ErrUnterminated,
+		"&AP&-":         ErrInvalid, // "&" is not in the base64 alphabet
 	} {
 		if _, err := DecodeCanonical(in); !errors.Is(err, want) {
 			t.Errorf("DecodeCanonical(%q): %v, want %v", in, err, want)
 		}
+	}
+}
+
+// TestEncodeInvalidUTF8: an octet that is not UTF-8 becomes U+FFFD.
+func TestEncodeInvalidUTF8(t *testing.T) {
+	if got := Encode("a\xffb"); got != "a&,,0-b" {
+		t.Fatalf("got %q", got)
 	}
 }
 

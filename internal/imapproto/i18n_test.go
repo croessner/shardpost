@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"shardpost/internal/memstore"
 )
@@ -145,16 +146,46 @@ func TestRawUTF8FromLegacyClient(t *testing.T) {
 }
 
 // TestNewNameIsNetUnicode: CREATE and RENAME refuse control characters
-// and names not in Normalization Form C (RFC 6855 3, RFC 9051 5.1).
+// (RFC 6855 3) and put a name into Normalization Form C (RFC 9051 5.1),
+// announcing the normalized name with OLDNAME; the denormalized form
+// finds the mailbox in every command, unless a mailbox of exactly that
+// name exists from before.
 func TestNewNameIsNetUnicode(t *testing.T) {
-	c, _ := newTestServer(t)
+	const (
+		nfd = "Entwürfe"
+		nfc = "Entwürfe"
+	)
+
+	c, store := newTestServer(t)
 	c.ok("LOGIN test test")
 	c.ok("ENABLE UTF8=ACCEPT")
 
-	mustHave(t, c.cmd("CREATE \"Entwürfe\""), "NO [CANNOT]") // NFD
+	mustHave(t, c.ok(`CREATE "%s"`, nfd), `* LIST () "/" "`+nfc+`" ("OLDNAME" ("`+nfd+`"))`)
+
+	u, _ := store.User("test")
+	if _, err := u.Lookup(nfc); err != nil {
+		t.Fatalf("not stored in NFC: %v", err)
+	}
+
+	mustHave(t, c.ok(`SELECT "%s"`, nfd), "OK [READ-WRITE]")
+	mustHave(t, c.ok(`STATUS "%s" (MESSAGES)`, nfd), `* STATUS "`+nfc+`" (MESSAGES 0)`)
+	c.ok("UNSELECT")
+	c.ok(`RENAME Junk "Grün"`)
+
+	if _, err := u.Lookup("Grün"); err != nil {
+		t.Fatalf("rename not normalized: %v", err)
+	}
+
+	// A name stored denormalized before stays reachable as it is.
+	if err := u.EnsureMailbox("Alt/Süd", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mustHave(t, c.ok(`STATUS "Alt/Süd" (MESSAGES)`), `* STATUS "Alt/Su`+"̈"+`d" (MESSAGES 0)`)
+
 	mustHave(t, c.cmd("CREATE \"a b\""), "NO [CANNOT]")
 	mustHave(t, c.cmd("CREATE \"a\u0085b\""), "NO [CANNOT]")
-	mustHave(t, c.cmd("RENAME Junk \"Entwürfe\""), "NO [CANNOT]")
+	mustHave(t, c.cmd("RENAME Trash \"a\u0001b\""), "NO [CANNOT]")
 
 	// Modified UTF-7 can carry control characters too.
 	c2, _ := newTestServer(t)
@@ -208,16 +239,20 @@ func TestMUTF7Notify(t *testing.T) {
 	mustHave(t, a.cmd(`NOTIFY SET (MAILBOXES "AT&T" (MessageNew MessageExpunge))`), "NO [CANNOT]")
 }
 
-// TestSearchCharsetAfterUTF8Accept: RFC 6855 3 — a CHARSET after ENABLE
-// UTF8=ACCEPT is BAD; before it, and with IMAP4rev2 only, it is fine.
+// TestSearchCharsetAfterUTF8Accept: RFC 6855 3 — after ENABLE
+// UTF8=ACCEPT a CHARSET other than UTF-8 or US-ASCII is BAD; those two
+// are taken, and before the ENABLE (or with IMAP4rev2 only) any known
+// charset is.
 func TestSearchCharsetAfterUTF8Accept(t *testing.T) {
 	c, _ := newTestServer(t)
 	c.ok("LOGIN test test")
 	c.ok("ENABLE IMAP4rev2")
 	c.ok("SELECT INBOX")
-	c.ok("SEARCH CHARSET UTF-8 ALL")
+	c.ok("SEARCH CHARSET ISO-8859-1 ALL")
 	c.ok("ENABLE UTF8=ACCEPT")
-	mustHave(t, c.cmd("SEARCH CHARSET UTF-8 ALL"), " BAD ")
+	c.ok("SEARCH CHARSET UTF-8 ALL")
+	c.ok("SEARCH CHARSET US-ASCII ALL")
+	mustHave(t, c.cmd("SEARCH CHARSET ISO-8859-1 ALL"), " BAD ")
 	c.ok("SEARCH ALL")
 }
 
@@ -243,7 +278,8 @@ func TestAppendUTF8(t *testing.T) {
 }
 
 // TestSaveDateSearch: the RFC 8514 keys compare the save date, not the
-// internal date, on the date alone.
+// internal date, on the date alone. The days are taken from the save
+// date the server reports, so the test does not depend on midnight.
 func TestSaveDateSearch(t *testing.T) {
 	c, _ := newTestServer(t)
 	c.ok("LOGIN test test")
@@ -252,16 +288,28 @@ func TestSaveDateSearch(t *testing.T) {
 	c.ok(`APPEND INBOX "01-Jan-2020 10:00:00 +0000" {%d+}`+"\r\n%s", len(msg), msg)
 	c.ok("SELECT INBOX")
 
-	today := time.Now().Format("2-Jan-2006")
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("2-Jan-2006")
+	line := find(c.ok("FETCH 1 SAVEDATE"), "SAVEDATE")
 
-	mustHave(t, c.ok("SEARCH SAVEDON %s", today), "* SEARCH 1")
-	mustHave(t, c.ok("SEARCH SAVEDSINCE %s", today), "* SEARCH 1")
-	mustHave(t, c.ok("SEARCH SAVEDBEFORE %s", tomorrow), "* SEARCH 1")
+	i := strings.Index(line, `SAVEDATE "`)
+	if i < 0 {
+		t.Fatalf("no save date: %q", line)
+	}
+
+	saved, err := time.Parse(fetchDateLayout, line[i+len(`SAVEDATE "`):i+len(`SAVEDATE "`)+len(fetchDateLayout)])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	day := saved.Format("2-Jan-2006")
+	next := saved.AddDate(0, 0, 1).Format("2-Jan-2006")
+
+	mustHave(t, c.ok("SEARCH SAVEDON %s", day), "* SEARCH 1")
+	mustHave(t, c.ok("SEARCH SAVEDSINCE %s", day), "* SEARCH 1")
+	mustHave(t, c.ok("SEARCH SAVEDBEFORE %s", next), "* SEARCH 1")
 	mustHave(t, c.ok("SEARCH SAVEDATESUPPORTED"), "* SEARCH 1")
 	mustHave(t, c.ok("SEARCH ON 1-Jan-2020"), "* SEARCH 1")
 
-	for _, q := range []string{"SAVEDBEFORE " + today, "SAVEDON 1-Jan-2020", "SAVEDSINCE " + tomorrow, "NOT SAVEDATESUPPORTED"} {
+	for _, q := range []string{"SAVEDBEFORE " + day, "SAVEDON 1-Jan-2020", "SAVEDSINCE " + next, "NOT SAVEDATESUPPORTED"} {
 		if lines := c.ok("SEARCH %s", q); has(lines, "* SEARCH 1") {
 			t.Errorf("%s matched: %v", q, lines)
 		}
@@ -341,6 +389,34 @@ func TestBadURLCarriesURL(t *testing.T) {
 
 	mustHave(t, c.cmd(`APPEND INBOX CATENATE (URL "/INBOX/;UID=1" URL "/INBOX/;UID=42")`), "NO [BADURL /INBOX/;UID=42] ")
 	mustHave(t, c.cmd(`APPEND INBOX CATENATE (URL "/IN]BOX/;UID=1")`), "NO [BADURL /IN%5DBOX/;UID=1] ")
+
+	// A long URL is cut.
+	long := "/INBOX/;UID=1/;SECTION=" + strings.Repeat("ü", 1500)
+	line := find(c.cmd(`APPEND INBOX CATENATE (URL {%d+}`+"\r\n%s)", len(long), long), "BADURL")
+
+	code := line[strings.Index(line, "[BADURL ")+len("[BADURL ") : strings.Index(line, "] ")]
+	if len(code) > maxBadURL+8 || !strings.HasSuffix(code, "...") || !utf8.ValidString(code) {
+		t.Fatalf("BADURL not cut: %d %q", len(code), code[len(code)-10:])
+	}
+}
+
+// TestMUTF7MoreResponses: the \Noselect parent of LSUB, the server
+// entries of GETMETADATA "" and an invalid LIST reference.
+func TestMUTF7MoreResponses(t *testing.T) {
+	c, _ := newTestServer(t)
+	c.ok("LOGIN test test")
+	c.ok("CREATE Entw&APw-rfe/x")
+	c.ok("SUBSCRIBE Entw&APw-rfe/x")
+	c.ok("UNSUBSCRIBE Entw&APw-rfe")
+
+	mustHave(t, c.ok(`LSUB "" "%%"`), `* LSUB (\Noselect) "/" Entw&APw-rfe`)
+	mustHave(t, c.ok(`LSUB "" "*"`), `"/" Entw&APw-rfe/x`)
+
+	c.ok(`SETMETADATA "" (/private/comment "x")`)
+	mustHave(t, c.ok(`GETMETADATA "" /private/comment`), `* METADATA "" (/private/comment "x")`)
+
+	mustHave(t, c.cmd(`LIST "&Jjo!" "*"`), "NO [CANNOT]")
+	mustHave(t, c.cmd(`LIST "" ("INBOX" "AT&T")`), "NO [CANNOT]")
 }
 
 // TestSortDisplay: SORT=DISPLAY is advertised, DISPLAYFROM sorts on the
@@ -384,4 +460,8 @@ func TestBinaryUnknownCTE(t *testing.T) {
 	mustHave(t, c.ok("FETCH 1 BODY.PEEK[1]"), "begin 644 x")
 	// The whole message has no encoding of its own.
 	c.ok("FETCH 2 BINARY.PEEK[]")
+
+	// A FETCH that would set \Seen fails before it marks anything.
+	mustHave(t, c.cmd("FETCH 1:2 BINARY[1]"), "NO [UNKNOWN-CTE]")
+	mustLack(t, c.ok("FETCH 1:2 FLAGS"), `\Seen`)
 }

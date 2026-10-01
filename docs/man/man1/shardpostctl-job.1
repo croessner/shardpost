@@ -172,6 +172,26 @@ removed. Running it again is harmless, and it is also the repair for a
 term that lost its dictionary entries (it is then found as a whole word
 but not as a part of one). It has no checkpoint.
 .TP
+.B mailbox_name_convert
+Role
+.BR repair ,
+locks the account. Renames mailboxes that IMAP clients without UTF-8
+support created under ShardPost 0.35.2 or earlier, when their modified
+UTF-7 names were stored as sent (for example
+.I Entw&APw-rfe
+for
+.IR Entwürfe ),
+to their UTF-8 names; children move with their parent. Subscriptions
+without a mailbox are rewritten the same way. Only a name level that is
+the exact modified UTF-7 form of another name changes;
+.I R&D
+stays. A rename whose new name exists already is reported as a
+conflict, with its children, and nothing is renamed for it; a name that
+is not valid UTF-8 is reported. The plan lists every change; check it
+before applying, since a mailbox that a UTF-8 client really named
+.I Entw&APw-rfe
+would be renamed as well.
+.TP
 .B mailbox_delete
 Role
 .BR delete ,
@@ -326,6 +346,16 @@ this has run.
 .nf
 .RS
 shardpostctl plan fts_dict_convert user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+After the upgrade from 0.35.2 or earlier, give mailboxes that older
+IMAP clients created with modified UTF-7 names their UTF-8 names:
+.PP
+.nf
+.RS
+shardpostctl plan mailbox_name_convert user@example.org
 shardpostctl apply -wait <plan-id>
 .RE
 .fi

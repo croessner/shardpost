@@ -622,8 +622,9 @@ func (c *conn) fetchAttributes(seqs []uint32, atts string) {
 			continue
 		}
 
+		// Unsolicited: with the UID for IMAP4rev2 (RFC 9051 appendix E 21).
 		m := c.msgs[seq-1]
-		_ = c.writeFetch(int(seq), &m, opts, false)
+		_ = c.writeFetch(int(seq), &m, opts, c.rev2)
 	}
 }
 

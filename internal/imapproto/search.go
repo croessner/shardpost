@@ -420,6 +420,12 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 
 	nums, highest := searchNums(seqs, metas, uid)
 
+	// RFC 9051 6.4.4, appendix E 4: an IMAP4rev2 session gets ESEARCH
+	// also without RETURN, with the matches as ALL.
+	if c.rev2 && !ret.esearch {
+		ret.esearch, ret.all = true, true
+	}
+
 	if ret.save {
 		uids := make([]uint32, len(metas))
 		for i, m := range metas {
@@ -445,7 +451,7 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 		return nil
 	}
 
-	c.w.untagged("ESEARCH (TAG %s) %s", quote(tag), strings.Join(esearchParts(ret, cr, nums, metas, highest, uid), " "))
+	c.w.untagged("%s", strings.Join(append([]string{"ESEARCH (TAG " + quote(tag) + ")"}, esearchParts(ret, cr, nums, metas, highest, uid)...), " "))
 	c.ok(tag, "", "SEARCH completed")
 
 	return nil
@@ -581,15 +587,15 @@ func (c *conn) parseSearchCommand() (searchReturn, *criteria, error) {
 
 			continue
 		case "CHARSET":
-			// RFC 6855 3: after ENABLE UTF8=ACCEPT the text is UTF-8,
-			// a charset label conflicts with that.
-			if c.utf8 {
-				return ret, nil, fmt.Errorf("%w: CHARSET is not allowed after ENABLE UTF8=ACCEPT", errSyntax)
-			}
-
 			dec, err := c.readSearchCharset()
 			if err != nil {
 				return ret, nil, err
+			}
+			// RFC 6855 3: after ENABLE UTF8=ACCEPT the text is UTF-8, and
+			// another charset label conflicts with that (SHOULD be BAD).
+			// UTF-8 and US-ASCII say nothing new and are taken.
+			if c.utf8 && dec != nil {
+				return ret, nil, fmt.Errorf("%w: only UTF-8 is allowed after ENABLE UTF8=ACCEPT", errSyntax)
 			}
 
 			charset = dec

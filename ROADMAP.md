@@ -224,8 +224,9 @@ Ports 110 with STLS and 995 implicit.
 * **Implemented (0.9.0):** Sieve ihave, include, index, regex, spamtest/
   virustest, mboxmetadata/servermetadata, special-use, enotify (mailto),
   foreverypart, mime, extracttext; Pigeonhole suite 117 of 148 files.
-  Open: source route in the ENVELOPE, extlists, replace/enclose;
-  imapsieve and extprograms as stage 5, JMAP as stage 6.
+  Open: extlists, replace/enclose; imapsieve and extprograms as
+  stage 5, JMAP as stage 6. (The source route in the ENVELOPE, open
+  here, was implemented after 0.35.2.)
 
 ## Stage 5: Sieve in the IMAP Path – implemented and rolled out
 

@@ -356,8 +356,14 @@ type conn struct {
 	cmdMu  sync.Mutex
 	notify *notifyState
 
-	// ENABLE; utf8 is UTF8=ACCEPT, rev2 IMAP4rev2 (both switch the
-	// session to UTF-8 mailbox names, see mboxname.go)
+	// ENABLE; utf8 is UTF8=ACCEPT, rev2 IMAP4rev2. Both switch the
+	// session to UTF-8 mailbox names (see mboxname.go). rev2 also drops
+	// \Recent, the RECENT response and STATUS item and [UNSEEN] from
+	// SELECT, answers SEARCH with ESEARCH, sends a LIST with SELECT and
+	// puts the UID into every FETCH the client did not ask for by UID
+	// (RFC 9051 appendix E). LSUB, CHECK and the RFC822 items stay
+	// available, as the deprecated parts of IMAP4rev1 a client may still
+	// use.
 	condstore  bool
 	qresync    bool
 	utf8       bool
@@ -1549,6 +1555,15 @@ func (c *conn) isRecent(m *model.Meta) bool {
 	return c.recentFrom != 0 && m.UID >= c.recentFrom
 }
 
+// announceRecent writes the untagged RECENT response that follows
+// EXISTS, except for a session that enabled IMAP4rev2, which has no
+// RECENT response (RFC 9051 appendix E 12).
+func (c *conn) announceRecent() {
+	if !c.rev2 {
+		c.w.untagged("%d RECENT", c.recentCount())
+	}
+}
+
 // recentCount counts the \Recent messages of the snapshot.
 func (c *conn) recentCount() int {
 	n := 0
@@ -1562,9 +1577,10 @@ func (c *conn) recentCount() int {
 	return n
 }
 
-// flagsOut renders the flags of a message including \Recent.
+// flagsOut renders the flags of a message including \Recent, which a
+// session that enabled IMAP4rev2 never sees (RFC 9051 appendix E 12).
 func (c *conn) flagsOut(m *model.Meta) string {
-	if !c.isRecent(m) {
+	if c.rev2 || !c.isRecent(m) {
 		return flagList(m.Flags)
 	}
 
