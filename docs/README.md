@@ -43,6 +43,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [ShardPost 0.40.0](reports/2026-10-01-shardpost-0.40.0.md): batch over all accounts, partitioned scrub with skip-if-idle, IMAP watch hub (scaling stage R2b).
 - [ShardPost 0.39.0](reports/2026-10-01-shardpost-0.39.0.md): no pool listing in running paths, per-account limits (scaling stage R2a).
 - [ShardPost 0.38.0](reports/2026-10-01-shardpost-0.38.0.md): job queue and expiry without listing, key rotation of the admin store (scaling stage R1b).
 - [ShardPost 0.37.0](reports/2026-10-01-shardpost-0.37.0.md): account directory (scaling stage R1a), ESORT.

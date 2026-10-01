@@ -1,6 +1,10 @@
-# Nightly scrubber: walks every user namespace and repairs what a crash
-# may have left behind (orphan blobs, entries without blob, refcounts,
-# quota drift). Same image and credentials as the server.
+# Nightly scrubber: submits one batch scrub over the account directory
+# (shardpost scrub --batch); the servers' job runners carry it out,
+# skipping accounts that did not change since their last complete scrub.
+# It repairs what a crash may have left behind (orphan blobs, entries
+# without blob, refcounts, quota drift). Without a completed directory
+# backfill it falls back to scrubbing in this pod. Same image and
+# credentials as the server.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -13,6 +17,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 1
+      activeDeadlineSeconds: 600
       template:
         metadata:
           labels:
@@ -30,7 +35,7 @@ spec:
           containers:
             - name: scrub
               image: docker.io/chrroessner/shardpost:0.26.0
-              args: ["scrub"]
+              args: ["scrub", "--batch"]
               env:
                 - name: CEPH_USER
                   value: shardpost
@@ -46,10 +51,10 @@ spec:
                   value: "false"
               resources:
                 requests:
-                  cpu: 100m
-                  memory: 128Mi
+                  cpu: 50m
+                  memory: 64Mi
                 limits:
-                  memory: 512Mi
+                  memory: 256Mi
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
