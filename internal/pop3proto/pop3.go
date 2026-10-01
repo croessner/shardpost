@@ -176,6 +176,8 @@ type conn struct {
 	mbox    *model.Mailbox
 	msgs    []model.Meta // maildrop snapshot, index+1 == message number
 	deleted map[int]bool
+	// attempts counts the refused logins, for the attempt ordinal.
+	attempts auth.LoginAttempts
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
@@ -565,7 +567,7 @@ func (c *conn) cmdAuth(arg string) error {
 		return nil
 	}
 
-	res, aerr := c.s.o.Auth.Authenticate(context.Background(), req)
+	res, aerr := c.authenticate(req)
 	if aerr != nil && mech != mechPlain {
 		if _, err := c.continuation(auth.OAuthBearerFailure(401, "")); err != nil {
 			return err
@@ -605,9 +607,22 @@ func (c *conn) continuation(text string) (string, error) {
 func (c *conn) login(user, pass string) error {
 	c.pending = ""
 	req := auth.Request{Username: user, Password: pass, Mechanism: cmdUSER, Protocol: protoPOP3, Client: c.nc.RemoteAddr(), Local: c.nc.LocalAddr(), TLS: c.tls}
-	res, err := c.s.o.Auth.Authenticate(context.Background(), req)
+	res, err := c.authenticate(req)
 
 	return c.finishLogin(req, res, err)
+}
+
+// authTimeout bounds one authentication, as it does for IMAP and
+// ManageSieve.
+const authTimeout = 15 * time.Second
+
+// authenticate asks the backend with the connection's attempt ordinal,
+// bounded by authTimeout.
+func (c *conn) authenticate(req auth.Request) (*auth.Result, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
+	defer cancel()
+
+	return c.attempts.Authenticate(ctx, c.s.o.Auth, req)
 }
 
 // finishLogin takes the maildrop lock and loads the snapshot.

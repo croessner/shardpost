@@ -39,7 +39,7 @@ type adminServers struct {
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
 func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store,
-	notices *sharenotice.Recorder,
+	notices *sharenotice.Recorder, flushLog *auth.FlushLog,
 ) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
@@ -63,7 +63,13 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		}
 	}
 
-	s := admin.New(admin.Options{Delivery: deliverer, Auth: authn, Log: log.With("component", "admin"), Version: version.Version,
+	// A typed nil would not compare equal to nil in the interface.
+	var flusher admin.AuthFlusher
+	if flushLog != nil {
+		flusher = flushLog
+	}
+
+	s := admin.New(admin.Options{AuthFlush: flusher, Delivery: deliverer, Auth: authn, Log: log.With("component", "admin"), Version: version.Version,
 		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients,
 		Import: importer, ImportLockTTL: time.Duration(c.Import.LockTTLSeconds) * time.Second,
 		ImportMaxBatchBytes: c.Import.MaxBatchBytes, ImportMaxBatchMessages: c.Import.MaxBatchMessages, ImportMaxInventory: c.Import.MaxInventory, ImportMaxChanges: c.Import.MaxChanges,

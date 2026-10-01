@@ -16,6 +16,8 @@ const (
 	subsystemLMTP  = "lmtp"
 	subsystemScrub = "scrub"
 	subsystemIMAP  = "imap"
+	subsystemAuth  = "auth"
+	subsystemJMAP  = "jmap"
 )
 
 // Label names.
@@ -31,6 +33,10 @@ const (
 	labelColl    = "collection"
 	labelCause   = "cause"
 	labelObject  = "object"
+	labelResult  = "result"
+	labelScope   = "scope"
+	labelSource  = "source"
+	labelLimit   = "limit"
 )
 
 var (
@@ -150,6 +156,43 @@ var (
 		Namespace: namespace, Subsystem: subsystemIMAP, Name: "watch_refused_total",
 		Help: "Watch subscriptions refused because the connection was at its limit.",
 	})
+	// AuthCache counts the auth cache's answers by operation
+	// (authenticate, lookup) and result: hit (a cached entry, positive
+	// or negative), miss (the caller asked the backend), shared (the
+	// caller waited for another caller's identical backend call) and
+	// bypass (an admin lookup that went past a negative entry).
+	AuthCache = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemAuth, Name: "cache_total",
+		Help: "Auth cache answers by operation and result (hit, miss, shared, bypass).",
+	}, []string{labelOp, labelResult})
+	// AuthCacheEntries is the number of entries the auth cache holds,
+	// by operation.
+	AuthCacheEntries = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemAuth, Name: "cache_entries",
+		Help: "Entries held by the auth cache, by operation.",
+	}, []string{labelOp})
+	// AuthCacheFlushes counts the flushes of the auth cache by scope
+	// (account, all) and source (local: this server's admin API; remote:
+	// the flush log of another server; resync: a full flush after a
+	// lost watch or a gap in the flush log).
+	AuthCacheFlushes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemAuth, Name: "cache_flushes_total",
+		Help: "Auth cache flushes by scope and source.",
+	}, []string{labelScope, labelSource})
+	// AuthBackend is the latency of the backend calls behind the auth
+	// cache, by operation.
+	AuthBackend = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: subsystemAuth, Name: "backend_seconds",
+		Help:    "Latency of the authentication backend calls behind the auth cache, by operation.",
+		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 20},
+	}, []string{labelOp})
+	// JMAPLimit counts the JMAP requests that met a full per-account or
+	// per-IP limit, by limit and outcome: waited (got a slot after
+	// waiting) and rejected (answered 429).
+	JMAPLimit = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemJMAP, Name: "limit_total",
+		Help: "JMAP requests that met a full limit, by limit and outcome (waited, rejected).",
+	}, []string{labelLimit, labelOutcome})
 )
 
 // Timer measures one RADOS operation.

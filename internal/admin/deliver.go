@@ -201,7 +201,7 @@ func (s *Server) resolveRecipient(w http.ResponseWriter, r *http.Request, recipi
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), lookupTimeout)
 	defer cancel()
 
-	res, err := s.o.Auth.Lookup(ctx, recipient, "lmtp", clientAddr(r))
+	res, err := s.o.Auth.Lookup(auth.AdminLookup(ctx), recipient, "lmtp", clientAddr(r))
 	if err != nil {
 		s.deliveryError(w, r, err)
 		return nil, false

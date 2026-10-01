@@ -30,6 +30,8 @@ type Config struct {
 	SMTP      SMTP      `mapstructure:"smtp"`
 	Scrub     Scrub     `mapstructure:"scrub"`
 	Nauthilus Nauthilus `mapstructure:"nauthilus"`
+	// Auth configures the auth cache in front of Nauthilus.
+	Auth Auth `mapstructure:"auth"`
 	// ExtPrograms is the allowlist of external programs (Sieve execute/
 	// pipe/filter and the learning rules).
 	ExtPrograms ExtPrograms `mapstructure:"extprograms"`
@@ -202,19 +204,26 @@ type Scrub struct {
 }
 
 // Nauthilus configures the Nauthilus authentication backend.
-type Nauthilus struct {
-	URL              string `mapstructure:"url" env:"NAUTHILUS_URL"`
-	User             string `mapstructure:"user" env:"NAUTHILUS_USER"`
-	Password         string `mapstructure:"password" env:"NAUTHILUS_PASSWORD" secret:"true"`
-	Token            string `mapstructure:"token" env:"NAUTHILUS_TOKEN" secret:"true"`
-	BearerMode       string `mapstructure:"bearer_mode" env:"NAUTHILUS_BEARER_MODE" validate:"oneof=password introspect"`
-	MaxWait          int64  `mapstructure:"max_wait" env:"NAUTHILUS_MAX_WAIT" validate:"gte=0,lte=86400"`
-	IntrospectURL    string `mapstructure:"introspect_url" env:"NAUTHILUS_INTROSPECT_URL"`
-	OidcClientID     string `mapstructure:"oidc_client_id" env:"NAUTHILUS_OIDC_CLIENT_ID"`
-	OidcClientSecret string `mapstructure:"oidc_client_secret" env:"NAUTHILUS_OIDC_CLIENT_SECRET" secret:"true"`
-	OidcAudience     string `mapstructure:"oidc_audience" env:"NAUTHILUS_OIDC_AUDIENCE"`
-	OidcScope        string `mapstructure:"oidc_scope" env:"NAUTHILUS_OIDC_SCOPE"`
-	AccountClaims    string `mapstructure:"account_claims" env:"NAUTHILUS_ACCOUNT_CLAIMS"`
+type Nauthilus struct { //nolint:dupl // a configuration section is a list of tagged fields, like the others
+	URL        string `mapstructure:"url" env:"NAUTHILUS_URL"`
+	User       string `mapstructure:"user" env:"NAUTHILUS_USER"`
+	Password   string `mapstructure:"password" env:"NAUTHILUS_PASSWORD" secret:"true"`
+	Token      string `mapstructure:"token" env:"NAUTHILUS_TOKEN" secret:"true"`
+	BearerMode string `mapstructure:"bearer_mode" env:"NAUTHILUS_BEARER_MODE" validate:"oneof=password introspect"`
+	MaxWait    int64  `mapstructure:"max_wait" env:"NAUTHILUS_MAX_WAIT" validate:"gte=0,lte=86400"`
+	// Timeout bounds one request to Nauthilus (gRPC or HTTP), to the
+	// introspection endpoint and to the token endpoint, in seconds.
+	Timeout int64 `mapstructure:"timeout" env:"NAUTHILUS_TIMEOUT" validate:"gte=1,lte=300"`
+	// HTTPMaxIdlePerHost is how many idle connections per host the HTTP
+	// client keeps that the JSON API, the introspection and the token
+	// endpoint share.
+	HTTPMaxIdlePerHost int64  `mapstructure:"http_max_idle_per_host" env:"NAUTHILUS_HTTP_MAX_IDLE_PER_HOST" validate:"gte=1,lte=1024"`
+	IntrospectURL      string `mapstructure:"introspect_url" env:"NAUTHILUS_INTROSPECT_URL"`
+	OidcClientID       string `mapstructure:"oidc_client_id" env:"NAUTHILUS_OIDC_CLIENT_ID"`
+	OidcClientSecret   string `mapstructure:"oidc_client_secret" env:"NAUTHILUS_OIDC_CLIENT_SECRET" secret:"true"`
+	OidcAudience       string `mapstructure:"oidc_audience" env:"NAUTHILUS_OIDC_AUDIENCE"`
+	OidcScope          string `mapstructure:"oidc_scope" env:"NAUTHILUS_OIDC_SCOPE"`
+	AccountClaims      string `mapstructure:"account_claims" env:"NAUTHILUS_ACCOUNT_CLAIMS"`
 	// IntrospectClientID and IntrospectClientSecret are the client the
 	// introspection endpoint is asked with. Empty falls back to
 	// oidc_client_id and oidc_client_secret; a separate client is what a
@@ -472,6 +481,18 @@ var defaults = []struct {
 	{"nauthilus.token", ""},
 	{"nauthilus.bearer_mode", "password"},
 	{"nauthilus.max_wait", 5},
+	{"nauthilus.timeout", 10},
+	{"nauthilus.http_max_idle_per_host", 32},
+	{"auth.cache.ttl", 30},
+	{"auth.cache.negative_ttl", 0},
+	{"auth.cache.max_entries", 10000},
+	{"auth.cache.key_client_ip", true},
+	{"auth.cache.lookup_ttl", 30},
+	{"auth.cache.lookup_negative_ttl", 5},
+	{"auth.cache.leader_budget", 0},
+	{"jmap.limit_wait", 2},
+	{"jmap.retry_after", 1},
+	{"jmap.max_concurrent_per_ip", 0},
 	{"nauthilus.introspect_url", ""},
 	{"nauthilus.oidc_client_id", ""},
 	{"nauthilus.oidc_client_secret", ""},
@@ -812,6 +833,10 @@ func (c *Config) checkAuth() error {
 
 	if c.Server.AuthBackend == "nauthilus" && c.Nauthilus.Transport == "http" && c.Nauthilus.URL == "" {
 		return fmt.Errorf("HTTP authentication requires nauthilus.url")
+	}
+
+	if err := c.Auth.Cache.Validate(); err != nil {
+		return err
 	}
 
 	return c.Nauthilus.checkIntrospection()

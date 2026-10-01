@@ -148,7 +148,7 @@ func testNauthilusPassword(t *testing.T, f *nauthilusFixture) {
 
 	n, ctx, client := f.n, f.ctx, f.client
 
-	res, err := n.Authenticate(ctx, Request{Username: "alice", Password: "secret", Mechanism: "PLAIN", Protocol: "imap", Client: client, TLS: true})
+	res, err := n.Authenticate(ctx, Request{Username: "alice", Password: "secret", Mechanism: "PLAIN", Protocol: "imap", Client: client, TLS: true, Attempt: 1})
 	if err != nil || res.Account != "alice@example.org" {
 		t.Fatalf("%v %v", res, err)
 	}
@@ -170,7 +170,13 @@ func testNauthilusFailures(t *testing.T, f *nauthilusFixture) {
 		t.Fatalf("expected ErrInvalid after Auth-Wait, got %v after %s", err, time.Since(start))
 	}
 
-	if _, err = n.Authenticate(ctx, Request{Username: "alice", Password: "wrong", Mechanism: "PLAIN", Client: client}); !errors.Is(err, ErrInvalid) {
+	// The ordinal is the caller's (per connection), and without TLS the
+	// ssl field stays empty: Nauthilus takes any value for TLS.
+	if last := f.last(); last["auth_login_attempt"] != nil || last["ssl"] != nil {
+		t.Fatalf("attempt without ordinal, no TLS: %v", last)
+	}
+
+	if _, err = n.Authenticate(ctx, Request{Username: "alice", Password: "wrong", Mechanism: "PLAIN", Client: client, Attempt: 2}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected ErrInvalid, got %v", err)
 	}
 

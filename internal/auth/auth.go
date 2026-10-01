@@ -7,8 +7,11 @@ package auth
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
+	"slices"
 	"strings"
+	"time"
 )
 
 // Request is one authentication attempt.
@@ -17,10 +20,16 @@ type Request struct {
 	Password  string // for PLAIN / LOGIN / USER+PASS
 	Token     string // for XOAUTH2 / OAUTHBEARER
 	Mechanism string // PLAIN, LOGIN, XOAUTH2, OAUTHBEARER
-	Protocol  string // imap, pop3, lmtp, sieve
+	Protocol  string // imap, pop3, lmtp, sieve, jmap
 	Client    net.Addr
 	Local     net.Addr
 	TLS       bool
+	// Attempt is the 1-based ordinal of this login attempt on its
+	// connection (1 + the failed attempts before it), which Nauthilus
+	// reads as auth_login_attempt; 0 means not set. IMAP, POP3 and
+	// ManageSieve set it, JMAP and LMTP have no connection to count on.
+	// It is not part of the auth cache key.
+	Attempt uint
 }
 
 // Result is a successful authentication.
@@ -34,6 +43,28 @@ type Result struct {
 	// DisplayName is the account holder's name, when the backend names
 	// the attribute that carries it (Nauthilus display_name_field).
 	DisplayName string
+	// Expiry is when the credential stops being valid, when the backend
+	// knows it (the exp claim of an introspected bearer token); zero
+	// means unknown. The auth cache keeps no entry beyond it.
+	Expiry time.Time
+}
+
+// Clone returns a deep copy: the attribute map and its value slices
+// are not shared with r.
+func (r *Result) Clone() *Result {
+	if r == nil {
+		return nil
+	}
+
+	c := *r
+	if r.Attributes != nil {
+		c.Attributes = maps.Clone(r.Attributes)
+		for k, v := range c.Attributes {
+			c.Attributes[k] = slices.Clone(v)
+		}
+	}
+
+	return &c
 }
 
 var (
@@ -42,6 +73,26 @@ var (
 	// ErrTemporary means the backend could not decide right now.
 	ErrTemporary = errors.New("authentication temporarily unavailable")
 )
+
+// LoginAttempts counts the refused logins of one connection, for the
+// attempt ordinal Nauthilus reads (1 + the refusals before it, as nginx
+// and Dovecot send it). A temporary failure is no refusal. The zero
+// value is ready; it is not safe for concurrent use, which a
+// connection's command loop never needs.
+type LoginAttempts struct{ refused uint }
+
+// Authenticate stamps r with the ordinal of this attempt, asks a and
+// counts a refusal.
+func (l *LoginAttempts) Authenticate(ctx context.Context, a Authenticator, r Request) (*Result, error) {
+	r.Attempt = l.refused + 1
+
+	res, err := a.Authenticate(ctx, r)
+	if err != nil && !errors.Is(err, ErrTemporary) {
+		l.refused++
+	}
+
+	return res, err
+}
 
 // Authenticator verifies credentials and resolves recipients.
 type Authenticator interface {

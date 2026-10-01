@@ -42,7 +42,8 @@ Roles: `diagnose` (version, server status and read-only diagnosis), `deliver` (d
 `deliver:noenforce` (additionally required for `enforce_quota=false`),
 `import` (account import), `trace` (protocol trace of an account, see
 below), `provision` (create, rename and subscribe mailboxes; change
-ACLs), `repair` (maintenance jobs that repair; retry learning jobs),
+ACLs), `repair` (maintenance jobs that repair; retry learning jobs;
+flush the auth cache, see below),
 `delete` (permanently delete a mailbox, messages and an account),
 `content` (read message content: search, headers, export, Sieve scripts)
 and `support` (flags, copy/move, change and activate Sieve scripts) and
@@ -853,6 +854,45 @@ Reading it out, for example:
 kubectl -n shardpost logs -l app.kubernetes.io/name=shardpost-server -c server --since=30m \
   | jq -r 'select(.event=="protocol_trace" and .user=="user@example.org") | "\(.time) \(.session_id[0:8]) \(.dir): \(.line)"'
 ```
+
+## Auth cache flush
+
+Every server keeps the logins and lookups Nauthilus answered for
+`auth.cache.ttl` and `lookup_ttl` (see
+[configuration](configuration.md#auth-cache-auth)). A change in LDAP that
+has to take effect before — a locked account, a removed alias, a new
+quota — is pushed through with a flush (role `repair`):
+
+```sh
+shardpostctl auth flush user@example.org   # the entries of one account
+shardpostctl auth flush                    # every entry
+shardpostctl auth flush --json alias@example.org
+```
+
+API: `POST /admin/v1/auth/flush` with an optional
+`{"account": "<name>"}`; without it, empty or `*` everything is
+flushed. The answer is `{"account": "<name in lower case or *>",
+"cached": true}`; `cached` is false on a server without an auth cache
+(the static backend, or `auth.cache.ttl: 0`), where nothing is flushed.
+
+The name is matched without regard to case against the login names, the
+lookup names and the canonical accounts of the entries, so an alias, an
+address or the account all reach the entries that carry them. The
+server that answers flushes its own cache before it answers and records
+the flush in the flush log of the cluster (the omap object `auth-flush`
+in the admin namespace: a generation counter and one entry per flush,
+kept for an hour). The other servers apply it when the notification on
+that object wakes them and at the latest on their next poll, 60 seconds
+later; the answer does not wait for them. A server that lost its watch,
+or finds that entries it has not read are gone, flushes everything.
+The flush is in the audit line (`flush_account`). When the flush log
+cannot be written the answer is 503 (`temporary`): the answering server
+is flushed, the others are not.
+
+A flush does not reach the Director's routing cache (up to 30 s) nor the
+cache of Nauthilus itself. See
+[Operations: Auth cache](operations/README.md#auth-cache) for what each
+change costs until it takes effect.
 
 ## Cluster operation (mTLS)
 

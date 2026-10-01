@@ -22,6 +22,7 @@ One page per subject, in the style of `doveadm`:
 | [shardpostctl-deliver(1)](man1/shardpostctl-deliver.1) | `deliver` |
 | [shardpostctl-migrate(1)](man1/shardpostctl-migrate.1) | `migrate` |
 | [shardpostctl-trace(1)](man1/shardpostctl-trace.1) | `trace on/status/off` |
+| [shardpostctl-auth(1)](man1/shardpostctl-auth.1) | `auth flush` |
 
 ## Reading them
 

@@ -1,0 +1,111 @@
+.TH SHARDPOSTCTL-AUTH 1 "2026-10-01" "ShardPost 0.41.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-auth \- flush the auth cache of every server
+.SH SYNOPSIS
+.B shardpostctl auth flush
+.RB [ \-\-json ]
+.RI [ account ]
+.SH DESCRIPTION
+Every server keeps the logins and lookups Nauthilus answered for a
+short time (the auth cache,
+.IR auth.cache.ttl ,
+30 seconds by default, and
+.I auth.cache.lookup_ttl
+for lookups). A change in LDAP \(em a locked account, a removed alias, a
+new quota, a changed display name \(em reaches ShardPost only when the
+entry ends.
+.B auth flush
+drops the entries at once.
+.PP
+With an
+.I account
+it drops every entry whose login name, lookup name or canonical account
+is that name, compared without regard to case: the account itself, an
+alias or an address all work. Without one it drops every entry.
+.PP
+The server that answers flushes its own cache before it answers and
+records the flush in the cluster's flush log. The other servers apply it
+when they are notified and at the latest on their next poll, 60 seconds
+later; the command does not wait for them. The flush reaches neither the
+Director's routing cache (up to 30 seconds) nor the cache of Nauthilus
+itself, which needs its own flush for a change that has to take effect
+at once.
+.PP
+A server without an auth cache (the static backend, or
+.I auth.cache.ttl
+0) answers that nothing was cached.
+.PP
+Role:
+.BR repair .
+The flush is written to the audit log.
+.SH OPTIONS
+.TP
+.B \-\-json
+Print the answer as JSON:
+.I account
+(the name in lower case, or
+.B *
+for every entry) and
+.I cached
+(whether the server has an auth cache).
+.SH EXAMPLES
+An account was locked in LDAP and has to be locked out now (flush
+Nauthilus' cache as well):
+.PP
+.nf
+.RS
+shardpostctl auth flush user@example.org
+.RE
+.fi
+.PP
+An alias was removed; LMTP should stop accepting it:
+.PP
+.nf
+.RS
+shardpostctl auth flush alias@example.org
+.RE
+.fi
+.PP
+An account moves to another shard: flush it on the source and on the
+target shard, then hold the account for at least
+.I lookup_ttl
+plus the Director's 30 seconds before pinning it:
+.PP
+.nf
+.RS
+kubectl -n shardpost exec deploy/shardpost-server -c server -- \\
+    shardpostctl auth flush user@example.org
+.RE
+.fi
+.PP
+Something looks stale and nobody knows what: flush everything.
+.PP
+.nf
+.RS
+shardpostctl auth flush
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Flushed on this server and recorded for the others (or nothing to flush
+on a server without an auth cache).
+.TP
+.B 64
+Wrong usage.
+.TP
+.B 75
+This server was flushed, but the flush could not be recorded for the
+other servers, or the server could not be reached. Try again.
+.TP
+.B 77
+The caller lacks the role
+.BR repair .
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-account (1)
+.PP
+The auth cache is described in
+.I docs/configuration.md
+(section auth), what each change costs until it takes effect in
+.IR docs/operations/README.md .

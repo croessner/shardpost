@@ -442,10 +442,11 @@ func TestBlobUploadCountsAsAnUpload(t *testing.T) {
 		t.Errorf("two blobs beyond the call's budget gave %#v", res)
 	}
 
-	if !s.enter(s.inFlup, "test", 1) {
+	release, ok := s.inUpload.tryAcquire("test")
+	if !ok {
 		t.Fatal("the upload slot is taken")
 	}
-	defer s.leave(s.inFlup, "test")
+	defer release()
 
 	if got := blobError(t, s, "Blob/upload", `{"create":{"a":{"data":[]}}}`); got != errServerUnavailable {
 		t.Errorf("a Blob/upload beside a running upload gave %q", got)

@@ -37,6 +37,7 @@ const maxAdminValue = model.MaxAdminValue
 type AdminKV struct {
 	*kvindex.Store
 	recs *adminRecords
+	omap *handleOmap
 }
 
 var _ model.IndexedKV = (*AdminKV)(nil)
@@ -71,8 +72,15 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 			return s.holdLock(adminNamespace, sortedindex.LockOID(name), "worker", name+" worker", ttl, true)
 		}})
 
-	return &AdminKV{Store: st, recs: recs}, nil
+	return &AdminKV{Store: st, recs: recs, omap: b}, nil
 }
+
+// Omap is plain omap access to single objects of the admin namespace,
+// with watch and notify. It runs on the store's handle, so it follows
+// key rotations and stays valid until Close.
+func (kv *AdminKV) Omap() model.AdminOmap { return kv.omap }
+
+var _ model.AdminOmap = (*handleOmap)(nil)
 
 // Close releases the store.
 func (kv *AdminKV) Close() { kv.recs.h.close() }

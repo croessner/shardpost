@@ -15,6 +15,12 @@ The authoritative, complete definition is [model.go](../../internal/model/model.
 `Authenticate` returns the canonical account; `Lookup` resolves LMTP recipients
 without a user password. `ErrInvalid` and `ErrTemporary` are different
 results: a backend outage must not count as a definitely wrong password.
+With Nauthilus the authenticator is layered
+`MasterUser{Cache{Nauthilus}}`: the master-user check, then the auth
+cache (`internal/auth/cache.go`: answers from memory, one shared backend
+call for identical concurrent requests, flushed across the cluster
+through the flush log `auth-flush` in the admin namespace), then the
+Nauthilus client.
 
 `model.User` is an account-bound view of mailboxes, messages,
 scripts, metadata and quotas. The caller must call `Close()`.

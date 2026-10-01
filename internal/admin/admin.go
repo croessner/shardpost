@@ -128,6 +128,9 @@ type Options struct {
 	Learning LearningAdmin
 	// SearchScanLimit bounds the messages one search request examines.
 	SearchScanLimit int
+	// AuthFlush flushes the auth cache of the cluster; nil when this
+	// server has none (the flush then answers that nothing is cached).
+	AuthFlush AuthFlusher
 }
 
 // Server implements the generated adminapi.ServerInterface.
@@ -424,6 +427,8 @@ func operation(path string) string {
 		return "accounts"
 	case "/admin/v1/plans":
 		return "batch_plan"
+	case "/admin/v1/auth/flush":
+		return "auth_flush"
 	default:
 		if rest, ok := strings.CutPrefix(path, "/admin/v1/jobs/"); ok {
 			if strings.HasSuffix(rest, "/cancel") {

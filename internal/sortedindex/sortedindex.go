@@ -37,10 +37,10 @@ const (
 // ErrConflict is returned by Backend.Write when the object's version is
 // no longer the one the write was guarded with (or an exclusive create
 // met an existing object).
-var ErrConflict = errors.New("object changed concurrently")
+var ErrConflict = model.ErrOmapConflict
 
 // AnyVersion makes Backend.Write unconditional.
-const AnyVersion = ^uint64(0)
+const AnyVersion = model.OmapAnyVersion
 
 // casRetries bounds the compare-and-swap rounds of one Update.
 const casRetries = 32
@@ -50,11 +50,9 @@ const casRetries = 32
 // this time.
 const HeadTTL = 10 * time.Second
 
-// KV is one omap key with its value.
-type KV struct {
-	Key   string
-	Value []byte
-}
+// KV is one omap key with its value; it is the model's entry type, so
+// a Backend with a Waker is a model.AdminOmap as it stands.
+type KV = model.KVEntry
 
 // Backend is the omap access to the objects of one namespace.
 type Backend interface {

@@ -16,6 +16,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,13 @@ type Limits struct {
 	// account may have in flight at the same time.
 	MaxConcurrentUpload   int
 	MaxConcurrentRequests int
+	// MaxConcurrentDownloads bounds the blob downloads and
+	// MaxEventSources the open event sources of one account. They are
+	// counted apart from the API requests, so that a client streaming an
+	// attachment or holding its event sources open does not lock itself
+	// out of the API.
+	MaxConcurrentDownloads int
+	MaxEventSources        int
 	// MaxCallsInRequest bounds the method calls of one API request.
 	MaxCallsInRequest int
 	// MaxObjectsInGet and MaxObjectsInSet bound one /get and one /set.
@@ -99,7 +107,9 @@ var DefaultLimits = Limits{
 	MaxSizeUpload:          50 << 20,
 	MaxSizeRequest:         10 << 20,
 	MaxConcurrentUpload:    4,
-	MaxConcurrentRequests:  4,
+	MaxConcurrentRequests:  8,
+	MaxConcurrentDownloads: 8,
+	MaxEventSources:        4,
 	MaxCallsInRequest:      16,
 	MaxObjectsInGet:        500,
 	MaxObjectsInSet:        500,
@@ -155,7 +165,30 @@ type Options struct {
 	// Principals configures Principal/* and ShareNotification/* (RFC
 	// 9670); the zero value takes the defaults.
 	Principals PrincipalOptions
+	// Load configures how the front-end meets its limits.
+	Load LoadOptions
 }
+
+// LoadOptions configure what happens at a limit: how long a request
+// waits for a slot of its account, what Retry-After a 429 or a 503 of
+// an undecided authentication carries, and the optional bound per
+// client address checked before authentication.
+type LoadOptions struct {
+	// LimitWait is how long an API request, an upload or a download
+	// waits for a slot when its account is at the limit; 0 answers 429
+	// at once. Event sources never wait.
+	LimitWait time.Duration
+	// RetryAfter is the Retry-After of a 429 and of a 503 from the
+	// authentication backend; 0 takes one second.
+	RetryAfter time.Duration
+	// MaxConcurrentPerIP bounds the requests one client address has in
+	// flight, before authentication; 0 is no bound.
+	MaxConcurrentPerIP int
+}
+
+// DefaultLoad are the load settings a configuration that says nothing
+// gets.
+var DefaultLoad = LoadOptions{LimitWait: 2 * time.Second, RetryAfter: time.Second}
 
 // ShardGate names the backend attribute that carries an account's shard
 // and the shard this server holds. Behind a proxy that does not route
@@ -257,14 +290,16 @@ func pushDefaults(p PushOptions) PushOptions {
 
 // Server is the JMAP front-end.
 type Server struct {
-	o       Options
-	mux     *http.ServeMux
-	mu      sync.Mutex
-	inFlong map[string]int // API requests in flight, per account
-	inFlup  map[string]int // uploads in flight, per account
-	inDown  map[string]int // downloads in flight, per account
-	// inEvents counts the open event sources per account.
-	inEvents map[string]int
+	o   Options
+	mux *http.ServeMux
+	// The per-account limits: API requests, uploads (the endpoint and
+	// Blob/upload), downloads and open event sources; and the optional
+	// limit per client address (nil: none).
+	inAPI    *limiter
+	inUpload *limiter
+	inDown   *limiter
+	inEvents *limiter
+	perIP    *limiter
 	// closing is closed when the server shuts down; open event sources
 	// end on it, since http.Server.Shutdown waits for them otherwise.
 	closing   chan struct{}
@@ -315,8 +350,21 @@ func New(o Options) *Server {
 		o.Sieve = &sv
 	}
 
-	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
-		inEvents: map[string]int{}, closing: make(chan struct{}), misses: newMissBudget(o.Principals.MissPerMinute)}
+	if o.Load.RetryAfter <= 0 {
+		o.Load.RetryAfter = DefaultLoad.RetryAfter
+	}
+
+	s := &Server{o: o, mux: http.NewServeMux(),
+		inAPI:    newLimiter("requests", o.Limits.MaxConcurrentRequests),
+		inUpload: newLimiter("uploads", o.Limits.MaxConcurrentUpload),
+		inDown:   newLimiter("downloads", o.Limits.MaxConcurrentDownloads),
+		inEvents: newLimiter("event_sources", o.Limits.MaxEventSources),
+		closing:  make(chan struct{}), misses: newMissBudget(o.Principals.MissPerMinute)}
+
+	if o.Load.MaxConcurrentPerIP > 0 {
+		s.perIP = newLimiter("per_ip", o.Load.MaxConcurrentPerIP)
+	}
+
 	s.watches = newWatchHub(o.Store, 0, o.Log)
 	s.fillSlots = make(chan struct{}, o.Limits.AttachmentBackfills)
 	s.fillCtx, s.fillCancel = context.WithCancel(context.Background())
@@ -357,6 +405,14 @@ func withDefaults(l Limits) Limits {
 
 	if l.MaxConcurrentRequests <= 0 {
 		l.MaxConcurrentRequests = d.MaxConcurrentRequests
+	}
+
+	if l.MaxConcurrentDownloads <= 0 {
+		l.MaxConcurrentDownloads = d.MaxConcurrentDownloads
+	}
+
+	if l.MaxEventSources <= 0 {
+		l.MaxEventSources = d.MaxEventSources
 	}
 
 	if l.MaxCallsInRequest <= 0 {
@@ -463,28 +519,42 @@ func (s *Server) Close() {
 	})
 }
 
-// enter takes a slot of the given per-account counter; it reports false
-// when the account is already at its limit.
-func (s *Server) enter(counters map[string]int, account string, limit int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if counters[account] >= limit {
-		return false
+// slot takes a slot of a limit for key. A request that waits (wait
+// true) queues up to jmap.limit_wait for a free one; without a slot it
+// is answered 429 with Retry-After, and slot reports false. A limit the
+// session advertises (limitName, such as maxConcurrentRequests) gets
+// the RFC 8620 3.6.1 limit error naming it; RFC 8620 reserves that
+// error for those, so a limit it does not know (limitName empty:
+// downloads, event sources, the bound per address) gets a plain problem
+// (type about:blank).
+func (s *Server) slot(w http.ResponseWriter, r *http.Request, lim *limiter, key string, wait bool, detail, limitName string) (func(), bool) {
+	d := time.Duration(0)
+	if wait {
+		d = s.o.Load.LimitWait
 	}
 
-	counters[account]++
+	release, ok := lim.acquire(r.Context(), key, d)
+	if !ok {
+		urn := errURNLimit
+		if limitName == "" {
+			urn = problemAboutBlank
+		}
 
-	return true
+		s.retryAfter(w)
+		writeProblem(w, http.StatusTooManyRequests, urn, detail, limitName)
+
+		return nil, false
+	}
+
+	return release, true
 }
 
-// leave gives a slot back.
-func (s *Server) leave(counters map[string]int, account string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// problemAboutBlank is the problem type of an error that is described
+// by its status alone (RFC 7807 4.2).
+const problemAboutBlank = "about:blank"
 
-	counters[account]--
-	if counters[account] <= 0 {
-		delete(counters, account)
-	}
+// retryAfter sets the Retry-After of a 429 or a 503 (whole seconds, at
+// least one).
+func (s *Server) retryAfter(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(max(int(s.o.Load.RetryAfter/time.Second), 1)))
 }

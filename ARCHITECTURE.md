@@ -26,7 +26,9 @@ repair are in the [storage chapter](docs/architecture/storage.md).
 In the production profile, Nauthilus is addressed over gRPC and an
 OIDC-authenticated backchannel. The generic auth interface additionally allows
 HTTP and a static test backend. A login name is not automatically the storage
-namespace: what counts is the canonical `auth.Result.Account`.
+namespace: what counts is the canonical `auth.Result.Account`. A short-lived
+auth cache in front of Nauthilus answers repeated logins and lookups and joins
+identical concurrent ones (see [configuration](docs/configuration.md#auth-cache-auth)).
 
 ## Components Within the Process
 

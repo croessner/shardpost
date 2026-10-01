@@ -166,6 +166,8 @@ type conn struct {
 	tls     bool
 	user    model.User
 	name    string
+	// attempts counts the refused logins, for the attempt ordinal.
+	attempts auth.LoginAttempts
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
@@ -842,7 +844,7 @@ func (c *conn) login(req auth.Request) error {
 	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
 	defer cancel()
 
-	res, err := c.s.o.Auth.Authenticate(ctx, req)
+	res, err := c.attempts.Authenticate(ctx, c.s.o.Auth, req)
 	if errors.Is(err, auth.ErrTemporary) {
 		metrics.Commands.WithLabelValues(protoManageSieve, cmdAuthenticate, "tempfail").Inc()
 		c.log.Warn("authentication unavailable", "event", "auth_unavailable")

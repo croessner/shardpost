@@ -29,6 +29,10 @@ type session struct {
 	srv    *Server
 	// remote is the client's IP address, for the relay (XCLIENT ADDR).
 	remote string
+	// releaseAddress gives the request's slot of the bound per client
+	// address back early (an event source, which stays open for hours,
+	// does that once it holds its own slot); calling it again is a no-op.
+	releaseAddress func()
 	// auth is the authentication result, whose attributes provisioning
 	// reads (the quota).
 	auth *auth.Result
@@ -113,6 +117,12 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 			return
 		}
 
+		release, ok := s.addressSlot(w, r)
+		if !ok {
+			return
+		}
+		defer release()
+
 		req, ok := credentials(r)
 		if !ok {
 			unauthorized(w)
@@ -127,20 +137,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 			return
 		}
 
-		if ok, shard := s.o.Shard.serves(res); !ok {
-			if shard == nil {
-				// Once per process: a misspelt attribute would otherwise
-				// log on every request of every account.
-				s.noShardAttr.Do(func() {
-					s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
-						"account", res.Account, "attribute", s.o.Shard.Attribute)
-				})
-			} else {
-				s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", shard)
-			}
-
-			writeProblem(w, http.StatusForbidden, errURNNotRequest, "this account is not served here", "")
-
+		if !s.servedHere(w, res) {
 			return
 		}
 
@@ -161,11 +158,47 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 		others := &views{store: s.o.Store, ctx: r.Context()}
 		defer others.close()
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r),
+		ctx := context.WithValue(r.Context(), ctxKey{}, &session{account: res.Account, user: u, own: u, limits: s.o.Limits, srv: s, remote: clientIP(r), releaseAddress: release,
 			log: s.o.Log.With("account", res.Account), auth: res, views: others,
 			principals: &principalCache{}})
 		next(w, r.WithContext(ctx))
 	}
+}
+
+// servedHere checks the shard gate; an account that lives elsewhere is
+// answered 403.
+func (s *Server) servedHere(w http.ResponseWriter, res *auth.Result) bool {
+	ok, shard := s.o.Shard.serves(res)
+	if ok {
+		return true
+	}
+
+	if shard == nil {
+		// Once per process: a misspelt attribute would otherwise log on
+		// every request of every account.
+		s.noShardAttr.Do(func() {
+			s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
+				"account", res.Account, "attribute", s.o.Shard.Attribute)
+		})
+	} else {
+		s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", shard)
+	}
+
+	writeProblem(w, http.StatusForbidden, errURNNotRequest, "this account is not served here", "")
+
+	return false
+}
+
+// addressSlot takes a slot of the bound per client address
+// (jmap.max_concurrent_per_ip) before the authentication, so that a
+// flood of requests does not reach the backend at all. Without the
+// bound it always succeeds.
+func (s *Server) addressSlot(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	if s.perIP == nil {
+		return func() {}, true
+	}
+
+	return s.slot(w, r, s.perIP, clientIP(r), false, "too many requests in flight from this address", "")
 }
 
 // authFailed answers a rejected or undecidable authentication. A backend
@@ -174,6 +207,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 func (s *Server) authFailed(w http.ResponseWriter, r *http.Request, user string, err error) {
 	if errors.Is(err, auth.ErrTemporary) {
 		s.o.Log.Warn("jmap: authentication backend unavailable", "err", err)
+		s.retryAfter(w)
 		writeProblem(w, http.StatusServiceUnavailable, errURNNotRequest, "authentication unavailable", "")
 
 		return
@@ -228,11 +262,12 @@ func credentials(r *http.Request) (auth.Request, bool) {
 // authentication backend's rate limiting and logging.
 func remoteAddr(r *http.Request) *addr { return &addr{s: r.RemoteAddr} }
 
-// clientIP is the IP address of the client, without the port.
+// clientIP is the IP address of the client, without the port; a remote
+// address without a port is taken as it is.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return ""
+		return r.RemoteAddr
 	}
 
 	return host

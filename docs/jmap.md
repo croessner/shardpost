@@ -1026,9 +1026,10 @@ and the current states of all shared accounts and of the notifications
 when the digest is no longer the current one; it compares them with its
 own and asks for the changes where they differ.
 `closeafter=state` ends the stream after one event; `ping` is clamped to
-15–900 seconds. An account may hold `maxConcurrentRequests` event
-sources open, counted apart from API requests, and shutting the server
-down ends them.
+15–900 seconds. An account may hold `jmap.max_event_sources` (default 4)
+event sources open, counted apart from API requests; one more is
+answered 429 at once, without waiting for a slot (see
+[Load](#load)). Shutting the server down ends them.
 
 **Push subscriptions** (RFC 8620 7.2) are for clients that cannot keep a
 connection open. A front-end takes them and keeps them in the shared
@@ -1698,6 +1699,68 @@ not. `nauthilus.oidc_audience` and `oidc_scope`, when set, are required
 of the token. Authentication on a plaintext connection is refused unless
 `jmap.insecure_auth` is set.
 
+Every request is authenticated, but not every request reaches
+Nauthilus: the auth cache (`auth.cache`, see
+[configuration](configuration.md#auth-cache-auth)) answers a repeated
+Basic login or Bearer token from memory for `auth.cache.ttl` (30 s by
+default; a token's entry ends at its `exp` when that comes first), and
+identical requests that arrive together share one backend call. A
+client that fires a batch of requests at once costs one authentication,
+not one per request. A backend that cannot decide is answered 503 with
+`Retry-After` (`jmap.retry_after`), never 401, so the client retries
+rather than asking for a new password. JMAP sends no login attempt
+ordinal: there is no connection to count on.
+
+## Load
+
+An account may have `jmap.max_concurrent_requests` API requests (default
+8, the `maxConcurrentRequests` the session advertises),
+`jmap.max_concurrent_upload` uploads (default 4, `Blob/upload` included),
+`jmap.max_concurrent_downloads` downloads (default 8) and
+`jmap.max_event_sources` event sources (default 4) running at once in
+one server. The four are counted apart, so that a client streaming an
+attachment or holding its event sources open does not lock itself out
+of the API.
+
+A request that finds its account at a limit does not fail at once: it
+queues for up to `jmap.limit_wait` (default 2 s, at most 10 s) and takes
+the next free slot. The queue of an account and limit is first come,
+first served — a freed slot goes to the oldest waiter, never to
+whoever asks next — and holds at most twice the limit; a request beyond
+that, or one whose wait runs out, is answered 429 with `Retry-After:
+jmap.retry_after` (default 1 s). For the limits the session advertises
+(`maxConcurrentRequests`, `maxConcurrentUpload`) the problem is the
+RFC 8620 3.6.1 `urn:ietf:params:jmap:error:limit` naming the limit; RFC
+8620 reserves that error for those, so a download, an event source and
+the bound per address below get a plain problem (`about:blank`, status
+429) without a `limit` property. An event source never waits: it stays
+open for hours, so it is answered 429 at once. A
+`Blob/upload` inside an API request that finds the uploads full answers
+`serverUnavailable` for that call, as before, rather than holding the
+API slot while it waits. Waiting happens after the authentication, and
+the wait has to stay well below the response timeouts of the proxies
+in front: the Director's `backend_response_header` defaults to two
+minutes, and HAProxy's `timeout server` for the JMAP path must be
+longer than `jmap.limit_wait` plus the time a request takes.
+
+`jmap.max_concurrent_per_ip` (default 0, off) bounds the requests one
+client address has in flight, checked before the authentication, so a
+flood from one address does not reach Nauthilus at all; past it the
+answer is 429 with `Retry-After` at once. An event source holds its
+address slot only until it is authenticated and has its own slot;
+the stream that stays open for hours does not count against the
+address, so a client with event sources open can still send requests
+(event sources are bounded per account by `jmap.max_event_sources`).
+Behind the Director the
+address is the Director's unless the PROXY protocol passes the
+client's (`server.proxy_protocol_trusted_cidrs`); the server warns at
+startup when the bound is set without it.
+
+The counters live in each server's memory: two servers behind the
+Director each allow the full limits. `imapceph_jmap_limit_total{limit,
+outcome}` counts the requests that waited for a slot and those that were
+turned away (see [Observability](observability.md)).
+
 ## Configuration
 
 **Behind nauthilus-director.** The lasting deployment puts JMAP behind
@@ -1768,7 +1831,12 @@ jmap:
   max_size_upload: 52428800
   max_size_request: 10485760
   max_concurrent_upload: 4
-  max_concurrent_requests: 4
+  max_concurrent_requests: 8     # advertised as maxConcurrentRequests
+  max_concurrent_downloads: 8
+  max_event_sources: 4
+  limit_wait: 2                  # seconds a request queues at a full limit; 0..10
+  retry_after: 1                 # Retry-After of 429 and of 503 from the backend
+  max_concurrent_per_ip: 0       # before authentication; 0 = off
   max_calls_in_request: 16
   max_objects_in_get: 500
   max_objects_in_set: 500
