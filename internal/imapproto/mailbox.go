@@ -172,11 +172,61 @@ func (c *conn) selectList(t *target, given string) {
 
 	mark := c.w.bw.Buffered()
 
-	if err := c.listLines(false, opts, "", []string{t.full}); err == nil && c.w.bw.Buffered() > mark {
+	if err := c.selectListLine(t, opts); err == nil && c.w.bw.Buffered() > mark {
 		return
 	}
 
 	c.w.untagged(`LIST () "/" %s%s`, c.mailboxOut(t.full), opts.extended)
+}
+
+// selectListLine writes the LIST line of the selected mailbox, reading
+// only the namespace it lies in. An own mailbox needs another namespace
+// only when it is named like that namespace's root (its \HasChildren
+// then comes from there).
+func (c *conn) selectListLine(t *target, opts listOptions) error {
+	patterns := []string{t.full}
+
+	switch {
+	case t.public:
+		public, nodes, err := c.collectPublic()
+		if err == nil {
+			c.listForeign(public, nodes, false, opts, "", patterns)
+		}
+
+		return err
+	case t.owner != "":
+		shared, nodes, err := c.collectSharedRefs()
+		if err == nil {
+			c.listForeign(shared, nodes, false, opts, "", patterns)
+		}
+
+		return err
+	}
+
+	var (
+		public, shared []sharedEntry
+		err            error
+	)
+
+	if isRoot(t.full, c.publicPrefix()) {
+		if public, _, err = c.collectPublic(); err != nil {
+			return err
+		}
+	}
+
+	if isRoot(t.full, c.sharedPrefix()) {
+		if shared, _, err = c.collectSharedRefs(); err != nil {
+			return err
+		}
+	}
+
+	return c.listOwn(false, opts, "", patterns, namespaceRoots("", patterns, public, shared))
+}
+
+// isRoot reports whether name is the root of the namespace with that
+// prefix ("" = switched off).
+func isRoot(name, prefix string) bool {
+	return prefix != "" && name == strings.TrimSuffix(prefix, "/")
 }
 
 // oldNameData is the OLDNAME extended data item (RFC 9051 6.3.9.7) for a

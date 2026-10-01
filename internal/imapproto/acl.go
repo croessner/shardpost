@@ -120,7 +120,9 @@ func (c *conn) resolveTarget(full string) (*target, error) {
 		return nil, err
 	}
 
-	return &target{u: u, owner: owner, prefix: shared, name: name, full: full}, nil
+	// The owner part is case-insensitive; full carries it lowercased,
+	// as the listing of the shared namespace does.
+	return &target{u: u, owner: owner, prefix: shared, name: name, full: shared + owner + "/" + name}, nil
 }
 
 // publicPrefix is the client-visible prefix of the public namespace,

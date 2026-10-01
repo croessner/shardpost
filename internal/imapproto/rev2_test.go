@@ -91,3 +91,20 @@ func TestIMAP4rev2SelectPublic(t *testing.T) {
 	mustHave(t, c.ok("EXAMINE \"Public/Ankündigungen\""), "* 1 EXISTS",
 		"* LIST (\\HasNoChildren) \"/\" \"Public/Ankündigungen\" (\"OLDNAME\" (\"Public/Ankündigungen\"))")
 }
+
+// TestIMAP4rev2SelectShared: the LIST of SELECT for another account's
+// mailbox, addressed with the owner in other case, carries the listing's
+// attributes and the canonical (lowercased) owner; an own mailbox named
+// like the shared root says \HasChildren.
+func TestIMAP4rev2SelectShared(t *testing.T) {
+	alice, bob := twoUsers(t)
+	alice.ok("CREATE \"Grün\"")
+	alice.ok("SETACL \"Grün\" bob lr")
+	bob.ok("SUBSCRIBE \"Shared/alice/Grün\"")
+
+	bob.ok("ENABLE IMAP4rev2")
+	mustHave(t, bob.ok("EXAMINE \"Shared/Alice/Grün\""), "* LIST (\\Subscribed \\HasNoChildren) \"/\" \"Shared/alice/Grün\"")
+
+	bob.ok("CREATE Shared")
+	mustHave(t, bob.ok("EXAMINE Shared"), `* LIST (\HasChildren) "/" Shared`)
+}
