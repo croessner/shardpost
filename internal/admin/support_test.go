@@ -11,8 +11,10 @@ import (
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/imapsieve"
+	"shardpost/internal/learnindex"
 	"shardpost/internal/model"
 	"shardpost/internal/sieve"
+	"shardpost/internal/sortedindex"
 )
 
 // testLearning is the learning queue of serveDiag (nil: none).
@@ -25,16 +27,31 @@ type fakeLearning struct {
 	ready bool
 }
 
-func (f *fakeLearning) All() ([]imapsieve.Job, error) {
+func (f *fakeLearning) Jobs(account string) ([]imapsieve.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	var out []imapsieve.Job
+
 	for _, j := range f.jobs {
-		out = append(out, j)
+		if account == "" || j.Owner == account {
+			out = append(out, j)
+		}
 	}
 
 	return out, nil
+}
+
+func (f *fakeLearning) Job(id string) (imapsieve.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	j, ok := f.jobs[id]
+	if !ok {
+		return j, imapsieve.ErrNoJob
+	}
+
+	return j, nil
 }
 
 func (f *fakeLearning) Ready(imapsieve.Job) (bool, error) { return f.ready, nil }
@@ -306,12 +323,51 @@ func TestSieveCheckWithoutStoreNeedsNoContentRole(t *testing.T) {
 	}
 }
 
-func TestLearningRetry(t *testing.T) {
-	q := &fakeLearning{jobs: map[string]imapsieve.Job{
+// learningJobs are the jobs of TestLearningRetry.
+func learningJobs() map[string]imapsieve.Job {
+	return map[string]imapsieve.Job{
 		"a1": {ID: "a1", Owner: "alice", Action: "spam", Dead: true, Attempts: 3},
 		"a2": {ID: "a2", Owner: "alice", Action: "spam"},
 		"b1": {ID: "b1", Owner: "bob", Action: "ham", Dead: true, Prepared: true},
-	}}
+	}
+}
+
+// TestLearningRetry runs over a fake queue and over the indexed queue in
+// read mode, which serves list, show and retry without listing.
+func TestLearningRetry(t *testing.T) {
+	t.Run("fake", func(t *testing.T) {
+		testLearningRetry(t, &fakeLearning{jobs: learningJobs()})
+	})
+
+	t.Run("indexed", func(t *testing.T) {
+		sortedindex.ForgetHeads()
+
+		rec := learnindex.NewMemRecords()
+		q := learnindex.New(rec, learnindex.Options{Mode: model.KVIndexRead, Backend: sortedindex.NewMemBackend()})
+
+		for _, j := range learningJobs() {
+			rec.Put(j, nil)
+			rec.SetReady(j.ID, false)
+
+			at := learnindex.Position(j)
+			if err := q.DueQueue().Move(j.ID, nil, &at); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := q.Owners().Set(learnindex.OwnerID(j), []byte{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		testLearningRetry(t, q)
+
+		if n := rec.Listings(); n != 0 {
+			t.Fatalf("the learning queue was listed %d times", n)
+		}
+	})
+}
+
+func testLearningRetry(t *testing.T, q LearningAdmin) {
 	testLearning = q
 
 	t.Cleanup(func() { testLearning = nil })

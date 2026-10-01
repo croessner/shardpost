@@ -45,6 +45,9 @@ type Config struct {
 	JMAP JMAP `mapstructure:"jmap"`
 	// FTS configures the text preparation of the full-text index.
 	FTS FTS `mapstructure:"fts"`
+	// Limits bounds what one account can grow (mailboxes, keywords,
+	// METADATA entries, shared pointers).
+	Limits Limits `mapstructure:"limits"`
 }
 
 // Logging configures the log output.
@@ -282,6 +285,8 @@ var defaults = []struct {
 	{"imapsieve.max_parallel", 4},
 	{"imapsieve.learning.max_attempts", 5},
 	{"imapsieve.learning.max_message_bytes", 4 << 20},
+	{"imapsieve.learning.index", "write"},
+	{"imapsieve.learning.queue_shards", 4},
 	{"extprograms.bin_dir", "/usr/local/lib/shardpost/programs"},
 	{"quota.grace", ""},
 	{"admin.socket", ""},
@@ -290,7 +295,7 @@ var defaults = []struct {
 	{"admin.tls_key", ""},
 	{"admin.client_ca", ""},
 	{"admin.search_scan_limit", 50000},
-	{"admin.kv_index", "write"},
+	{"admin.kv_index", "read"},
 	{"admin.kv_queue_shards", 4},
 	{"admin.import.lock_ttl_seconds", 900},
 	{"admin.import.max_batch_bytes", 64 << 20},
@@ -314,6 +319,11 @@ var defaults = []struct {
 	{"fts.html", "text"},
 	{"fts.imap_search", "substring"},
 	{"fts.verify_parallel", 8},
+	{"limits.mailboxes", defaultLimitMailboxes},
+	{"limits.mailbox_names", defaultLimitMailboxNames},
+	{"limits.keywords_per_mailbox", defaultLimitKeywords},
+	{"limits.metadata_entries", defaultLimitMetadataEntries},
+	{"limits.shared_pointers", defaultLimitSharedPointers},
 	{"quota.over_flag.enabled", false},
 	{"quota.over_flag.attribute", ""},
 	{"quota.over_flag.over_value", "TRUE"},

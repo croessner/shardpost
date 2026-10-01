@@ -18,7 +18,7 @@ const (
 	// as JSON). Readers may switch to admin.kv_index=read only after a
 	// backfill that started after the last server without the indexes
 	// stopped.
-	MarkerKV = "backfill.kv"
+	MarkerKV = kvindex.MarkerKV
 	// markerKVProgress records the position of a running backfill.
 	markerKVProgress = "backfill.kv.progress"
 )

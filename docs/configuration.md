@@ -9,6 +9,8 @@ shardpost --config /etc/shardpost/server.yaml scrub
 shardpost --config /etc/shardpost/server.yaml index backfill accounts [--restart]
 shardpost --config /etc/shardpost/server.yaml index backfill kv [--restart]
 shardpost --config /etc/shardpost/server.yaml index show kv [<key>...]
+shardpost --config /etc/shardpost/server.yaml index backfill learning [--restart]
+shardpost --config /etc/shardpost/server.yaml index show learning [<id>...]
 ```
 
 `index backfill accounts` fills the account directory once after a
@@ -18,14 +20,19 @@ admin store's hint indexes and due queues (see
 [Operations](operations/README.md#admin-store-backfill)); it uses
 `admin.kv_index` (refuses `off`) and `jobs.retention_days`. `index show
 kv` prints their state and that of the given admin store keys
-(read-only).
+(read-only). `index backfill learning` fills the learning queue's due
+queue and owner index (see
+[Operations](operations/README.md#learning-queue-backfill)); it uses
+`imapsieve.learning.index` (refuses `off`) and
+`imapsieve.learning.queue_shards`. `index show learning` prints their
+state and that of the given learning jobs (read-only).
 
 Alternatively, `SHARDPOST_CONFIG` determines the file path. `IMAP_CONFIG`
 is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
 explicit `--config` takes precedence over both variables. An explicitly
 empty `SHARDPOST_CONFIG` disables the old fallback. Precedence: built-in defaults, explicit YAML file, explicitly set legacy env variables. There is no implicit file lookup and no automatic reload. Changes in Kubernetes are applied through a controlled deployment rollout. Go runtime settings such as `GOMEMLIMIT` remain environment variables; additional standardized OTEL SDK options are still evaluated by the SDK.
 
-The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin`, `fts` and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go`, `internal/config/fts.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
+The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin`, `fts`, `limits` (see [account limits](#account-limits-limits)) and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go`, `internal/config/fts.go`, `internal/config/limits.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
 
 ```yaml
 server:
@@ -409,15 +416,74 @@ YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `admin.kv_index` | `write` | `off`: no hint indexes, no due queues, no expiry worker (the behaviour before the indexes); `write`: keep them up to date while readers still list the admin namespace; `read`: also read from them (job runner, job lists, expiry of old records, push subscription scan). Environment: `ADMIN_KV_INDEX` |
+| `admin.kv_index` | `read` | `off`: no hint indexes, no due queues, no expiry worker (the behaviour before the indexes); `write`: keep them up to date while readers still list the admin namespace (and the listing cleanup of old jobs and plans runs on every runner poll); `read`: also read from them (job runner, job lists, expiry of old records, push subscription scan) and list nothing on a running path. Environment: `ADMIN_KV_INDEX` |
 | `admin.kv_queue_shards` | 4 | shard objects of a due queue (1–8) when its first writer creates it; an existing queue keeps its count |
 
-Switch to `read` only after `shardpost index backfill kv` completed with
-a start after the last server without the indexes stopped, and set it
-on every server (a server in `read` mode does not see what a server in
-`off` mode writes). Back to `write` is always possible. See
+`read` is the default. It is correct on a cluster whose
+`shardpost index backfill kv` completed after the last server without
+the indexes (before 0.38.0, or with `admin.kv_index: off`) stopped.
+Without the completion marker a server configured for `read` logs a
+warning and behaves as in `write` mode until the marker exists (it
+looks for it every 30 seconds), so the gate keeps such a cluster on
+`write` until the backfill ran. A new installation runs the backfill
+once as well (it finds no records and completes at once). Set the same
+mode on every server (a server in `read` mode does not see what a server
+in `off` mode writes). Back to `write` is always possible. See
+
 [Storage: admin store](architecture/storage.md#admin-store-hint-indexes-and-due-queues)
 and [Operations](operations/README.md#admin-store-backfill).
+
+### Learning queue index (`imapsieve.learning.index`)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `imapsieve.learning.index` | `write` | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
+| `imapsieve.learning.queue_shards` | 4 | shard objects of the due queue (1–8) when its first writer creates it; an existing queue keeps its count |
+
+Switch to `read` only after `shardpost index backfill learning`
+completed with a start after the last server without the index stopped,
+on every server. Without the completion marker a server in `read` mode
+logs a warning and behaves as in `write` mode until the marker exists.
+See [Storage: learning queue](architecture/storage.md#learning-queue-due-queue-and-owner-index)
+and [Operations](operations/README.md#learning-queue-backfill).
+
+### Account limits (`limits`)
+
+Upper bounds on what one account can grow. They keep the omap objects
+that hold an account's state (the mailbox registry, a mailbox header,
+the METADATA object) far below the size at which Ceph reports
+`LARGE_OMAP_OBJECTS` and one account slows down the OSD that serves it.
+The defaults are far above what accounts reach in normal use; `0`
+switches a limit off.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `limits.mailboxes` | 10000 | mailboxes of an account. INBOX is never refused. Environment: `LIMITS_MAILBOXES` |
+| `limits.mailbox_names` | 50000 | distinct names an account ever created a mailbox under. The registry keeps the last UIDVALIDITY of every such name for good (so that a mailbox recreated under the same name never reuses one); a name used before can always be used again, RENAME does not count. Environment: `LIMITS_MAILBOX_NAMES` |
+| `limits.keywords_per_mailbox` | 1000 | user keywords one mailbox knows. The keyword list of a mailbox only grows (it is what PERMANENTFLAGS and JMAP show), so the limit counts every keyword ever used in the mailbox; keywords it already knows and system flags are always accepted. Environment: `LIMITS_KEYWORDS_PER_MAILBOX` |
+| `limits.metadata_entries` | 1000 | METADATA entries (RFC 5464) of an account: server and mailbox entries, shared and private, together. Only the number counts (each value is bounded to 64 KiB on its own). Entries the server keeps for itself (`/private/vendor/shardpost/jmap/...`: JMAP identities, vacation response, Sieve scripts, share notifications) count but are never refused. Environment: `LIMITS_METADATA_ENTRIES` |
+| `limits.shared_pointers` | 10000 | mailboxes of other accounts shared with an account (the pointers ACL grants write into the grantee's registry). A grant that would add one more is refused on the granting side, before the ACL changes; changing the rights of an existing grant, `anyone` and public folders need no pointer. Environment: `LIMITS_SHARED_POINTERS` |
+
+What a client sees when it reaches a limit is listed in
+[Protocols: account limits](protocols.md#account-limits). Delivery never
+loses mail to a limit: a Sieve `fileinto` that would have to create a
+mailbox beyond `limits.mailboxes` or `limits.mailbox_names` goes to
+INBOX like any other failed `fileinto`, and keywords a Sieve script adds
+beyond `limits.keywords_per_mailbox` are dropped (the message is stored
+with its system flags). The autocreated mailboxes (`server.autocreate`)
+are skipped for an account at its mailbox limit.
+
+An account import (admin API) is held to the mailbox limits, which it
+checks before it writes anything for a mailbox, but not to the keyword
+limit: an import reproduces the source mailbox as it is, and refusing
+it halfway would leave messages whose keywords the mailbox does not
+list.
+
+The keyword limit is checked in the same compare-and-swap as the change
+that adds the keywords, so it holds exactly (a MOVE checks it before it
+starts and then completes). The other limits count omap keys before the
+write and are advisory: writers that race past the check together can
+exceed a limit by one entry each.
 
 ### Full-text index (`fts`)
 

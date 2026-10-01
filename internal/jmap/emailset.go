@@ -24,6 +24,9 @@ const (
 	setOverQuota    = "overQuota"
 	setBlobNotFound = "blobNotFound"
 	setTooLarge     = "tooLarge"
+	// setTooManyKeywords: the email would carry more keywords than the
+	// server allows (RFC 8621 4.6, 4.8).
+	setTooManyKeywords = "tooManyKeywords"
 )
 
 // emailSet implements Email/set: creations first, then updates, then
@@ -919,7 +922,27 @@ func storeFailed(err error) *setError {
 		return &setError{Type: setOverQuota}
 	}
 
+	if errors.Is(err, model.ErrLimit) {
+		return limitFailed(err)
+	}
+
 	return &setError{Type: setServerFail, Description: err.Error()}
+}
+
+// limitFailed maps a per-account limit (model.Limits) onto a set error:
+// keywords a mailbox may not take any more are tooManyKeywords (RFC 8621
+// 4.6 for Email/set, 4.8 for Email/import), a
+// limit on the number of objects (mailboxes, shares) is overQuota (RFC
+// 8620 5.3).
+func limitFailed(err error) *setError {
+	switch model.LimitKindOf(err) {
+	case model.LimitKeywords:
+		return &setError{Type: setTooManyKeywords, Description: "a mailbox of the email would hold more keywords than allowed"}
+	case model.LimitSharedPointers:
+		return &setError{Type: setOverQuota, Description: "the mailbox would be shared with an account that has as many shared mailboxes as allowed"}
+	default:
+		return &setError{Type: setOverQuota, Description: "the account has as many mailboxes as allowed"}
+	}
 }
 
 // emailDestroys runs the destructions of a /set: every copy of the

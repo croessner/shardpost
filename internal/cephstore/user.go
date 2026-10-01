@@ -142,6 +142,7 @@ type User struct {
 	// objects of the layout before 0.35.0 (see legacyDictMatches).
 	legacyDict    int
 	acctRetention int
+	limits        model.Limits
 	shardSize     uint32
 	limit         QuotaLimit
 	rules         *quota.Policy
@@ -360,9 +361,22 @@ func (u *User) CreateMailbox(name string, specialUse []string) error {
 	rec := MailboxRec{ID: newGUID(), UIDValidity: uint32(time.Now().Unix()), SpecialUse: specialUse}
 	// A recreated mailbox must not reuse the UIDVALIDITY of its
 	// predecessor, even within the same second.
+	known := false
+
 	if vals, err := getOmapKeys(u.idx, oidRegistry, []string{regLastValidity + name}); err == nil {
-		if last, _ := strconv.ParseUint(string(vals[regLastValidity+name]), 10, 32); uint32(last) >= rec.UIDValidity {
-			rec.UIDValidity = uint32(last) + 1
+		var v []byte
+		if v, known = vals[regLastValidity+name]; known {
+			if last, _ := strconv.ParseUint(string(v), 10, 32); uint32(last) >= rec.UIDValidity {
+				rec.UIDValidity = uint32(last) + 1
+			}
+		}
+	}
+
+	// An existing mailbox is answered as before (the claim below finds
+	// it), not as a limit.
+	if _, err := u.Lookup(name); errors.Is(err, ErrNoMailbox) {
+		if err := u.checkMailboxLimits(name, known); err != nil {
+			return err
 		}
 	}
 
@@ -1448,29 +1462,33 @@ func (u *User) background(f func()) {
 
 // trimLog keeps the change and vanished logs bounded and moves h:logstart
 // forward (never backward: a slower concurrent trim must not undo a newer
-// one, so the write is a CAS against the current value).
+// one, so the write is a CAS against the current value). It reads the
+// header first and the log only when the window h:logstart..h:modseq is
+// over the retention, and then only the records below the new start; see
+// model.PlanLogTrim for the rule and how it relates to the count-based
+// one it replaces.
 func (u *User) trimLog(id string) {
-	chg, err := u.idx.GetAllOmapValues(mboxOID(id), "", keyChgPrefix, omapPageSize)
-	if err != nil || len(chg) <= LogRetention {
+	oid := mboxOID(id)
+
+	hv, err := getOmapKeys(u.idx, oid, []string{keyModSeq, keyLogStart})
+	if err != nil {
 		return
 	}
 
-	keys := make([]string, 0, len(chg))
-	for k := range chg {
-		keys = append(keys, k)
-	}
+	head, _ := strconv.ParseUint(string(hv[keyModSeq]), 10, 64)
+	logStart, _ := strconv.ParseUint(string(hv[keyLogStart]), 10, 64)
 
-	sort.Strings(keys)
-	drop := keys[:len(keys)-LogRetention]
-	oldest := strings.TrimPrefix(keys[len(keys)-LogRetention], keyChgPrefix)
-	start, _ := strconv.ParseUint(oldest, 10, 64)
+	start, drop, err := model.PlanLogTrim(head, logStart, LogRetention, omapPageSize, chgKey, u.logPageReader(oid, keyChgPrefix))
+	if err != nil || start == 0 {
+		return
+	}
 
 	rm := append([]string{}, drop...)
 	for _, k := range drop {
 		rm = append(rm, keyVanPrefix+strings.TrimPrefix(k, keyChgPrefix))
 	}
 
-	_ = casOmap(u, u.idx, mboxOID(id), []string{keyLogStart}, func(cur map[string][]byte) (map[string][]byte, []string) {
+	_ = casOmap(u, u.idx, oid, []string{keyLogStart}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		have, _ := strconv.ParseUint(string(cur[keyLogStart]), 10, 64)
 		if have >= start {
 			return nil, nil
@@ -1478,6 +1496,18 @@ func (u *User) trimLog(id string) {
 
 		return map[string][]byte{keyLogStart: []byte(strconv.FormatUint(start, 10))}, rm
 	})
+}
+
+// logPageReader lists the keys of one log (a key prefix of oid) for
+// model.PlanLogTrim.
+func (u *User) logPageReader(oid, prefix string) model.LogPageReader {
+	return func(after string, limit int) ([]string, error) {
+		keys := make([]string, 0, limit)
+
+		_, err := listOmapKeys(u.idx, oid, after, prefix, uint64(limit), func(key string) { keys = append(keys, key) })
+
+		return keys, err
+	}
 }
 
 // Changes returns the change records after since, oldest first. ok is
@@ -1964,10 +1994,19 @@ func (u *User) linkLogged(mb *Mailbox, m Meta) (*Meta, error) {
 }
 
 // link adds an index entry for an existing blob to the mailbox and
-// allocates its UID. New keywords in the flags are registered. Entries on
-// shard 0 are written in the header CAS; other shards two-phase (pending
-// change, entry write, commit).
+// allocates its UID. New keywords in the flags are registered, within
+// the keyword limit of the mailbox (checked in the header CAS, so it is
+// exact). Entries on shard 0 are written in the header CAS; other shards
+// two-phase (pending change, entry write, commit).
 func (u *User) link(mb *Mailbox, m Meta) (*Meta, error) {
+	return u.linkAs(mb, m, true)
+}
+
+// linkAs is link; without limited the keyword limit is not applied. That
+// is for the steps that complete what was already accepted: the links of
+// a MOVE once its intent is written (the scrubber would complete it
+// anyway) and the scrubber's own completion of such a MOVE.
+func (u *User) linkAs(mb *Mailbox, m Meta, limited bool) (*Meta, error) {
 	var learningLease model.Lease
 
 	if u.learningHook != nil {
@@ -1998,6 +2037,12 @@ func (u *User) link(mb *Mailbox, m Meta) (*Meta, error) {
 	_, modseq, err := u.casHeader(mb, func(info *MailboxInfo, modseq uint64) (*headerChange, error) {
 		if leaseLost(learningLease) {
 			return nil, ErrLocked
+		}
+
+		if limited {
+			if err := model.CheckKeywords(info.Keywords, m.Flags, u.limits.KeywordsPerMailbox); err != nil {
+				return nil, err
+			}
 		}
 
 		hc, err := u.linkHeader(mb, &m, info, modseq, &e)
@@ -2232,7 +2277,8 @@ type flagsApply struct {
 // setFlagsHeader is phase 1 of setFlags: the header CAS allocates the
 // modseq, updates the shard 0 entries and announces the UIDs on higher
 // shards (filled into higher) as pending. It returns the updated shard 0
-// entries and the change record (nil if nothing changed).
+// entries and the change record (nil if nothing changed). The keyword
+// limit is checked in the same CAS (flagEntries).
 func (u *User) setFlagsHeader(mb *Mailbox, uids []uint32, unchangedSince uint64, apply func(old []string) []string, res *model.FlagsResult, higher map[string][]string) ([]Meta, *changeRec, uint64, error) {
 	var (
 		updated []Meta
@@ -2248,7 +2294,7 @@ func (u *User) setFlagsHeader(mb *Mailbox, uids []uint32, unchangedSince uint64,
 
 		shard0 := u.partitionUIDs(mb, info.ShardSize, uids, higher)
 
-		cur, err := u.getEntries(mb.ID, info.ShardSize, shard0)
+		cur, err := u.flagEntries(mb, info, shard0, apply)
 		if err != nil {
 			return nil, err
 		}
@@ -2292,6 +2338,18 @@ func (u *User) setFlagsHeader(mb *Mailbox, uids []uint32, unchangedSince uint64,
 	})
 
 	return updated, chg, modseq, err
+}
+
+// flagEntries checks the keyword limit of a STORE against the header
+// info and reads the shard 0 entries it changes. The limit is checked on
+// what apply can add (apply(nil): the flags of +FLAGS and FLAGS, none for
+// -FLAGS), because the entries on higher shards are not read here.
+func (u *User) flagEntries(mb *Mailbox, info *MailboxInfo, shard0 []uint32, apply func(old []string) []string) ([]Meta, error) {
+	if err := model.CheckKeywords(info.Keywords, apply(nil), u.limits.KeywordsPerMailbox); err != nil {
+		return nil, err
+	}
+
+	return u.getEntries(mb.ID, info.ShardSize, shard0)
 }
 
 // partitionUIDs returns the UIDs that live on shard 0 of mb and adds the
@@ -2723,6 +2781,10 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		return nil, err
 	}
 
+	if err := u.checkKeywordRoom(mb, metas); err != nil {
+		return nil, err
+	}
+
 	res, err := u.reserve(mb, sizeOf(metas))
 	if err != nil {
 		return nil, err
@@ -2812,6 +2874,10 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 
 	dmb, err := u.Lookup(dest)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := u.checkKeywordRoom(dmb, metas); err != nil {
 		return nil, err
 	}
 	// A move between two counted (or two ignored) mailboxes leaves the
@@ -2909,7 +2975,9 @@ func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
 			return mv, err // intent stays; scrubber reconciles
 		}
 
-		nm, err := u.link(dmb, relink(m))
+		// The keyword limit was checked before the intent (Move); from
+		// here on the move completes, as the scrubber would complete it.
+		nm, err := u.linkAs(dmb, relink(m), false)
 		if err != nil {
 			_, _ = u.blobRef(m.GUID, -1)
 			return mv, err // intent stays; scrubber reconciles

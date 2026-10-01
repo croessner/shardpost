@@ -66,6 +66,7 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 	b := &handleOmap{h: h, key: s.indexKey(adminNamespace)}
 
 	st := kvindex.New(recs, kvindex.Options{Mode: mode, QueueShards: shards, Backend: b, Log: s.log.With("component", "kvindex"),
+		RequireBackfill: true,
 		Lock: func(name string, ttl time.Duration) (model.Lease, error) {
 			return s.holdLock(adminNamespace, sortedindex.LockOID(name), "worker", name+" worker", ttl, true)
 		}})

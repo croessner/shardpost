@@ -309,6 +309,11 @@ func finishShare(sess *session, path string, edits []*shareEdit, created map[str
 
 	sess.log.Warn("jmap: shareWith of a new mailbox not written; deleting it again", "mailbox", path, "err", err)
 
+	failed := &setError{Type: setServerFail, Description: "the mailbox could not be shared: " + err.Error()}
+	if errors.Is(err, model.ErrLimit) {
+		failed = limitFailed(err)
+	}
+
 	if derr := sess.user.DeleteMailbox(path); derr != nil {
 		sess.log.Error("jmap: a new mailbox whose shareWith failed could not be deleted", "mailbox", path, "err", derr)
 
@@ -319,7 +324,7 @@ func finishShare(sess *session, path string, edits []*shareEdit, created map[str
 		}
 	}
 
-	return &setError{Type: setServerFail, Description: "the mailbox could not be shared: " + err.Error()}
+	return failed
 }
 
 // placeOf validates the name, the sort order and the role of a creation
@@ -404,6 +409,10 @@ func useOf(t *tree, role *string) ([]string, *setError) {
 func createFailed(err error) *setError {
 	if errors.Is(err, model.ErrMailboxExists) {
 		return invalidProperty(propName, "a mailbox of that name is already there")
+	}
+
+	if errors.Is(err, model.ErrLimit) {
+		return limitFailed(err)
 	}
 
 	return &setError{Type: setServerFail, Description: err.Error()}
@@ -596,6 +605,10 @@ func updateShare(sess *session, a *account, mb *model.Mailbox, edits []*shareEdi
 	if err := sess.srv.shareApply(sess, a, mb, edits); err != nil {
 		if errors.Is(err, model.ErrNoMailbox) {
 			return nil, &setError{Type: setNotFound}
+		}
+
+		if errors.Is(err, model.ErrLimit) {
+			return nil, limitFailed(err)
 		}
 
 		return nil, &setError{Type: setServerFail, Description: err.Error()}

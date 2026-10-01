@@ -178,7 +178,7 @@ func (r *run) endIntents(intents []intent) error {
 // storeOne records the target in the intent of its namespace and stores
 // the message (or the target's own edited copy) there.
 func (r *run) storeOne(intents []intent, t target, raw []byte, f sieve.FileInto) (*model.Meta, error) {
-	if !t.public {
+	if !t.public && !t.ensured {
 		if err := t.u.EnsureMailbox(t.mailbox, nil); err != nil {
 			return nil, err
 		}
@@ -194,7 +194,17 @@ func (r *run) storeOne(intents []intent, t target, raw []byte, f sieve.FileInto)
 		body = raw
 	}
 
-	return t.u.DeliverGUID(t.mailbox, guid, body, f.Flags, r.now())
+	meta, err := t.u.DeliverGUID(t.mailbox, guid, body, f.Flags, r.now())
+	if errors.Is(err, model.ErrLimit) {
+		// The flags of a Sieve addflag would take the mailbox beyond
+		// its keyword limit: the message is stored without the
+		// keywords rather than not at all.
+		r.log.Warn("keywords dropped at the keyword limit", "mailbox", t.where, "err", err)
+
+		meta, err = t.u.DeliverGUID(t.mailbox, guid, body, model.SystemFlags(f.Flags), r.now())
+	}
+
+	return meta, err
 }
 
 // target is a resolved fileinto destination: the namespace that stores
@@ -206,6 +216,8 @@ type target struct {
 	mailbox string
 	where   string
 	public  bool
+	// ensured: target() already created the mailbox when it was missing.
+	ensured bool
 }
 
 // target resolves a fileinto destination. A name under the public
@@ -217,6 +229,13 @@ func (r *run) target(name string) (target, error) {
 	t, refused, err := r.resolveTarget(name)
 	if err != nil {
 		return target{}, err
+	}
+
+	if refused == nil {
+		t.ensured, refused, err = r.creatable(t)
+		if err != nil {
+			return target{}, err
+		}
 	}
 
 	if refused == nil {
@@ -232,6 +251,27 @@ func (r *run) target(name string) (target, error) {
 	r.log.Warn("fileinto refused", "mailbox", name, "reason", refused.Error())
 
 	return target{u: r.u, mailbox: inboxName, where: inboxName}, nil
+}
+
+// creatable creates the own mailbox a Sieve fileinto names when it is
+// missing, which it is refused when the account is at one of its mailbox
+// limits (limits.mailboxes, limits.mailbox_names): refused is then that
+// limit, and the message goes to INBOX like any other failed fileinto
+// instead of the whole delivery failing. ensured reports that the
+// mailbox exists now, so storeOne does not ensure it a second time. A
+// mailbox the caller named itself is never created (checkExplicit), nor
+// a public folder.
+func (r *run) creatable(t target) (ensured bool, refused, err error) {
+	if r.explicit || t.public || t.mailbox == inboxName {
+		return false, nil, nil
+	}
+
+	err = t.u.EnsureMailbox(t.mailbox, nil)
+	if errors.Is(err, model.ErrLimit) {
+		return false, err, nil
+	}
+
+	return err == nil, nil, err
 }
 
 // resolveTarget resolves a name without any fallback. refused says why

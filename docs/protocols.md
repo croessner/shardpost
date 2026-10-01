@@ -223,7 +223,7 @@ Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267),
 |---|---|---|
 | `FLAGS`, `+FLAGS`, `-FLAGS`, `.SILENT` | ✅ | |
 | `UNCHANGEDSINCE` | ✅ | Failed messages are listed in `[MODIFIED]`. |
-| Arbitrary keywords | ◐ | Accepted without a count limit, but stored lower-case. System flags and `$Forwarded $MDNSent $Junk $NotJunk $Phishing` are returned in their canonical spelling, other keywords lower-case. |
+| Arbitrary keywords | ◐ | Up to `limits.keywords_per_mailbox` (default 1000) distinct keywords per mailbox; a `STORE`, `APPEND`, `COPY` or `MOVE` that would add more is `NO [LIMIT]` (see [account limits](#account-limits)). Stored lower-case. System flags and `$Forwarded $MDNSent $Junk $NotJunk $Phishing` are returned in their canonical spelling, other keywords lower-case. |
 | `PERMANENTFLAGS` | ✅ | Follows the session's rights; includes `\*` with the `w` right. |
 | `\Recent` | ✅ | Session-scoped; `SELECT` claims it, `EXAMINE` does not. Not shown after `ENABLE IMAP4rev2`. |
 | Rights per flag | ✅ | `\Seen` needs `s`, `\Deleted` needs `t`, everything else `w` (RFC 4314). |
@@ -290,7 +290,7 @@ IMAPSieve script entry.
 | `GETMETADATA` `MAXSIZE`, `DEPTH 0/1/infinity` | ✅ | `[METADATA LONGENTRIES n]`. |
 | `/shared/imapsieve/script` | ✅ | Needs the `a` right; see [IMAPSieve](#imapsieve). |
 | `/private/vendor/shardpost/jmap/…` | ✅ | JMAP identities and vacation; read-only over IMAP. |
-| `[METADATA TOOMANY]` | ✗ | No limit on the number of entries. |
+| `[METADATA TOOMANY]` | ✅ | A `SETMETADATA` that would take the account beyond `limits.metadata_entries` (default 1000) entries. |
 | Unsolicited `METADATA` responses | ✗ | |
 
 ### NOTIFY and IDLE
@@ -738,6 +738,24 @@ See [Quota](quota.md).
 | Other users' folders | `Shared/<account>/…` by ACL (IMAP), separate accounts (JMAP). |
 | Public folders | `Public/…` / `~public`, own quota, private `\Seen`. |
 | Share notifications | RFC 9670 §3 records on ACL changes; at most 50 per user by default (`server.share_notifications_max`, at most 200), kept 30 days (`server.share_notifications_retention_seconds`). |
+
+### Account limits
+
+Configurable upper bounds per account (section `limits`, see
+[Configuration](configuration.md#account-limits-limits); `0` switches
+one off). What each protocol answers when a change would exceed one:
+
+| Limit (default) | IMAP | JMAP (RFC 8620 §5.3) | Admin API | Delivery (LMTP, LDA, admin deliver) |
+|---|---|---|---|---|
+| `limits.mailboxes` (10000) | `CREATE`: `NO [LIMIT]` | `Mailbox/set` create: `overQuota` | 409 `limit_exceeded` | A Sieve `fileinto` that would create the mailbox goes to INBOX. INBOX is never refused. |
+| `limits.mailbox_names` (50000) | `CREATE` under a name never used: `NO [LIMIT]` | `overQuota` | 409 `limit_exceeded` | as above |
+| `limits.keywords_per_mailbox` (1000) | `STORE`, `APPEND`, `COPY`, `MOVE`: `NO [LIMIT]` | `Email/set` (create, update), `Email/import`: `tooManyKeywords` (RFC 8621 §4.6, §4.8) | 409 `limit_exceeded` | The keywords are dropped, the message is stored. |
+| `limits.metadata_entries` (1000) | `SETMETADATA`: `NO [METADATA TOOMANY]` | — (server-managed entries are never refused) | 409 `limit_exceeded` (metadata import) | — |
+| `limits.shared_pointers` (10000) | `SETACL` granting a new grantee: `NO [LIMIT]` | `Mailbox/set` `shareWith`: `overQuota` | 409 `limit_exceeded` | — |
+
+POP3 creates nothing but INBOX and adds only `\Seen`, so it never meets
+a limit. An account import is held to the mailbox limits but not to the
+keyword limit.
 
 ### Import, export and migration
 

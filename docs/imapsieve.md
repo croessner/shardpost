@@ -345,11 +345,24 @@ rule names the `extprograms` entry that receives the message. COPY/MOVE within o
 
 Before the Ceph link, an independent copy of the content is persisted in the data pool namespace `~learning`. A commit receipt is written atomically together with the target entry, even across higher index shards. Only then can the worker send. EXPUNGE leaves the payload untouched. Link and mailbox DELETE coordinate through a Ceph lease; before the deletion, commit receipts that are still needed are transferred into the queue.
 
-Exactly one worker holds the cluster-wide learning lease. Failed attempts are retried with backoff. The selection prioritizes the oldest due entries. After a successful response the final state is stored, and receipt and payload are removed afterwards. Exit 75 from the program leads to a retry with backoff, any other failure ends the job permanently. A crash between the program accepting the message and the local confirmation can cause a repeated invocation: the transport offers at-least-once delivery, not a distributed exactly-once guarantee. Jobs that have permanently failed or are still unconfirmed after 24 hours are kept for diagnosis; they are not silently removed as successful.
+Exactly one worker holds the cluster-wide learning lease and keeps it while it runs (renewed every 40 seconds; given up at shutdown and when the cephx key rotates, then taken again). Failed attempts are retried with backoff. The selection prioritizes the oldest due entries. After a successful response the final state is stored, and receipt and payload are removed afterwards. Exit 75 from the program leads to a retry with backoff, any other failure ends the job permanently. A crash between the program accepting the message and the local confirmation can cause a repeated invocation: the transport offers at-least-once delivery, not a distributed exactly-once guarantee. Jobs that have permanently failed or are still unconfirmed after 24 hours are kept for diagnosis; they are not silently removed as successful.
 
 Messages above the size limit are not learned and are counted as `oversize`. An error while durably preparing the learning job prevents the corresponding link, so that no successfully confirmed learning operation exists without a stored job.
 
-Metrics: `imap_imapsieve_events_total{phase=...}` and `imap_imapsieve_learning_total{result=...}`. No message texts, passwords or script errors containing message data are logged. Dead-letter jobs require a deliberate operator decision; there is no graphical queue management yet.
+**Finding due jobs.** The worker looks for due jobs every second. With
+`imapsieve.learning.index: read` it reads them from a due queue in the
+index pool (`<next attempt>/<id>/<gen>`, a dead job after every live
+one) and is also woken at once by a notify when a job is enqueued or
+retried; with `write` (the default) or `off` it lists the namespace
+`~learning` of the data pool, as before. The admin API's learning list
+and the account purge read an owner index (`<account>/<id>`) in `read`
+mode and list the namespace otherwise. `read` needs a completed
+`shardpost index backfill learning`; see
+[Storage](architecture/storage.md#learning-queue-due-queue-and-owner-index)
+and [Operations](operations/README.md#learning-queue-backfill).
+
+Metrics: `imap_imapsieve_events_total{phase=...}`, `imap_imapsieve_learning_total{result=...}`, `imap_imapsieve_learning_wakeups_total` (passes a queue notify started) and the queue metrics with `queue="learning"`.
+ No message texts, passwords or script errors containing message data are logged. Dead-letter jobs require a deliberate operator decision; there is no graphical queue management yet.
 
 The learning path uses the same program table as the Sieve extensions; in the IMAP pod only the configured program runs, no shell.
 

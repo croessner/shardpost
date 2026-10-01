@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,6 +19,11 @@ import (
 
 var learningResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_learning_total", Help: "Learning queue and delivery outcomes."}, []string{"result"})
 var scriptResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_events_total", Help: "IMAPSieve outcomes by bounded phase."}, []string{phaseName})
+
+// learningWakeups counts the worker passes a queue notify started (the
+// once-a-second poll is not counted).
+var learningWakeups = promauto.NewCounter(prometheus.CounterOpts{Name: "imap_imapsieve_learning_wakeups_total",
+	Help: "Learning worker passes started by a queue notify."})
 
 // Job owns an independent copy of the message, so EXPUNGE cannot invalidate a retry.
 type Job struct {
@@ -33,24 +39,41 @@ type Job struct {
 	Size             int64
 	// Retries counts manual retries of a dead job (admin API).
 	Retries int `json:",omitempty"`
+	// Gen counts the writes of the job through the queue index (scaling
+	// plan B5): it is part of the job's due queue key, so a reader can
+	// tell an entry the job was moved away from. Servers without the
+	// index drop it when they rewrite a job; the readers repair that.
+	Gen uint64 `json:",omitempty"`
 }
 
 // Errors of the learning queue administration.
 var (
 	ErrNoJob   = errors.New("no such learning job")
 	ErrNotDead = errors.New("only dead learning jobs can be retried")
+	// ErrNoWatch is returned by Watcher.Watch when the queue cannot be
+	// watched (the worker then only polls).
+	ErrNoWatch = errors.New("the learning queue cannot be watched")
 )
 
 // Queue is the persistent learning job queue with a worker lease.
 type Queue interface {
 	Put(Job, []byte) error
+	// List returns up to 100 live jobs that are due, oldest first.
 	List() ([]Job, error)
 	Read(Job) ([]byte, error)
 	Update(Job) error
 	Delete(Job) error
+	// Lock takes the worker lease, which stays held (renewed) until
+	// Release or until it is reported lost.
 	Lock() (model.Lease, error)
 	Ready(Job) (bool, error)
 	Cleanup(Job) error
+}
+
+// Watcher is a Queue whose writers notify the worker when a job becomes
+// due earlier (enqueued, retried).
+type Watcher interface {
+	Watch() (model.Watch, error)
 }
 
 // Programs is what the worker needs from the allowlist runner.
@@ -59,11 +82,15 @@ type Programs interface {
 }
 
 // LearningWorker sends queued learning jobs to their programs, with
-// retries and dead-lettering.
+// retries and dead-lettering. One worker of the cluster holds the queue
+// lease at a time and keeps it while it runs.
 type LearningWorker struct {
 	Config   config.Learning
 	Queue    Queue
 	Programs Programs
+
+	mu    sync.Mutex
+	lease model.Lease
 }
 
 // NewLearningWorker builds a worker for queue q.
@@ -96,28 +123,96 @@ func (w *LearningWorker) Enqueue(ctx context.Context, e Event, action string, ra
 	return nil
 }
 
-// Run processes the queue once a second until ctx ends.
+// Run processes the queue until ctx ends: once a second and, when the
+// queue can be watched, whenever a writer notifies it. A watch that
+// breaks (the OSD dropped it, the store rotated its key) is set up again
+// at the next poll. The lease is released when Run returns.
 func (w *LearningWorker) Run(ctx context.Context) {
+	defer w.Release()
+
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
+
+	events, errs, unwatch := w.watch()
+	defer func() { unwatch() }()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			w.Step(ctx)
+			if events == nil {
+				events, errs, unwatch = w.watch()
+			}
+		case <-events:
+			learningWakeups.Inc()
+		case <-errs:
+			unwatch()
+
+			events, errs, unwatch = nil, nil, func() {}
 		}
+
+		w.Step(ctx)
 	}
 }
 
-// Step processes due jobs once while holding the queue lease.
-func (w *LearningWorker) Step(ctx context.Context) {
-	lease, err := w.Queue.Lock()
+// watch watches the queue; nil channels without a watch.
+func (w *LearningWorker) watch() (<-chan struct{}, <-chan error, func()) {
+	wq, ok := w.Queue.(Watcher)
+	if !ok {
+		return nil, nil, func() {}
+	}
+
+	wt, err := wq.Watch()
 	if err != nil {
+		return nil, nil, func() {}
+	}
+
+	return wt.Events(), wt.Errors(), wt.Close
+}
+
+// holdLease returns the worker lease, taking it when this worker does
+// not hold it (nil: another worker holds it). A lease reported lost is
+// released and taken again.
+func (w *LearningWorker) holdLease() model.Lease {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.lease != nil && w.lease.Lost() {
+		w.lease.Release()
+		w.lease = nil
+	}
+
+	if w.lease == nil {
+		l, err := w.Queue.Lock()
+		if err != nil {
+			return nil
+		}
+
+		w.lease = l
+	}
+
+	return w.lease
+}
+
+// Release gives the worker lease up (shutdown).
+func (w *LearningWorker) Release() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.lease != nil {
+		w.lease.Release()
+		w.lease = nil
+	}
+}
+
+// Step processes due jobs once while holding the queue lease; it takes
+// the lease when this worker does not hold it and keeps it.
+func (w *LearningWorker) Step(ctx context.Context) {
+	lease := w.holdLease()
+	if lease == nil {
 		return
 	}
-	defer lease.Release()
 
 	jobs, err := w.Queue.List()
 	if err != nil {

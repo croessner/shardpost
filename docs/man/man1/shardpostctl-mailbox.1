@@ -202,6 +202,12 @@ Conflict, or the ETag no longer matches.
 .B 67
 No such account or mailbox.
 .TP
+.B 73
+The account is at its mailbox limit
+.RB ( limits.mailboxes " or " limits.mailbox_names
+in the server configuration; error
+.BR limit_exceeded ).
+.TP
 .B 77
 The caller lacks the role.
 .SH SEE ALSO

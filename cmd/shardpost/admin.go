@@ -16,6 +16,8 @@ import (
 	"shardpost/internal/config"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
+	"shardpost/internal/learnindex"
+
 	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/version"
@@ -46,20 +48,17 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		return a, nil
 	}
 
-	clients, scopes := map[string][]string{}, map[string][]string{}
-	for _, cl := range c.Clients {
-		clients[cl.Identity] = cl.Roles
-
-		if len(cl.Accounts) > 0 {
-			scopes[cl.Identity] = cl.Accounts
-		}
-	}
-
+	clients, scopes := adminClients(c.Clients)
 	importer := importStore{store}
 	instance, _ := os.Hostname()
 
+	learning, err := store.LearningQueue()
+	if err != nil {
+		return nil, fmt.Errorf("learning queue: %w", err)
+	}
+
 	if settings.Jobs.Enabled {
-		if err := a.newJobs(log, settings, store, importer, instance); err != nil {
+		if err := a.newJobs(log, settings, store, importer, instance, learning); err != nil {
 			return nil, err
 		}
 	}
@@ -72,7 +71,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
 		ClientScopes:         scopes, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
-		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: cephstore.LearningQueue{Store: store}, SearchScanLimit: c.SearchScanLimit,
+		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: learning, SearchScanLimit: c.SearchScanLimit,
 		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices})
 
 	if c.Addr != "" {
@@ -96,8 +95,26 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	return a, nil
 }
 
+// adminClients maps the configured client identities to their roles and,
+// for clients with an account scope, to their account patterns.
+func adminClients(cs []config.AdminClient) (clients, scopes map[string][]string) {
+	clients, scopes = map[string][]string{}, map[string][]string{}
+
+	for _, cl := range cs {
+		clients[cl.Identity] = cl.Roles
+
+		if len(cl.Accounts) > 0 {
+			scopes[cl.Identity] = cl.Accounts
+		}
+	}
+
+	return clients, scopes
+}
+
 // newJobs builds the maintenance job system (roadmap 8c).
-func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store *cephstore.Store, importer importStore, instance string) error {
+func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store *cephstore.Store, importer importStore, instance string,
+	learning *learnindex.Queue,
+) error {
 	kv, err := store.AdminKV()
 	if err != nil {
 		return fmt.Errorf("admin store: %w", err)
@@ -105,7 +122,7 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
-	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: cephstore.LearningQueue{Store: store}}
+	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning}
 
 	a.jobsKV = kv
 	a.jobs = jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),
@@ -118,22 +135,16 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 	return nil
 }
 
-// warnUnbackfilled warns when the job system reads from the indexes
-// without a completed "shardpost index backfill kv": records written by
-// older servers are then missing from them.
+// warnUnbackfilled reports at startup how admin.kv_index=read is met.
+// Without a completed "shardpost index backfill kv" the records of older
+// servers would be missing from the indexes, so the store behaves as in
+// write mode until the marker exists (it logs that as a warning itself).
 func warnUnbackfilled(log *slog.Logger, kv *cephstore.AdminKV) {
-	if kv.IndexMode() != model.KVIndexRead {
+	if kv.ConfiguredMode() != model.KVIndexRead || kv.IndexMode() != model.KVIndexRead {
 		return
 	}
 
-	rep, ok, err := backfill.KVBackfilled(kv)
-
-	switch {
-	case err != nil:
-		log.Warn("admin.kv_index=read: backfill marker unreadable", "err", err)
-	case !ok:
-		log.Warn("admin.kv_index=read without a completed \"shardpost index backfill kv\": records of older servers are not found")
-	default:
+	if rep, ok, err := backfill.KVBackfilled(kv); err == nil && ok {
 		log.Info("admin.kv_index=read", "backfill_started", rep.Started, "backfill_finished", rep.Finished)
 	}
 }

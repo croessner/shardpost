@@ -267,9 +267,22 @@ func (u *User) importCreate(name string, spec model.ImportMailbox) (*Mailbox, er
 		rec.ID = newGUID()
 	}
 
+	// The account limits hold for an import as for any other creation:
+	// an import that runs into one stops before it writes anything for
+	// this mailbox, and the operator raises the limit and resumes.
+	vals, err := getOmapKeys(u.idx, oidRegistry, []string{regLastValidity + name})
+	if err != nil {
+		return nil, fmt.Errorf("import mailbox %q: %w", name, err)
+	}
+
+	_, known := vals[regLastValidity+name]
+	if err := u.checkMailboxLimits(name, known); err != nil {
+		return nil, err
+	}
+
 	size := u.importShardSize(spec)
 
-	err := u.createIndexObjectSized(&rec, size)
+	err = u.createIndexObjectSized(&rec, size)
 	if errCode(err) == syscall.EEXIST {
 		rec.ID = newGUID() // the preferred id is in use
 		err = u.createIndexObjectSized(&rec, size)

@@ -53,15 +53,32 @@ func TestAdminYAML(t *testing.T) {
 
 func TestAdminKVIndex(t *testing.T) {
 	c, err := Load(configFile(t, "logging:\n  level: info\n"))
-	if err != nil || c.Admin.KVIndex != "write" || c.Admin.KVQueueShards != 4 || c.Jobs.ExpirySeconds != 60 {
+	if err != nil || c.Admin.KVIndex != "read" || c.Admin.KVQueueShards != 4 || c.Jobs.ExpirySeconds != 60 {
 		t.Fatalf("defaults: %+v %v", c.Admin, err)
 	}
 
-	if c, err := Load(configFile(t, "admin:\n  kv_index: read\n  kv_queue_shards: 8\n")); err != nil || c.Admin.KVIndex != "read" || c.Admin.KVQueueShards != 8 {
-		t.Fatalf("read mode: %v", err)
+	if c, err := Load(configFile(t, "admin:\n  kv_index: write\n  kv_queue_shards: 8\n")); err != nil || c.Admin.KVIndex != "write" || c.Admin.KVQueueShards != 8 {
+		t.Fatalf("write mode: %v", err)
 	}
 
 	for _, bad := range []string{"admin:\n  kv_index: on\n", "admin:\n  kv_queue_shards: 9\n", "jobs:\n  expiry_seconds: 1\n"} {
+		if _, err := Load(configFile(t, bad)); err == nil {
+			t.Errorf("accepted: %q", bad)
+		}
+	}
+}
+
+func TestLearningIndex(t *testing.T) {
+	c, err := Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil || c.IMAPSieve.Learning.Index != "write" || c.IMAPSieve.Learning.QueueShards != 4 {
+		t.Fatalf("learning index defaults: %+v %v", c.IMAPSieve.Learning, err)
+	}
+
+	if c, err := Load(configFile(t, "imapsieve:\n  learning:\n    index: read\n")); err != nil || c.IMAPSieve.Learning.Index != "read" {
+		t.Fatalf("learning read mode: %v", err)
+	}
+
+	for _, bad := range []string{"imapsieve:\n  learning:\n    index: on\n", "imapsieve:\n  learning:\n    queue_shards: 9\n"} {
 		if _, err := Load(configFile(t, bad)); err == nil {
 			t.Errorf("accepted: %q", bad)
 		}

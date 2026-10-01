@@ -29,7 +29,7 @@ func TestListingsAreCounted(t *testing.T) {
 
 	iter := regexp.MustCompile(`\.Iter\(\)`)
 	sites := map[string]bool{}
-	site := regexp.MustCompile(`listObjects\([^,]+, (list[A-Za-z]+)\)|q\.all\((list[A-Za-z]+)\)`)
+	site := regexp.MustCompile(`listObjects\([^,]+, (list[A-Za-z]+|site)\)`)
 
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -46,12 +46,13 @@ func TestListingsAreCounted(t *testing.T) {
 		}
 
 		for _, m := range site.FindAllStringSubmatch(string(b), -1) {
-			sites[m[1]+m[2]] = true
+			sites[m[1]] = true
 		}
 	}
 
+	// "site": the learning queue's sites come from learnindex.
 	for _, want := range []string{"listUsers", "listScrubOrphans", "listScrubUnknown", "listPurgeObjects", "listAdminKV", "listAdminBackfill",
-		"listLearningAll", "listLearningPurge"} {
+		"site"} {
 		if !sites[want] {
 			t.Errorf("listing site %s is not used", want)
 		}

@@ -24,6 +24,7 @@ user namespaces.
 | Script/metadata objects | Sieve texts, the active script, private/shared metadata | [scripts.go](../../internal/cephstore/scripts.go), [metadata.go](../../internal/cephstore/metadata.go) |
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
+| `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
 | `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
 
 The index pool is replicated because its omap structures require it.
@@ -451,24 +452,38 @@ rotation. `Store.Rotate` releases each held worker lock only after a
 renewal in flight returned, so a rotation can take up to the OSD op
 timeout (60 s) per held lock.
 
-In this version `cleanup()` keeps running beside the expiry worker,
-because `jobs/expiry` knows only the records written since the rollout
-until the backfill ran (and `cleanup()` itself looks at the first 100
-jobs of each listing only).
+In `write` and `off` mode `cleanup()` (a listing of the jobs and plans)
+keeps running on every runner poll beside the expiry worker. In `read`
+mode it does not run: after the backfill `jobs/expiry` knows every
+record, and the expiry worker alone deletes what is due. So in `read`
+mode no running path lists the admin namespace: the runner claims from
+`jobs/claimable`, job lists (admin API, `shardpostctl job list`) and the
+push worker's scans read the hint indexes, and the expiry worker reads
+`jobs/expiry`. Only `shardpost index backfill kv` lists
+(`imapceph_rados_listings_total{site="admin_kv_backfill"}`); a listing
+under `admin_kv` in `read` mode is a prefix that is not an indexed
+collection.
 
 **Modes** (`admin.kv_index`):
 
 | Mode | Writes | Reads |
 |---|---|---|
 | `off` | no index, no queue, no expiry worker | listings (the behaviour before) |
-| `write` (default) | hint indexes, both queues, expiry worker, notifies | listings; the runner claims from the listing |
-| `read` | as `write` | listings of an indexed collection come from its hint index (key order, merged across shards; entries without record are removed); job lists filter on the index values; the runner claims from `Due` |
+| `write` | hint indexes, both queues, expiry worker, notifies | listings; the runner claims from the listing; `cleanup()` on the poll |
+| `read` (default) | as `write` | listings of an indexed collection come from its hint index (key order, merged across shards; entries without record are removed); job lists filter on the index values; the runner claims from `Due`; no `cleanup()` |
 
 `read` is only correct after `shardpost index backfill kv` completed
 with a start after the last server without the indexes stopped: records
-such a server wrote are missing from the indexes until then. The server
-warns at start when `read` is set without a completion marker. See
-[Operations](../operations/README.md#admin-store-backfill).
+such a server wrote are missing from the indexes until then. A server
+configured for `read` therefore checks the completion marker
+`backfill.kv`: while it is missing, the server logs a warning at start
+("admin.kv_index=read without a completed …") and behaves as in
+`write` mode (it lists, runs `cleanup()` and does not watch the
+claimable queue). It looks for the marker again every 30 seconds and
+switches to `read` once it exists, without a restart. The server cannot
+tell when the last older server stopped; that the backfill started
+after it is the operator's part of the rollout (see
+[Operations](../operations/README.md#admin-store-backfill)).
 
 **Rollback.** Older servers ignore the `ix.*` objects (they list only
 `kv.*`) and keep reading by listing; the records are unchanged, the job
@@ -476,6 +491,97 @@ record only gains the field `idem_key`. A job that an older server ends
 leaves its queue entries behind; the readers of this version remove
 them (claimable: the record has ended; expiry: the record is gone or is
 rescheduled to its real expiry).
+
+## Learning queue: due queue and owner index
+
+A learning job ([imapsieve](../imapsieve.md#durable-learning-queue)) is
+a record of its own: `learning/<id>` in the namespace `~learning` of
+the data pool holds the message, the job is its xattr `job`. The data
+pool is erasure coded and has no omap, so the indexes that spare the
+worker and the purge the listing of that namespace live in the namespace
+`~learning` of the index pool
+([learnindex](../../internal/learnindex/learnindex.go)):
+
+| Object (index pool, `~learning`) | Content |
+|---|---|
+| `ix.learning/head`, `ix.learning/<n>` | due queue `learning`: `<next attempt>/<id>/<gen>` → empty; `imapsieve.learning.queue_shards` shards (default 4) |
+| `ix.learning/owner/head`, `ix.learning/owner/<nn>` (16 shards) | hint index of the jobs by owner: `<account>/<id>` → empty |
+| `ix.learning/lock` | cls_lock of `shardpost index backfill learning` |
+| `mbox/learning-worker` | cls_lock `maildrop` of the worker (the object and name every version locks) |
+
+The head of the due queue carries the backfill markers
+`backfill.learning` and `backfill.learning.progress`.
+
+**Due queue.** A completeness index: every job has one entry. A live
+job sits at its next attempt, a dead one at the largest due time the
+key can hold (`09223372036854775807`, the year 2262), after every live
+entry, so it is never due and readers of the due entries never reach
+it. (The plan called this the `dead/` prefix; a prefix on the id would
+put the entry into another shard, so the move would no longer be one
+write.) The generation is the job's `Gen`, which every write through the
+queue counts up; servers without the index drop the field when they
+rewrite a job.
+
+| Writer | Record | Queue | Owner index |
+|---|---|---|---|
+| enqueue (event, prepared COPY/MOVE) | created exclusively; an existing job is left alone | entry at its next attempt written before the record (removed again when the record exists already at another position); notify | entry after the record |
+| attempt failed (retry, backoff) | `Attempts`, `Next`, `Gen`+1 | moved after the record | unchanged |
+| dead (attempts exhausted, permanent error, unconfirmed after a day, oversize) | `Dead`, `Gen`+1 | moved to the dead position | unchanged |
+| retry of a dead job (admin API) | `Dead` false, `Next` now, `Retries`+1, `Gen`+1 | moved to now; notify | unchanged |
+| delivered, purge | removed | removed after the record | removed before the record |
+
+**Worker.** One server of the cluster holds the cls_lock `maildrop` on
+`mbox/learning-worker` in the index pool and keeps it (renewed every
+third of its two minutes) instead of taking it per pass. Servers of
+older versions take the same lock per pass, so during a rolling update
+only one worker sends jobs to the learning programs. When the store
+rotates its cephx key the lock is unlocked through the old connection
+and reported lost; the worker takes it again on the new connection. A
+lock whose holder died stays held until its TTL ran out. In `read` mode
+the worker reads at most 100 due entries per pass from the heads of the
+queue shards, reads each job's record and compares: an entry without
+record is skipped and removed after ten minutes (the entry is written
+before the record); an entry the record does not match (an older server
+rewrote the job) is moved to the record's position. It watches shard 0
+of the queue, which an enqueue and a retry notify, and keeps its poll of
+one second as the fallback; a broken watch is set up again at the next
+poll. `imap_imapsieve_learning_wakeups_total` counts the passes a
+notify started.
+
+**Readers.** In `read` mode the admin API lists jobs from the owner
+index (all of them, or the prefix `<account>/`) and reads each record;
+an entry whose record is gone is removed. Show and retry read the
+record by id in every mode. An account purge deletes the jobs the owner
+index names. In `write` mode all three list the namespace as before
+(`imapceph_rados_listings_total{site="learning_all"}`,
+`{site="learning_purge_owner"}`).
+
+**Modes** (`imapsieve.learning.index`, default `write`):
+
+| Mode | Writes | Reads |
+|---|---|---|
+| `off` | no index, no queue | listings (the behaviour before) |
+| `write` (default) | due queue and owner index | worker, admin list and purge list the namespace |
+| `read` | as `write` | worker from `Due`, woken by notify; admin list and purge from the owner index |
+
+`read` needs the marker of a completed `shardpost index backfill
+learning` that started after the last server without the index stopped
+(jobs such a server enqueued have no entries until then). Without the
+marker the server logs a warning at start and behaves as in `write` mode
+until the marker exists; it looks for it every 30 seconds. The backfill
+lists the namespace once (`{site="learning_backfill"}`) under the
+cls_lock `ix.learning/lock`, reads every job again and sets its queue
+and owner entry; it can be repeated and resumes after an interruption.
+It then removes the queue entries whose job is gone: those at the dead
+position, which no reader of due entries reaches, and those due for
+longer than ten minutes. A delete that finds the job already gone
+removes the id's entries at the dead position as well (one bounded read
+of its shard).
+See [Operations](../operations/README.md#learning-queue-backfill).
+
+**Rollback.** Older servers ignore the index objects and the field
+`Gen`; a job they rewrite or delete leaves its entry behind, which
+readers of this version move or remove.
 
 ## Notifications and search
 

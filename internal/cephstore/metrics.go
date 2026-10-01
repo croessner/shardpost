@@ -25,9 +25,11 @@ const (
 	listPurgeObjects  = "purge_objects"
 	listAdminKV       = "admin_kv"
 	listAdminBackfill = "admin_kv_backfill"
-	listLearningAll   = "learning_all"
-	listLearningPurge = "learning_purge_owner"
 )
+
+// The learning queue's listing sites come from learnindex (SiteAll,
+// SitePurge, SiteBackfill); learningRecords.List counts under the site it
+// is given.
 
 // listObjects starts a listing of the context's namespace (or of all
 // namespaces) and counts it under site. It is the only place the store

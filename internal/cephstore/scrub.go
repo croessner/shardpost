@@ -501,7 +501,8 @@ func (sr *scrubRun) linkMissing(dst *Mailbox, srcMetas []Meta, inDest map[string
 			continue
 		}
 
-		if _, err := u.link(dst, relink(m)); err != nil {
+		// Completing an accepted MOVE: the keyword limit does not apply.
+		if _, err := u.linkAs(dst, relink(m), false); err != nil {
 			_, _ = u.blobRef(m.GUID, -1)
 
 			rep.Errors = append(rep.Errors, err.Error())

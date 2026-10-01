@@ -328,7 +328,9 @@ func testSender(t *testing.T) (*webpush.Sender, string) {
 
 // TestPushWorker: the worker sends the verification, then, once the
 // subscription is verified, a StateChange when mail arrives; a
-// subscription the push service calls gone is destroyed.
+// subscription the push service calls gone is destroyed. The worker runs
+// in admin.kv_index=read mode: its scans read the hint index and nothing
+// lists the admin store.
 func TestPushWorker(t *testing.T) {
 	fake := &fakePushService{status: http.StatusCreated}
 	ps := httptest.NewTLSServer(fake)
@@ -349,11 +351,16 @@ func TestPushWorker(t *testing.T) {
 	go func() {
 		defer close(done)
 
-		_ = RunPushWorker(ctx, WorkerOptions{Store: store, KV: kv, Sender: sender, Instance: "w1", VAPIDPublicKey: vapid,
+		_ = RunPushWorker(ctx, WorkerOptions{Store: store, KV: kv.WithMode(model.KVIndexRead), Sender: sender, Instance: "w1", VAPIDPublicKey: vapid,
 			Scan: 50 * time.Millisecond, Verify: 20 * time.Millisecond, Poll: 50 * time.Millisecond, Coalesce: 10 * time.Millisecond})
 	}()
 
 	defer func() { cancel(); <-done }()
+	defer func() {
+		if n := kv.Listings(); n != 0 {
+			t.Errorf("the admin store was listed %d times", n)
+		}
+	}()
 
 	waitFor(t, "the verification", func() bool { return len(fake.got()) == 1 })
 

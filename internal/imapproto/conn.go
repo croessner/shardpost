@@ -681,6 +681,8 @@ func (c *conn) storeErr(tag string, err error) {
 		c.no(tag, "LIMIT", "Message too large")
 	case errors.Is(err, model.ErrOverQuota):
 		c.no(tag, "OVERQUOTA", "Quota exceeded")
+	case errors.Is(err, model.ErrLimit):
+		c.limitErr(tag, err)
 	case errors.Is(err, model.ErrImportLocked):
 		// Another namespace the command needs — the public folders, a
 		// sharing account — is being imported or maintained.
@@ -689,6 +691,25 @@ func (c *conn) storeErr(tag string, err error) {
 	default:
 		c.log.Error("storage error", "err", err)
 		c.no(tag, "SERVERBUG", "Storage error")
+	}
+}
+
+// limitErr answers a command that ran into a per-account limit: [LIMIT]
+// (RFC 5530), or [METADATA TOOMANY] (RFC 5464 4.3) for METADATA entries.
+func (c *conn) limitErr(tag string, err error) {
+	switch model.LimitKindOf(err) {
+	case model.LimitMetadata:
+		c.no(tag, "METADATA TOOMANY", "Too many metadata entries")
+	case model.LimitMailboxes:
+		c.no(tag, "LIMIT", "Too many mailboxes")
+	case model.LimitMailboxNames:
+		c.no(tag, "LIMIT", "Too many mailbox names in use")
+	case model.LimitKeywords:
+		c.no(tag, "LIMIT", "Too many keywords in the mailbox")
+	case model.LimitSharedPointers:
+		c.no(tag, "LIMIT", "Too many mailboxes shared with that user")
+	default:
+		c.no(tag, "LIMIT", "Limit reached")
 	}
 }
 
@@ -1136,7 +1157,7 @@ func (c *conn) finishLogin(tag string, req auth.Request, res *auth.Result, err e
 	c.log = c.log.With("user", account)
 	provision.Apply(u, res, c.log)
 
-	if err := provision.Mailboxes(u, c.s.o.Autocreate); err != nil {
+	if err := provision.Mailboxes(u, account, c.s.o.Autocreate, c.log); err != nil {
 		c.log.Error("provision user", "err", err)
 	}
 

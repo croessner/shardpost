@@ -122,7 +122,11 @@ func (u *User) ImportMailbox(spec model.ImportMailbox) (*model.Mailbox, error) {
 		if err := u.dropForReplace(b, name, spec); err != nil {
 			return nil, err
 		}
+	} else if err := u.checkNewMailbox(name); err != nil {
+		return nil, err
 	}
+
+	u.useName(name)
 
 	nb := &box{MailboxRec: model.MailboxRec{ID: u.importID(spec.ID), UIDValidity: spec.UIDValidity, SpecialUse: spec.SpecialUse, Subscribed: spec.Subscribed},
 		uidNext: 1, modseq: 1, vanished: map[uint64][]uint32{}}

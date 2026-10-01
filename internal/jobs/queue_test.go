@@ -689,7 +689,43 @@ func TestReadModeEndToEnd(t *testing.T) {
 	}
 }
 
+// TestCleanupOnlyWithoutReadMode: cleanup() (a listing) runs on the poll
+// in write mode and not at all in read mode, where the expiry worker
+// alone deletes what its queue holds. The ended job here has no expiry
+// entry (an older server finished it before the backfill), so only
+// cleanup() would delete it.
+func TestCleanupOnlyWithoutReadMode(t *testing.T) {
+	for _, mode := range []model.KVIndexMode{model.KVIndexRead, model.KVIndexWrite} {
+		t.Run(string(mode), func(t *testing.T) {
+			kv := memstore.NewAdminKVMode(mode)
+			old := time.Now().Add(-30 * 24 * time.Hour)
+
+			b, _ := json.Marshal(Job{ID: "old", Kind: "count", Account: "alice", State: StateSucceeded, Created: old, Finished: old})
+
+			if err := kv.Update(prefixJob+"old", func([]byte) ([]byte, error) { return b, nil }); err != nil {
+				t.Fatal(err)
+			}
+
+			m := newTestManager(kv, memstore.New(), "pod-a", &stepKind{name: "count", steps: 1})
+			stop := runManager(t, m)
+
+			time.Sleep(100 * time.Millisecond) // several polls
+			stop()
+
+			_, err := kv.Get(prefixJob + "old")
+			if deleted := errors.Is(err, model.ErrNotFound); deleted != (mode == model.KVIndexWrite) {
+				t.Fatalf("deleted by cleanup: %v", deleted)
+			}
+
+			if listed := kv.Listings() > 0; listed != (mode == model.KVIndexWrite) {
+				t.Fatalf("listed: %v", listed)
+			}
+		})
+	}
+}
+
 // checkList checks a page of Manager.List.
+
 func checkList(t *testing.T, m *Manager, account, state, after string, limit int, want []string, wantNext string) {
 	t.Helper()
 

@@ -38,11 +38,22 @@ func NewAdminKVMode(mode model.KVIndexMode) *AdminKV {
 
 // WithMode returns a view on the same records, indexes, queues and locks
 // in another index mode (a server of another configuration, tests).
+// Read mode holds without the backfill marker (see WithGatedMode).
 func (kv *AdminKV) WithMode(mode model.KVIndexMode) *AdminKV {
+	return kv.view(kvindex.Options{Mode: mode})
+}
+
+// WithGatedMode is WithMode with read mode gated on the backfill marker,
+// as the RADOS store does it (tests of the fallback).
+func (kv *AdminKV) WithGatedMode(mode model.KVIndexMode, now func() time.Time) *AdminKV {
+	return kv.view(kvindex.Options{Mode: mode, RequireBackfill: true, Now: now})
+}
+
+func (kv *AdminKV) view(o kvindex.Options) *AdminKV {
 	v := &AdminKV{recs: kv.recs, mem: kv.mem, wake: kv.wake, locks: kv.locks}
 
-	b := &wakingBackend{MemBackend: kv.mem, w: kv.wake}
-	v.Store = kvindex.New(kv.recs, kvindex.Options{Mode: mode, Backend: b, Lock: kv.locks.lock})
+	o.Backend, o.Lock = &wakingBackend{MemBackend: kv.mem, w: kv.wake}, kv.locks.lock
+	v.Store = kvindex.New(kv.recs, o)
 
 	return v
 }

@@ -30,9 +30,10 @@ func New() *Store { return &Store{users: map[string]*User{}} }
 // Store is an in-memory model.Store/User for protocol tests. It mirrors
 // the semantics of cephstore (ids, modseq, vanished log, refcount-free).
 type Store struct {
-	mu    sync.Mutex
-	users map[string]*User
-	ix    indexes
+	mu     sync.Mutex
+	users  map[string]*User
+	ix     indexes
+	limits model.Limits // see SetLimits
 }
 
 func (s *Store) user(name string) *User {
@@ -118,6 +119,9 @@ type User struct {
 	active  string
 	imp     *importLock
 	trace   model.TraceState
+	// usedNames are the names a mailbox was ever created under (the
+	// "uv:" records of the RADOS registry), for the name limit.
+	usedNames map[string]bool
 	// registered: the user has a registry (directory.go).
 	registered atomic.Bool
 }
@@ -216,6 +220,11 @@ func (u *User) CreateMailbox(name string, use []string) error {
 		return model.ErrMailboxExists
 	}
 
+	if err := u.checkNewMailbox(name); err != nil {
+		return err
+	}
+
+	u.useName(name)
 	u.guidN++
 
 	b := &box{MailboxRec: model.MailboxRec{ID: fmt.Sprintf("box%d", u.guidN), UIDValidity: uint32(u.guidN), SpecialUse: use}, uidNext: 1, modseq: 1, vanished: map[uint64][]uint32{}}
@@ -532,8 +541,8 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 		return nil, err
 	}
 
-	if enforce && u.limit.Bytes > 0 && u.usage.Bytes+int64(len(raw)) > u.limit.Bytes {
-		return nil, model.ErrOverQuota
+	if err := u.admit(b, len(raw), flags, enforce); err != nil {
+		return nil, err
 	}
 
 	if when.IsZero() {
@@ -591,6 +600,12 @@ func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply
 
 	b, _, err := u.lookup(name)
 	if err != nil {
+		return nil, err
+	}
+
+	// As in cephstore: the keywords a change can add are those apply
+	// adds to no flags at all.
+	if err := u.checkKeywords(b, apply(nil)); err != nil {
 		return nil, err
 	}
 
@@ -727,9 +742,19 @@ func (u *User) Copy(metas []model.Meta, dest string) ([]model.Meta, error) {
 		return nil, err
 	}
 
+	var flags []string
+	for _, m := range metas {
+		flags = append(flags, m.Flags...)
+	}
+
+	if err := u.checkKeywords(b, flags); err != nil {
+		return nil, err
+	}
+
 	var out []model.Meta
 
 	for _, m := range metas {
+		b.addKeywords(m.Flags)
 		m.UID, m.POP3UIDL = b.uidNext, ""
 		b.uidNext++
 		m.ModSeq = b.bump()
@@ -1236,6 +1261,10 @@ func (u *User) SetACL(name, identifier, rights string) error {
 		return model.ErrAccountPurging
 	}
 
+	if err := u.checkGrant(name, identifier, func(string) string { return rights }); err != nil {
+		return err
+	}
+
 	u.mu.Lock()
 
 	b, canon, err := u.lookup(name)
@@ -1336,6 +1365,10 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 
 	blocked, err := u.grantBlocked(identifier)
 	if err != nil {
+		return "", 0, err
+	}
+
+	if err := u.checkGrant(name, identifier, change); err != nil {
 		return "", 0, err
 	}
 
@@ -1736,6 +1769,10 @@ func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string)
 		u.annot = map[string]string{}
 	}
 
+	set, names := map[string]string{}, map[string]string{}
+
+	var rm []string
+
 	for entry, val := range entries {
 		acc := ""
 		if strings.HasPrefix(entry, "/private/") {
@@ -1748,11 +1785,21 @@ func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string)
 		}
 
 		if val == nil {
-			delete(u.annot, prefix+entry)
+			rm = append(rm, prefix+entry)
 		} else {
-			u.annot[prefix+entry] = *val
+			set[prefix+entry], names[prefix+entry] = *val, entry
 		}
 	}
+
+	if err := u.checkMetadata(set, rm, names); err != nil {
+		return err
+	}
+
+	for _, k := range rm {
+		delete(u.annot, k)
+	}
+
+	maps.Copy(u.annot, set)
 
 	return nil
 }
@@ -1774,6 +1821,12 @@ func (u *User) SwapMetadata(mailbox, accessor, entry, old string, next *string) 
 
 	if u.annot[prefix+entry] != old {
 		return false, nil
+	}
+
+	if next != nil {
+		if err := u.checkMetadata(map[string]string{prefix + entry: *next}, nil, map[string]string{prefix + entry: entry}); err != nil {
+			return false, err
+		}
 	}
 
 	if u.annot == nil {
