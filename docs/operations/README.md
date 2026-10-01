@@ -440,7 +440,9 @@ ones of servers configured with more; after lowering `fts_shards` on
 purpose, run `fts_rebuild` for the account and remove the shards above
 the new count with `rados rm`. A namespace whose account is created
 again while the sweep looks at it is counted as `recreated` and keeps
-everything. It needs `mon 'allow r'` (it reads each pool's
+everything; no object written later than `scrub.sweep_clock_margin_seconds`
+(60) before the sweep read the namespace is taken for a remnant, so the
+servers' clocks must agree (NTP) to well within that margin. It needs `mon 'allow r'` (it reads each pool's
 `pg_num`), which the server's CephClient has. A namespace without
 registry is deleted only when the account directory says it is being
 purged, or a purge of 0.42.0 or later recorded it (`ix.purged`) and the

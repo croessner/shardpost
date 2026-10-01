@@ -25,6 +25,7 @@ func init() {
 	// The tests take everything they wrote for old (scrubNow sleeps past
 	// the mtime resolution); TestRepairGrace checks the minimum itself.
 	minRepairGrace = 0
+	sweepClockMargin = 0
 }
 
 var (

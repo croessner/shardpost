@@ -79,6 +79,7 @@ func TestScrubAndBatchDefaults(t *testing.T) {
 func TestScrubIntents(t *testing.T) {
 	c, err := Load(configFile(t, "logging:\n  level: info\n"))
 	if err != nil || c.Scrub.OrphanSource != "shadow" || c.Scrub.IntentGraceSeconds != 3600 || c.Scrub.SweepSpillShards != 256 ||
+		c.Scrub.SweepClockMarginSeconds != 60 ||
 		!c.Purge.Listing || c.JMAP.UploadTTLSeconds != 86400 {
 		t.Fatalf("defaults: %+v %+v %d %v", c.Scrub, c.Purge, c.JMAP.UploadTTLSeconds, err)
 	}
@@ -89,7 +90,7 @@ func TestScrubIntents(t *testing.T) {
 	}
 
 	refused(t, "scrub:\n  orphan_source: none\n", "scrub:\n  intent_grace_seconds: 60\n",
-		"scrub:\n  sweep_spill_shards: 0\n", "jmap:\n  upload_ttl_seconds: 600\n")
+		"scrub:\n  sweep_spill_shards: 0\n", "jmap:\n  upload_ttl_seconds: 600\n", "scrub:\n  sweep_clock_margin_seconds: 0\n")
 }
 
 // refused fails for every configuration that loads.

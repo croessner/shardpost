@@ -214,6 +214,10 @@ type Scrub struct {
 	// SweepSpillShards is how many spill objects "shardpost scrub
 	// --sweep" spreads the object names of a pool over.
 	SweepSpillShards int `mapstructure:"sweep_spill_shards" env:"SCRUB_SWEEP_SPILL_SHARDS" validate:"gte=1,lte=4096"`
+	// SweepClockMarginSeconds is how far before reading a namespace the
+	// sweep draws the line after which nothing is a remnant: object
+	// mtimes have whole seconds and come from the writer's clock.
+	SweepClockMarginSeconds int64 `mapstructure:"sweep_clock_margin_seconds" env:"SCRUB_SWEEP_CLOCK_MARGIN_SECONDS" validate:"gte=1,lte=3600"`
 }
 
 // Purge configures the account purge job.
@@ -498,6 +502,7 @@ var defaults = []struct {
 	{"scrub.orphan_source", "shadow"},
 	{"scrub.intent_grace_seconds", 3600},
 	{"scrub.sweep_spill_shards", 256},
+	{"scrub.sweep_clock_margin_seconds", 60},
 	{"purge.listing", true},
 	{"jmap.upload_ttl_seconds", 86400},
 	{"server.auth_backend", "static"},

@@ -210,6 +210,12 @@ a crash (3600).
 .I scrub.sweep_spill_shards
 Spill objects per pool of a new sweep (256).
 .TP
+.I scrub.sweep_clock_margin_seconds
+Nothing written after the sweep read a namespace is a remnant; the line
+lies this far before the read, on a whole second (60): object times
+have whole seconds and come from the writing server's clock. It matters
+only when a namespace takes the sweep longer than the grace period.
+.TP
 .I scrub.dry_run
 Report only.
 .SH EXAMPLES

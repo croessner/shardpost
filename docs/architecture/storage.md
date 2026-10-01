@@ -194,6 +194,11 @@ against the scrubber's: the servers' clocks must agree (NTP) to well
 within `scrub.intent_grace_seconds`; a writer whose clock runs ahead
 only delays the scrub, one that runs behind by more than the grace
 period lets a scrub take an intent of a write in flight for a crash.
+Object mtimes, which the scrub and the sweep compare with their own
+clock, have whole seconds and come from the writer's clock as well; the
+sweep's line for a namespace it read lies `scrub.sweep_clock_margin_seconds`
+(60) before the read, on a whole second, so a write in the same second
+or from a clock a little behind is never taken for older.
 
 **Where the scrub looks** is `scrub.orphan_source`:
 

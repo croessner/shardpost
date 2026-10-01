@@ -96,6 +96,29 @@ func checkRecreated(t *testing.T, u *User, left []string) {
 	}
 }
 
+// TestOpenedLineHasMargin: the line after which nothing is a remnant lies
+// a margin before the read, on a whole second, so a write in the same
+// second (mtimes have whole seconds) or from a clock a little behind is
+// never older than it.
+func TestOpenedLineHasMargin(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 30, 700_000_000, time.UTC)
+
+	if got := openedLine(now, time.Minute); !got.Equal(time.Date(2026, 10, 2, 11, 59, 30, 0, time.UTC)) {
+		t.Fatalf("line %v", got)
+	}
+
+	// An object written in the second of the read, by a clock a few
+	// seconds behind, is after the line.
+	written := now.Add(-5 * time.Second).Truncate(time.Second)
+	if !written.After(openedLine(now, time.Minute)) {
+		t.Fatal("a write within the margin counts as older than the read")
+	}
+
+	if got := openedLine(now, 0); !got.Equal(now) {
+		t.Fatalf("no margin: %v", got)
+	}
+}
+
 // sampled reports whether a sample of the report starts with prefix.
 func sampled(rep *SweepReport, prefix string) bool {
 	for _, x := range rep.Samples {

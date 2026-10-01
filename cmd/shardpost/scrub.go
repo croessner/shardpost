@@ -185,6 +185,7 @@ func scrubSweep(ctx context.Context, store *cephstore.Store, log *slog.Logger, s
 		Repair: repair && !settings.Scrub.DryRun, Restart: restart, Log: log,
 		Grace:       time.Duration(settings.Scrub.GraceSeconds) * time.Second,
 		SpillShards: settings.Scrub.SweepSpillShards,
+		ClockMargin: time.Duration(settings.Scrub.SweepClockMarginSeconds) * time.Second,
 	})
 	if rep != nil {
 		b, _ := json.Marshal(rep)

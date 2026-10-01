@@ -51,6 +51,10 @@ import (
 // DefaultSweepSpillShards is the number of spill objects per pool.
 const DefaultSweepSpillShards = 256
 
+// sweepClockMargin is the default of SweepOptions.ClockMargin (a variable
+// for the tests).
+var sweepClockMargin = time.Minute
+
 const (
 	sweepLockOID  = "sweep/lock"
 	sweepStateOID = "sweep/state"
@@ -100,6 +104,11 @@ type SweepOptions struct {
 	SpillShards int
 	// Restart drops a sweep in progress and starts a new one.
 	Restart bool
+	// ClockMargin is how far before the moment a namespace is read the
+	// sweep sets the line after which nothing is a remnant (0:
+	// sweepClockMargin): object mtimes have whole seconds and come from
+	// the writer's clock.
+	ClockMargin time.Duration
 	// Batch overrides sweepBatch (tests).
 	Batch int
 	Log   *slog.Logger
@@ -281,6 +290,10 @@ func (s *Store) newSweeper(ctx context.Context, o SweepOptions, lost func() bool
 
 	if o.Batch <= 0 {
 		o.Batch = sweepBatch
+	}
+
+	if o.ClockMargin <= 0 {
+		o.ClockMargin = sweepClockMargin
 	}
 
 	if o.Repair {
@@ -699,7 +712,7 @@ func (sw *sweeper) openNamespace(name, pool string) *sweepNamespace {
 // taken for a remnant.
 func (ns *sweepNamespace) load() error {
 	u, rep := ns.u, &ns.sw.st.Report
-	ns.opened = time.Now()
+	ns.opened = openedLine(time.Now(), ns.sw.o.ClockMargin)
 
 	if !u.objectExists(oidRegistry) {
 		ok, reason, err := ns.cleanable()
@@ -745,6 +758,17 @@ const (
 	remnantRegistryMissing = "registry missing" // the directory holds it as active
 	remnantUnregistered    = "no registry"      // neither purging nor recorded as purged
 )
+
+// openedLine is the line a namespace read at now sets: a margin before it
+// for the writers' clocks, in whole seconds as object mtimes are (no
+// margin: now itself, tests).
+func openedLine(now time.Time, margin time.Duration) time.Time {
+	if margin <= 0 {
+		return now
+	}
+
+	return now.Add(-margin).Truncate(time.Second)
+}
 
 // cleanable reports whether the objects of a namespace without registry
 // are remnants: the account directory says the account is being purged,
