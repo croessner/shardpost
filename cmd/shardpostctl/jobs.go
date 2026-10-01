@@ -28,7 +28,8 @@ import (
 const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
-  kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, mailbox_name_convert, mailbox_delete, expunge, purge`
+  kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, mailbox_name_convert,
+  attachment_backfill, mailbox_delete, expunge, purge`
 
 // labelKind labels the kind row.
 const labelKind = "kind"

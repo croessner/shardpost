@@ -49,15 +49,42 @@ quantiles are not meaningful.
 One trace is started per unit of work: an IMAP or POP3 command
 (`imap.FETCH`, `pop3.RETR`), a delivery (`lmtp.deliver`,
 `delivery.deliver`), an admin request (`admin.<operation>`, the operation
-label carries no account name) and a maintenance job (`job.<kind>` with
-`job.id`). The store reports its own work below them, so a trace shows
-where the time of a command actually goes:
+label carries no account name), a JMAP request and a maintenance job
+(`job.<kind>` with `job.id`). The store reports its own work below them,
+so a trace shows where the time of a command actually goes:
 
 ```
 imap.FETCH
 ├─ store.get_entries    rados.oid, number of UIDs
 └─ store.blob_read      guid, bytes
 ```
+
+A JMAP request is one span per HTTP request — `jmap.session`,
+`jmap.api`, `jmap.upload`, `jmap.download`, with `http.method`,
+`http.status_code`, `net.peer` and, once authenticated, `jmap.user` — and
+below `jmap.api` one span per method call, named after the method
+(`jmap.Email/query`) with `jmap.method`, `jmap.account` (the account the
+call works on: the user's own, another owner's or `~public`) and, when
+the call failed, `jmap.error` (the JMAP error type). Only a server-side
+failure (`serverFail`, `serverUnavailable`, `serverPartialFail`, or an
+HTTP status of 500 and above) marks a span as an error; a client's
+mistake is an attribute. The store views of the request — the user's own
+and every shared namespace a call opens — hang their operations below
+the call that runs them:
+
+```
+jmap.api
+├─ jmap.Email/query      jmap.account
+│  ├─ store.fts_search
+│  └─ store.get_entries
+└─ jmap.Email/get
+   └─ store.blob_read
+```
+
+The event source (`/jmap/eventsource/`) is not traced: it stays open for
+hours, and a span that long says nothing. Neither are the health
+endpoint and a call of an unknown method. No JMAP attribute carries a
+credential, a filter value, a mailbox name or anything of a message.
 
 Store spans: `store.deliver`, `store.blob_read`, `store.blob_write`,
 `store.fts_index`, `store.fts_search`, `store.fts_dict` (the dictionary
@@ -88,9 +115,14 @@ checkpoints remain the way to follow a long run.
 Store spans deliberately carry no mailbox names, only object ids, counts
 and sizes; mailbox names are user content. The traces currently also
 contain user attributes (`imap.user`, `pop3.user`,
-`lmtp.user`), and for IMAP possibly the mailbox and the peer
-(`imap.mailbox`, `net.peer`). The collector configuration and the access
-rights have to implement the applicable rules for this data. Credentials
+`lmtp.user`, `jmap.user`, `jmap.account`), and for IMAP possibly the
+mailbox and the peer (`imap.mailbox`, `net.peer`; JMAP spans carry
+`net.peer` as well). The collector configuration and the access
+rights have to implement the applicable rules for this data. The
+collector filter accepted on 2026-09-15 (below) removes five
+attributes; `jmap.user` and `jmap.account` came later with JMAP tracing
+and have to be added to it in the owner repository, otherwise JMAP
+traces export them. Credentials
 belong neither in dashboards nor in export files or operational reports.
 
 ## Operational responsibility and acceptance

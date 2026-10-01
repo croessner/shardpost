@@ -24,6 +24,7 @@ example](jmap-examples.md) shows a recorded send and receive as JSON.
 | 6c-1 | Sharing of mail: shared mailboxes and public folders as accounts, `Email/copy` between them | built |
 | 6c-2 | `Principal/*`, `shareWith`, `ShareNotification` (RFC 9670) | built |
 | 6c-3 | Push for shared accounts and share notifications; shared states that move with visible changes only | built |
+| 6d | `SearchSnippet/get`, the `hasAttachment` filter, `sortAsTree` and `filterAsTree`, tracing | built |
 
 A client that asks for a capability this server does not have is told
 `unknownCapability`, and a method that is not implemented answers
@@ -31,11 +32,11 @@ A client that asks for a capability this server does not have is told
 
 The session advertises `urn:ietf:params:jmap:mail` from stage 2 on,
 because a method is only reachable through the capability it belongs to.
-With stage 4 the capability is complete for reading and writing mail;
-`SearchSnippet/get` is the one method of RFC 8621 5 that is still
-missing (see the limits below). Whether `jmap.addr` is set, and real
-clients reach the front-end, is an operator decision from here on, not
-a gap in the code.
+With stage 4 the capability is complete for reading and writing mail,
+and with stage 6d every method and query option of RFC 8621 2 to 5 is
+there, `SearchSnippet/get` included. Whether `jmap.addr` is set, and
+real clients reach the front-end, is an operator decision from here on,
+not a gap in the code.
 
 ## The account state
 
@@ -122,6 +123,17 @@ for `i;octet`; the session advertises these two, the collations this
 server actually applies. A comparator that asks for another one is
 `unsupportedSort`.
 
+**Trees.** `sortAsTree` puts every mailbox before its descendants and
+orders two mailboxes that are not in one line by their nearest
+ancestors that are siblings — the depth-first walk of the tree with the
+children of every mailbox in comparator order. The ancestors that decide
+the order need not be in the result: the whole tree is sorted, and the
+walk keeps the mailboxes that matched. `filterAsTree` keeps a mailbox
+only when every mailbox of its parent chain matched the filter as well.
+A parent is the JMAP parent: in a path whose intermediate level has no
+mailbox (see above), and in a shared account where the user cannot see
+it, the nearest ancestor that is a mailbox of the account.
+
 **`Mailbox/queryChanges`** answers `cannotCalculateChanges`, and
 `Mailbox/query` says so up front with `canCalculateChanges: false`: the
 query result is not a list this server keeps, so a client re-runs the
@@ -169,7 +181,11 @@ rate it receives mail, spread over 32 objects; at a million messages over
 its lifetime that is about thirty thousand keys per object, well below
 Ceph's large-omap threshold. An account far beyond that can have its
 locator dropped (`ix/jmaploc/*`) while no JMAP client is connected; the
-next request rebuilds it from what exists.
+next request rebuilds it from what exists. Besides the placements the
+locator remembers `hasAttachment` of messages stored by an earlier
+version (`a:<guid>`, a few bytes each, see
+[hasAttachment](#hasattachment)); dropping the locator drops those too,
+and the next query reads the messages again.
 
 **Keywords** are IMAP flags under their JMAP names (RFC 8621 4.1.1):
 `\Seen`, `\Flagged`, `\Answered` and `\Draft` become `$seen`, `$flagged`,
@@ -188,10 +204,12 @@ index gets them wrong for JMAP: it fills an absent `Sender` and
 `Reply-To` from `From`, where JMAP says null, and it merges `References`
 with `In-Reply-To` for threading. `header:*` and `headers` read the
 header block as well. The body properties — `bodyStructure`,
-`textBody`, `htmlBody`, `attachments`, `bodyValues`, `hasAttachment` —
-read and parse the whole message, which is what an IMAP `BODYSTRUCTURE`
-costs too. A list view that asks for `hasAttachment` therefore reads
-every message it shows.
+`textBody`, `htmlBody`, `attachments`, `bodyValues` — read and parse the
+whole message, which is what an IMAP `BODYSTRUCTURE` costs too.
+`hasAttachment` comes from the index record as well: it is computed when
+a message is stored (see [hasAttachment](#hasattachment)), and only a
+message stored by an earlier version, whose record does not carry it,
+is read for it.
 
 **Bodies.** `textBody`, `htmlBody` and `attachments` come from the
 algorithm RFC 8621 4.1.4 gives, ported as written. A body value is
@@ -255,7 +273,7 @@ The conditions:
 | `text`, `subject`, `body` | The full-text index, with the word semantics IMAP `SEARCH` has here |
 | `from`, `to`, `cc`, `bcc` | The full-text index narrows by the words of the value (`to`, `cc` and `bcc` share an index field); the envelope decides: every word has to occur, without regard to case, in `name <address>` of one address |
 | `header` | The full-text index narrows a value; the header block of each candidate decides. A name alone, or a value without an indexable word, reads the header of every candidate |
-| `hasAttachment` | Refused with `unsupportedFilter`: it would mean parsing every candidate |
+| `hasAttachment` | The index record; a record without it is answered once by reading the message (see [hasAttachment](#hasattachment)) |
 
 An unknown condition or operator, and a node that is both an operator
 and a condition, is `unsupportedFilter`, never silently ignored — an
@@ -293,7 +311,97 @@ messages, or a change that is announced and not yet recorded is
 accepted and not used: the delta is computed over the whole result.
 Carrying a
 materialised index per sort key would lift the restriction, at a write
-on every delivery; it is not done.
+on every delivery; it is not done. A `hasAttachment` condition does not
+restrict the delta: a message's attachments never change.
+
+### hasAttachment
+
+The index record of a message carries `hasAttachment` (`att`), computed
+when the message is stored — IMAP `APPEND`, LMTP and the admin API's
+local delivery, `Email/import`, `Email/set` and the account import alike,
+since all of them store through the same two paths of the store. It is
+computed by the code `Email/get` renders the property with
+(`internal/mimepart`, the algorithm of RFC 8621 4.1.4: an attachment
+that is not marked inline), so a query by it and the property agree.
+A copy or a move keeps the record and with it the field.
+
+A message stored by an earlier version has a record without the field.
+Nothing rewrites those records: rewriting every index record of every
+account to add one bit is the kind of write a cluster should not do for
+a convenience. Instead such a message is read and parsed once, and the
+answer is remembered in the JMAP locator under `a:<guid>` — the locator
+is the derived index of the JMAP front-end anyway, a message's content
+never changes under its GUID, and a locator that is dropped only costs
+reading again. `Email/get` answers from there as well; a message it has
+no answer for it parses, as it parses a message for its body
+properties, and remembers the answer, so the next call does not parse
+it again.
+
+The filter is evaluated in three-valued logic: first with what the
+records say, so that only the messages whose match still depends on an
+unknown `hasAttachment` — the ones the other conditions do not decide —
+are looked up in the locator, a thousand at a time, and read. One query
+reads at most `jmap.search.max_attachment_reads` such messages (1000). A query
+that would need more remembers what it read, starts a fill of the
+namespace in the background and answers `serverUnavailable`; once the
+fill is through, the query succeeds. A fill reads every old message of
+the namespace once; one runs per namespace at a time, at most
+`jmap.search.attachment_backfills` (2) at once in a process, each for at most
+`jmap.search.attachment_backfill_seconds` (600 s). Shutdown stops them
+and waits up to ten seconds for them to end before the store is closed.
+What a fill wrote stays when it is stopped, so the next one starts
+where it ended. A mailbox that cannot be listed is skipped and logged,
+and a message that cannot be read — or that the parser fails on, even
+with a panic — is counted as failed and logged; neither ends the fill. The maintenance job `attachment_backfill` (see
+[Admin API](admin-api.md#maintenance-jobs-stage-8c)) does the same ahead
+of time, for an account whose users are about to search.
+
+A message that cannot be read counts as one without an attachment. The
+failure is not remembered in the locator, since it may pass (only a
+store that reports the data as gone, `model.ErrNoBlob`, has it
+remembered as unreadable; the RADOS store reports a read error), but the
+process does not read that message again for ten minutes and logs it
+once as a warning, then at debug level. A fill counts such messages as
+failed and tries them again the next time.
+
+### Search snippets
+
+`SearchSnippet/get` (RFC 8621 5) shows where a message matched the text
+of a filter: its `subject` and a `preview` piece of its body, with every
+matched word in `<mark>…</mark>` and `&`, `<` and `>` escaped
+everywhere else. The full-text index says which messages match, not
+where, so the words are found again: with the tokenizer and the
+stemmers the index is built with, and with the matching rules of the
+index — a word matches a query word that it contains, or that one of
+the stems of either equals; a query word of fewer than three letters
+matches a word it is the start of. What is marked is what the index
+matched by.
+
+- `subject` marks the words of `text` and `subject` conditions in the
+  subject of the index record; `preview` those of `text` and `body`
+  conditions in the text body (`textBody` of RFC 8621 4.1.4, an HTML
+  part turned into text). Words under a `NOT` are not marked, and
+  `from`, `to`, `cc`, `bcc` and `header` conditions mark nothing.
+- A property is null when none of its words matched; a filter without
+  text conditions gives null for both. This server does not check
+  whether a message matches the filter as a whole: a message outside the
+  filter's other conditions still gets its words marked. That is a choice
+  of this server, to keep a snippet from costing a second query.
+- The preview starts a few words before the first match and is cut at
+  a word boundary to at most 255 octets, marks included. Each distinct
+  word of a call is matched once.
+- An id given more than once gets one snippet, in the place of its
+  first mention.
+- The body is read from the front of the message, at most
+  `jmap.search.snippet_read_bytes` (256 KiB) of it, where the text parts are. A
+  match beyond that gives no preview.
+- `emailIds` is required and bounded by `maxObjectsInGet`
+  (`requestTooLarge`); an id the account does not hold, or holds where
+  the user may not read it, is in `notFound`. The filter is checked as
+  `Email/query` checks it — an unknown condition is `unsupportedFilter`
+  — but no result is computed.
+- It works in shared accounts like the `Email` methods, on the messages
+  of the mailboxes the user may read (`mayReadItems`).
 
 ## Writing messages
 
@@ -538,7 +646,7 @@ owner creates the mailbox and shares it.
 **Messages.** An Email of a shared account is a message in a mailbox the
 user may read (`l` and `r`), and its `mailboxIds` are those mailboxes;
 a copy elsewhere is not part of it. `Email/get`, `/query`, `/changes`,
-`/queryChanges` and `Thread/*` see only those mailboxes. The full-text
+`/queryChanges`, `Thread/*` and `SearchSnippet/get` see only those mailboxes. The full-text
 index is the namespace's, so it finds messages the user may not read,
 but every hit is resolved through the locator, which finds a message
 only where the user may read it, so such a hit never becomes a result.
@@ -1669,6 +1777,11 @@ jmap:
   max_principal_lookups: 5       # exact address lookups per API request (Principal/*, shareWith)
   max_principals: 1000           # principals a user sees without a lookup
   principal_miss_per_minute: 30  # lookups that find nothing, per account and front-end
+  search:
+    snippet_read_bytes: 262144   # the front of a message SearchSnippet/get reads
+    max_attachment_reads: 1000   # old messages one Email/query reads for hasAttachment
+    attachment_backfills: 2      # background fills of hasAttachment at once
+    attachment_backfill_seconds: 600
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
@@ -1737,19 +1850,23 @@ authentication backend, and the relay learns the account from
 
 ## Limits of this stage
 
-- `SearchSnippet/get` (RFC 8621 5) is not here: highlighting needs the
-  matched text, which the full-text index does not keep.
-- `hasAttachment` is refused as a query condition, and a `header`
-  condition without an indexable value reads the header of every
-  candidate (see above).
+- `SearchSnippet/get` reads the front of each message (at most
+  `jmap.search.snippet_read_bytes`) for its preview, and marks whole words;
+  it does not check that a message matches the filter (see
+  [Search snippets](#search-snippets)).
+- A `header` condition without an indexable value reads the header of
+  every candidate (see above), and a `hasAttachment` condition reads a
+  message stored by an earlier version once; past
+  `jmap.search.max_attachment_reads` the query answers `serverUnavailable` until
+  the background fill is through (see [hasAttachment](#hasattachment)).
 - `Email/queryChanges` answers for the default order only and ignores
   `upToId` (see above). Over a public folder it shares the limitation
   of the private `\Seen` marks below.
 - `Email/get` needs ids: asking for every message of an account is
   answered with `requestTooLarge`.
-- `hasAttachment` reads the whole message (see above). Caching it in the
-  index record at delivery would make list views cheaper; it is not done
-  yet.
+- `Mailbox/queryChanges` always answers `cannotCalculateChanges`.
+- The event source is not traced; every other endpoint is, with a span
+  per method call (see [Observability](observability.md#traces-and-access)).
 - A message beyond the limits of the MIME walk (more than 1000 parts, or
   nested deeper than 32 levels) is described as one opaque part a client
   can download, and a message whose data cannot be read has no body

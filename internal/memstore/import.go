@@ -314,7 +314,7 @@ func (u *User) importOne(b *box, m *model.ImportMessage, res *model.ImportResult
 	p := mailmeta.Parse(m.Raw)
 	b.msgs = append(b.msgs, model.Meta{UID: m.UID, GUID: guid, Size: int64(len(m.Raw)), Chunks: 1, Flags: append([]string(nil), m.Flags...),
 		InternalDate: m.InternalDate, SaveDate: m.SaveDate, ModSeq: m.ModSeq, Envelope: p.Envelope, Routes: p.Routes, References: p.Refs,
-		Preview: p.Preview, POP3UIDL: m.POP3UIDL})
+		Preview: p.Preview, HasAttachment: mailmeta.HasAttachment(m.Raw), POP3UIDL: m.POP3UIDL})
 	b.addKeywords(m.Flags)
 	u.usage.Bytes += int64(len(m.Raw))
 	u.usage.Msgs++

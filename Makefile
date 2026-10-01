@@ -77,7 +77,7 @@ lint-local:
 	golangci-lint run --build-tags tentacle ./...
 
 test:
-	go test -race ./internal/config ./internal/logging ./internal/auth ./internal/imapproto ./internal/pop3proto ./internal/sieve ./internal/imapsieve ./internal/extprograms ./internal/delivery ./internal/admin ./cmd/shardpostctl ./internal/migrate ./internal/mutf7 ./internal/memstore ./internal/quota ./internal/provision ./internal/fts ./internal/postings ./internal/telemetry ./internal/prototrace ./internal/inflate ./internal/jobs ./internal/archive ./internal/jmap ./internal/sharenotice
+	go test -race ./internal/config ./internal/logging ./internal/auth ./internal/imapproto ./internal/pop3proto ./internal/sieve ./internal/imapsieve ./internal/extprograms ./internal/delivery ./internal/admin ./cmd/shardpostctl ./internal/migrate ./internal/mutf7 ./internal/memstore ./internal/quota ./internal/provision ./internal/fts ./internal/postings ./internal/telemetry ./internal/prototrace ./internal/inflate ./internal/jobs ./internal/archive ./internal/jmap ./internal/sharenotice ./internal/mimepart ./internal/mailmeta ./internal/model ./internal/attcache
 
 # Python programs, in the runtime base image with the same venv as the
 # image (programs/requirements.txt, hash-pinned).

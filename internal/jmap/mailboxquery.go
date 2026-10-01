@@ -26,6 +26,14 @@ type queryRequest struct {
 	Sort      []comparator    `json:"sort"`
 }
 
+// mailboxQueryRequest is the argument shape of Mailbox/query, which adds
+// two tree options to the standard /query (RFC 8621 2.3).
+type mailboxQueryRequest struct {
+	queryRequest
+	SortAsTree   bool `json:"sortAsTree"`
+	FilterAsTree bool `json:"filterAsTree"`
+}
+
 // comparator is one sort key of a /query.
 type comparator struct {
 	IsAscending *bool  `json:"isAscending"`
@@ -93,7 +101,7 @@ const jsonNull = "null"
 // of an account is small enough to filter and sort in memory; the work
 // is in saying exactly what the filter means.
 func mailboxQuery(_ context.Context, sess *session, args json.RawMessage) (any, *methodError) {
-	var req queryRequest
+	var req mailboxQueryRequest
 	if merr := forAccount(sess, args, &req); merr != nil {
 		return nil, merr
 	}
@@ -118,11 +126,102 @@ func mailboxQuery(_ context.Context, sess *session, args json.RawMessage) (any, 
 		return nil, merr
 	}
 
-	if merr := sortMailboxes(t, matched, req.Sort); merr != nil {
+	if req.FilterAsTree {
+		matched = filterAsTree(t, matched)
+	}
+
+	if req.SortAsTree {
+		if matched, merr = sortAsTree(t, matched, req.Sort); merr != nil {
+			return nil, merr
+		}
+	} else if merr := sortMailboxes(t, matched, req.Sort); merr != nil {
 		return nil, merr
 	}
 
 	return page(sess.accountID(), state, ids(matched), &req.paging)
+}
+
+// treeParent is the id of a mailbox's JMAP parent, "" at the top level.
+func treeParent(t *tree, mb *model.Mailbox) string {
+	if _, parent := t.split(mb.Name); parent != nil {
+		return *parent
+	}
+
+	return ""
+}
+
+// filterAsTree keeps a mailbox only when every mailbox of its parent
+// chain matched the filter as well (RFC 8621 2.3).
+func filterAsTree(t *tree, matched []model.Mailbox) []model.Mailbox {
+	in := make(map[string]bool, len(matched))
+	for _, mb := range matched {
+		in[mb.ID] = true
+	}
+
+	out := make([]model.Mailbox, 0, len(matched))
+
+	for _, mb := range matched {
+		ok := true
+
+		for p := treeParent(t, &mb); p != "" && ok; {
+			ok = in[p]
+
+			parent := t.byID[p]
+			p = treeParent(t, &parent)
+		}
+
+		if ok {
+			out = append(out, mb)
+		}
+	}
+
+	return out
+}
+
+// sortAsTree orders the result as RFC 8621 2.3 asks with sortAsTree: a
+// mailbox comes before its descendants, and two mailboxes that are not
+// in one line are ordered by the comparators applied to their nearest
+// ancestors that are siblings. That is the depth-first walk of the whole
+// tree with the children of every mailbox in comparator order, keeping
+// the mailboxes of the result. The whole tree is sorted, not only the
+// result: the ancestors that decide the order need not be in it.
+func sortAsTree(t *tree, matched []model.Mailbox, by []comparator) ([]model.Mailbox, *methodError) {
+	all := append([]model.Mailbox(nil), t.all...)
+	sort.Slice(all, func(i, j int) bool { return all[i].Name < all[j].Name })
+
+	if merr := sortMailboxes(t, all, by); merr != nil {
+		return nil, merr
+	}
+
+	children := map[string][]model.Mailbox{}
+
+	for _, mb := range all {
+		p := treeParent(t, &mb)
+		children[p] = append(children[p], mb)
+	}
+
+	in := make(map[string]bool, len(matched))
+	for _, mb := range matched {
+		in[mb.ID] = true
+	}
+
+	out := make([]model.Mailbox, 0, len(matched))
+
+	var visit func(parent string)
+
+	visit = func(parent string) {
+		for _, mb := range children[parent] {
+			if in[mb.ID] {
+				out = append(out, mb)
+			}
+
+			visit(mb.ID)
+		}
+	}
+
+	visit("")
+
+	return out, nil
 }
 
 // readFilter decodes and checks the filter of a query. A filter that is

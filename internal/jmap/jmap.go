@@ -13,6 +13,7 @@
 package jmap
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -76,21 +77,38 @@ type Limits struct {
 	// before the base64 or JSON encoding. A client that wants more asks
 	// for a range, or downloads the blob.
 	MaxSizeBlobGet int64
+	// SnippetReadBytes bounds how much of a message SearchSnippet/get
+	// reads to find a match in the body: the front of the message, where
+	// the text parts are. A match beyond it gives no preview snippet.
+	SnippetReadBytes int64
+	// MaxAttachmentReads bounds the messages one Email/query reads to
+	// answer hasAttachment for an index record that does not carry it
+	// (stored before the record had the field).
+	MaxAttachmentReads int
+	// AttachmentBackfills bounds the background fills of hasAttachment
+	// that run at once in the process, and AttachmentBackfillTime how
+	// long one may run.
+	AttachmentBackfills    int
+	AttachmentBackfillTime time.Duration
 }
 
 // DefaultLimits are the values a configuration that says nothing gets.
 // They are deliberately modest: a JMAP client discovers them and adapts,
 // and an operator who needs more says so.
 var DefaultLimits = Limits{
-	MaxSizeUpload:         50 << 20,
-	MaxSizeRequest:        10 << 20,
-	MaxConcurrentUpload:   4,
-	MaxConcurrentRequests: 4,
-	MaxCallsInRequest:     16,
-	MaxObjectsInGet:       500,
-	MaxObjectsInSet:       500,
-	MaxDataSources:        minDataSources,
-	MaxSizeBlobGet:        10 << 20,
+	MaxSizeUpload:          50 << 20,
+	MaxSizeRequest:         10 << 20,
+	MaxConcurrentUpload:    4,
+	MaxConcurrentRequests:  4,
+	MaxCallsInRequest:      16,
+	MaxObjectsInGet:        500,
+	MaxObjectsInSet:        500,
+	MaxDataSources:         minDataSources,
+	MaxSizeBlobGet:         10 << 20,
+	SnippetReadBytes:       256 << 10,
+	MaxAttachmentReads:     1000,
+	AttachmentBackfills:    2,
+	AttachmentBackfillTime: 10 * time.Minute,
 }
 
 // minDataSources is the fewest data sources per Blob/upload creation RFC
@@ -263,6 +281,19 @@ type Server struct {
 	// watches are the watches on the account objects of shared accounts
 	// the event sources follow, one per namespace.
 	watches *watchHub
+	// The background fills of hasAttachment (attachment.go): the
+	// namespaces being filled, the free slots, the fills running, and
+	// the context that ends them at shutdown.
+	fills      sync.Map
+	fillSlots  chan struct{}
+	fillWG     sync.WaitGroup
+	fillCtx    context.Context
+	fillCancel context.CancelFunc
+	// fillMu orders starting a fill against Close: no fill is added to
+	// fillWG once Close waits for it.
+	fillMu sync.Mutex
+	// unreadable are the messages a query could not read lately.
+	unreadable unreadableSet
 }
 
 // New builds the server and its routes.
@@ -287,6 +318,8 @@ func New(o Options) *Server {
 	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
 		inEvents: map[string]int{}, closing: make(chan struct{}), misses: newMissBudget(o.Principals.MissPerMinute)}
 	s.watches = newWatchHub(o.Store, 0, o.Log)
+	s.fillSlots = make(chan struct{}, o.Limits.AttachmentBackfills)
+	s.fillCtx, s.fillCancel = context.WithCancel(context.Background())
 
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.
@@ -295,10 +328,12 @@ func New(o Options) *Server {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	s.mux.HandleFunc("GET "+PathSession, s.authenticated(s.handleSession))
-	s.mux.HandleFunc("POST "+PathAPI, s.authenticated(s.handleAPI))
-	s.mux.HandleFunc("POST "+PathUpload+"{accountId}/", s.authenticated(s.handleUpload))
-	s.mux.HandleFunc("GET "+PathDownload+"{accountId}/{blobId}/{name}", s.authenticated(s.handleDownload))
+	s.mux.HandleFunc("GET "+PathSession, traced("jmap.session", s.authenticated(s.handleSession)))
+	s.mux.HandleFunc("POST "+PathAPI, traced("jmap.api", s.authenticated(s.handleAPI)))
+	s.mux.HandleFunc("POST "+PathUpload+"{accountId}/", traced("jmap.upload", s.authenticated(s.handleUpload)))
+	s.mux.HandleFunc("GET "+PathDownload+"{accountId}/{blobId}/{name}",
+		traced("jmap.download", s.authenticated(s.handleDownload)))
+	// Not traced: an event source stays open for hours (see tracing.go).
 	s.mux.HandleFunc("GET "+PathEvents, s.authenticated(s.handleEvents))
 
 	return s
@@ -336,7 +371,30 @@ func withDefaults(l Limits) Limits {
 		l.MaxObjectsInSet = d.MaxObjectsInSet
 	}
 
-	return blobDefaults(l)
+	if l.SnippetReadBytes <= 0 {
+		l.SnippetReadBytes = d.SnippetReadBytes
+	}
+
+	return attachmentDefaults(blobDefaults(l))
+}
+
+// attachmentDefaults fills in the bounds of the hasAttachment reads.
+func attachmentDefaults(l Limits) Limits {
+	d := DefaultLimits
+
+	if l.MaxAttachmentReads <= 0 {
+		l.MaxAttachmentReads = d.MaxAttachmentReads
+	}
+
+	if l.AttachmentBackfills <= 0 {
+		l.AttachmentBackfills = d.AttachmentBackfills
+	}
+
+	if l.AttachmentBackfillTime <= 0 {
+		l.AttachmentBackfillTime = d.AttachmentBackfillTime
+	}
+
+	return l
 }
 
 // blobDefaults fills in the limits of the blob methods: a blob built by
@@ -376,8 +434,34 @@ func (s *Server) HTTPServer(addr string) *http.Server {
 	return srv
 }
 
-// Close ends the open event sources.
-func (s *Server) Close() { s.closeOnce.Do(func() { close(s.closing) }) }
+// fillStopWait is how long Close waits for the background fills to end.
+const fillStopWait = 10 * time.Second
+
+// Close ends the open event sources and the background fills, and waits
+// for the fills: the store may be closed after Close returns. A second
+// call waits for the first.
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		close(s.closing)
+
+		s.fillMu.Lock()
+		s.fillCancel()
+		s.fillMu.Unlock()
+
+		done := make(chan struct{})
+
+		go func() {
+			s.fillWG.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(fillStopWait):
+			s.o.Log.Warn("jmap: background fills still running at shutdown")
+		}
+	})
+}
 
 // enter takes a slot of the given per-account counter; it reports false
 // when the account is already at its limit.

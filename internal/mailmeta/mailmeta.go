@@ -1,7 +1,8 @@
 // Package mailmeta derives the metadata that is cached in the mailbox index
 // record of a message: the IMAP envelope (for FETCH ENVELOPE, SORT and
-// THREAD without touching the blob), a short text preview (RFC 8970) and
-// the parsed Date header (for SEARCH SENTSINCE/SENTBEFORE).
+// THREAD without touching the blob), a short text preview (RFC 8970), the
+// parsed Date header (for SEARCH SENTSINCE/SENTBEFORE) and whether the
+// message has an attachment (for the JMAP hasAttachment filter).
 package mailmeta
 
 import (
@@ -17,8 +18,13 @@ import (
 	"github.com/emersion/go-message/textproto"
 
 	"shardpost/internal/fts"
+	"shardpost/internal/mimepart"
 	"shardpost/internal/model"
 )
+
+// WordDecoder decodes RFC 2047 encoded words in every charset Go's text
+// encodings know (see mimepart.WordDecoder).
+var WordDecoder = mimepart.WordDecoder
 
 // ThreadID is the conversation a message belongs to: the root of its
 // References chain, or its own Message-ID, or — for a message with
@@ -139,6 +145,17 @@ func envelope(hdr textproto.Header) (*imap.Envelope, map[string][]string) {
 	}
 
 	return env, routes
+}
+
+// HasAttachment is what the index record keeps as the message's
+// hasAttachment (RFC 8621 4.1.4): computed by the same code JMAP renders
+// the property with, so a query by it and the property agree. It is a
+// pointer because a record written before the field existed has none,
+// and "unknown" is not "no".
+func HasAttachment(raw []byte) *bool {
+	has := mimepart.MessageHasAttachment(raw)
+
+	return &has
 }
 
 // MessageIDs extracts the <...> tokens of a References/In-Reply-To value,

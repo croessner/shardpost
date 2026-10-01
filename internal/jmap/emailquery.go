@@ -116,9 +116,17 @@ type emailQuery struct {
 	threads map[string][]map[string]bool // thread -> keyword sets of its messages
 	filter  *cnode
 	sorts   []emailComparator
+	// attach is what the query learned about hasAttachment beyond the
+	// index records (see attachment.go).
+	attach *attachState
 	// threadDep is set when the filter looks at other messages of a
 	// thread: a message's match can then change without the message.
 	threadDep bool
+	// needAttach is set when the filter has a hasAttachment condition.
+	needAttach bool
+	// noSearch compiles the filter without asking the full-text index:
+	// SearchSnippet/get checks a filter and computes no result.
+	noSearch bool
 }
 
 // emailQueryRun implements Email/query.
@@ -185,12 +193,9 @@ func (q *emailQuery) run(collapse bool) ([]string, *methodError) {
 		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	matched := make([]*emailItem, 0, len(items))
-
-	for _, it := range items {
-		if q.filter.eval(it) {
-			matched = append(matched, it)
-		}
+	matched, merr := q.match(items)
+	if merr != nil {
+		return nil, merr
 	}
 
 	q.sortItems(matched)
@@ -605,6 +610,10 @@ func parseUTCDate(s string) (time.Time, bool) {
 // is resolved through the locator, which finds a message only where the
 // user may read it, so such a hit never becomes a result.
 func (q *emailQuery) ftsSearch(fields []string, value string) (map[string]bool, error) {
+	if q.noSearch {
+		return map[string]bool{}, nil
+	}
+
 	return q.sess.user.SearchFields(fields, value)
 }
 

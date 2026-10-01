@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
@@ -58,19 +59,34 @@ func Tokenize(text string) []string {
 
 	var out []string
 
-	emit := func(t string) {
-		t = strings.ToLower(t)
-		if n := len([]rune(t)); n < minToken || n > maxToken {
-			return
+	for _, w := range Words(text) {
+		t, ok := token(text[w.Start:w.End])
+		if !ok {
+			continue
 		}
 
 		if _, ok := seen[t]; ok {
-			return
+			continue
 		}
 
 		seen[t] = struct{}{}
 		out = append(out, t)
 	}
+
+	return out
+}
+
+// Span is the byte range of one word of a text.
+type Span struct {
+	Start, End int
+}
+
+// Words returns the words of a text in order: the runs of Unicode letters
+// and digits Tokenize makes its tokens of, including the ones too short
+// or too long to be a token.
+func Words(text string) []Span {
+	var out []Span
+
 	start := -1
 
 	for i, r := range text {
@@ -83,16 +99,27 @@ func Tokenize(text string) []string {
 		}
 
 		if start >= 0 {
-			emit(text[start:i])
+			out = append(out, Span{start, i})
 			start = -1
 		}
 	}
 
 	if start >= 0 {
-		emit(text[start:])
+		out = append(out, Span{start, len(text)})
 	}
 
 	return out
+}
+
+// token is the index token of a word, and whether it is one: lower case,
+// and within the length the index keeps.
+func token(word string) (string, bool) {
+	t := strings.ToLower(word)
+	if n := utf8.RuneCountInString(t); n < minToken || n > maxToken {
+		return "", false
+	}
+
+	return t, true
 }
 
 // Terms extracts all index terms of a raw message: every token and its

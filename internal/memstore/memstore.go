@@ -528,7 +528,7 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 
 	p := mailmeta.Parse(raw)
 	m := model.Meta{UID: b.uidNext, GUID: guid, Size: int64(len(raw)), Chunks: 1, Flags: flags, InternalDate: when, SaveDate: time.Now(), ModSeq: b.bump(),
-		Envelope: p.Envelope, Routes: p.Routes, References: p.Refs, Preview: p.Preview}
+		Envelope: p.Envelope, Routes: p.Routes, References: p.Refs, Preview: p.Preview, HasAttachment: mailmeta.HasAttachment(raw)}
 	b.changes = append(b.changes, model.Change{ModSeq: m.ModSeq, UIDs: []uint32{m.UID}})
 	b.uidNext++
 
@@ -831,22 +831,28 @@ func (u *User) Move(src string, metas []model.Meta, dest string) ([]model.Meta, 
 }
 
 // termMatches reports whether an index term answers a query token on a
-// field, by the rules of the cephstore index: the token is a substring
-// of the term, except on a field without substring matching
-// (fts.Substring), where it is a prefix of the term or a substring of a
-// term of one of the fields that stand in for it.
-func termMatches(field, tok, term string) bool {
+// field, by the rules of the cephstore index (and of fts.Matcher): the
+// term is the token or one of its stems (exp), or the token is a
+// substring of the term — a prefix for a token shorter than a trigram,
+// and on a field without substring matching (fts.Substring), where a
+// longer token is also a substring of a term of one of the fields that
+// stand in for it.
+func termMatches(field, tok string, exp []string, term string) bool {
 	fld, t, _ := strings.Cut(term, ":")
+	short := fts.ShortToken(tok)
 
 	if fld == field {
-		if fts.Substring(field) {
-			return strings.Contains(t, tok)
+		switch {
+		case slices.Contains(exp, t):
+			return true
+		case short || !fts.Substring(field):
+			return strings.HasPrefix(t, tok)
 		}
 
-		return strings.HasPrefix(t, tok)
+		return strings.Contains(t, tok)
 	}
 
-	return !fts.Substring(field) && slices.Contains(fts.HeaderSubstringFields, fld) && strings.Contains(t, tok)
+	return !fts.Substring(field) && !short && slices.Contains(fts.HeaderSubstringFields, fld) && strings.Contains(t, tok)
 }
 
 // SearchFields returns the GUIDs whose fields contain every query token
@@ -859,10 +865,11 @@ func (u *User) SearchFields(fields []string, query string) (map[string]bool, err
 
 	for _, tok := range fts.Tokenize(query) {
 		hits := map[string]bool{}
+		exp := fts.Expand(tok)
 
 		for _, f := range fields {
 			for term, guids := range u.terms {
-				if termMatches(f, tok, term) {
+				if termMatches(f, tok, exp, term) {
 					for g := range guids {
 						hits[g] = true
 					}

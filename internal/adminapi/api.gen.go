@@ -228,6 +228,7 @@ func (e LearningState) Valid() bool {
 // Defines values for PlanRequestKind.
 const (
 	AclReconcile       PlanRequestKind = "acl_reconcile"
+	AttachmentBackfill PlanRequestKind = "attachment_backfill"
 	Expunge            PlanRequestKind = "expunge"
 	FtsDictConvert     PlanRequestKind = "fts_dict_convert"
 	FtsRebuild         PlanRequestKind = "fts_rebuild"
@@ -242,6 +243,8 @@ const (
 func (e PlanRequestKind) Valid() bool {
 	switch e {
 	case AclReconcile:
+		return true
+	case AttachmentBackfill:
 		return true
 	case Expunge:
 		return true
@@ -1771,8 +1774,9 @@ type ClientInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-	// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -1786,8 +1790,9 @@ type ClientInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-	// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -2991,8 +2996,9 @@ func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxI
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -3016,8 +3022,9 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -7036,8 +7043,9 @@ type ClientWithResponsesInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-	// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -7051,8 +7059,9 @@ type ClientWithResponsesInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-	// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+	// `delete`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -10646,8 +10655,9 @@ func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, acc
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -10667,8 +10677,9 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert` (role `repair`),
-// `mailbox_delete`, `expunge`, `purge` (role `delete`). A plan
+// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
+// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
+// `delete`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //

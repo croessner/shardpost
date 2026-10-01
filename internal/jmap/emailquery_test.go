@@ -213,7 +213,6 @@ func TestEmailQueryRefuses(t *testing.T) {
 	f := newQueryFixture(t)
 
 	cases := []struct{ args, want string }{
-		{`{"accountId":"test","filter":{"hasAttachment":true}}`, errUnsupportedFilter},
 		{`{"accountId":"test","filter":{"nonsense":1}}`, errUnsupportedFilter},
 		{`{"accountId":"test","filter":{"operator":"XOR","conditions":[]}}`, errUnsupportedFilter},
 		{`{"accountId":"test","filter":{"before":"yesterday"}}`, errUnsupportedFilter},

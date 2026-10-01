@@ -344,3 +344,20 @@ YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#mai
 | `admin.search_scan_limit` | 50000 | a search request examines at most this many messages (role `content`); a longer search resumes with its cursor |
 
 YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
+
+### JMAP search bounds (`jmap.search`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `jmap.search.snippet_read_bytes` | `JMAP_SEARCH_SNIPPET_READ_BYTES` | 262144 | how much of each message, from its front, `SearchSnippet/get` reads to find a match in the body; a match beyond it gives no preview |
+| `jmap.search.max_attachment_reads` | `JMAP_SEARCH_MAX_ATTACHMENT_READS` | 1000 | messages one `Email/query` may read to answer `hasAttachment` for a message stored by an earlier version, whose index record does not carry it; a query past the bound remembers what it read, starts a background fill of the namespace and answers `serverUnavailable` until the fill is through |
+| `jmap.search.attachment_backfills` | `JMAP_SEARCH_ATTACHMENT_BACKFILLS` | 2 | background fills of `hasAttachment` that run at once in a process (one per namespace); a namespace that finds no free slot is filled when a query asks again |
+| `jmap.search.attachment_backfill_seconds` | `JMAP_SEARCH_ATTACHMENT_BACKFILL_SECONDS` | 600 | how long one background fill may run; what it wrote stays, and the next fill goes on from there |
+
+`0` takes the default. The maintenance job `attachment_backfill` fills an
+account ahead of time ([Admin API](admin-api.md#maintenance-jobs-stage-8c)).
+A `SearchSnippet/get` reads at most
+`jmap.max_objects_in_get` messages, so one call reads at most that many
+times `jmap.search.snippet_read_bytes`. See [JMAP: Search snippets](jmap.md#search-snippets)
+and [JMAP: hasAttachment](jmap.md#hasattachment). The other `jmap.*` keys
+are described in [JMAP: Configuration](jmap.md#configuration).

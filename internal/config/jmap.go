@@ -81,6 +81,9 @@ type JMAP struct {
 	// kept in each front-end's memory; 0 takes 30. A lookup that finds a
 	// principal is not counted.
 	PrincipalMissPerMinute int64 `mapstructure:"principal_miss_per_minute" env:"JMAP_PRINCIPAL_MISS_PER_MINUTE" validate:"gte=0"`
+	// Search bounds what SearchSnippet/get and the hasAttachment filter
+	// of Email/query read.
+	Search JMAPSearch `mapstructure:"search"`
 	// Push configures push subscriptions and the push worker.
 	Push JMAPPush `mapstructure:"push"`
 	// Submission configures sending (EmailSubmission) and identities.
@@ -277,4 +280,23 @@ func (j JMAP) Certificate(global TLS) (cert, key string) {
 	}
 
 	return global.Cert, global.Key
+}
+
+// JMAPSearch bounds the reads behind SearchSnippet/get and the
+// hasAttachment filter of Email/query; 0 takes the default everywhere.
+type JMAPSearch struct {
+	// SnippetReadBytes bounds how much of each message SearchSnippet/get
+	// reads to find a match in the body (its front, where the text parts
+	// are); 0 takes 256 KiB. A match beyond it gives no preview snippet.
+	SnippetReadBytes int64 `mapstructure:"snippet_read_bytes" env:"JMAP_SEARCH_SNIPPET_READ_BYTES" validate:"gte=0"`
+	// MaxAttachmentReads bounds the messages one Email/query may read to
+	// answer hasAttachment for messages whose index record does not carry
+	// it (stored before the record had the field); 0 takes 1000. A query
+	// past it starts a background fill and answers serverUnavailable.
+	MaxAttachmentReads int64 `mapstructure:"max_attachment_reads" env:"JMAP_SEARCH_MAX_ATTACHMENT_READS" validate:"gte=0"`
+	// AttachmentBackfills bounds the background fills of hasAttachment
+	// (one per namespace) that run at once in the process; 0 takes 2.
+	// AttachmentBackfillSeconds bounds how long one runs; 0 takes 600.
+	AttachmentBackfills       int64 `mapstructure:"attachment_backfills" env:"JMAP_SEARCH_ATTACHMENT_BACKFILLS" validate:"gte=0"`
+	AttachmentBackfillSeconds int64 `mapstructure:"attachment_backfill_seconds" env:"JMAP_SEARCH_ATTACHMENT_BACKFILL_SECONDS" validate:"gte=0"`
 }

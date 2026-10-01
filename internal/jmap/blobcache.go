@@ -191,12 +191,12 @@ func (c *blobCache) part(guid, path string) ([]byte, error) {
 			}
 		}
 
-		part := root.find(section)
+		part := root.Find(section)
 		if part == nil {
 			return nil, model.ErrNoBlob
 		}
 
-		body, _ = part.decodedBody()
+		body, _ = part.Decoded()
 	}
 
 	return body, nil

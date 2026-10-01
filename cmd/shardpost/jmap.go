@@ -96,6 +96,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 	}
 
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
+	srv.jmapFront = front
 
 	return nil
 }
@@ -290,16 +291,20 @@ func jmapQuota(c config.Quota) jmap.QuotaOptions {
 // jmapLimits maps the configured limits; a zero keeps the default.
 func jmapLimits(c config.JMAP) jmap.Limits {
 	return jmap.Limits{
-		MaxSizeUpload:         c.MaxSizeUpload,
-		MaxSizeRequest:        c.MaxSizeRequest,
-		MaxConcurrentUpload:   int(c.MaxConcurrentUpload),
-		MaxConcurrentRequests: int(c.MaxConcurrentRequests),
-		MaxCallsInRequest:     int(c.MaxCallsInRequest),
-		MaxObjectsInGet:       int(c.MaxObjectsInGet),
-		MaxObjectsInSet:       int(c.MaxObjectsInSet),
-		MaxSizeBlobSet:        c.MaxSizeBlobSet,
-		MaxDataSources:        int(c.MaxDataSources),
-		MaxSizeBlobGet:        c.MaxSizeBlobGet,
+		MaxSizeUpload:          c.MaxSizeUpload,
+		MaxSizeRequest:         c.MaxSizeRequest,
+		MaxConcurrentUpload:    int(c.MaxConcurrentUpload),
+		MaxConcurrentRequests:  int(c.MaxConcurrentRequests),
+		MaxCallsInRequest:      int(c.MaxCallsInRequest),
+		MaxObjectsInGet:        int(c.MaxObjectsInGet),
+		MaxObjectsInSet:        int(c.MaxObjectsInSet),
+		MaxSizeBlobSet:         c.MaxSizeBlobSet,
+		MaxDataSources:         int(c.MaxDataSources),
+		MaxSizeBlobGet:         c.MaxSizeBlobGet,
+		SnippetReadBytes:       c.Search.SnippetReadBytes,
+		MaxAttachmentReads:     int(c.Search.MaxAttachmentReads),
+		AttachmentBackfills:    int(c.Search.AttachmentBackfills),
+		AttachmentBackfillTime: sec(c.Search.AttachmentBackfillSeconds),
 	}
 }
 

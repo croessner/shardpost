@@ -28,6 +28,7 @@ import (
 	"shardpost/internal/extprograms"
 	"shardpost/internal/imapproto"
 	"shardpost/internal/imapsieve"
+	"shardpost/internal/jmap"
 	"shardpost/internal/lmtpd"
 	"shardpost/internal/membudget"
 	"shardpost/internal/model"
@@ -350,6 +351,9 @@ type servers struct {
 	// jmap serves the JMAP front-end on its own listener (nil: off).
 	jmap    *http.Server
 	jmapTLS *tls.Config
+	// jmapFront is the front-end behind jmap; closing it waits for its
+	// background work, which uses the store.
+	jmapFront *jmap.Server
 	// jmapKV is the admin store the JMAP push subscriptions are kept in.
 	jmapKV *cephstore.AdminKV
 	// sieveConfig are the Sieve settings ManageSieve compiles with; JMAP
@@ -389,11 +393,9 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	defer stopWorker()
 
 	srv := newServers(log, settings, store, authn, tlsCfg, imapSieve, programs, sieveCfg)
-	if a := settings.SMTP.Addr; a != "" {
-		log.Info("outbound relay for sieve redirect/vacation", "addr", a)
-	} else {
-		log.Warn("no SMTP_RELAY_ADDR: sieve redirect keeps messages, vacation replies are not sent")
-	}
+	logRelay(log, settings)
+
+	defer srv.closeJMAP() // before the caller closes the store, which the fills read
 
 	if err := srv.setupHTTP(log, settings, store, authn); err != nil {
 		return err
@@ -588,8 +590,28 @@ func (srv *servers) drain(settings *config.Config) {
 		_ = srv.jmap.Shutdown(shCtx)
 	}
 
+	srv.closeJMAP()
+
 	if srv.jmapKV != nil {
 		srv.jmapKV.Close()
+	}
+}
+
+// logRelay says whether Sieve has an outbound relay.
+func logRelay(log *slog.Logger, settings *config.Config) {
+	if a := settings.SMTP.Addr; a != "" {
+		log.Info("outbound relay for sieve redirect/vacation", "addr", a)
+	} else {
+		log.Warn("no SMTP_RELAY_ADDR: sieve redirect keeps messages, vacation replies are not sent")
+	}
+}
+
+// closeJMAP ends the JMAP front-end's background work and waits for it.
+// Shutdown runs the front-end's Close in a goroutine of its own; this
+// call waits for that one, so the store may be closed afterwards.
+func (srv *servers) closeJMAP() {
+	if srv.jmapFront != nil {
+		srv.jmapFront.Close()
 	}
 }
 
