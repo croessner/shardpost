@@ -34,7 +34,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: push
-          image: docker.io/chrroessner/shardpost:0.40.0@sha256:52956785c45edede24a8b3e7c281fc77cc7181386fc4821ac0ea28f6eb8a6a3a
+          image: docker.io/chrroessner/shardpost:0.41.0@sha256:70b538231ae63a5844424c0bb0c2a8e7e79535204ffdb62c4bff4d1acffc6305
           imagePullPolicy: IfNotPresent
           args: ["push"]
           env:

@@ -62,7 +62,12 @@ curlcfg() {
 	printf '"\n'
 }
 
-pods() { $K get pods -l "$SELECTOR" -o name; }
+# pods lists the serving pods: draining ones of an earlier rollout carry
+# a deletion timestamp and are left out.
+pods() {
+	$K get pods -l "$SELECTOR" --field-selector=status.phase=Running \
+		-o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}pod/{{.metadata.name}}{{"\n"}}{{end}}{{end}}'
+}
 
 # metric <name> <labels> sums a series over all server pods.
 metric() {
@@ -75,8 +80,18 @@ metric() {
 hits() { metric imapceph_auth_cache_total 'op="authenticate",result="hit"'; }
 misses() { metric imapceph_auth_cache_total 'op="authenticate",result="miss"'; }
 
-imap_login() {
-	curlcfg | $K exec -i "$TOOLS" -- curl -sS -K - --ssl-reqd --insecure "$IMAP_URL" -X NOOP >/dev/null 2>&1 ||
+# imap_logins <n> logs in n times from one exec in the tools pod: an
+# exec per login takes seconds, and n of them would outlast the cache
+# TTL (30 s by default), so later logins would miss by design.
+imap_logins() {
+	# shellcheck disable=SC2016 # expanded by the shell in the tools pod
+	curlcfg | $K exec -i "$TOOLS" -- sh -c '
+		cfg=$(cat)
+		i=0
+		while [ "$i" -lt "$1" ]; do
+			printf "%s\n" "$cfg" | curl -sS -K - --ssl-reqd --insecure "$2" -X NOOP >/dev/null 2>&1 || exit 1
+			i=$((i + 1))
+		done' imap_logins "$1" "$IMAP_URL" ||
 		fail "IMAP login of $ACCOUNT failed"
 }
 
@@ -89,7 +104,7 @@ LOGINS=${LOGINS:-$((3 * npods + 1))}
 echo "== $LOGINS IMAP logins of $ACCOUNT over $npods pods =="
 h0=$(hits)
 m0=$(misses)
-for _ in $(seq "$LOGINS"); do imap_login; done
+imap_logins "$LOGINS"
 h1=$(hits)
 m1=$(misses)
 echo "hits +$((h1 - h0)), misses +$((m1 - m0))"
@@ -105,7 +120,7 @@ sleep "$WAIT"
 m2=$(misses)
 h2=$(hits)
 # One login per pod at most can be a miss; the first must be one.
-imap_login
+imap_logins 1
 m3=$(misses)
 h3=$(hits)
 echo "after the flush: hits +$((h3 - h2)), misses +$((m3 - m2))"
