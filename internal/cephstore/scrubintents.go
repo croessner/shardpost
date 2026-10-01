@@ -3,6 +3,7 @@ package cephstore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -490,8 +491,15 @@ func (sr *scrubRun) collectOrphan(guid string, c *blobCand) {
 	// Intents that name a blob by its GUID alone (an import step's) leave
 	// its size to its length attribute.
 	if c.size == 0 {
-		if size, err := u.BlobSize(guid); err == nil {
+		size, err := u.BlobSize(guid)
+
+		switch {
+		case err == nil:
 			c.size, c.chunks = size, max(c.chunks, u.chunkCount(size))
+		case !errors.Is(err, model.ErrNoBlob):
+			// Without its size only chunk 0 would go: next run.
+			sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("size of orphan %s: %v", guid, err))
+			return
 		}
 	}
 

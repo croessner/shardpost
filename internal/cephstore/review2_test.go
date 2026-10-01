@@ -205,7 +205,7 @@ func TestImportIntentStaysSmall(t *testing.T) {
 		t.Fatalf("fallbacks %v, want %v", all, guids[0])
 	}
 
-	if other, _ := importGUIDs(msgs[:1]); importFallback(other, guids[0][0], 1) == guids[0][1] {
+	if other, _ := importGUIDs(msgs[:1]); importFallback(other, 0, guids[0][0], 1) == guids[0][1] {
 		t.Fatal("the fallbacks do not depend on the salt")
 	}
 }

@@ -119,8 +119,10 @@ type SweepReport struct {
 	Removed  int64            `json:"removed"`
 	Young    int64            `json:"young"`
 	// Adopted counts the ps: keys written for marks of live public
-	// folders.
-	Adopted int64    `json:"adopted,omitempty"`
+	// folders; PurgedForgotten the records of purged accounts a
+	// repairing run removed at its end.
+	Adopted         int64 `json:"adopted,omitempty"`
+	PurgedForgotten int64 `json:"purged_forgotten,omitempty"`
 	Samples []string `json:"samples,omitempty"`
 	Errors  []string `json:"errors,omitempty"`
 }
@@ -209,6 +211,18 @@ func (s *Store) Sweep(ctx context.Context, o SweepOptions) (*SweepReport, error)
 		if err := sw.evaluatePool(); err != nil {
 			return &sw.st.Report, err
 		}
+	}
+
+	// Every purged namespace the run looked at is clean now; records of
+	// purges newer than the run's start (less its grace) stay for the
+	// next one.
+	if sw.o.Repair {
+		n, err := s.forgetPurged(sw.st.Report.Started.Add(-sw.o.Grace))
+		if err != nil {
+			sw.st.Report.fail(err)
+		}
+
+		sw.st.Report.PurgedForgotten = int64(n)
 	}
 
 	rep := sw.st.Report
@@ -659,8 +673,13 @@ func (ns *sweepNamespace) load() error {
 			return err
 		}
 
+		purged, err := ns.sw.s.purged(ns.name)
+		if err != nil {
+			return err
+		}
+
 		switch {
-		case ok && state == model.AccountPurging:
+		case ok && state == model.AccountPurging, purged:
 		case ok:
 			rep.RegistryMissing++
 			rep.sample("registry missing: " + ns.name)

@@ -93,9 +93,11 @@ type importIntent struct {
 // may use (see importBlob).
 const importFallbacks = 2
 
-// importFallback is fallback k of a message's base GUID in a step.
-func importFallback(salt, base string, k int) string {
-	sum := sha256.Sum256([]byte(salt + "/" + base + "/" + strconv.Itoa(k)))
+// importFallback is fallback k of message i (its base GUID) in a step;
+// the index keeps two messages of the step that share a source GUID
+// apart.
+func importFallback(salt string, i int, base string, k int) string {
+	sum := sha256.Sum256([]byte(salt + "/" + strconv.Itoa(i) + "/" + base + "/" + strconv.Itoa(k)))
 
 	return hex.EncodeToString(sum[:guidBytes])
 }
@@ -104,10 +106,10 @@ func importFallback(salt, base string, k int) string {
 func (im importIntent) guids() []string {
 	out := make([]string, 0, len(im.Base)*(1+importFallbacks))
 
-	for _, b := range im.Base {
+	for i, b := range im.Base {
 		out = append(out, b)
 		for k := 1; k <= importFallbacks; k++ {
-			out = append(out, importFallback(im.Salt, b, k))
+			out = append(out, importFallback(im.Salt, i, b, k))
 		}
 	}
 
@@ -364,14 +366,18 @@ func (u *User) anyKey(oid string, prefixes ...string) (string, error) {
 // expired, see expiredUpload).
 var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPrefix, regCreatePrefix, regDeletePrefix}
 
-// uploadPage bounds the upload intents ScrubPending reads.
+// uploadPage bounds the upload intents ScrubPending reads: an account with
+// more uploads than that is judged by the first page (the expiry worker
+// removes them when they are due either way; the scrub is the fallback).
 const uploadPage = 64
 
 // expiredUpload reports whether the first uploadPage upload intents hold
-// one that expired (a live upload keeps no account from being idle; the
-// expiry worker removes it when it is due, the scrub only if the worker
-// did not get to it).
+// one the scrub would act on: expired longer ago than the intent grace
+// (the threshold gatherBlobIntents uses). A live upload keeps no account
+// from being idle.
 func (u *User) expiredUpload(now time.Time) (bool, error) {
+	cut := now.Add(-u.intentGrace()).Unix()
+
 	vals, err := u.idx.GetOmapValues(oidRegistry, "", regUploadPrefix, uploadPage)
 	if err != nil {
 		if errCode(err) == syscall.ENOENT {
@@ -383,7 +389,7 @@ func (u *User) expiredUpload(now time.Time) (bool, error) {
 
 	for _, v := range vals {
 		var in blobIntent
-		if json.Unmarshal(v, &in) != nil || in.Expires <= now.Unix() {
+		if json.Unmarshal(v, &in) != nil || in.Expires <= cut {
 			return true, nil
 		}
 	}

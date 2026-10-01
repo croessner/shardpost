@@ -33,10 +33,12 @@ import (
 //   - pubseen/<id> for every ps:<id>;
 //   - the registry, last.
 //
-// What the model cannot name stays: debris of servers before 0.42.0 that
-// left no intent, objects of an account that was never scrubbed since,
-// full-text shards above the configured count after fts_shards was
-// lowered. "shardpost scrub --sweep" finds those.
+// What the model cannot name stays: debris that servers before 0.42.0
+// left without an intent, objects of an account that was never scrubbed
+// since, full-text shards above the configured count after fts_shards was
+// lowered. The purge records the account as purged first (purged.go), so
+// "shardpost scrub --sweep" may delete what is left in the namespace once
+// its registry is gone.
 
 // purgeFixedIndexSpaces are the spaces of the front-end indexes
 // (ix/<space>/<nn>) a purge deletes; a new space has to be added here.
@@ -50,7 +52,10 @@ const purgeProbeShards = 64
 // lastShard is the highest shard of a mailbox: the last of its range, or
 // one above that exists (probed one by one, up to purgeProbeShards).
 func (u *User) lastShard(id string, info *MailboxInfo) uint32 {
-	last := shardOf(max(info.UIDNext-1, 1), info.ShardSize)
+	last := uint32(0)
+	if info != nil {
+		last = shardOf(max(info.UIDNext-1, 1), info.ShardSize)
+	}
 
 	for probe := last + 1; probe <= last+purgeProbeShards && u.objectExists(u.shardOID(id, probe)); probe++ {
 		last = probe
@@ -383,6 +388,11 @@ func (u *User) purgeListing() bool {
 // the objects the data model does not name are reported; otherwise from
 // the data model (see the comment at the top).
 func (u *User) PurgeNamespace(fence func() error) (int, error) {
+	// Recorded first: what the purge cannot name, the sweep then removes.
+	if err := u.markPurged(); err != nil {
+		return 0, err
+	}
+
 	named, err := u.enumerate(false)
 
 	if u.purgeListing() {

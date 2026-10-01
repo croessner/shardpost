@@ -31,6 +31,11 @@ const (
 	// AccountBackfillMarker is the head marker of the last completed
 	// account backfill.
 	AccountBackfillMarker = "backfill.accounts"
+	// PurgedIndexName is the hint index of purged accounts in
+	// AccountsNamespace, which the sweep cleans after (cephstore
+	// purged.go).
+	PurgedIndexName   = "purged"
+	PurgedIndexShards = 16
 )
 
 // Directory states.

@@ -619,6 +619,14 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 		return u.releaseUsage(mb, Quota{Bytes: -q.Bytes, Msgs: -q.Msgs})
 	}
 
+	if final == nil {
+		// No shard 0 and no header read before: nothing is left to
+		// release or delete.
+		u.dropTombstone(mb, name)
+
+		return u.releaseUsage(mb, Quota{})
+	}
+
 	entries, foreign, err := u.entriesToRelease(mb.ID, final)
 	if err != nil {
 		u.log.Warn("delete: entries not read, left to the scrubber", "mailbox", name, "err", err)
@@ -628,18 +636,18 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 	// A removal of another session whose release is still to come (its
 	// r: key on shard 0) or a delivery whose entry is still on its way:
 	// the tombstone (with the range the header had when it was retired)
-	// and, for the removal, the shards stay for the scrubber.
+	// and the shards stay for the scrubber, which counts what they hold
+	// once the grace period is over.
 	if inFlight || foreign {
-		if err := u.setIntent(map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final)}); err != nil {
-			u.log.Warn("delete: tombstone not updated", "mailbox", name, "err", err)
-		}
+		u.keepTombstone(mb, final, name)
 	}
 
 	q, failed := u.releaseMessages(entries)
-	if failed > 0 || foreign {
+	if failed > 0 || foreign || inFlight {
 		// The shards are the only record of which blobs still hold a
 		// reference too many: they stay with the tombstone.
-		u.log.Warn("delete: shards left to the scrubber", "mailbox", name, "failed", failed, "foreign_removals", foreign)
+		u.log.Warn("delete: shards left to the scrubber", "mailbox", name, "failed", failed, "foreign_removals", foreign,
+			"in_flight", inFlight)
 
 		return u.releaseUsage(mb, q)
 	}
@@ -648,13 +656,24 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 		return errors.Join(err, u.releaseUsage(mb, q))
 	}
 
-	if !inFlight {
-		if err := rmKeys(u.idx, oidRegistry, []string{deleteKey(mb.ID)}); err != nil {
-			u.log.Warn("delete: tombstone not removed", "mailbox", name, "err", err)
-		}
-	}
+	u.dropTombstone(mb, name)
 
 	return u.releaseUsage(mb, q)
+}
+
+// dropTombstone removes the tombstone of a finished deletion.
+func (u *User) dropTombstone(mb *Mailbox, name string) {
+	if err := rmKeys(u.idx, oidRegistry, []string{deleteKey(mb.ID)}); err != nil {
+		u.log.Warn("delete: tombstone not removed", "mailbox", name, "err", err)
+	}
+}
+
+// keepTombstone rewrites the tombstone with the range of the retired
+// header, for the scrubber.
+func (u *User) keepTombstone(mb *Mailbox, final *MailboxInfo, name string) {
+	if err := u.setIntent(map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final)}); err != nil {
+		u.log.Warn("delete: tombstone not updated", "mailbox", name, "err", err)
+	}
 }
 
 // entriesToRelease reads the entries a deleted mailbox holds after its
@@ -2180,7 +2199,9 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 			_ = u.ftsRemove(&Meta{GUID: guid, Size: size.Bytes, Chunks: chunks})
 		}
 
-		if u.deleteBlobAll(guid, chunks) {
+		// After a failed blob write (chunks 0) the write removed what it
+		// created; the intent stays for anything it could not.
+		if chunks > 0 && u.deleteBlobAll(guid, chunks) {
 			u.intentDone(intent)
 		}
 
@@ -2207,7 +2228,7 @@ func (u *User) storeAndLink(mb *Mailbox, guid string, raw []byte, flags []string
 
 	chunks, err := u.writeBlob(guid, raw)
 	if err != nil {
-		undo(u.chunkCount(int64(len(raw))), false)
+		undo(0, false)
 		return nil, fmt.Errorf("write blob: %w", err)
 	}
 

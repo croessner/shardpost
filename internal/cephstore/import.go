@@ -604,7 +604,7 @@ func importGUIDs(msgs []model.ImportMessage) (string, [][]string) {
 
 		out[i] = []string{base}
 		for k := 1; k <= importFallbacks; k++ {
-			out[i] = append(out[i], importFallback(salt, base, k))
+			out[i] = append(out[i], importFallback(salt, i, base, k))
 		}
 	}
 

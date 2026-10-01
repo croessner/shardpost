@@ -25,6 +25,7 @@ user namespaces.
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `pubseen/<id>` | Private `\Seen` marks of the public folder `<id>` (registry key `ps:<id>`) | [acl.go](../../internal/cephstore/acl.go) |
 | `~accounts` / `ix.uploads/…` in the index pool | Due queue of the JMAP uploads, by expiry | [uploads.go](../../internal/cephstore/uploads.go) |
+| `~accounts` / `ix.purged/…` in the index pool | Accounts a purge deleted, for the sweep to clean after (removed by a repairing sweep) | [purged.go](../../internal/cephstore/purged.go) |
 | `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`) | [sweep.go](../../internal/cephstore/sweep.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
 | `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
@@ -312,7 +313,13 @@ does not name (`imapceph_scrub_purge_unnamed_objects_total`, with a
 warning naming a few). What the model cannot name: debris that servers
 before 0.42.0 left without an intent, objects of an account that was
 never scrubbed since, full-text shards above a lowered `fts_shards`.
-A purge without listing leaves those behind; the sweep finds them.
+A purge without listing leaves those behind in a namespace that then has
+neither a registry nor a directory entry. So that the sweep can tell such
+a namespace from an account that only kept Sieve scripts before 0.42.0,
+every purge first records the account in the hint index `ix.purged`
+(`~accounts`); the sweep deletes what is left in a recorded namespace
+without registry, and a repairing sweep removes, when it ends, the
+records of purges older than its start less its grace period.
 
 ## The sweep
 
@@ -337,7 +344,7 @@ runs as a one-off, not as a routine.
   (at least ten minutes) is deleted (a blob through its reference count,
   under the version of its chunk 0). A namespace without registry is
   deleted only when the account directory says the account is being
-  purged; any other one (a lost registry, an account that only kept
+  purged or the purge recorded it in `ix.purged`; any other one (a lost registry, an account that only kept
   Sieve scripts before 0.42.0, the leftovers of a purge whose directory
   entry is gone) is reported (`registry_missing`, `unregistered`, class
   `namespace`) and left alone. An account whose data model cannot be
