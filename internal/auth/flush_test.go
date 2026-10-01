@@ -249,6 +249,41 @@ func TestFlushLogStartRetried(t *testing.T) {
 	waitFor(t, "the flush to reach the retried log", func() bool { return b.cache.Len() == 2 })
 }
 
+// TestFlushLogReadFailureKeepsTheCache: while the generation cannot be
+// read the cache is not emptied on every poll; once it can, the start
+// flushes everything once (flushes may have gone by unseen).
+func TestFlushLogReadFailureKeepsTheCache(t *testing.T) {
+	omap := &flakyOmap{AdminOmap: memstore.NewAdminKV().Omap()}
+	omap.failures.Store(1 << 30)
+
+	c := testCache(&fakeBackend{}, nil)
+	b := &pod{cache: c}
+	b.fill(t)
+
+	l := NewFlushLog(omap, c, 5*time.Millisecond, nil)
+	b.log = l
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() { defer close(done); l.Run(ctx) }()
+
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitFor(t, "several failed reads", func() bool { return omap.failures.Load() < 1<<30-10 })
+
+	if c.Len() != 3 {
+		t.Fatalf("a failing read emptied the cache: %d entries", c.Len())
+	}
+
+	omap.failures.Store(0)
+
+	waitFor(t, "the start after the failures", func() bool { l.mu.Lock(); defer l.mu.Unlock(); return l.started })
+
+	if c.Len() != 0 {
+		t.Fatalf("the late start kept %d entries", c.Len())
+	}
+}
+
 func TestFlushLogPrunes(t *testing.T) {
 	omap := memstore.NewAdminKV().Omap()
 	l := NewFlushLog(omap, testCache(&fakeBackend{}, nil), time.Hour, nil)

@@ -262,11 +262,12 @@ func credentials(r *http.Request) (auth.Request, bool) {
 // authentication backend's rate limiting and logging.
 func remoteAddr(r *http.Request) *addr { return &addr{s: r.RemoteAddr} }
 
-// clientIP is the IP address of the client, without the port.
+// clientIP is the IP address of the client, without the port; a remote
+// address without a port is taken as it is.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return ""
+		return r.RemoteAddr
 	}
 
 	return host

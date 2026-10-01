@@ -724,7 +724,7 @@ and carrying its trace span, and every caller, the first included, stops
 waiting when its own context ends; the call goes on and its answer is
 stored for the next. An `Auth-Wait` Nauthilus asks for over HTTP is
 waited out once, by that call, and every caller waits with it. An answer
-that a flush overtook while it was on its way is not stored.
+that a flush overtook while it was on its way is not stored, and a caller that comes after a flush starts a call of its own.
 
 Lookups of the admin API (diagnosis, imports, deliveries) go past a
 cached "unknown" and store a found account, so an account created a

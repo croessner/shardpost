@@ -284,6 +284,17 @@ func TestEventSourceGivesItsAddressSlotBack(t *testing.T) {
 	}
 }
 
+func TestClientIP(t *testing.T) {
+	for remote, want := range map[string]string{"192.0.2.7:4711": "192.0.2.7", "[2001:db8::1]:443": "2001:db8::1", "192.0.2.8": "192.0.2.8"} {
+		r := httptest.NewRequest(http.MethodGet, PathSession, nil)
+		r.RemoteAddr = remote
+
+		if got := clientIP(r); got != want {
+			t.Errorf("%s: %q, want %q", remote, got, want)
+		}
+	}
+}
+
 func TestTempfailAnswers503WithRetryAfter(t *testing.T) {
 	s := newTestServer(t, func(o *Options) { o.Auth = &countingAuth{err: auth.ErrTemporary} })
 

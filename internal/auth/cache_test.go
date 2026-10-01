@@ -605,6 +605,35 @@ func TestCacheFlushDuringCall(t *testing.T) {
 	}
 }
 
+// TestCacheFlushSplitsFlights: a caller that comes after a flush does
+// not join a backend call that started before it.
+func TestCacheFlushSplitsFlights(t *testing.T) {
+	f := &fakeBackend{gate: make(chan struct{}), started: make(chan struct{}, 2)}
+	c := testCache(f, nil)
+	done := make(chan struct{}, 2)
+
+	go func() { _, _ = c.Authenticate(context.Background(), login()); done <- struct{}{} }()
+
+	<-f.started
+	c.Flush("alice")
+
+	go func() { _, _ = c.Authenticate(context.Background(), login()); done <- struct{}{} }()
+
+	<-f.started // the second caller reached the backend itself
+	close(f.gate)
+	<-done
+	<-done
+
+	if f.auths.Load() != 2 {
+		t.Fatalf("backend calls %d, want 2", f.auths.Load())
+	}
+
+	// The second call started after the flush: its answer is stored.
+	if c.Len() != 1 {
+		t.Fatalf("entries %d, want 1", c.Len())
+	}
+}
+
 func TestCacheSweep(t *testing.T) {
 	f := &fakeBackend{}
 	c := testCache(f, nil)

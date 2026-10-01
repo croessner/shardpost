@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -313,8 +314,21 @@ func lengthPrefixed(parts ...string) string {
 	return b.String()
 }
 
-// get returns a live entry's result (cloned; nil for a refusal).
+// get returns a live entry's result (cloned; nil for a refusal). An
+// entry's result is never changed after put, so it is cloned outside
+// the lock.
 func (c *Cache) get(op, key string) (*Result, bool) {
+	res, ok := c.lookupEntry(op, key)
+	if !ok {
+		return nil, false
+	}
+
+	return res.Clone(), true
+}
+
+// lookupEntry returns the stored result of a live entry and marks it
+// used.
+func (c *Cache) lookupEntry(op, key string) (*Result, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -334,7 +348,7 @@ func (c *Cache) get(op, key string) (*Result, bool) {
 
 	l.order.MoveToFront(e.elem)
 
-	return e.res.Clone(), true
+	return e.res, true
 }
 
 // put stores an entry unless a flush happened since gen.
@@ -505,15 +519,18 @@ type flight struct {
 func (c *Cache) do(ctx context.Context, op, key string, fn func(context.Context) (*Result, error),
 	store func(gen uint64, res *Result, err error),
 ) (*Result, error) {
-	fkey := op + "\x00" + key
-
 	c.mu.Lock()
+
+	// The flush generation is part of the flight's key: a caller that
+	// comes after a flush does not join a call that started before it,
+	// whose answer may be what the flush was for.
+	gen := c.gen
+	fkey := op + "\x00" + strconv.FormatUint(gen, 10) + "\x00" + key
 	f, joined := c.calls[fkey]
 
 	if !joined {
 		f = &flight{done: make(chan struct{})}
 		c.calls[fkey] = f
-		gen := c.gen
 
 		go c.lead(ctx, op, fkey, f, gen, fn, store)
 	}

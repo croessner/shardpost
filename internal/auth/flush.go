@@ -196,7 +196,7 @@ func parseGen(v []byte) (uint64, error) {
 // lost watch flushes everything (a flush may have gone by unseen) and
 // is set up again; until it is, the poll reads the log.
 func (l *FlushLog) Run(ctx context.Context) {
-	lost := false
+	lost, first := false, true
 
 	for ctx.Err() == nil {
 		w, err := l.omap.Watch(FlushObject)
@@ -208,13 +208,18 @@ func (l *FlushLog) Run(ctx context.Context) {
 		started := l.started
 		l.mu.Unlock()
 
+		// Only the very first start knows that nothing can have been
+		// missed; a later one, after a lost watch or a start that
+		// failed, flushes everything.
 		if lost || !started {
-			if err := l.start(lost); err != nil {
+			if err := l.start(lost || !first); err != nil {
 				l.log.Warn("auth flush log: read failed", "err", err)
 			}
 		} else {
 			l.apply()
 		}
+
+		first = false
 
 		if lost = l.follow(ctx, w); lost {
 			// A watch that fails at once must not turn into a loop of
@@ -230,22 +235,21 @@ func (l *FlushLog) Run(ctx context.Context) {
 // watchRetry is the pause before a lost watch is set up again.
 const watchRetry = time.Second
 
-// start sets the generation the server has applied, after flushing the
-// whole cache when the watch was lost: whatever happened while it was
-// down is unknown.
-func (l *FlushLog) start(lost bool) error {
+// start reads the generation the server has applied, and with resync
+// flushes the whole cache once it has: whatever happened while the
+// watch was down, or before a failed start, is unknown. The flush
+// follows the read, so a store that cannot be read does not empty the
+// cache on every try; nothing is lost by the order, because the watch
+// is set up before the read.
+func (l *FlushLog) start(resync bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	return l.startLocked(lost)
+	return l.startLocked(resync)
 }
 
 // startLocked is start with l.mu held.
-func (l *FlushLog) startLocked(lost bool) error {
-	if lost {
-		l.cache.flush(FlushAll, "resync")
-	}
-
+func (l *FlushLog) startLocked(resync bool) error {
 	l.started = false
 
 	vals, _, err := l.omap.ReadKeys(FlushObject, []string{flushHeadKey})
@@ -256,6 +260,10 @@ func (l *FlushLog) startLocked(lost bool) error {
 	gen, err := parseGen(vals[flushHeadKey])
 	if err != nil {
 		return err
+	}
+
+	if resync {
+		l.cache.flush(FlushAll, "resync")
 	}
 
 	l.lastGen, l.started = gen, true
