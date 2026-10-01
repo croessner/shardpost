@@ -49,6 +49,19 @@ monmaptool --create --addv a '[v2:127.0.0.1:3300]' --fsid "$fsid" "$D/monmap" >/
 ceph-mon --mkfs -i a --monmap "$D/monmap" 2>/dev/null
 ceph-mon -i a
 
+# The daemons go with the container, and with this script when it runs
+# elsewhere.
+# shellcheck disable=SC2329 # invoked by the trap
+stop() {
+	for pid in "$D"/run/*.pid; do
+		[ -f "$pid" ] && kill "$(cat "$pid")" 2>/dev/null
+	done
+
+	return 0
+}
+
+trap stop EXIT
+
 id=$(ceph --connect-timeout 30 osd create)
 ceph-osd -i "$id" --mkfs 2>/dev/null
 ceph-osd -i "$id" 2>/dev/null
@@ -92,7 +105,5 @@ export SHARDPOST_TEST_CEPH_DATA_POOL=shardpost-test-data
 
 rc=0
 "$@" || rc=$?
-
-kill "$(cat "$D/run/osd.$id.pid")" "$(cat "$D/run/mon.a.pid")" 2>/dev/null || true
 
 exit "$rc"

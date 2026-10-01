@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syscall"
+	"time"
 
 	"shardpost/internal/model"
 )
@@ -58,6 +59,13 @@ func (u *User) ScrubPending() (string, error) {
 		return "", fmt.Errorf("read intents: %w", err)
 	case p != "":
 		return "intents " + p, nil
+	}
+
+	switch expired, err := u.expiredUpload(time.Now()); {
+	case err != nil:
+		return "", fmt.Errorf("read upload intents: %w", err)
+	case expired:
+		return "intents " + regUploadPrefix, nil
 	}
 
 	boxes, err := u.ListMailboxes()

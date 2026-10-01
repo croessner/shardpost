@@ -2,6 +2,7 @@ package cephstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -130,8 +131,16 @@ func splitChunkOID(oid string) (string, int, bool) {
 	return guid, c, err == nil
 }
 
+// errModelIncomplete is returned by enumerate when the data model cannot
+// be read in full: a registry record that does not parse would hide a
+// mailbox, an unreadable header its range.
+var errModelIncomplete = errors.New("the data model of the account cannot be read in full")
+
 // enumerate names every object of the account (see the comment above).
-func (u *User) enumerate() (*namedObjects, error) {
+// strict (the sweep) also refuses a registered mailbox whose shard 0 is
+// missing: its range is unknown, and what lies above shard 0 must not
+// look like debris.
+func (u *User) enumerate(strict bool) (*namedObjects, error) {
 	reg, err := u.idx.GetAllOmapValues(oidRegistry, "", "", omapPageSize)
 	if err != nil && errCode(err) != syscall.ENOENT {
 		return nil, fmt.Errorf("read registry: %w", err)
@@ -139,7 +148,11 @@ func (u *User) enumerate() (*namedObjects, error) {
 
 	n := &namedObjects{blobs: map[string]int{}}
 	mailboxes := map[string]mailboxIntent{}
-	others := u.registryNames(reg, n, mailboxes)
+
+	others, registered, err := u.registryNames(reg, n, mailboxes)
+	if err != nil {
+		return nil, err
+	}
 
 	ids := make([]string, 0, len(mailboxes))
 	for id := range mailboxes {
@@ -149,6 +162,10 @@ func (u *User) enumerate() (*namedObjects, error) {
 	sort.Strings(ids)
 
 	for _, id := range ids {
+		if strict && registered[id] && !u.objectExists(mboxOID(id)) {
+			return nil, fmt.Errorf("%w: shard 0 of the registered mailbox %s is missing", errModelIncomplete, id)
+		}
+
 		if err := u.enumerateMailbox(id, mailboxes[id], n); err != nil {
 			return nil, err
 		}
@@ -167,17 +184,23 @@ func (u *User) enumerate() (*namedObjects, error) {
 // registryNames reads the registry: the mailboxes (registered, being
 // created, being deleted with their tombstone) go to mailboxes, the blobs
 // of intents to n; it returns the further index objects it names
-// (pubseen/<id>).
-func (u *User) registryNames(reg map[string][]byte, n *namedObjects, mailboxes map[string]mailboxIntent) []string {
+// (pubseen/<id>) and the registered mailbox ids. A mailbox record that
+// does not parse is an error.
+func (u *User) registryNames(reg map[string][]byte, n *namedObjects, mailboxes map[string]mailboxIntent) ([]string, map[string]bool, error) {
 	var others []string
+
+	registered := map[string]bool{}
 
 	for k, v := range reg {
 		switch {
 		case strings.HasPrefix(k, regMboxPrefix):
 			var rec MailboxRec
-			if json.Unmarshal(v, &rec) == nil && rec.ID != "" {
-				addMailbox(mailboxes, rec.ID)
+			if json.Unmarshal(v, &rec) != nil || rec.ID == "" {
+				return nil, nil, fmt.Errorf("%w: registry record %q", errModelIncomplete, k)
 			}
+
+			addMailbox(mailboxes, rec.ID)
+			registered[rec.ID] = true
 		case strings.HasPrefix(k, regCreatePrefix):
 			addMailbox(mailboxes, strings.TrimPrefix(k, regCreatePrefix))
 		case strings.HasPrefix(k, regDeletePrefix):
@@ -192,7 +215,7 @@ func (u *User) registryNames(reg map[string][]byte, n *namedObjects, mailboxes m
 		}
 	}
 
-	return others
+	return others, registered, nil
 }
 
 // addMailbox adds a mailbox id without a tombstone (a tombstone of the
@@ -217,8 +240,8 @@ func registryBlobs(k string, v []byte, n *namedObjects) {
 
 		_ = json.Unmarshal(v, &im)
 
-		for _, b := range im.Blobs {
-			n.blob(b.GUID, b.Chunks)
+		for _, g := range im.guids() {
+			n.blob(g, 0)
 		}
 	case strings.HasPrefix(k, regDeliveryPrefix):
 		var d deliveryIntent
@@ -234,7 +257,12 @@ func registryBlobs(k string, v []byte, n *namedObjects) {
 // enumerateMailbox names the shards of a mailbox, highest first, and the
 // blobs of their entries and of the intents on shard 0.
 func (u *User) enumerateMailbox(id string, tomb mailboxIntent, n *namedObjects) error {
-	last := u.lastShard(id, u.deletedRange(id, tomb))
+	info, err := u.deletedRange(id, tomb)
+	if err != nil {
+		return err
+	}
+
+	last := u.lastShard(id, info)
 
 	for s := int64(last); s >= 0; s-- {
 		oid := u.shardOID(id, uint32(s))
@@ -355,7 +383,7 @@ func (u *User) purgeListing() bool {
 // the objects the data model does not name are reported; otherwise from
 // the data model (see the comment at the top).
 func (u *User) PurgeNamespace(fence func() error) (int, error) {
-	named, err := u.enumerate()
+	named, err := u.enumerate(false)
 
 	if u.purgeListing() {
 		if err != nil {

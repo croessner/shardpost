@@ -600,14 +600,17 @@ func (u *User) DeleteMailbox(name string) error {
 
 // destroyUnregistered is the part of DeleteMailbox after the registry
 // entry was replaced by the tombstone: retire the header, release the
-// blobs, delete the shards, drop the tombstone.
+// blobs, delete the shards, drop the tombstone. metas (read before the
+// unregistration) only serve the account log, which recorded them; what
+// is released is what the shards hold once the header is retired, since
+// another session may have removed (and released) an entry meanwhile.
 //
 // The usage of the entries is released in any case: the mailbox is no
 // longer registered, so its entries count nowhere. Whatever is left
 // undone stays with the tombstone, from which the scrubber completes the
 // deletion (it recounts the blobs, it never releases twice).
 func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta, name string) error {
-	final, late, inFlight, err := u.retireDeleted(mb, info)
+	final, inFlight, err := u.retireDeleted(mb, info)
 	if err != nil {
 		u.log.Warn("delete: header not retired, left to the scrubber", "mailbox", name, "err", err)
 
@@ -616,27 +619,32 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 		return u.releaseUsage(mb, Quota{Bytes: -q.Bytes, Msgs: -q.Msgs})
 	}
 
-	metas = append(metas, late...)
+	entries, foreign, err := u.entriesToRelease(mb.ID, final)
+	if err != nil {
+		u.log.Warn("delete: entries not read, left to the scrubber", "mailbox", name, "err", err)
+		return nil
+	}
 
-	if inFlight {
-		// An entry may still land on a higher shard: the tombstone takes
-		// the range the header had when it was retired (shard 0 goes
-		// below) and stays; the scrubber probes above that range.
+	// A removal of another session whose release is still to come (its
+	// r: key on shard 0) or a delivery whose entry is still on its way:
+	// the tombstone (with the range the header had when it was retired)
+	// and, for the removal, the shards stay for the scrubber.
+	if inFlight || foreign {
 		if err := u.setIntent(map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final)}); err != nil {
 			u.log.Warn("delete: tombstone not updated", "mailbox", name, "err", err)
 		}
 	}
 
-	q, failed := u.releaseMessages(metas)
-	if failed > 0 {
+	q, failed := u.releaseMessages(entries)
+	if failed > 0 || foreign {
 		// The shards are the only record of which blobs still hold a
 		// reference too many: they stay with the tombstone.
-		u.log.Warn("delete: blob references not released, left to the scrubber", "mailbox", name, "failed", failed)
+		u.log.Warn("delete: shards left to the scrubber", "mailbox", name, "failed", failed, "foreign_removals", foreign)
 
 		return u.releaseUsage(mb, q)
 	}
 
-	if err := u.deleteShards(mb, final, name); err != nil {
+	if err := u.deleteShardRange(mb.ID, u.lastShard(mb.ID, final)); err != nil {
 		return errors.Join(err, u.releaseUsage(mb, q))
 	}
 
@@ -649,13 +657,51 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 	return u.releaseUsage(mb, q)
 }
 
+// entriesToRelease reads the entries a deleted mailbox holds after its
+// header was retired (no session can remove one any more, unless its
+// removal already started): every shard of the range and above it. An
+// entry whose removal intent (r:) is on shard 0 belongs to the session
+// that removes it and is left out; foreign reports that there was one.
+func (u *User) entriesToRelease(id string, final *MailboxInfo) ([]Meta, bool, error) {
+	if final == nil {
+		return nil, false, nil
+	}
+
+	removals, err := u.removeIntents(id)
+	if err != nil {
+		return nil, false, err
+	}
+
+	theirs := make(map[uint32]bool, len(removals))
+	for k := range removals {
+		theirs[uidOfKey(strings.Replace(k, keyRemovePrefix, keyMsgPrefix, 1))] = true
+	}
+
+	var out []Meta
+
+	for s := uint32(0); s <= u.lastShard(id, final); s++ {
+		vals, err := u.idx.GetAllOmapValues(u.shardOID(id, s), "", keyMsgPrefix, omapPageSize)
+		if err != nil && errCode(err) != syscall.ENOENT {
+			return nil, false, err
+		}
+
+		for _, v := range vals {
+			var m Meta
+			if json.Unmarshal(v, &m) == nil && !theirs[m.UID] {
+				out = append(out, m)
+			}
+		}
+	}
+
+	return out, len(removals) > 0, nil
+}
+
 // retireDeleted retires the header of an unregistered mailbox (UIDNEXT 0,
 // the old value kept under h:retired) and returns the header as it was
-// then, the entries that deliveries added after info was read, and
-// whether a delivery may still write an entry to a higher shard (a
-// pending change younger than pendingMaxAge). A missing shard 0 returns
-// info unchanged.
-func (u *User) retireDeleted(mb *Mailbox, info *MailboxInfo) (*MailboxInfo, []Meta, bool, error) {
+// then and whether a delivery may still write an entry to a higher shard
+// (a pending change younger than pendingMaxAge). A missing shard 0
+// returns info unchanged.
+func (u *User) retireDeleted(mb *Mailbox, info *MailboxInfo) (*MailboxInfo, bool, error) {
 	var final *MailboxInfo
 
 	err := casOmap(u, u.idx, mboxOID(mb.ID), []string{keyUIDNext, keyRetired, keyShardSize, keyModSeq},
@@ -678,20 +724,7 @@ func (u *User) retireDeleted(mb *Mailbox, info *MailboxInfo) (*MailboxInfo, []Me
 			return map[string][]byte{keyUIDNext: []byte("0"), keyRetired: []byte(strconv.FormatUint(uint64(n), 10))}, nil
 		})
 	if err != nil || final == nil {
-		return info, nil, false, err
-	}
-
-	var late []Meta
-
-	if start := uidNextOf(info); final.UIDNext > start {
-		uids := make([]uint32, 0, final.UIDNext-start)
-		for uid := start; uid < final.UIDNext; uid++ {
-			uids = append(uids, uid)
-		}
-
-		if late, err = u.getEntries(mb.ID, final.ShardSize, uids); err != nil {
-			return final, nil, true, err
-		}
+		return info, false, err
 	}
 
 	inFlight := false
@@ -701,16 +734,7 @@ func (u *User) retireDeleted(mb *Mailbox, info *MailboxInfo) (*MailboxInfo, []Me
 		inFlight = pending || err != nil
 	}
 
-	return final, late, inFlight, nil
-}
-
-// uidNextOf is UIDNEXT of a header read (1 when there was none).
-func uidNextOf(info *MailboxInfo) uint32 {
-	if info == nil || info.UIDNext == 0 {
-		return 1
-	}
-
-	return info.UIDNext
+	return final, inFlight, nil
 }
 
 // unregisterLogged unregisters a mailbox and records both the mailbox

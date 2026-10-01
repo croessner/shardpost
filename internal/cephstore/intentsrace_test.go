@@ -128,8 +128,8 @@ func TestDeletedRangeIgnoresHeaderless(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info := u.deletedRange(id, mailboxIntent{UIDNext: 9, ShardSize: 4})
-	if info.UIDNext != 9 || info.ShardSize != 4 {
+	info, err := u.deletedRange(id, mailboxIntent{UIDNext: 9, ShardSize: 4})
+	if err != nil || info.UIDNext != 9 || info.ShardSize != 4 {
 		t.Fatalf("range %d/%d, want the tombstone's 9/4", info.UIDNext, info.ShardSize)
 	}
 }
@@ -226,9 +226,9 @@ func TestUncoveredEntriesKeepTheirBlobs(t *testing.T) {
 	u := testUser(t, intentsStore(t, model.OrphanSourceIntents))
 	mb := mustMailbox(t, u, "INBOX")
 	msgs := []model.ImportMessage{{UID: 5, Raw: testMessage("ahead", 300)}}
-	guids := importGUIDs(msgs)
+	salt, guids := importGUIDs(msgs)
 
-	if _, err := u.reserveWith(mb, Quota{}, map[string][]byte{regImportBlobPrefix + "b": u.importIntent(mb.ID, msgs, guids)}); err != nil {
+	if _, err := u.reserveWith(mb, Quota{}, map[string][]byte{regImportBlobPrefix + "b": u.importIntent(mb.ID, salt, guids)}); err != nil {
 		t.Fatal(err)
 	}
 

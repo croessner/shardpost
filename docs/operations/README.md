@@ -394,6 +394,11 @@ writes leave none, which the listing still covers).
    mailbox with messages on the throwaway account and scrubs it in shadow
    mode; the report must show no difference.
 
+**Only when every server runs 0.42.0 or later.** Servers do not report
+their versions to each other, so nothing enforces this: an older server
+writes no removal intents, and a message it moves or expunges can then
+look like an orphan to a scrub without listing, which deletes it.
+
 **The switch** is `scrub.orphan_source: intents` (or
 `SCRUB_ORPHAN_SOURCE=intents`) in the servers' configuration (the batch
 scrub runs there) and in the scrub CronJob's environment (for a scrub
@@ -428,9 +433,14 @@ namespace (the cost of one scrub listing per pool, not per account),
 spills the object names into `~accounts` and evaluates them account by
 account; a sweep that stops (a restart of the Job, a lost lease) goes on
 from its checkpoint when it is run again. `imapceph_rados_listings_total{site="sweep"}`
-counts its listings. A namespace without registry that the account
-directory still holds as `active` is reported (`registry_missing`) and
-left alone: that is a lost registry, not debris. See the
+counts its listings. It needs `mon 'allow r'` (it reads each pool's
+`pg_num`), which the server's CephClient has. A namespace without
+registry is deleted only when the account directory says it is being
+purged; any other one is reported and left alone: `registry_missing`
+(the directory holds it as active: a lost registry), `unregistered`
+(no directory entry: an account that only kept Sieve scripts before
+0.42.0, or what a purge left whose directory entry is gone; remove the
+latter by hand once checked). See the
 [manual page](../man/man1/shardpost-scrub.1).
 
 **The purge without listing.** `purge.listing` (default `true`) keeps the

@@ -9,7 +9,7 @@
 | Config/unit tests | Validation, data structures, defined error paths | Reachability of production services |
 | TCP protocol tests with memstore | Parser, states, responses, ACL and logging contracts | RADOS CAS, OSD failures, real key rotation |
 | Linux tests with a librados build | Compilation and tests on the server platform | Full operation against a real Ceph |
-| cephstore tests against a throwaway cluster | `make test-docker` starts one monitor and one OSD on the in-memory object store inside the lint image ([hack/ceph-test-cluster.sh](../../hack/ceph-test-cluster.sh)); the store's RADOS paths (CAS, intents, crash windows of the scrub, the purge without listing, the sweep) run against it | Replication, EC pools, OSD failures, real cephx, load |
+| cephstore tests against a throwaway cluster | `make test-docker` starts one monitor and one OSD on the in-memory object store inside the lint image ([hack/ceph-test-cluster.sh](../../hack/ceph-test-cluster.sh)); the store's RADOS paths (CAS, intents, crash windows of the scrub, the purge without listing, the sweep) run against it; starting the cluster and these tests add about a minute to `make test-docker` | Replication, EC pools, OSD failures, real cephx, load |
 | Pigeonhole fork tests | Script compiler and interpreter in the test adapter | A complete Dovecot environment or external delivery |
 | imaptest | Specific IMAP conformance groups | Capabilities that are not offered or are skipped |
 | Native acceptance | The actual network, TLS, auth and store path | Other accounts, unknown client variants or long-term load |

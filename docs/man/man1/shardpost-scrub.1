@@ -41,6 +41,11 @@ lists each account's namespace in both pools,
 reports where the two differ,
 .B intents
 reads the intents only and lists nothing.
+.B intents
+is safe only when every server of the cluster runs 0.42.0 or later:
+older servers write no removal intents, and a message they move or
+expunge can then look like an orphan to the scrub. Nothing checks this
+for you; switch only after the last older server is gone.
 With
 .I scrub.dry_run
 it only reports.
@@ -73,11 +78,18 @@ the sweep only reports; with it, a remnant older than
 is deleted (a blob through its reference count, so that a copy taken
 meanwhile keeps it).
 .PP
-A namespace without registry is a remnant as a whole, unless the account
-directory still holds the account as active: that is a lost registry,
-which the sweep reports
-.RB ( registry_missing )
-and leaves alone. An account under an import lock is left alone. The
+A namespace without registry is deleted only when the account directory
+says the account is being purged
+.RB ( purging ,
+a purge that stopped after the registry went). Any other one is
+reported and left alone: a lost registry
+.RB ( registry_missing ),
+an account that only kept Sieve scripts before 0.42.0 or the leftovers
+of a purge whose directory entry is gone
+.RB ( unregistered ).
+An account whose data model cannot be read in full (a registry record
+that does not parse, an unreadable header, a registered mailbox without
+its shard 0) and an account under an import lock are left alone. The
 private \eSeen marks of a live public folder that were written before
 0.42.0 are adopted (their registry key
 .B ps:
@@ -114,6 +126,12 @@ the remnants by class
 for objects of a namespace without registry), how many were removed,
 how many were left for being younger than the grace period, the marks
 adopted, a few samples and the first errors.
+.PP
+The sweep needs the cluster permission
+.B mon 'allow r'
+(it asks the monitors for each pool's
+.BR pg_num );
+the server's CephClient has it.
 .SH OPTIONS
 .TP
 .BI \-\-config " file"

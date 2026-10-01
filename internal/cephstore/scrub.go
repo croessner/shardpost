@@ -111,6 +111,9 @@ type ScrubOptions struct {
 	// Fence (if set) is checked before each repair; failing, the repair
 	// is skipped.
 	Fence func() error
+	// afterList runs between the read of a mailbox's entries and of its
+	// removal intents (tests).
+	afterList func(Mailbox)
 }
 
 // Repair classes of the scrubber (model.Repair*).
@@ -688,6 +691,20 @@ func (sr *scrubRun) scanMailbox(mb Mailbox, idx *scrubIndex) bool {
 	complete := sr.markShards(&mb, info, idx.known)
 	sr.removeUncovered(&mb, info)
 
+	metas, err := u.ListMessages(mb.ID)
+	if err != nil {
+		rep.Errors = append(rep.Errors, fmt.Sprintf("mailbox %q: %v", mb.Name, err))
+		return false
+	}
+
+	if sr.o.afterList != nil {
+		sr.o.afterList(mb)
+	}
+
+	// The removal intents are read after the entries: a removal whose
+	// header CAS landed before the entries were read has its intent seen
+	// here (and its blob is left alone while it is young); one that
+	// lands after it still finds its entry counted.
 	removals, err := u.removeIntents(mb.ID)
 	if err != nil {
 		rep.Errors = append(rep.Errors, fmt.Sprintf("mailbox %q removal intents: %v", mb.Name, err))
@@ -696,12 +713,6 @@ func (sr *scrubRun) scanMailbox(mb Mailbox, idx *scrubIndex) bool {
 
 	if len(removals) > 0 {
 		sr.intents.removals[mb.ID] = removals
-	}
-
-	metas, err := u.ListMessages(mb.ID)
-	if err != nil {
-		rep.Errors = append(rep.Errors, fmt.Sprintf("mailbox %q: %v", mb.Name, err))
-		return false
 	}
 
 	for _, m := range metas {
@@ -798,27 +809,69 @@ func (sr *scrubRun) removeUncovered(mb *Mailbox, info *MailboxInfo) {
 		return
 	}
 
-	removed := 0
-
-	err := casOmap(u, u.idx, oid, slices.Collect(maps.Keys(seen)), func(cur map[string][]byte) (map[string][]byte, []string) {
-		var rm []string
-
-		for k, v := range cur {
-			if bytes.Equal(v, seen[k]) {
-				rm = append(rm, k)
-			}
-		}
-
-		removed = len(rm)
-
-		return nil, rm
-	})
+	removed, rkeys, err := u.unlinkUncovered(mb, oid, seen)
 	if err != nil {
 		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("remove uncovered entries of %q: %v", mb.Name, err))
 		return
 	}
 
-	sr.rep.UncoveredEntries += removed
+	// Their blob references go like those of any removal.
+	if failed := u.releaseRemoved(mb, removed, rkeys); failed > 0 {
+		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("uncovered entries of %q: %d blob references not released", mb.Name, failed))
+	}
+
+	sr.rep.UncoveredEntries += len(removed)
+}
+
+// unlinkUncovered removes the entries seen (as read) from shard oid with
+// removal intents on shard 0: in the same CAS when oid is shard 0, else
+// written before. It returns the entries removed and the intent keys.
+func (u *User) unlinkUncovered(mb *Mailbox, oid string, seen map[string][]byte) ([]Meta, []string, error) {
+	byKey := make(map[string]Meta, len(seen))
+	metas := make([]Meta, 0, len(seen))
+
+	for k, v := range seen {
+		var m Meta
+		if json.Unmarshal(v, &m) == nil {
+			byKey[k] = m
+			metas = append(metas, m)
+		}
+	}
+
+	rset := removalSet(time.Now().Unix(), metas)
+	rkeys := slices.Collect(maps.Keys(rset))
+
+	shard0 := oid == mboxOID(mb.ID)
+	if !shard0 {
+		if err := casOmap(u, u.idx, mboxOID(mb.ID), nil, func(map[string][]byte) (map[string][]byte, []string) {
+			return rset, nil
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var removed []Meta
+
+	err := casOmap(u, u.idx, oid, slices.Collect(maps.Keys(seen)), func(cur map[string][]byte) (map[string][]byte, []string) {
+		var rm []string
+
+		removed = removed[:0]
+
+		for k, v := range cur {
+			if bytes.Equal(v, seen[k]) {
+				rm = append(rm, k)
+				removed = append(removed, byKey[k])
+			}
+		}
+
+		if shard0 && len(rm) > 0 {
+			return removalSet(time.Now().Unix(), removed), rm
+		}
+
+		return nil, rm
+	})
+
+	return removed, rkeys, err
 }
 
 // uncovered returns the entries of shard oid at or above UIDNEXT, as

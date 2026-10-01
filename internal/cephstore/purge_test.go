@@ -60,9 +60,9 @@ func populateCrashes(t *testing.T, u *User, inbox *Mailbox, metas []Meta) {
 	crashedDelivery(t, u, inbox)
 
 	more := []model.ImportMessage{{UID: 100, Raw: testMessage("import", 300)}}
-	guids := importGUIDs(more)
+	salt, guids := importGUIDs(more)
 
-	if _, err := u.reserveWith(inbox, Quota{}, map[string][]byte{regImportBlobPrefix + "b": u.importIntent(inbox.ID, more, guids)}); err != nil {
+	if _, err := u.reserveWith(inbox, Quota{}, map[string][]byte{regImportBlobPrefix + "b": u.importIntent(inbox.ID, salt, guids)}); err != nil {
 		t.Fatal(err)
 	}
 

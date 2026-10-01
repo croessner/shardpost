@@ -127,12 +127,12 @@ and removes it once the write is complete
 | Intent | Where | Set | Removed |
 |---|---|---|---|
 | `bi:<guid>` | registry | in the reservation CAS of `DeliverGUID` (delivery, APPEND, CATENATE, REPLACE, Sieve `fileinto`, COPY into another account), before the blob is written | once the entry is linked or the blob deleted again; batched, see below |
-| `bimp:<batch>` | registry | in the reservation CAS of an import step, with every GUID the step may write (each message's GUID and two fallbacks) | after the header write of the step |
+| `bimp:<batch>` | registry | in the reservation CAS of an import step: each message's GUID and a salt from which its two fallback GUIDs follow (about 35 bytes per message, 350 KiB for the largest step of 10 000 messages) | after the header write of the step |
 | `up:<guid>` | registry | before a JMAP upload's blob is written, after its entry in the uploads due queue | when the upload expires (`jmap.upload_ttl_seconds`) |
 | `ci:<id>` | registry | in a CAS of its own before `mbox/<id>` is created | in the CAS that registers the name (or an import replacement's swap) |
 | `dm:<id>` | registry | in the CAS that unregisters a mailbox, with its UIDNEXT and shard size | after the blobs are released and the shards deleted (highest first, shard 0 last) |
 | `ps:<id>` | registry | before the first private `\Seen` mark of the public folder `<id>` is written | when the scrub removes the marks of a folder that is gone |
-| `r:<uid>` | shard 0 of the mailbox | in the header CAS that removes the entry (EXPUNGE, MOVE, the scrub's own removals), with the blob's GUID, size and chunk count | after the blob reference is released |
+| `r:<uid>` | shard 0 of the mailbox | in the header CAS that removes the entry (EXPUNGE, MOVE, the scrub's own removals; for entries above UIDNEXT on a higher shard in a write before the removal), with the blob's GUID, size and chunk count | after the blob reference is released, by the session that removed the entry |
 
 A DELETE also **retires** the header of shard 0 after unregistering the
 mailbox (`h:uidnext` 0, the old value kept as `h:retired`), so that a
@@ -142,6 +142,16 @@ and the retirement are released as well. A delivery whose entry for a
 higher shard was still on its way when the header was retired keeps the
 tombstone for the scrub, rewritten with the range the header had then;
 a release that failed keeps the tombstone and the shards.
+
+An account that only stores Sieve scripts (ManageSieve, the admin API)
+gets a registry with its first script (the key `created`), and with it
+a directory entry; before 0.42.0 such accounts had none.
+
+DELETE releases what the shards hold once the header is retired, not
+the list it read before unregistering: an EXPUNGE or MOVE of another
+session in between released its entries itself. An entry whose removal
+intent is on shard 0 belongs to that session; its release may still
+come, so the shards and the tombstone then stay for the scrub.
 
 **What the scrub does with an intent.** An intent older than
 `scrub.intent_grace_seconds` (3600) belongs to a write that will not
@@ -178,6 +188,12 @@ The scrub settles what it names against its index scan of the account
   well (the registry is read after the entries; ids are never used
   again).
 
+The age of an intent is the writer's clock (the time in its value)
+against the scrubber's: the servers' clocks must agree (NTP) to well
+within `scrub.intent_grace_seconds`; a writer whose clock runs ahead
+only delays the scrub, one that runs behind by more than the grace
+period lets a scrub take an intent of a write in flight for a crash.
+
 **Where the scrub looks** is `scrub.orphan_source`:
 
 | Value | Listing | Acts on | Intents |
@@ -191,8 +207,10 @@ count what the listing found and no intent names: debris from before
 0.42.0, or of a server of an older version during a rolling update, or a
 write path without an intent (which would be a bug). `orphan_extra`
 counts blobs the intents take for orphans and the listing does not; it
-must stay 0. The switch to `intents` is safe once every server runs
-0.42.0 or later, `orphan_extra` stayed 0, and what `*_missed` still
+must stay 0. The switch to `intents` is safe only once every server runs
+0.42.0 or later (servers do not report their versions to each other, so
+nothing enforces this: older servers write no removal intents, and a
+blob they move or expunge can then look like an orphan), `orphan_extra` stayed 0, and what `*_missed` still
 reports is debris from before (the sweep removes it, see
 [operations](../operations/README.md#scrub-without-listings)).
 
@@ -314,13 +332,18 @@ runs as a one-off, not as a routine.
   changes nothing).
 - **Pass 2** reads each spill object in key order, so the names of one
   namespace come together, and compares them with what the account's data
-  model names (the purge's enumeration). What it does not name is a
+  model (the purge's enumeration). What it does not name is a
   remnant; with `--repair`, a remnant older than `scrub.grace_seconds`
-  is deleted (a blob through its reference count, under the version of
-  its chunk 0). A namespace without registry is a remnant as a whole,
-  unless the account directory still holds the account as `active`: a
-  lost registry is reported, never cleaned up. Accounts under an import
-  lock are left alone. Private `\Seen` marks of a live public folder
+  (at least ten minutes) is deleted (a blob through its reference count,
+  under the version of its chunk 0). A namespace without registry is
+  deleted only when the account directory says the account is being
+  purged; any other one (a lost registry, an account that only kept
+  Sieve scripts before 0.42.0, the leftovers of a purge whose directory
+  entry is gone) is reported (`registry_missing`, `unregistered`, class
+  `namespace`) and left alone. An account whose data model cannot be
+  read in full (a registry record that does not parse, an unreadable
+  header, a registered mailbox without shard 0) and accounts under an
+  import lock are left alone. Private `\Seen` marks of a live public folder
   that predate the intents are adopted: their `ps:` key is written.
 
 One sweep runs at a time (a cls_lock on `sweep/lock`); the report is

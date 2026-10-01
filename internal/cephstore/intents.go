@@ -1,6 +1,8 @@
 package cephstore
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -75,12 +77,41 @@ type blobRef struct {
 }
 
 // importIntent is the value of "bimp:": the blobs an import step may
-// write (each message with the GUIDs it may fall back to) and the
-// mailbox.
+// write and the mailbox. Base holds each message's GUID; the GUIDs it may
+// fall back to follow from it and the step's salt (importFallback), so
+// the value stays at about 35 bytes per message (a step of 10000
+// messages, the largest admin.import.max_batch_messages allows, needs
+// about 350 KiB, well below the 1 MiB an omap value may have).
 type importIntent struct {
-	Time    int64     `json:"t"`
-	Mailbox string    `json:"m"`
-	Blobs   []blobRef `json:"b"`
+	Time    int64    `json:"t"`
+	Mailbox string   `json:"m"`
+	Salt    string   `json:"s"`
+	Base    []string `json:"g"`
+}
+
+// importFallbacks is how many fallback GUIDs a message of an import step
+// may use (see importBlob).
+const importFallbacks = 2
+
+// importFallback is fallback k of a message's base GUID in a step.
+func importFallback(salt, base string, k int) string {
+	sum := sha256.Sum256([]byte(salt + "/" + base + "/" + strconv.Itoa(k)))
+
+	return hex.EncodeToString(sum[:guidBytes])
+}
+
+// guids returns every GUID the step may have written.
+func (im importIntent) guids() []string {
+	out := make([]string, 0, len(im.Base)*(1+importFallbacks))
+
+	for _, b := range im.Base {
+		out = append(out, b)
+		for k := 1; k <= importFallbacks; k++ {
+			out = append(out, importFallback(im.Salt, b, k))
+		}
+	}
+
+	return out
 }
 
 // mailboxIntent is the value of "ci:" and "dm:": the name and, for a
@@ -329,8 +360,36 @@ func (u *User) anyKey(oid string, prefixes ...string) (string, error) {
 }
 
 // intentPrefixes are the registry prefixes of intents a scrub has to look
-// at (ps: is not one: it stays while the marks exist).
-var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPrefix, regUploadPrefix, regCreatePrefix, regDeletePrefix}
+// at (ps: is not one: it stays while the marks exist; up: only once it
+// expired, see expiredUpload).
+var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPrefix, regCreatePrefix, regDeletePrefix}
+
+// uploadPage bounds the upload intents ScrubPending reads.
+const uploadPage = 64
+
+// expiredUpload reports whether the first uploadPage upload intents hold
+// one that expired (a live upload keeps no account from being idle; the
+// expiry worker removes it when it is due, the scrub only if the worker
+// did not get to it).
+func (u *User) expiredUpload(now time.Time) (bool, error) {
+	vals, err := u.idx.GetOmapValues(oidRegistry, "", regUploadPrefix, uploadPage)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	for _, v := range vals {
+		var in blobIntent
+		if json.Unmarshal(v, &in) != nil || in.Expires <= now.Unix() {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
 
 // registryIntents are the intents of the registry, by prefix and then by
 // the key without prefix.

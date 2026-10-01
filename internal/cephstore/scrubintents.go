@@ -249,8 +249,8 @@ func (sr *scrubRun) gatherBlobIntents() {
 		_ = json.Unmarshal(v, &im)
 
 		old := sr.oldIntent(time.Unix(im.Time, 0))
-		for _, b := range im.Blobs {
-			in.blob(b.GUID, b.Size, b.Chunks, old, true)
+		for _, g := range im.guids() {
+			in.blob(g, 0, 0, old, true)
 		}
 	}
 
@@ -307,7 +307,17 @@ func (sr *scrubRun) gatherDeletion(id string, v []byte) {
 	_ = json.Unmarshal(v, &tomb)
 
 	d := &deletion{id: id, old: sr.oldIntent(time.Unix(tomb.Time, 0)), read: true}
-	d.info = u.deletedRange(id, tomb)
+
+	info, err := u.deletedRange(id, tomb)
+	if err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, err.Error())
+		d.read = false
+		in.deletions = append(in.deletions, d)
+
+		return
+	}
+
+	d.info = info
 	d.last = u.lastShard(id, d.info)
 
 	if !d.old {
@@ -353,14 +363,18 @@ func (sr *scrubRun) gatherDeletion(id string, v []byte) {
 // (retired) header of shard 0 and the tombstone say. A shard 0 without
 // header keys (an object a lock or a late write created again) says
 // nothing.
-func (u *User) deletedRange(id string, tomb mailboxIntent) *MailboxInfo {
+func (u *User) deletedRange(id string, tomb mailboxIntent) (*MailboxInfo, error) {
 	info := &MailboxInfo{Mailbox: Mailbox{Name: tomb.Name, MailboxRec: MailboxRec{ID: id}}, UIDNext: max(tomb.UIDNext, 1), ShardSize: tomb.ShardSize}
 
 	hv, ver, err := u.getKeysVer(u.idx, mboxOID(id), []string{keyUIDNext, keyRetired, keyShardSize})
+	if err != nil {
+		return nil, fmt.Errorf("%w: header of %s: %w", errModelIncomplete, id, err)
+	}
+
 	_, hasNext := hv[keyUIDNext]
 	_, hasRetired := hv[keyRetired]
 
-	if err == nil && ver != 0 && (hasNext || hasRetired) {
+	if ver != 0 && (hasNext || hasRetired) {
 		info.UIDNext = max(retiredUIDNext(hv), info.UIDNext)
 
 		if ss, _ := strconv.ParseUint(string(hv[keyShardSize]), 10, 32); ss > 0 {
@@ -372,7 +386,7 @@ func (u *User) deletedRange(id string, tomb mailboxIntent) *MailboxInfo {
 		info.ShardSize = DefaultShardSize
 	}
 
-	return info
+	return info, nil
 }
 
 // settleIntents settles what the intents name (see the comment at the
@@ -464,11 +478,24 @@ func (sr *scrubRun) settleOrphan(guid string, c *blobCand, act bool) {
 
 	sr.log.Warn("orphan blob (intent)", "guid", guid, "chunks", c.chunks)
 
-	if !sr.o.Allowed(RepairOrphans) {
-		return
+	if sr.o.Allowed(RepairOrphans) {
+		sr.collectOrphan(guid, c)
+	}
+}
+
+// collectOrphan deletes an orphan blob an old intent names.
+func (sr *scrubRun) collectOrphan(guid string, c *blobCand) {
+	u := sr.u
+
+	// Intents that name a blob by its GUID alone (an import step's) leave
+	// its size to its length attribute.
+	if c.size == 0 {
+		if size, err := u.BlobSize(guid); err == nil {
+			c.size, c.chunks = size, max(c.chunks, u.chunkCount(size))
+		}
 	}
 
-	gone, err := u.collectBlob(guid, c.size, c.chunks, c.unindex, sr.cutoff)
+	gone, err := u.collectBlob(guid, c.size, c.chunks, c.unindex && c.size > 0, sr.cutoff)
 	if err != nil {
 		sr.rep.Errors = append(sr.rep.Errors, err.Error())
 	}
@@ -533,6 +560,12 @@ func (sr *scrubRun) settleCreations(act bool) {
 	for id, v := range in.reg[regCreatePrefix] {
 		live := in.live[id]
 
+		// A mailbox with a tombstone is the deletion's to remove: its
+		// shards still name blobs that have to be counted first.
+		if _, deleting := in.reg[regDeletePrefix][id]; deleting {
+			continue
+		}
+
 		switch {
 		case live:
 		case !sr.oldIntent(intentTime(v)):
@@ -581,7 +614,7 @@ func (sr *scrubRun) settleBlobKeys() {
 		if sr.oldIntent(time.Unix(im.Time, 0)) {
 			sr.rep.IntentsOpen++
 
-			if sr.settled(importGUIDsOf(im)) {
+			if sr.settled(im.guids()) {
 				in.drop[oidRegistry] = append(in.drop[oidRegistry], regImportBlobPrefix+batch)
 			}
 		}
@@ -616,15 +649,6 @@ func (sr *scrubRun) settleKey(oid, key string, c *blobCand) {
 	if c.resolved {
 		sr.intents.drop[oid] = append(sr.intents.drop[oid], key)
 	}
-}
-
-func importGUIDsOf(im importIntent) []string {
-	out := make([]string, 0, len(im.Blobs))
-	for _, b := range im.Blobs {
-		out = append(out, b.GUID)
-	}
-
-	return out
 }
 
 // settlePubSeen removes the private \Seen marks of public folders that

@@ -106,10 +106,13 @@ type SweepReport struct {
 	Skipped int64 `json:"skipped"`
 	// Namespaces counts the namespaces pass 2 looked at; ImportLocked
 	// the ones it left alone, RegistryMissing those without registry
-	// that the directory still holds as active.
+	// that the directory holds as active, Unregistered those without
+	// registry and directory entry; the objects of both are only
+	// reported (class namespace).
 	Namespaces      int64 `json:"namespaces"`
 	ImportLocked    int64 `json:"import_locked,omitempty"`
 	RegistryMissing int64 `json:"registry_missing,omitempty"`
+	Unregistered    int64 `json:"unregistered,omitempty"`
 	// Remnants counts the objects nothing names, by class; Removed
 	// those deleted, Young those left for being younger than the grace.
 	Remnants map[string]int64 `json:"remnants"`
@@ -149,6 +152,8 @@ type sweepState struct {
 	// Shard and After are the spill object and its last key pass 2 did.
 	Shard  int         `json:"shard"`
 	After  string      `json:"after"`
+	// LastNS is the pool and namespace pass 2 counted last.
+	LastNS string      `json:"last_ns,omitempty"`
 	Report SweepReport `json:"report"`
 }
 
@@ -572,7 +577,9 @@ func (sw *sweeper) evaluateShard(pool string) error {
 			st.After = kv.Key
 		}
 
-		ns.finish()
+		// The chunks of the last blob may go on on the next page.
+		done := !more || len(page) == 0
+		ns.flush(!done)
 
 		if sw.stopped() {
 			return errSweepStopped
@@ -582,7 +589,7 @@ func (sw *sweeper) evaluateShard(pool string) error {
 			return err
 		}
 
-		if !more || len(page) == 0 {
+		if done {
 			return nil
 		}
 	}
@@ -594,21 +601,28 @@ type sweepNamespace struct {
 	name  string
 	data  bool
 	u     *User
-	skip  bool          // left alone (import lock, registry missing, error)
+	skip  bool          // left alone (import lock, error)
+	keep  bool          // reported only (no registry, not being purged)
 	named *namedObjects // nil: no registry, everything is a remnant
 	index map[string]bool
 	live  map[string]bool // public folders, read on demand
 	// remnants found and not yet handled: index objects, and blobs by
 	// GUID with their highest chunk number + 1.
-	objects []string
-	blobs   map[string]int
+	objects  []string
+	blobs    map[string]int
+	lastGUID string
 }
 
 // openNamespace prepares the evaluation of a namespace.
 func (sw *sweeper) openNamespace(name, pool string) *sweepNamespace {
 	ns := &sweepNamespace{sw: sw, name: name, data: pool == sweepDataPool, blobs: map[string]int{}}
 	rep := &sw.st.Report
-	rep.Namespaces++
+
+	// A namespace a resumed run opens again is counted once.
+	if key := pool + sweepSep + name; sw.st.LastNS != key {
+		rep.Namespaces++
+		sw.st.LastNS = key
+	}
 
 	u, err := sw.s.User(name)
 	if err != nil {
@@ -630,23 +644,33 @@ func (sw *sweeper) openNamespace(name, pool string) *sweepNamespace {
 	return ns
 }
 
-// load reads the data model of the namespace's account; a namespace
-// without registry has none (unless the directory still has the account
-// as active: then it is left alone).
+// load reads the data model of the namespace's account. A namespace
+// without registry has none; its objects are remnants only when the
+// account directory says the account is being purged (a purge that
+// stopped after the registry went). Any other one is reported and left
+// alone: accounts that only ever kept Sieve scripts had no registry
+// before 0.42.0, and a lost registry is no debris.
 func (ns *sweepNamespace) load() error {
 	u, rep := ns.u, &ns.sw.st.Report
 
 	if !u.objectExists(oidRegistry) {
-		active, err := ns.sw.s.directoryActive(ns.name)
+		state, ok, err := ns.sw.s.directoryState(ns.name)
 		if err != nil {
 			return err
 		}
 
-		if active {
+		switch {
+		case ok && state == model.AccountPurging:
+		case ok:
 			rep.RegistryMissing++
 			rep.sample("registry missing: " + ns.name)
 
-			ns.skip = true
+			ns.keep = true
+		default:
+			rep.Unregistered++
+			rep.sample("no registry: " + ns.name)
+
+			ns.keep = true
 		}
 
 		return nil
@@ -660,7 +684,7 @@ func (ns *sweepNamespace) load() error {
 		return err
 	}
 
-	named, err := u.enumerate()
+	named, err := u.enumerate(true)
 	if err != nil {
 		return err
 	}
@@ -670,25 +694,25 @@ func (ns *sweepNamespace) load() error {
 	return nil
 }
 
-// directoryActive reports whether the account directory holds the
-// account as active.
-func (s *Store) directoryActive(account string) (bool, error) {
+// directoryState returns the account's state in the account directory
+// (ok false: no entry).
+func (s *Store) directoryState(account string) (string, bool, error) {
 	if !model.InDirectory(account) {
-		return false, nil
+		return "", false, nil
 	}
 
 	ix, release, err := s.AccountIndex()
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	defer release()
 
 	e, ok, err := model.GetAccountEntry(ix, account)
-	if err != nil {
-		return false, err
+	if err != nil || !ok {
+		return "", false, err
 	}
 
-	return ok && e.State != model.AccountPurging, nil
+	return e.State, true, nil
 }
 
 // check looks at one object of the namespace.
@@ -704,6 +728,8 @@ func (ns *sweepNamespace) check(oid string) {
 	if ns.data {
 		if guid, chunk, ok := splitChunkOID(oid); ok {
 			ns.blobs[guid] = max(ns.blobs[guid], chunk+1)
+			ns.lastGUID = guid
+
 			return
 		}
 	} else if ns.named != nil && ns.adopt(oid) {
@@ -751,13 +777,26 @@ func (ns *sweepNamespace) adopt(oid string) bool {
 }
 
 // finish handles the remnants collected so far.
-func (ns *sweepNamespace) finish() {
+func (ns *sweepNamespace) finish() { ns.flush(false) }
+
+// flush handles the remnants collected so far; with holdLast the blob
+// seen last waits (its chunks may go on on the next page, and a blob is
+// handled once).
+func (ns *sweepNamespace) flush(holdLast bool) {
 	if ns == nil || ns.skip {
 		return
 	}
 
+	held, last := 0, ""
+	if holdLast {
+		last = ns.lastGUID
+		held = ns.blobs[last]
+	}
+
 	for guid, chunks := range ns.blobs {
-		ns.blobRemnant(guid, chunks)
+		if guid != last || !holdLast {
+			ns.blobRemnant(guid, chunks)
+		}
 	}
 
 	for _, oid := range ns.objects {
@@ -765,6 +804,10 @@ func (ns *sweepNamespace) finish() {
 	}
 
 	ns.blobs, ns.objects = map[string]int{}, nil
+
+	if holdLast && held > 0 {
+		ns.blobs[last] = held
+	}
 }
 
 func (ns *sweepNamespace) close() {
@@ -809,7 +852,7 @@ func (ns *sweepNamespace) blobRemnant(guid string, chunks int) {
 	case err == nil && st.ModTime.After(ns.cutoff()):
 		rep.Young++
 		return
-	case !ns.sw.o.Repair:
+	case !ns.sw.o.Repair || ns.keep:
 		return
 	}
 
@@ -855,7 +898,7 @@ func (ns *sweepNamespace) objectRemnant(oid string) {
 	case st.ModTime.After(ns.cutoff()):
 		rep.Young++
 		return
-	case !ns.sw.o.Repair:
+	case !ns.sw.o.Repair || ns.keep:
 		return
 	}
 

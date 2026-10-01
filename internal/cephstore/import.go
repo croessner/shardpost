@@ -581,48 +581,42 @@ func (u *User) reserveImport(mb *Mailbox, todo []model.ImportMessage) (*reservat
 		size.Msgs++
 	}
 
-	guids := importGUIDs(todo)
+	salt, guids := importGUIDs(todo)
 	intent := regImportBlobPrefix + newGUID()
 
-	resv, err := u.reserveWith(mb, size, map[string][]byte{intent: u.importIntent(mb.ID, todo, guids)})
+	resv, err := u.reserveWith(mb, size, map[string][]byte{intent: u.importIntent(mb.ID, salt, guids)})
 
 	return resv, guids, intent, err
 }
 
-// importFallbacks is how many fresh GUIDs a message of an import step
-// may fall back to (see importBlob).
-const importFallbacks = 2
-
-// importGUIDs returns, per message, the GUIDs its blob may be stored
-// under: the source GUID (or a fresh one) first, then the fallbacks.
-func importGUIDs(msgs []model.ImportMessage) [][]string {
+// importGUIDs returns a fresh salt and, per message, the GUIDs its blob
+// may be stored under: the source GUID (or a fresh one) first, then the
+// fallbacks derived from it (importFallback).
+func importGUIDs(msgs []model.ImportMessage) (string, [][]string) {
+	salt := newGUID()[:16]
 	out := make([][]string, len(msgs))
 
 	for i := range msgs {
-		first := msgs[i].GUID
-		if !model.ValidGUID(first) {
-			first = newGUID()
+		base := msgs[i].GUID
+		if !model.ValidGUID(base) {
+			base = newGUID()
 		}
 
-		out[i] = []string{first}
-		for range importFallbacks {
-			out[i] = append(out[i], newGUID())
+		out[i] = []string{base}
+		for k := 1; k <= importFallbacks; k++ {
+			out[i] = append(out[i], importFallback(salt, base, k))
 		}
 	}
 
-	return out
+	return salt, out
 }
 
 // importIntent is the "bimp:" value of an import step.
-func (u *User) importIntent(mailbox string, msgs []model.ImportMessage, guids [][]string) []byte {
-	in := importIntent{Time: time.Now().Unix(), Mailbox: mailbox}
+func (u *User) importIntent(mailbox, salt string, guids [][]string) []byte {
+	in := importIntent{Time: time.Now().Unix(), Mailbox: mailbox, Salt: salt, Base: make([]string, 0, len(guids))}
 
-	for i := range msgs {
-		size := int64(len(msgs[i].Raw))
-
-		for _, g := range guids[i] {
-			in.Blobs = append(in.Blobs, blobRef{GUID: g, Size: size, Chunks: u.chunkCount(size)})
-		}
+	for _, g := range guids {
+		in.Base = append(in.Base, g[0])
 	}
 
 	return encode(in)

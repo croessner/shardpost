@@ -452,7 +452,7 @@ func crashedDelete(t *testing.T, u *User, mb *Mailbox) {
 		t.Fatalf("unregister: %v, lost %v", err, lost)
 	}
 
-	if _, _, _, err := u.retireDeleted(mb, info); err != nil {
+	if _, _, err := u.retireDeleted(mb, info); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -512,10 +512,10 @@ func TestImportBlobIntent(t *testing.T) {
 
 	// A step that died after writing its blobs.
 	more := []model.ImportMessage{{UID: 3, Raw: testMessage("three", 300)}}
-	guids := importGUIDs(more)
+	salt, guids := importGUIDs(more)
 
 	if _, err := u.reserveWith(mb, Quota{Bytes: 300, Msgs: 1},
-		map[string][]byte{regImportBlobPrefix + "batch": u.importIntent(mb.ID, more, guids)}); err != nil {
+		map[string][]byte{regImportBlobPrefix + "batch": u.importIntent(mb.ID, salt, guids)}); err != nil {
 		t.Fatal(err)
 	}
 
