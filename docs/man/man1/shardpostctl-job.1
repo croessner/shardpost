@@ -172,6 +172,25 @@ removed. Running it again is harmless, and it is also the repair for a
 term that lost its dictionary entries (it is then found as a whole word
 but not as a part of one). It has no checkpoint.
 .TP
+.B attachment_backfill
+Role
+.BR repair .
+Reads every message whose index record does not say whether it has an
+attachment \(em messages stored before the record had the field \(em and
+remembers the answer for JMAP (the
+.I hasAttachment
+filter of
+.B Email/query
+and the property of
+.BR Email/get ).
+It changes no message and no index record and does not lock the account;
+it stops when an import or another job locks the account. The plan shows
+how many such messages there are and how many are already remembered;
+the result counts the messages read, the ones without data and the ones
+that could not be read. What a stopped run wrote stays, and running it
+again reads only what is left. A JMAP query starts the same fill on its
+own when it needs it; the job does it ahead of time.
+.TP
 .B mailbox_delete
 Role
 .BR delete ,
@@ -326,6 +345,16 @@ this has run.
 .nf
 .RS
 shardpostctl plan fts_dict_convert user@example.org
+shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+Before the users of an account with older mail search by attachment
+over JMAP, read its old messages once:
+.PP
+.nf
+.RS
+shardpostctl plan attachment_backfill user@example.org
 shardpostctl apply -wait <plan-id>
 .RE
 .fi

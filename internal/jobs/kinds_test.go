@@ -250,6 +250,22 @@ func TestFTSDictConvert(t *testing.T) {
 	}
 }
 
+// TestAttachmentBackfill: the plan counts the messages without
+// hasAttachment in their record (none in a store that writes it), and the
+// run reports what it filled.
+func TestAttachmentBackfill(t *testing.T) {
+	m, _ := kindsSetup(t)
+
+	p, j := planAndApply(t, m, KindAttachments, "alice", nil)
+	if string(p.Summary) != `{"messages":0,"known":0}` || !strings.Contains(string(j.Result), `"computed":0`) {
+		t.Fatalf("attachment backfill: %s %s", p.Summary, j.Result)
+	}
+
+	if k, _ := m.Kind(KindAttachments); k.Role() != RoleRepair || k.Exclusive() {
+		t.Error("attachment_backfill is not a repair that leaves the account unlocked")
+	}
+}
+
 func TestQuotaRecalcFTSScrubAndCheck(t *testing.T) {
 	m, _ := kindsSetup(t)
 

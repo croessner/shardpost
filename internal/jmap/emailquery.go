@@ -193,21 +193,8 @@ func (q *emailQuery) run(collapse bool) ([]string, *methodError) {
 		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
 
-	if q.needAttach {
-		if err := q.prefetchAttachments(items); err != nil {
-			return nil, &methodError{Type: errServerFail, Description: err.Error()}
-		}
-	}
-
-	matched := make([]*emailItem, 0, len(items))
-
-	for _, it := range items {
-		if q.filter.eval(it) {
-			matched = append(matched, it)
-		}
-	}
-
-	if merr := q.finishAttachments(); merr != nil {
+	matched, merr := q.match(items)
+	if merr != nil {
 		return nil, merr
 	}
 

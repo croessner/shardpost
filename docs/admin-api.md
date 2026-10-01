@@ -266,6 +266,7 @@ shardpostctl plan quota_recalc user@example.org
 shardpostctl plan acl_reconcile user@example.org
 shardpostctl plan fts_rebuild user@example.org
 shardpostctl plan fts_dict_convert user@example.org        # dictionary layout of 0.35.0
+shardpostctl plan attachment_backfill user@example.org     # JMAP hasAttachment of older messages
 shardpostctl plan -mailbox "Archiv/2019" mailbox_delete user@example.org
 shardpostctl plan purge user@example.org
 shardpostctl apply -wait <plan-id>
@@ -291,6 +292,7 @@ only the repairs that were planned and are still needed.
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index and rebuild it from all messages |
 | `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account |
+| `attachment_backfill` | `repair` | no | read every message whose index record does not carry `hasAttachment` (stored before the record had the field) and remember the answer in the JMAP locator (`a:<guid>`, see [JMAP: hasAttachment](jmap.md#hasattachment)); changes no message and no index record, may be repeated and then reads only what is left, stops when an import or another job locks the account; the plan counts such messages and the ones already remembered |
 | `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
 | `expunge` | `delete` | no | permanently remove messages of a mailbox: `uids` or `deleted: true` (all with `\Deleted`) |
 | `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account |
@@ -316,7 +318,8 @@ only the repairs that were planned and are still needed.
   once the lease has expired and continues from the last checkpoint. On an
   orderly shutdown the server gives up running jobs immediately.
   `fts_rebuild` and `fts_dict_convert` have no checkpoint and start over
-  after a takeover.
+  after a takeover; `attachment_backfill` has none either, but keeps what
+  it wrote and reads only what is left.
   Leases compare the clocks of different servers, so those clocks have to
   be kept in sync with NTP. A deviation well below `jobs.lease_seconds` is
   harmless.

@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/text/encoding/htmlindex"
 
+	"shardpost/internal/attcache"
 	"shardpost/internal/model"
 )
 
@@ -90,12 +91,14 @@ func bodyProperties(sess *session, m *model.Meta, raw []byte, props []string, re
 
 	for _, p := range props {
 		// hasAttachment is kept in the index record of every message
-		// stored since the record has the field; only an older record
-		// needs the message.
-		if p == propHasAttachment && m.HasAttachment != nil {
-			out[p] = *m.HasAttachment
+		// stored since the record has the field, and remembered in the
+		// locator for many older ones; only the rest need the message.
+		if p == propHasAttachment {
+			if has, ok := knownHasAttachment(m, req); ok {
+				out[p] = has
 
-			continue
+				continue
+			}
 		}
 
 		need = need || contentProperties[p]
@@ -126,12 +129,31 @@ func bodyProperties(sess *session, m *model.Meta, raw []byte, props []string, re
 	r.textBody, r.htmlBody, r.attached = flatten(root)
 
 	for _, p := range props {
+		if _, done := out[p]; done && p == propHasAttachment {
+			continue // answered from the record: the record is the answer
+		}
+
 		if v, ok := r.property(p, req); ok {
 			out[p] = v
 		}
 	}
 
 	return nil
+}
+
+// knownHasAttachment answers hasAttachment without the message: from the
+// index record, or from the locator for an older record. A message the
+// locator knows to have no data has no body properties at all.
+func knownHasAttachment(m *model.Meta, req *emailGetRequest) (has, ok bool) {
+	if m.HasAttachment != nil {
+		return *m.HasAttachment, true
+	}
+
+	if v, found := req.attach[m.GUID]; found && v != attcache.Unreadable {
+		return v.Has(), true
+	}
+
+	return false, false
 }
 
 // messageBytes is the message a rendering works on: the one given, or

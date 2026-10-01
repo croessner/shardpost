@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"shardpost/internal/attcache"
 	"shardpost/internal/model"
 )
 
@@ -30,6 +31,7 @@ const (
 	KindACLReconcile  = "acl_reconcile"
 	KindFTSRebuild    = "fts_rebuild"
 	KindFTSDict       = "fts_dict_convert"
+	KindAttachments   = "attachment_backfill"
 	KindMailboxDelete = "mailbox_delete"
 	KindExpunge       = "expunge"
 	KindPurge         = "purge"
@@ -66,6 +68,7 @@ func Kinds(grace time.Duration) []Kind {
 		&aclReconcile{kindBase{KindACLReconcile, RoleRepair, true, false}},
 		&ftsRebuild{kindBase{KindFTSRebuild, RoleRepair, true, true}},
 		&ftsDictConvert{kindBase{KindFTSDict, RoleRepair, true, false}},
+		&attachmentBackfill{kindBase{KindAttachments, RoleRepair, true, false}},
 		&mailboxDelete{kindBase{KindMailboxDelete, RoleDelete, true, true}},
 		&expunge{kindBase{KindExpunge, RoleDelete, true, false}},
 		&purge{kindBase{KindPurge, RoleDelete, true, true}},
@@ -522,6 +525,65 @@ func (k *ftsDictConvert) Run(_ context.Context, run *Run) (any, error) {
 
 	return cv.ConvertFTSDict(fence, func(done, total int) {
 		_ = run.Progress("dictionary", int64(done), int64(total))
+	})
+}
+
+// --- attachment_backfill ---------------------------------------------------
+
+// attachmentBackfill remembers hasAttachment, for JMAP, of the messages
+// whose index record does not carry it (stored before the record had the
+// field): it reads each such message once and writes the answer into the
+// JMAP locator (internal/attcache). It changes no message and no index
+// record and needs no lock; it stops when an import or another job locks
+// the account. A run that is stopped keeps what it wrote, and running it
+// again reads only what is left.
+type attachmentBackfill struct{ kindBase }
+
+type attachmentSummary struct {
+	Messages int `json:"messages"`
+	Known    int `json:"known"`
+}
+
+func (k *attachmentBackfill) Plan(_ context.Context, _ *Env, u model.User, _ string, _ json.RawMessage) (any, string, error) {
+	ix, err := capability[model.Index](u, "keep an index for JMAP")
+	if err != nil {
+		return nil, "", err
+	}
+
+	legacy, err := attcache.Legacy(u)
+	if err != nil {
+		return nil, "", err
+	}
+
+	guids := make([]string, len(legacy))
+	for i := range legacy {
+		guids[i] = legacy[i].GUID
+	}
+
+	known, err := attcache.Lookup(ix, guids)
+
+	return attachmentSummary{Messages: len(legacy), Known: len(known)}, "", err
+}
+
+func (k *attachmentBackfill) Run(ctx context.Context, run *Run) (any, error) {
+	fence := func() error {
+		if err := run.Fence(); err != nil {
+			return err
+		}
+
+		if errors.Is(model.RefuseDuringImport(run.User), model.ErrImportLocked) {
+			return errors.New("the account is locked by an import or another job; run the backfill again afterwards")
+		}
+
+		return nil
+	}
+
+	if err := fence(); err != nil {
+		return nil, err
+	}
+
+	return attcache.Backfill(ctx, run.User, fence, func(done, total int) {
+		_ = run.Progress("messages", int64(done), int64(total))
 	})
 }
 

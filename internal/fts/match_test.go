@@ -32,6 +32,23 @@ func TestMatcher(t *testing.T) {
 	}
 }
 
+// TestMatcherStemsFoldedWords: the cheap test before stemming lets a
+// word through whose stem rewrites its letters, and a repeated word gets
+// the remembered answer.
+func TestMatcherStemsFoldedWords(t *testing.T) {
+	m := NewMatcher(Tokenize("Grüsse"))
+
+	for _, w := range []string{"Grüße", "Grüße", "grüssen"} {
+		if !m.Match(w) {
+			t.Errorf("Match(%q) = false", w)
+		}
+	}
+
+	if m.Match("Gras") || m.Match("Tasse") {
+		t.Error("a word that only shares letters matched")
+	}
+}
+
 // TestWords: the words and their byte offsets, the same runs Tokenize
 // makes its tokens of.
 func TestWords(t *testing.T) {

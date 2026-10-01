@@ -13,6 +13,7 @@
 package jmap
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -84,23 +85,30 @@ type Limits struct {
 	// answer hasAttachment for an index record that does not carry it
 	// (stored before the record had the field).
 	MaxAttachmentReads int
+	// AttachmentBackfills bounds the background fills of hasAttachment
+	// that run at once in the process, and AttachmentBackfillTime how
+	// long one may run.
+	AttachmentBackfills    int
+	AttachmentBackfillTime time.Duration
 }
 
 // DefaultLimits are the values a configuration that says nothing gets.
 // They are deliberately modest: a JMAP client discovers them and adapts,
 // and an operator who needs more says so.
 var DefaultLimits = Limits{
-	MaxSizeUpload:         50 << 20,
-	MaxSizeRequest:        10 << 20,
-	MaxConcurrentUpload:   4,
-	MaxConcurrentRequests: 4,
-	MaxCallsInRequest:     16,
-	MaxObjectsInGet:       500,
-	MaxObjectsInSet:       500,
-	MaxDataSources:        minDataSources,
-	MaxSizeBlobGet:        10 << 20,
-	SnippetReadBytes:      256 << 10,
-	MaxAttachmentReads:    1000,
+	MaxSizeUpload:          50 << 20,
+	MaxSizeRequest:         10 << 20,
+	MaxConcurrentUpload:    4,
+	MaxConcurrentRequests:  4,
+	MaxCallsInRequest:      16,
+	MaxObjectsInGet:        500,
+	MaxObjectsInSet:        500,
+	MaxDataSources:         minDataSources,
+	MaxSizeBlobGet:         10 << 20,
+	SnippetReadBytes:       256 << 10,
+	MaxAttachmentReads:     1000,
+	AttachmentBackfills:    2,
+	AttachmentBackfillTime: 10 * time.Minute,
 }
 
 // minDataSources is the fewest data sources per Blob/upload creation RFC
@@ -273,6 +281,16 @@ type Server struct {
 	// watches are the watches on the account objects of shared accounts
 	// the event sources follow, one per namespace.
 	watches *watchHub
+	// The background fills of hasAttachment (attachment.go): the
+	// namespaces being filled, the free slots, the fills running, and
+	// the context that ends them at shutdown.
+	fills      sync.Map
+	fillSlots  chan struct{}
+	fillWG     sync.WaitGroup
+	fillCtx    context.Context
+	fillCancel context.CancelFunc
+	// unreadable are the messages a query could not read lately.
+	unreadable unreadableSet
 }
 
 // New builds the server and its routes.
@@ -297,6 +315,8 @@ func New(o Options) *Server {
 	s := &Server{o: o, mux: http.NewServeMux(), inFlong: map[string]int{}, inFlup: map[string]int{}, inDown: map[string]int{},
 		inEvents: map[string]int{}, closing: make(chan struct{}), misses: newMissBudget(o.Principals.MissPerMinute)}
 	s.watches = newWatchHub(o.Store, 0, o.Log)
+	s.fillSlots = make(chan struct{}, o.Limits.AttachmentBackfills)
+	s.fillCtx, s.fillCancel = context.WithCancel(context.Background())
 
 	// The health endpoint has no authentication and no side effects: it
 	// answers the backend check of a proxy in front, nothing else.
@@ -352,11 +372,26 @@ func withDefaults(l Limits) Limits {
 		l.SnippetReadBytes = d.SnippetReadBytes
 	}
 
+	return attachmentDefaults(blobDefaults(l))
+}
+
+// attachmentDefaults fills in the bounds of the hasAttachment reads.
+func attachmentDefaults(l Limits) Limits {
+	d := DefaultLimits
+
 	if l.MaxAttachmentReads <= 0 {
 		l.MaxAttachmentReads = d.MaxAttachmentReads
 	}
 
-	return blobDefaults(l)
+	if l.AttachmentBackfills <= 0 {
+		l.AttachmentBackfills = d.AttachmentBackfills
+	}
+
+	if l.AttachmentBackfillTime <= 0 {
+		l.AttachmentBackfillTime = d.AttachmentBackfillTime
+	}
+
+	return l
 }
 
 // blobDefaults fills in the limits of the blob methods: a blob built by
@@ -396,8 +431,13 @@ func (s *Server) HTTPServer(addr string) *http.Server {
 	return srv
 }
 
-// Close ends the open event sources.
-func (s *Server) Close() { s.closeOnce.Do(func() { close(s.closing) }) }
+// Close ends the open event sources and the background fills.
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		close(s.closing)
+		s.fillCancel()
+	})
+}
 
 // enter takes a slot of the given per-account counter; it reports false
 // when the account is already at its limit.

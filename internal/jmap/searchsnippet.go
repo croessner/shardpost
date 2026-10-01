@@ -71,7 +71,8 @@ func searchSnippetGet(_ context.Context, sess *session, args json.RawMessage) (a
 			Description: "SearchSnippet/get needs emailIds"}
 	}
 
-	if len(*req.EmailIDs) > sess.limits.MaxObjectsInGet {
+	ids := dedupe(*req.EmailIDs)
+	if len(ids) > sess.limits.MaxObjectsInGet {
 		return nil, &methodError{Type: errRequestTooLarge, Description: "more emailIds than maxObjectsInGet"}
 	}
 
@@ -93,7 +94,7 @@ func searchSnippetGet(_ context.Context, sess *session, args json.RawMessage) (a
 		return nil, merr
 	}
 
-	hits, err := loc.resolve(*req.EmailIDs)
+	hits, err := loc.resolve(ids)
 	if err != nil {
 		return nil, &methodError{Type: errServerFail, Description: err.Error()}
 	}
@@ -101,7 +102,7 @@ func searchSnippetGet(_ context.Context, sess *session, args json.RawMessage) (a
 	subject, body := snippetTerms(f)
 	out := &searchSnippetResponse{AccountID: sess.accountID(), List: []searchSnippet{}, NotFound: []string{}}
 
-	for _, id := range *req.EmailIDs {
+	for _, id := range ids {
 		found, ok := hits[id]
 		if !ok {
 			out.NotFound = append(out.NotFound, id)
@@ -113,6 +114,21 @@ func searchSnippetGet(_ context.Context, sess *session, args json.RawMessage) (a
 	}
 
 	return out, nil
+}
+
+// dedupe drops repeated ids, keeping the first of each in its place.
+func dedupe(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+
+	return out
 }
 
 // snippetTerms collects the words of the text conditions a filter has
@@ -172,7 +188,9 @@ func snippetOf(sess *session, id string, m *model.Meta, subject, body *fts.Match
 	}
 
 	if start, ok := firstMatch(text, body); ok {
-		if p, ok := highlight(text, body, start, snippetPreviewMax); ok {
+		// The preview is never longer than its text, so the text after
+		// the limit, to the end of the word it cuts, is all it can show.
+		if p, ok := highlight(text[:wordEnd(text, start+snippetPreviewMax)], body, start, snippetPreviewMax); ok {
 			out.Preview = &p
 		}
 	}
@@ -261,10 +279,32 @@ func firstMatch(text string, m *fts.Matcher) (int, bool) {
 	return 0, false
 }
 
-// isWordRune reports whether the rune that ends at byte i+1 of text is
+// wordEnd is the end of the word at byte i of text, or i when it is not
+// in one; it is at most the length of the text.
+func wordEnd(text string, i int) int {
+	if i >= len(text) {
+		return len(text)
+	}
+
+	for i < len(text) && !utf8.RuneStart(text[i]) {
+		i++
+	}
+
+	for i < len(text) && isWordRune(text, i) {
+		_, n := utf8.DecodeRuneInString(text[i:])
+		i += n
+	}
+
+	return i
+}
+
+// isWordRune reports whether the rune at or ending at byte i of text is
 // part of a word.
 func isWordRune(text string, i int) bool {
-	r, _ := utf8.DecodeLastRuneInString(text[:i+1])
+	r, _ := utf8.DecodeRuneInString(text[i:])
+	if r == utf8.RuneError {
+		r, _ = utf8.DecodeLastRuneInString(text[:i+1])
+	}
 
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
@@ -319,10 +359,13 @@ var htmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 // escapeHTML escapes &, < and >.
 func escapeHTML(s string) string { return htmlEscaper.Replace(s) }
 
-// The parts of an HTML body that are not text.
+// The parts of an HTML body that are not text. A tag starts with "<" and
+// a letter, "/", "!" or "?": a "<" before anything else is text ("a < b").
+// When the HTML-to-text of internal/fts (fts.HTMLText) is merged, this
+// uses it instead.
 var (
 	htmlHidden = regexp.MustCompile(`(?is)<(script|style|head|title)\b.*?</(script|style|head|title)\s*>|<!--.*?-->`)
-	htmlTag    = regexp.MustCompile(`(?s)<[^>]*>`)
+	htmlTag    = regexp.MustCompile(`(?s)<[A-Za-z/!?][^>]*>`)
 )
 
 // htmlText is the text of an HTML body: no markup, no scripts or styles,

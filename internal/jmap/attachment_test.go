@@ -171,17 +171,20 @@ func TestEmailQueryHasAttachment(t *testing.T) {
 	sameIDs(t, "with text", queryIDs(t, s, `{"accountId":"test","filter":{"text":"file","hasAttachment":true}}`), pdf.GUID)
 }
 
-// TestEmailQueryHasAttachmentLegacy: a record without the field is
-// answered by reading the message once; the answer is remembered in the
-// locator, and a query that would read more than the bound answers
-// serverUnavailable after remembering what it read.
-func TestEmailQueryHasAttachmentLegacy(t *testing.T) {
+// legacyServer is a server over a store whose records lack
+// hasAttachment, with three messages in INBOX: one with a file, one with
+// an inline image and a plain one.
+func legacyServer(t *testing.T, bound int) (*Server, *legacyStore, *model.Meta) {
+	t.Helper()
+
 	inner := memstore.New()
 	store := &legacyStore{inner: inner}
 	s := newTestServer(t, func(o *Options) {
 		o.Store = store
-		o.Limits.MaxAttachmentReads = 2
+		o.Limits.MaxAttachmentReads = bound
 	})
+
+	t.Cleanup(s.Close)
 
 	u, _ := inner.User("test")
 	if err := u.CreateMailbox(inboxName, nil); err != nil {
@@ -192,24 +195,94 @@ func TestEmailQueryHasAttachmentLegacy(t *testing.T) {
 	deliverAt(t, u, inboxName, rawInlineImage, 2)
 	deliverAt(t, u, inboxName, rawPlain, 3)
 
+	return s, store, pdf
+}
+
+// TestEmailQueryHasAttachmentLegacy: a record without the field is
+// answered by reading the message once; the answer is remembered in the
+// locator. A query that would read more than the bound answers
+// serverUnavailable after remembering what it read and starts a fill of
+// the namespace in the background, after which the query succeeds.
+func TestEmailQueryHasAttachmentLegacy(t *testing.T) {
+	s, store, pdf := legacyServer(t, 2)
+
 	args := `{"accountId":"test","filter":{"hasAttachment":true}}`
 	if got := mailError(t, s, "Email/query", args); got != errServerUnavailable {
 		t.Fatalf("a query past the read bound answered %q, want serverUnavailable", got)
 	}
 
-	if store.readCount() != 2 {
-		t.Errorf("the first query read %d messages, want the bound of 2", store.readCount())
-	}
-
-	sameIDs(t, "second attempt", queryIDs(t, s, args), pdf.GUID)
+	s.fillWG.Wait()
 
 	if store.readCount() != 3 {
-		t.Errorf("the queries read %d messages in all, want each one once", store.readCount())
+		t.Errorf("the query and the fill read %d messages, want each one once", store.readCount())
 	}
 
-	sameIDs(t, "third attempt", queryIDs(t, s, args), pdf.GUID)
+	sameIDs(t, "after the fill", queryIDs(t, s, args), pdf.GUID)
+	sameIDs(t, "false", queryIDs(t, s, `{"accountId":"test","filter":{"hasAttachment":false}}`), legacyOthers(t, s)...)
 
 	if store.readCount() != 3 {
 		t.Errorf("a remembered answer was read again (%d reads)", store.readCount())
+	}
+}
+
+// legacyOthers are the ids of the messages without a file, newest first.
+func legacyOthers(t *testing.T, s *Server) []string {
+	t.Helper()
+
+	all := queryIDs(t, s, `{"accountId":"test"}`)
+
+	return all[:2]
+}
+
+// TestEmailQueryHasAttachmentLazy: a message the other conditions decide
+// is neither looked up nor read.
+func TestEmailQueryHasAttachmentLazy(t *testing.T) {
+	s, store, pdf := legacyServer(t, 1000)
+
+	sameIDs(t, "with text", queryIDs(t, s, `{"accountId":"test","filter":{"subject":"file","hasAttachment":true}}`), pdf.GUID)
+
+	if store.readCount() != 1 {
+		t.Errorf("the query read %d messages, want only the one the text matched", store.readCount())
+	}
+
+	sameIDs(t, "OR decided by text", queryIDs(t, s,
+		`{"accountId":"test","filter":{"operator":"OR","conditions":[{"subject":"file"},{"hasAttachment":true}]}}`), pdf.GUID)
+
+	if store.readCount() != 3 {
+		t.Errorf("the OR read %d messages in all, want the two it could not decide", store.readCount())
+	}
+}
+
+// TestEmailQueryHasAttachmentUnreadable: a message that cannot be read
+// counts as one without an attachment and is not read again by every
+// query.
+func TestEmailQueryHasAttachmentUnreadable(t *testing.T) {
+	s, store, _ := legacyServer(t, 1000)
+	store.mu.Lock()
+	store.failRead = true
+	store.mu.Unlock()
+
+	args := `{"accountId":"test","filter":{"hasAttachment":true}}`
+	sameIDs(t, "unreadable", queryIDs(t, s, args))
+	sameIDs(t, "again", queryIDs(t, s, args))
+
+	if store.readCount() != 3 {
+		t.Errorf("two queries read %d times, want each message once", store.readCount())
+	}
+}
+
+// TestEmailGetHasAttachmentRemembered: Email/get answers hasAttachment of
+// an old record from the locator, without the message.
+func TestEmailGetHasAttachmentRemembered(t *testing.T) {
+	s, store, pdf := legacyServer(t, 1000)
+
+	queryIDs(t, s, `{"accountId":"test","filter":{"hasAttachment":true}}`)
+
+	store.mu.Lock()
+	store.failRead = true
+	store.mu.Unlock()
+
+	if got := getEmail(t, s, pdf.GUID, `["hasAttachment"]`)[propHasAttachment]; got != true {
+		t.Errorf("hasAttachment is %v with the message unreadable, want true from the locator", got)
 	}
 }

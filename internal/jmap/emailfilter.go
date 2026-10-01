@@ -19,6 +19,10 @@ type cnode struct {
 	op       string
 	children []*cnode
 	preds    []func(*emailItem) bool
+	// attach is the hasAttachment a condition asks for, nil for none. It
+	// is not a predicate: for a message stored before the index record
+	// carried it the answer may not be known yet (see attachment.go).
+	attach *bool
 	// inMailbox and exact are what candidates() looks at on the top node:
 	// a mailbox the node is limited to, and the index hits of a text
 	// condition the index answers exactly.
@@ -27,37 +31,88 @@ type cnode struct {
 	hasExact  bool
 }
 
-// eval evaluates the node against one message.
-func (n *cnode) eval(it *emailItem) bool {
+// tri is the value of a filter node for a message whose hasAttachment
+// may not be known yet: Kleene's three-valued logic.
+type tri int8
+
+const (
+	triFalse tri = iota
+	triTrue
+	triUnknown
+)
+
+// attachOf answers hasAttachment of a message, and whether it is known.
+type attachOf func(*emailItem) (has, known bool)
+
+// eval evaluates the node against one message whose hasAttachment, if
+// the filter asks for it, is known.
+func (n *cnode) eval(it *emailItem, att attachOf) bool { return n.eval3(it, att) == triTrue }
+
+// eval3 evaluates the node against one message. A node is unknown only
+// when its value depends on a hasAttachment that is not known: a message
+// the other conditions decide never needs its attachments looked at.
+func (n *cnode) eval3(it *emailItem, att attachOf) tri {
 	if n == nil {
-		return true
+		return triTrue
 	}
 
 	if n.op != "" {
-		return n.evalOp(it)
+		return n.evalOp(it, att)
 	}
 
 	for _, p := range n.preds {
 		if !p(it) {
-			return false
+			return triFalse
 		}
 	}
 
-	return true
+	if n.attach == nil {
+		return triTrue
+	}
+
+	has, known := att(it)
+
+	switch {
+	case !known:
+		return triUnknown
+	case has == *n.attach:
+		return triTrue
+	}
+
+	return triFalse
 }
 
 // evalOp evaluates an operator node: AND needs every child, OR one, NOT
 // none.
-func (n *cnode) evalOp(it *emailItem) bool {
-	want := n.op != opAND // the child result that decides early
+func (n *cnode) evalOp(it *emailItem, att attachOf) tri {
+	want := triTrue // the child value that decides early
+	if n.op == opAND {
+		want = triFalse
+	}
+
+	unknown := false
 
 	for _, c := range n.children {
-		if c.eval(it) == want {
-			return n.op == opOR
+		switch c.eval3(it, att) {
+		case want:
+			if n.op == opOR {
+				return triTrue
+			}
+
+			return triFalse
+		case triUnknown:
+			unknown = true
 		}
 	}
 
-	return n.op != opOR
+	switch {
+	case unknown:
+		return triUnknown
+	case n.op == opOR:
+		return triFalse
+	}
+
+	return triTrue
 }
 
 // conjuncts are the condition nodes that must all hold for the node to
@@ -130,12 +185,9 @@ func (q *emailQuery) compile(f *emailFilter) (*cnode, *methodError) {
 	}
 
 	if f.HasAttachment != nil {
-		// Last among the conditions of the node, so that a message the
-		// others exclude never needs its attachments looked at.
 		want := *f.HasAttachment
+		n.attach = &want
 		q.needAttach = true
-
-		n.preds = append(n.preds, func(it *emailItem) bool { return q.hasAttachment(it) == want })
 	}
 
 	return n, nil

@@ -344,7 +344,9 @@ second protocol layer on top of `model.User`, not a second data store.
 * `Thread/get` and `Thread/changes` from the existing
   REFERENCES threading; `threadId` stable per conversation
   (persisted in the meta entry, not recomputed on every call).
-* `SearchSnippet/get` from the FTS index (match highlighting).
+* `SearchSnippet/get` with match highlighting: the words are found again
+  in the subject and the text body with the tokenizer and stemmers of the
+  full-text index, which says which messages match but not where.
 * `Identity/get` and `/set` (sender identities, pre-populated from LDAP via
   Nauthilus, additions persisted).
 * `EmailSubmission/get`, `/changes`, `/query`, `/set` with

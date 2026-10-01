@@ -1,155 +1,178 @@
 package jmap
 
 import (
-	"shardpost/internal/mimepart"
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+
+	"shardpost/internal/attcache"
+	"shardpost/internal/model"
 )
 
 // The hasAttachment condition of Email/query. Every message stored since
 // the index record carries the field (model.Meta.HasAttachment) is
 // answered from the record, computed at delivery, append, import or
 // Email/set by the same code Email/get renders the property with. A
-// record written before has none; for such a message the query reads and
-// parses the message once and remembers the answer in the locator
-// ("a:<guid>"), which is the derived index of the JMAP front-end anyway.
-// A message's content never changes under its GUID, so the answer never
-// goes stale. How many messages one query may read this way is bounded
-// (Limits.MaxAttachmentReads): a query over an account full of old
-// records answers serverUnavailable once the bound is reached, after it
-// has stored what it learned, so that the next attempt gets further.
+// record written before has none; for such a message the answer is
+// looked up in the locator (attcache, "a:<guid>"), or the message is read
+// once and the answer remembered there.
+//
+// The filter is evaluated in three-valued logic: first with what the
+// records say, so that only the messages whose match still depends on an
+// unknown hasAttachment are looked up, in batches, and read. How many
+// messages one query may read is bounded (Limits.MaxAttachmentReads); a
+// query that reaches the bound stores what it learned, starts a
+// background fill of the namespace (Server.backfill) and answers
+// serverUnavailable, so that a later attempt finds the answers.
 
-// locAttach is the locator key prefix of a remembered hasAttachment.
-const locAttach = "a:"
-
-// The values a remembered hasAttachment is written as.
-const (
-	attachYes = "1"
-	attachNo  = "0"
-)
-
-// attachState is what one query knows about hasAttachment beyond the
+// attachState is what one query learned about hasAttachment beyond the
 // index records.
 type attachState struct {
-	known map[string]bool // remembered in the locator, or read here
-	fresh map[string]bool // read here, to be remembered
+	known map[string]attcache.Value // remembered, or read here
+	fresh map[string]attcache.Value // read here, to be remembered
 	reads int
 	// exhausted is set when a message would have had to be read past
 	// the bound.
 	exhausted bool
 }
 
-// attachments reads the remembered hasAttachment of messages.
-func (l *locator) attachments(guids []string) (map[string]bool, error) {
-	out := map[string]bool{}
-	if len(guids) == 0 {
-		return out, nil
-	}
+// match filters the candidates, in their order.
+func (q *emailQuery) match(items []*emailItem) ([]*emailItem, *methodError) {
+	if !q.needAttach {
+		matched := make([]*emailItem, 0, len(items))
 
-	keys := make([]string, len(guids))
-	for i, g := range guids {
-		keys[i] = locAttach + g
-	}
-
-	vals, err := l.ix.IndexGet(locSpace, keys)
-	if err != nil {
-		return nil, err
-	}
-
-	for k, v := range vals {
-		out[k[len(locAttach):]] = string(v) == attachYes
-	}
-
-	return out, nil
-}
-
-// rememberAttachments writes the hasAttachment of messages that were
-// read. A key that is already there is left alone: it says the same.
-func (l *locator) rememberAttachments(vals map[string]bool) error {
-	if len(vals) == 0 {
-		return nil
-	}
-
-	keys := make([]string, 0, len(vals))
-	for g := range vals {
-		keys = append(keys, locAttach+g)
-	}
-
-	return l.ix.IndexApply(locSpace, keys, func(keys []string, cur map[string][]byte) (map[string][]byte, []string) {
-		set := map[string][]byte{}
-
-		for _, k := range keys {
-			if _, ok := cur[k]; ok {
-				continue
+		for _, it := range items {
+			if q.filter.eval(it, nil) {
+				matched = append(matched, it)
 			}
-
-			v := attachNo
-			if vals[k[len(locAttach):]] {
-				v = attachYes
-			}
-
-			set[k] = []byte(v)
 		}
 
-		return set, nil
-	})
+		return matched, nil
+	}
+
+	return q.matchAttach(items)
 }
 
-// prefetchAttachments reads what the locator remembers for the
-// candidates whose index record does not say.
-func (q *emailQuery) prefetchAttachments(items []*emailItem) error {
-	var unknown []string
+// matchAttach filters candidates with a hasAttachment condition: once
+// with what is known, then the undecided ones in batches.
+func (q *emailQuery) matchAttach(items []*emailItem) ([]*emailItem, *methodError) {
+	q.attach = &attachState{known: map[string]attcache.Value{}, fresh: map[string]attcache.Value{}}
 
-	for _, it := range items {
-		if it.meta.HasAttachment == nil {
-			unknown = append(unknown, it.guid)
+	verdict := make([]tri, len(items))
+
+	var pending []int
+
+	for i, it := range items {
+		if verdict[i] = q.filter.eval3(it, q.knownAttach); verdict[i] == triUnknown {
+			pending = append(pending, i)
 		}
 	}
 
-	known, err := q.loc.attachments(unknown)
+	for start := 0; start < len(pending) && !q.attach.exhausted; start += attcache.Batch {
+		batch := pending[start:min(start+attcache.Batch, len(pending))]
+		if err := q.resolveAttachments(items, batch); err != nil {
+			return nil, &methodError{Type: errServerFail, Description: err.Error()}
+		}
+
+		for _, i := range batch {
+			verdict[i] = q.filter.eval3(items[i], q.knownAttach)
+		}
+	}
+
+	if merr := q.finishAttachments(); merr != nil {
+		return nil, merr
+	}
+
+	matched := make([]*emailItem, 0, len(items))
+
+	for i, it := range items {
+		if verdict[i] == triTrue {
+			matched = append(matched, it)
+		}
+	}
+
+	return matched, nil
+}
+
+// knownAttach answers hasAttachment from the index record or from what
+// the query learned.
+func (q *emailQuery) knownAttach(it *emailItem) (has, known bool) {
+	if v := it.meta.HasAttachment; v != nil {
+		return *v, true
+	}
+
+	if v, ok := q.attach.known[it.guid]; ok {
+		return v.Has(), true
+	}
+
+	return false, false
+}
+
+// resolveAttachments looks one batch of undecided messages up in the
+// locator and reads the ones it does not know, up to the bound.
+func (q *emailQuery) resolveAttachments(items []*emailItem, batch []int) error {
+	ix, ok := q.sess.user.(model.Index)
+	if !ok {
+		return errNoIndex
+	}
+
+	guids := make([]string, 0, len(batch))
+	for _, i := range batch {
+		guids = append(guids, items[i].guid)
+	}
+
+	known, err := attcache.Lookup(ix, guids)
 	if err != nil {
 		return err
 	}
 
-	q.attach = &attachState{known: known, fresh: map[string]bool{}}
+	st := q.attach
+
+	for g, v := range known {
+		st.known[g] = v
+	}
+
+	for _, i := range batch {
+		it := items[i]
+		if _, ok := st.known[it.guid]; ok {
+			continue
+		}
+
+		if st.reads >= q.sess.limits.MaxAttachmentReads {
+			st.exhausted = true
+
+			return nil
+		}
+
+		st.known[it.guid] = q.readAttachment(it.meta)
+	}
 
 	return nil
 }
 
-// hasAttachment answers the hasAttachment of one candidate: from its
-// index record, from the locator, or by reading the message.
-func (q *emailQuery) hasAttachment(it *emailItem) bool {
-	if v := it.meta.HasAttachment; v != nil {
-		return *v
+// readAttachment reads one message for its hasAttachment. A message that
+// cannot be read counts as one without: Email/get has no body properties
+// for it either. It is not remembered in the locator, since the failure
+// may pass, but the server does not read it again for a while.
+func (q *emailQuery) readAttachment(m *model.Meta) attcache.Value {
+	srv := q.sess.srv
+	if srv != nil && srv.unreadable.recent(m.GUID) {
+		return attcache.No
 	}
 
-	st := q.attach
-	if st == nil {
-		st = &attachState{known: map[string]bool{}, fresh: map[string]bool{}}
-		q.attach = st
-	}
+	q.attach.reads++
 
-	if v, ok := st.known[it.guid]; ok {
-		return v
-	}
-
-	if st.reads >= q.sess.limits.MaxAttachmentReads {
-		st.exhausted = true
-
-		return false
-	}
-
-	st.reads++
-
-	raw, err := q.sess.user.Read(it.meta)
+	v, err := attcache.Compute(q.sess.user, m)
 	if err != nil {
-		// A message whose data cannot be read has no body properties in
-		// Email/get either; it is not a message with an attachment.
-		q.sess.log.Warn("jmap: message body unreadable", "guid", it.guid, "err", err)
+		if srv != nil {
+			srv.unreadable.note(q.sess.log, m.GUID, err)
+		}
 
-		return false
+		return attcache.No
 	}
 
-	v := mimepart.MessageHasAttachment(raw)
-	st.known[it.guid], st.fresh[it.guid] = v, v
+	q.attach.fresh[m.GUID] = v
 
 	return v
 }
@@ -157,19 +180,151 @@ func (q *emailQuery) hasAttachment(it *emailItem) bool {
 // finishAttachments remembers what the query read, and answers
 // serverUnavailable when it had to stop reading.
 func (q *emailQuery) finishAttachments() *methodError {
-	if q.attach == nil {
+	if ix, ok := q.sess.user.(model.Index); ok {
+		if err := attcache.Remember(ix, q.attach.fresh); err != nil {
+			// Only a cache: the next query reads the messages again.
+			q.sess.log.Warn("jmap: hasAttachment not remembered", "err", err)
+		}
+	}
+
+	if !q.attach.exhausted {
 		return nil
 	}
 
-	if err := q.loc.rememberAttachments(q.attach.fresh); err != nil {
-		// Only a cache: the next query reads the messages again.
-		q.sess.log.Warn("jmap: hasAttachment not remembered", "err", err)
+	if q.sess.srv != nil {
+		q.sess.srv.backfill(q.sess.current().owner)
 	}
 
-	if q.attach.exhausted {
-		return &methodError{Type: errServerUnavailable,
-			Description: "hasAttachment needs more messages read than one query may read; try again"}
+	return &methodError{Type: errServerUnavailable,
+		Description: "hasAttachment needs older messages read; they are being read now, try again shortly"}
+}
+
+// unreadableTTL is how long a message that could not be read is not read
+// again for hasAttachment; maxUnreadable bounds how many are kept.
+const (
+	unreadableTTL = 10 * time.Minute
+	maxUnreadable = 10000
+)
+
+// unreadableSet remembers, per process, the messages a query could not
+// read, so that every query does not read and log them again.
+type unreadableSet struct {
+	mu   sync.Mutex
+	seen map[string]time.Time // guid -> when it failed
+	once map[string]bool      // logged at warning level already
+}
+
+// recent reports whether the message failed within the TTL.
+func (u *unreadableSet) recent(guid string) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	at, ok := u.seen[guid]
+
+	return ok && time.Since(at) < unreadableTTL
+}
+
+// note records a failure; the first one of a message is a warning, the
+// ones after it are debug.
+func (u *unreadableSet) note(log *slog.Logger, guid string, err error) {
+	u.mu.Lock()
+
+	if u.seen == nil || len(u.seen) >= maxUnreadable {
+		u.seen, u.once = map[string]time.Time{}, map[string]bool{}
 	}
 
-	return nil
+	u.seen[guid] = time.Now()
+	first := !u.once[guid]
+	u.once[guid] = true
+
+	u.mu.Unlock()
+
+	if first {
+		log.Warn("jmap: message body unreadable", "guid", guid, "err", err)
+	} else {
+		log.Debug("jmap: message body still unreadable", "guid", guid, "err", err)
+	}
+}
+
+// backfill fills the remembered hasAttachment of a namespace in the
+// background: one fill per namespace at a time, at most
+// Limits.AttachmentBackfills at once in the process, each for at most
+// Limits.AttachmentBackfillTime, and all of them stopped when the server
+// shuts down. A namespace that finds no free slot is filled when a later
+// query asks again.
+func (s *Server) backfill(namespace string) {
+	if _, running := s.fills.LoadOrStore(namespace, struct{}{}); running {
+		return
+	}
+
+	select {
+	case s.fillSlots <- struct{}{}:
+	default:
+		s.fills.Delete(namespace)
+
+		return
+	}
+
+	s.fillWG.Add(1)
+
+	go func() {
+		defer s.fillWG.Done()
+		defer s.fills.Delete(namespace)
+		defer func() { <-s.fillSlots }()
+
+		s.runBackfill(namespace)
+	}()
+}
+
+// runBackfill is one background fill.
+func (s *Server) runBackfill(namespace string) {
+	ctx, cancel := context.WithTimeout(s.fillCtx, s.o.Limits.AttachmentBackfillTime)
+	defer cancel()
+
+	u, err := s.o.Store.User(namespace)
+	if err != nil {
+		s.o.Log.Warn("jmap: hasAttachment fill not started", "namespace", namespace, "err", err)
+
+		return
+	}
+	defer u.Close()
+
+	start := time.Now()
+	rep, err := attcache.Backfill(ctx, u, nil, nil)
+
+	s.o.Log.Info("jmap: hasAttachment filled", "namespace", namespace, "messages", rep.Messages,
+		"known", rep.Known, "computed", rep.Computed, "unreadable", rep.Unreadable, "failed", rep.Failed,
+		"duration_ms", time.Since(start).Milliseconds(), "err", err)
+}
+
+// attachmentsOf looks up the remembered hasAttachment of the messages of
+// an Email/get whose index record does not carry it, when the call asks
+// for the property.
+func attachmentsOf(sess *session, hits map[string]*found, props []string) map[string]attcache.Value {
+	ix, ok := sess.user.(model.Index)
+	if !ok || !containsString(props, propHasAttachment) {
+		return nil
+	}
+
+	var guids []string
+
+	for _, f := range hits {
+		if f.metas[0].HasAttachment == nil {
+			guids = append(guids, f.metas[0].GUID)
+		}
+	}
+
+	if len(guids) == 0 {
+		return nil
+	}
+
+	known, err := attcache.Lookup(ix, guids)
+	if err != nil {
+		// Only a cache: the messages are parsed instead.
+		sess.log.Warn("jmap: hasAttachment lookup failed", "err", err)
+
+		return nil
+	}
+
+	return known
 }

@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -114,7 +115,7 @@ func TestSearchSnippetRefuses(t *testing.T) {
 		{`{"accountId":"test","filter":{"unknown":"x"},"emailIds":[]}`, errUnsupportedFilter},
 		{`{"accountId":"test","filter":{"before":"yesterday"},"emailIds":[]}`, errUnsupportedFilter},
 		{`{"accountId":"test","filter":[],"emailIds":[]}`, errInvalidArguments},
-		{`{"accountId":"test","emailIds":[` + strings.TrimSuffix(strings.Repeat(`"x",`, 501), ",") + `]}`, errRequestTooLarge},
+		{`{"accountId":"test","emailIds":[` + manyIDs(501) + `]}`, errRequestTooLarge},
 		{`{"accountId":"other","emailIds":[]}`, errAccountNotFound},
 	} {
 		if got := mailError(t, s, "SearchSnippet/get", c.args); got != c.want {
@@ -159,5 +160,40 @@ func TestSearchSnippetBackReference(t *testing.T) {
 
 	if sn, _ := list[0].(map[string]any); sn["emailId"] != m.GUID || sn["subject"] != "<mark>invoice</mark>" {
 		t.Errorf("the snippet is %#v", sn)
+	}
+}
+
+// manyIDs is a list of n distinct ids, as JSON array elements.
+func manyIDs(n int) string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = `"M` + strconv.Itoa(i) + `"`
+	}
+
+	return strings.Join(ids, ",")
+}
+
+// TestSearchSnippetDedupes: an id given twice is one snippet, in the
+// place of its first mention, and many repeats of one id are not too
+// many.
+func TestSearchSnippetDedupes(t *testing.T) {
+	s, u := emailServer(t)
+
+	a := deliver(t, u, inboxName, "From: a@example.org\r\nSubject: alpha\r\n\r\nx\r\n")
+	b := deliver(t, u, inboxName, "From: a@example.org\r\nSubject: beta\r\n\r\nx\r\n")
+
+	res := mailCall(t, s, "SearchSnippet/get", `{"accountId":"test","filter":{"subject":"alpha"},"emailIds":["`+
+		b.GUID+`","`+a.GUID+`","`+b.GUID+`"`+strings.Repeat(`,"`+a.GUID+`"`, 600)+`]}`)
+
+	list, _ := res["list"].([]any)
+	if len(list) != 2 || list[0].(map[string]any)["emailId"] != b.GUID || list[1].(map[string]any)["emailId"] != a.GUID {
+		t.Errorf("the snippets are %#v", list)
+	}
+}
+
+// TestHTMLTextKeepsComparisons: a "<" that starts no tag is text.
+func TestHTMLTextKeepsComparisons(t *testing.T) {
+	if got := collapseSpace(htmlText("<p>if a < b and c<5 then</p>")); got != "if a < b and c<5 then" {
+		t.Errorf("htmlText gave %q", got)
 	}
 }

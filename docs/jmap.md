@@ -326,20 +326,38 @@ that is not marked inline), so a query by it and the property agree.
 A copy or a move keeps the record and with it the field.
 
 A message stored by an earlier version has a record without the field.
-No job rewrites those records: rewriting every index record of every
-account to add one bit is the kind of write a cluster should not do
-for a convenience. Instead such a message is read and parsed once, the
-first time a query asks, and the answer is remembered in the JMAP
-locator under `a:<guid>` — the locator is the derived index of the JMAP
-front-end anyway, a message's content never changes under its GUID, and
-a locator that is dropped only costs reading again. One query reads at
-most `jmap.max_attachment_reads` such messages (1000). A query that
-would need more answers `serverUnavailable` after it has remembered what
-it read, so that the next attempt gets further; on an account full of
-old mail the first few `hasAttachment` searches may need a retry. The
-condition is evaluated after the other conditions of its node, so a
-message the others exclude is never read for it. `Email/get` answers
-`hasAttachment` for such a message by parsing it, as it always did.
+Nothing rewrites those records: rewriting every index record of every
+account to add one bit is the kind of write a cluster should not do for
+a convenience. Instead such a message is read and parsed once, and the
+answer is remembered in the JMAP locator under `a:<guid>` — the locator
+is the derived index of the JMAP front-end anyway, a message's content
+never changes under its GUID, and a locator that is dropped only costs
+reading again. `Email/get` answers from there as well, and parses only
+a message nobody has asked about yet.
+
+The filter is evaluated in three-valued logic: first with what the
+records say, so that only the messages whose match still depends on an
+unknown `hasAttachment` — the ones the other conditions do not decide —
+are looked up in the locator, a thousand at a time, and read. One query
+reads at most `jmap.search.max_attachment_reads` such messages (1000). A query
+that would need more remembers what it read, starts a fill of the
+namespace in the background and answers `serverUnavailable`; once the
+fill is through, the query succeeds. A fill reads every old message of
+the namespace once; one runs per namespace at a time, at most
+`jmap.search.attachment_backfills` (2) at once in a process, each for at most
+`jmap.search.attachment_backfill_seconds` (600 s), and shutdown stops them.
+What a fill wrote stays when it is stopped, so the next one starts
+where it ended. The maintenance job `attachment_backfill` (see
+[Admin API](admin-api.md#maintenance-jobs-stage-8c)) does the same ahead
+of time, for an account whose users are about to search.
+
+A message that cannot be read counts as one without an attachment. The
+failure is not remembered in the locator, since it may pass (only a
+store that reports the data as gone, `model.ErrNoBlob`, has it
+remembered as unreadable; the RADOS store reports a read error), but the
+process does not read that message again for ten minutes and logs it
+once as a warning, then at debug level. A fill counts such messages as
+failed and tries them again the next time.
 
 ### Search snippets
 
@@ -360,14 +378,17 @@ matched by.
   part turned into text). Words under a `NOT` are not marked, and
   `from`, `to`, `cc`, `bcc` and `header` conditions mark nothing.
 - A property is null when none of its words matched; a filter without
-  text conditions gives null for both. Whether a message matches the
-  filter as a whole is not checked — RFC 8621 5 lets a server answer
-  null for one that does not, and does not require it — so a message
-  outside the filter's other conditions still gets its words marked.
+  text conditions gives null for both. This server does not check
+  whether a message matches the filter as a whole: a message outside the
+  filter's other conditions still gets its words marked. That is a choice
+  of this server, to keep a snippet from costing a second query.
 - The preview starts a few words before the first match and is cut at
-  a word boundary to at most 255 octets, marks included.
+  a word boundary to at most 255 octets, marks included. Each distinct
+  word of a call is matched once.
+- An id given more than once gets one snippet, in the place of its
+  first mention.
 - The body is read from the front of the message, at most
-  `jmap.snippet_read_bytes` (256 KiB) of it, where the text parts are. A
+  `jmap.search.snippet_read_bytes` (256 KiB) of it, where the text parts are. A
   match beyond that gives no preview.
 - `emailIds` is required and bounded by `maxObjectsInGet`
   (`requestTooLarge`); an id the account does not hold, or holds where
@@ -1745,14 +1766,17 @@ jmap:
   max_size_blob_set: 52428800    # Blob/upload; at most max_size_upload
   max_data_sources: 64           # per Blob/upload creation; at least 64
   max_size_blob_get: 10485760    # the blob data one Blob/get returns
-  snippet_read_bytes: 262144     # the front of a message SearchSnippet/get reads
-  max_attachment_reads: 1000     # old messages one Email/query reads for hasAttachment
   max_shared_accounts: 64        # owners the session lists; the public account is one more
   max_shared_mailboxes: 1000     # mailboxes one shared account examines
   max_session_pointers: 8000     # pointers the session examines in all; 0 = 8 × max_shared_mailboxes
   max_principal_lookups: 5       # exact address lookups per API request (Principal/*, shareWith)
   max_principals: 1000           # principals a user sees without a lookup
   principal_miss_per_minute: 30  # lookups that find nothing, per account and front-end
+  search:
+    snippet_read_bytes: 262144   # the front of a message SearchSnippet/get reads
+    max_attachment_reads: 1000   # old messages one Email/query reads for hasAttachment
+    attachment_backfills: 2      # background fills of hasAttachment at once
+    attachment_backfill_seconds: 600
   push:
     vapid_key_file: /secrets/jmap-vapid/vapid.pem
     vapid_subject: mailto:postmaster@example.org
@@ -1822,13 +1846,14 @@ authentication backend, and the relay learns the account from
 ## Limits of this stage
 
 - `SearchSnippet/get` reads the front of each message (at most
-  `jmap.snippet_read_bytes`) for its preview, and marks whole words;
+  `jmap.search.snippet_read_bytes`) for its preview, and marks whole words;
   it does not check that a message matches the filter (see
   [Search snippets](#search-snippets)).
 - A `header` condition without an indexable value reads the header of
   every candidate (see above), and a `hasAttachment` condition reads a
-  message stored by an earlier version once (see
-  [hasAttachment](#hasattachment)).
+  message stored by an earlier version once; past
+  `jmap.search.max_attachment_reads` the query answers `serverUnavailable` until
+  the background fill is through (see [hasAttachment](#hasattachment)).
 - `Email/queryChanges` answers for the default order only and ignores
   `upToId` (see above). Over a public folder it shares the limitation
   of the private `\Seen` marks below.

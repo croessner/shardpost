@@ -148,7 +148,7 @@ func (c *callTrace) end(merr *methodError) {
 // serverError reports whether a method error is the server's failure
 // rather than the client's.
 func serverError(t string) bool {
-	return t == errServerFail || t == errServerUnavailable || t == "serverPartialFail"
+	return t == errServerFail || t == errServerUnavailable || t == errServerPartialFail
 }
 
 // storeViews are the store views a method call can work on: the

@@ -8,6 +8,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-message/textproto"
 
+	"shardpost/internal/attcache"
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/model"
 )
@@ -75,6 +76,9 @@ type emailGetRequest struct {
 	FetchTextBodyValues bool      `json:"fetchTextBodyValues"`
 	FetchHTMLBodyValues bool      `json:"fetchHTMLBodyValues"`
 	FetchAllBodyValues  bool      `json:"fetchAllBodyValues"`
+	// attach is hasAttachment the locator remembers for messages whose
+	// index record does not carry it (see attachment.go).
+	attach map[string]attcache.Value
 }
 
 // emailGet implements Email/get (RFC 8621 4.2).
@@ -115,6 +119,8 @@ func emailGet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 	}
 
 	out := &getResponse{AccountID: sess.accountID(), State: state, List: []map[string]any{}, NotFound: []string{}}
+
+	req.attach = attachmentsOf(sess, hits, props)
 
 	for _, id := range *req.IDs {
 		f, ok := hits[id]

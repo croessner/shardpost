@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 
+	"shardpost/internal/attcache"
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/model"
 )
@@ -29,9 +30,9 @@ import (
 //	"e:<guid>"     emailRec: the placements of the message, its thread
 //	"t:<thread>"   threadRec: the messages of a conversation
 //	"a:<guid>"     hasAttachment of a message whose index record lacks it
-//	               (see attachment.go)
+//	               (internal/attcache)
 const (
-	locSpace     = "jmaploc"
+	locSpace     = attcache.Space
 	locWatermark = "h:seq"
 	locEmail     = "e:"
 	locThread    = "t:"
