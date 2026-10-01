@@ -3,7 +3,7 @@
 This document lists, protocol by protocol, what ShardPost implements:
 the standards it follows, the extensions it advertises, the commands
 and methods it answers, and where it deliberately or knowingly deviates.
-It describes **ShardPost 0.37.0** as of 2026-10-01 and was written from
+It describes **ShardPost 0.38.0** as of 2026-10-01 and was written from
 the code, not from earlier documentation.
 
 How to read the tables:
