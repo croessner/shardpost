@@ -887,6 +887,59 @@ func (u *User) SearchFields(fields []string, query string) (map[string]bool, err
 	return result, nil
 }
 
+// SearchCandidates returns a superset of the messages whose text in one
+// of fields contains query as a substring, or nil when the index cannot
+// narrow them, by the rules of the cephstore index (fts.SpanIndexed).
+func (u *User) SearchCandidates(fields []string, query string) (map[string]bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	var result map[string]bool
+
+	for _, sp := range fts.Spans(query) {
+		hits, ok := u.spanHits(fields, sp)
+		if !ok {
+			continue
+		}
+
+		if result == nil {
+			result = hits
+
+			continue
+		}
+
+		for g := range result {
+			if !hits[g] {
+				delete(result, g)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// spanHits returns the messages whose terms in fields can hold the
+// span; false when the index cannot tell.
+func (u *User) spanHits(fields []string, sp fts.Span) (map[string]bool, bool) {
+	hits := map[string]bool{}
+
+	for _, f := range fields {
+		if !fts.SpanIndexed(f, sp) {
+			return nil, false
+		}
+
+		for term, guids := range u.terms {
+			if fld, t, _ := strings.Cut(term, ":"); fld == f && fts.SpanTerm(sp, t) {
+				for g := range guids {
+					hits[g] = true
+				}
+			}
+		}
+	}
+
+	return hits, true
+}
+
 // SearchField is SearchFields for one field.
 func (u *User) SearchField(f, q string) (map[string]bool, error) {
 	return u.SearchFields([]string{f}, q)

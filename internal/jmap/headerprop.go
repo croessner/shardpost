@@ -11,6 +11,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-message/textproto"
 
+	"shardpost/internal/charset"
 	"shardpost/internal/mailmeta"
 )
 
@@ -197,15 +198,12 @@ func unfold(raw string) string {
 // wordDecoder decodes RFC 2047 encoded words in any charset Go knows.
 var wordDecoder = mailmeta.WordDecoder
 
-// textForm is the Text form: unfolded, encoded words decoded, trimmed.
+// textForm is the Text form: unfolded, decoded to UTF-8 as the
+// full-text index decodes a header value (encoded words in any charset
+// of the WHATWG list, raw 8-bit text in fts.fallback_charset), trimmed.
+// The header filter matches against it.
 func textForm(raw string) string {
-	v := unfold(raw)
-
-	if dec, err := wordDecoder.DecodeHeader(v); err == nil {
-		v = dec
-	}
-
-	return strings.TrimSpace(v)
+	return strings.TrimSpace(charset.DecodeHeader(unfold(raw)))
 }
 
 // addressesForm is the Addresses form: the address list, groups

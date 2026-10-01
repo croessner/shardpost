@@ -71,6 +71,11 @@ type Options struct {
 	ServerID     map[string]string
 	// QuotaSelfService lets users change their own quota limits (SETQUOTA).
 	QuotaSelfService bool
+	// WordSearch lets the full-text index answer SUBJECT, BODY, TEXT and
+	// HEADER Subject alone, by its word semantics, instead of only
+	// narrowing the candidates of the substring matching RFC 9051
+	// specifies (fts.imap_search: word).
+	WordSearch bool
 	// Limits (0 = unlimited).
 	MaxConnsPerIP   int
 	MaxConnsPerUser int

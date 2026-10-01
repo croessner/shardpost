@@ -298,6 +298,7 @@ var defaults = []struct {
 	{"trace.recheck_seconds", 60},
 	{"fts.fallback_charset", charset.DefaultFallback},
 	{"fts.html", "text"},
+	{"fts.imap_search", "substring"},
 	{"quota.over_flag.enabled", false},
 	{"quota.over_flag.attribute", ""},
 	{"quota.over_flag.over_value", "TRUE"},

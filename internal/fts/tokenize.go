@@ -95,10 +95,10 @@ func Tokenize(text string) []string {
 }
 
 // Terms extracts all index terms of a raw message: every token and its
-// stems, qualified by field. Header values are decoded to UTF-8 by
-// charset.DecodeHeader (encoded words in any charset of the WHATWG
-// list, raw 8-bit text in the fallback charset); the body text is what
-// BodyText returns.
+// stems, qualified by field, and the LongWord marker of every field
+// with a word too long to be a term. Header values are taken as
+// HeaderValue returns them, every value of a field; the body text is
+// what BodyText returns.
 func Terms(raw []byte) []Term {
 	set := map[Term]struct{}{}
 	add := func(field, text string) {
@@ -106,6 +106,10 @@ func Terms(raw []byte) []Term {
 			for _, t := range Expand(tok) {
 				set[field+":"+t] = struct{}{}
 			}
+		}
+
+		if hasLongWord(text) {
+			set[field+":"+LongWord] = struct{}{}
 		}
 	}
 
@@ -115,14 +119,16 @@ func Terms(raw []byte) []Term {
 			{"Subject", FieldSubject}, {"From", FieldFrom}, {"Sender", FieldFrom}, {"Reply-To", FieldFrom},
 			{"To", FieldTo}, {"Cc", FieldTo}, {"Bcc", FieldTo},
 		} {
-			if v := hdr.Get(kv.key); v != "" {
-				add(kv.field, charset.DecodeHeader(v))
+			for _, v := range hdr.Values(kv.key) {
+				add(kv.field, HeaderValue(v))
 			}
 		}
 
+		// names and values: IMAP TEXT matches the header as a whole
 		fields := hdr.Fields()
 		for fields.Next() {
-			add(FieldHeader, charset.DecodeHeader(fields.Value()))
+			add(FieldHeader, fields.Key())
+			add(FieldHeader, HeaderValue(fields.Value()))
 		}
 	}
 
@@ -136,4 +142,16 @@ func Terms(raw []byte) []Term {
 	sort.Strings(out)
 
 	return out
+}
+
+// unfoldHeader removes the line breaks of a folded header value
+// (RFC 5322 2.2.3); the white space after them stays.
+var unfoldHeader = strings.NewReplacer("\r\n", "", "\r", "", "\n", "")
+
+// HeaderValue is a header field value as the index and the direct
+// matching of IMAP SEARCH see it: unfolded and decoded to UTF-8 by
+// charset.DecodeHeader (encoded words in any charset of the WHATWG
+// list, raw 8-bit text in the fallback charset).
+func HeaderValue(v string) string {
+	return charset.DecodeHeader(unfoldHeader.Replace(v))
 }

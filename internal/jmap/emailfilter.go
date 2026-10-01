@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"strings"
 
-	"shardpost/internal/charset"
 	"shardpost/internal/fts"
 	"shardpost/internal/model"
 )
@@ -285,8 +284,8 @@ type textCond struct {
 }
 
 // compileText compiles the text conditions against the full-text index.
-// The index answers text, subject and body exactly enough — word
-// semantics, as IMAP SEARCH has them here. From, To, Cc and Bcc share
+// The index answers text, subject and body alone, by word (RFC 8621
+// leaves the matching to the server). From, To, Cc and Bcc share
 // index fields, so for them the index only narrows the candidates and
 // the address itself is checked.
 func (q *emailQuery) compileText(f *emailFilter, n *cnode) *methodError {
@@ -442,8 +441,8 @@ func (q *emailQuery) headerHas(m *model.Meta, name, value string) bool {
 	}
 
 	for _, v := range h.Values(name) {
-		// decoded as the index decodes it, raw 8-bit text included
-		if value == "" || strings.Contains(strings.ToLower(strings.TrimSpace(charset.DecodeHeader(unfold(v)))), value) {
+		// textForm decodes as the index does, raw 8-bit text included
+		if value == "" || strings.Contains(strings.ToLower(textForm(v)), value) {
 			return true
 		}
 	}

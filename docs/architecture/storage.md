@@ -211,15 +211,16 @@ that contains the token is listed under each of its trigrams, so one
 complete range, filtered for the token, is the whole answer. A shorter
 token is looked up as a prefix in the posting shards.
 
-The field `h` (every header value) has posting lists but no dictionary
-keys. Most of its vocabulary occurs once — message IDs, timestamps,
-queue IDs — and a substring index over it would grow with the number of
-messages rather than with their words. A token searched in `h` (IMAP
-`TEXT` and `HEADER <other name>`, the JMAP `header` filter, the admin
-`text` search) matches a header word exactly, by its stem or as a
-prefix (a prefix lookup reads at most 64 terms per posting shard), and as a substring where the word is in the subject or an
-address (`s`, `f`, `t`), which have dictionary keys. Subject, addresses
-and body match by substring as before.
+The field `h` (every header name and value) has posting lists but no
+dictionary keys. Most of its vocabulary occurs once — message IDs,
+timestamps, queue IDs — and a substring index over it would grow with
+the number of messages rather than with their words. In a word search
+(the JMAP `header` filter, the admin `text` search, IMAP with
+`fts.imap_search: word`) a token searched in `h` matches a header word
+exactly, by its stem or as a prefix (a prefix lookup reads every
+matching term, 64 per round trip and shard), and as a substring where
+the word is in the subject or an address (`s`, `f`, `t`), which have
+dictionary keys. Subject, addresses and body match by substring.
 
 Up to 0.34.6 the dictionary was `ftsd/<nn>` (as many shards as `fts/`)
 with one key per trigram and the newline-separated list of its terms as
@@ -233,27 +234,40 @@ lists and deleted the old objects; `fts_rebuild` does the same from the
 messages. A server older than 0.35.0 does not read `ftst/`: after a
 downgrade, substring search needs an `fts_rebuild`.
 
-What is indexed is UTF-8 text. Header values are decoded from RFC 2047
-encoded words in any charset of the WHATWG list; every `text/*` body
-part is converted from its charset parameter (a `text/html` part
-without one by its `<meta charset>`), and text without a usable label
-that is not valid UTF-8 — unlabelled or US-ASCII-labelled 8-bit text,
-raw 8-bit header values — is read in `fts.fallback_charset`
-(Windows-1252 by default). A `text/html` part is reduced to its
-visible text (`fts.html`, see [configuration](../configuration.md#full-text-index-fts)).
-The body text stays bounded to 4 MiB per message. One function
-([body.go](../../internal/fts/body.go)) prepares the body text for the
-index, for IMAP `SEARCH` keys matched against the message and for the
-cached preview, so they agree. A message is indexed once, when it is
-stored: messages indexed by a version without this conversion, or
-before a change of either key, are found by their new text only after
-an `fts_rebuild`.
+What is indexed is UTF-8 text, prepared by the `fts` package
+([body.go](../../internal/fts/body.go), `HeaderValue`) for the index, for IMAP
+`SEARCH` keys checked against the message and for the cached preview,
+so they agree: header names and values (unfolded, RFC 2047 words in any
+charset of the WHATWG list, raw 8-bit text in `fts.fallback_charset`),
+every `text/*` part converted from its charset (`text/html` reduced to
+its visible text, `fts.html`), the file names of all parts and the
+header and text of attached messages, at most 4 MiB of text per
+message. A field with a word longer than 40 characters, which has no
+term, gets the marker term `<field>:~~` instead. Details are in the
+[configuration](../configuration.md#full-text-index-fts). A message is
+indexed once, when it is stored: messages indexed by an earlier version
+or before a change of `fts.fallback_charset` or `fts.html` are found by
+their new text only after an `fts_rebuild`.
 
-Not every SEARCH combination can be answered completely from this
-index. The protocol layer can read message data on demand; the
-historical claim "no mail is read for a search" is too sweeping.
-See [search.go](../../internal/imapproto/search.go) and the
-[tokenizer](../../internal/fts/tokenize.go).
+IMAP `SEARCH` matches substrings (RFC 9051 6.4.4). The index cannot
+answer that alone — stems, words in any order and the missing
+dictionary of `h` make it find too much or too little — so by default
+(`fts.imap_search: substring`) it only supplies candidates and every
+candidate is checked against the message. The candidates must include
+every message that contains the value. Each word of the value is looked
+up by how it can occur ([query.go](../../internal/fts/query.go)): a word
+between two separators of the value as that term, the last word as the
+start of a term (a key scan of the posting shards), the first word —
+which may be the end of a longer word — through the dictionary; the
+last two add the messages with the `~~` marker. A word that cannot be
+looked up completely (the first word in `h` or of two letters, a
+lookup that would list more than 4096 terms, an account still on the
+dictionary layout before 0.35.0) narrows nothing; when no word narrows,
+every message of the mailbox is read. With `fts.imap_search: word` the
+index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, as
+earlier versions did. JMAP and the admin `text` search always use the
+index alone. See [search.go](../../internal/imapproto/search.go) and
+`SearchCandidates` in [fts.go](../../internal/cephstore/fts.go).
 
 ## Repair and its limits
 

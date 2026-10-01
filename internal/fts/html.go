@@ -50,6 +50,10 @@ func markupAt(s string, i int) bool {
 // breaks a line.
 func skipMarkup(s string, i int) (int, bool) {
 	switch {
+	case strings.HasPrefix(s[i:], "<!-->"): // an empty comment, closed
+		return i + len("<!-->"), false
+	case strings.HasPrefix(s[i:], "<!--->"):
+		return i + len("<!--->"), false
 	case strings.HasPrefix(s[i:], "<!--"):
 		return skipPast(s, i+4, "-->"), false
 	case s[i+1] == '!' || s[i+1] == '?':
@@ -62,7 +66,9 @@ func skipMarkup(s string, i int) (int, bool) {
 	name, closing := tagName(s[i+1 : end])
 	next := min(end+1, len(s))
 
-	if !closing && rawTextElements[name] && !strings.HasSuffix(strings.TrimSpace(s[:end]), "/") {
+	// A "/" before ">" does not close script or style (HTML ignores it
+	// on those elements): their content ends only at the end tag.
+	if !closing && rawTextElements[name] {
 		next = skipRawText(s, next, name)
 	}
 
@@ -124,7 +130,8 @@ func tagName(t string) (string, bool) {
 
 // skipRawText returns the index after the end tag of a raw text element
 // (script, style, …) whose content starts at i, compared without regard
-// to case; len(s) if it is not closed.
+// to case; len(s) if it is not closed. The name has to end there:
+// "</scripts>" does not end a script.
 func skipRawText(s string, i int, name string) int {
 	end := "</" + name
 
@@ -135,14 +142,20 @@ func skipRawText(s string, i int, name string) int {
 		}
 
 		i += j
-		if len(s)-i >= len(end) && strings.EqualFold(s[i:i+len(end)], end) {
-			return min(len(s), tagEnd(s, i+len(end))+1)
+		if k := i + len(end); k <= len(s) && strings.EqualFold(s[i:k], end) && (k == len(s) || endsTagName(s[k])) {
+			return min(len(s), tagEnd(s, k)+1)
 		}
 
 		i++
 	}
 
 	return len(s)
+}
+
+// endsTagName reports whether c ends a tag name: white space, "/" or
+// ">".
+func endsTagName(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '/' || c == '>'
 }
 
 // rawTextElements are the elements whose content is not text a reader

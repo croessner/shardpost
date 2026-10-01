@@ -95,7 +95,7 @@ func Extract(raw []byte) (*imap.Envelope, []string, string) {
 		}
 	}
 
-	return env, refs, Preview(fts.BodyText(raw))
+	return env, refs, Preview(fts.ReadableText(raw))
 }
 
 // MessageIDs extracts the <...> tokens of a References/In-Reply-To value,

@@ -3,6 +3,7 @@ package fts
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // Messages in the charsets and forms German mail arrives in.
@@ -118,6 +119,12 @@ func TestHTMLText(t *testing.T) {
 		{"open <b unclosed", "open "},
 		{"<style>never closed", ""},
 		{"<p class=\"x\">&eacute;t&#233;</p>", "\nété\n"},
+		{"<script/>hidden</script>vis", "vis"},
+		{"<style />p{}</style>vis", "vis"},
+		{"a<!-->b<!--->c<!-- x -->d", "abcd"},
+		{"<script>x</scripts>hidden</script >vis", "vis"},
+		{"<script>x</script\n>vis", "vis"},
+		{"<script>x</script/>vis", "vis"},
 	}
 
 	for _, c := range cases {
@@ -128,10 +135,143 @@ func TestHTMLText(t *testing.T) {
 }
 
 func TestBodyTextBounded(t *testing.T) {
+	// Latin-1 doubles in UTF-8: the text is cut, not the input read whole
 	raw := "Subject: big\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\n" + strings.Repeat("\xe4", MaxBodyBytes)
 
 	got := BodyText([]byte(raw))
-	if len(got) > MaxBodyBytes+1 || !strings.HasPrefix(got, "ääää") {
+	if len(got) > MaxBodyBytes+1 || !strings.HasPrefix(got, "ääää") || !utf8.ValidString(got) {
 		t.Errorf("body text of %d bytes", len(got))
+	}
+
+	// two parts: the second gets only the room the first left
+	half := strings.Repeat("a", MaxBodyBytes/2+10)
+
+	raw ="Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\n" + half + "\r\n--b\r\n\r\n" + half + "\r\n--b--\r\n"
+	if got := BodyText([]byte(raw)); len(got) > MaxBodyBytes+1 {
+		t.Errorf("two parts: %d bytes", len(got))
+	}
+
+	// a message go-message cannot parse: bounded after conversion
+	raw = "a header line without a colon\r\n\r\n" + strings.Repeat("\xe4", MaxBodyBytes)
+	if got := BodyText([]byte(raw)); len(got) > MaxBodyBytes || !utf8.ValidString(got) {
+		t.Errorf("unparsable: %d bytes", len(got))
+	}
+}
+
+func TestMetaCharset(t *testing.T) {
+	for _, label := range []string{"", "; charset=us-ascii", "; charset=x-unknown"} {
+		for _, meta := range []string{
+			`<meta charset="iso-8859-1">`,
+			`<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">`,
+		} {
+			raw := "Content-Type: text/html" + label + "\r\n\r\n<html><head>" + meta + "</head><p>K\xe4se</p></html>"
+			if got := BodyText([]byte(raw)); !strings.Contains(got, "Käse") {
+				t.Errorf("label %q, %s: %q", label, meta, got)
+			}
+		}
+	}
+
+	// a declared charset wins over the meta element
+	raw := "Content-Type: text/html; charset=iso-8859-15\r\n\r\n<meta charset=\"koi8-r\"><p>\xa4</p>"
+	if got := BodyText([]byte(raw)); !strings.Contains(got, "€") {
+		t.Errorf("declared charset: %q", got)
+	}
+}
+
+func TestUTF16AndMislabelledUTF8(t *testing.T) {
+	utf16 := "Content-Type: text/plain; charset=utf-16le\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		"RwByAPwA3wBlAA==\r\n" // "Grüße" in UTF-16LE
+	if got := BodyText([]byte(utf16)); !strings.Contains(got, "Grüße") {
+		t.Errorf("utf-16le: %q", got)
+	}
+
+	mislabelled := "Content-Type: text/plain; charset=iso-8859-1\r\n\r\nGrüße\r\n"
+	if got := BodyText([]byte(mislabelled)); !strings.Contains(got, "Grüße") {
+		t.Errorf("UTF-8 labelled Latin-1: %q", got)
+	}
+}
+
+func TestAttachmentNamesAndMessages(t *testing.T) {
+	raw := "Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n" +
+		"--b\r\nContent-Type: application/pdf; name=\"=?utf-8?q?Angebot_K=C3=B6ln.pdf?=\"\r\n" +
+		"Content-Disposition: attachment;\r\n filename*0*=iso-8859-1''Rechnung%20M%E4rz;\r\n filename*1=\".pdf\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n" +
+		"--b\r\nContent-Type: message/rfc822\r\n\r\n" +
+		"From: Inner <inner@example.org>\r\nSubject: =?iso-8859-1?q?Gr=FC=DFe?=\r\n\r\nquarterly numbers\r\n" +
+		"--b--\r\n"
+
+	got := BodyText([]byte(raw))
+	for _, want := range []string{"see attached", "Angebot Köln.pdf", "Rechnung März.pdf", "Subject: Grüße", "inner@example.org", "quarterly numbers"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+
+	if strings.Contains(got, "JVBER") {
+		t.Errorf("attachment content in %q", got)
+	}
+
+	if r := ReadableText([]byte(raw)); r != "see attached " {
+		t.Errorf("readable text %q", r)
+	}
+}
+
+func TestMediaParams(t *testing.T) {
+	cases := []struct {
+		in, typ, key, want string
+	}{
+		{`Text/HTML; Charset="UTF-8"`, "text/html", "charset", "UTF-8"},
+		{`attachment; filename="a;b \"c\".txt"`, "attachment", "filename", `a;b "c".txt`},
+		{`attachment; filename*=utf-8'de'%C3%A4.txt`, "attachment", "filename", "ä.txt"},
+		{`attachment; filename*1="b.txt"; filename*0="a"`, "attachment", "filename", "ab.txt"},
+		{"attachment; filename=M\xfcller.txt", "attachment", "filename", "Müller.txt"},
+		{`text/plain; charset=utf-8; charset=utf-8; broken`, "text/plain", "charset", "utf-8"},
+	}
+
+	for _, c := range cases {
+		typ, params := mediaParams(c.in)
+		if typ != c.typ || params[c.key] != c.want {
+			t.Errorf("%q: %q %q", c.in, typ, params[c.key])
+		}
+	}
+}
+
+func TestSpans(t *testing.T) {
+	got := Spans(`eautiful "head" foo-ba x`)
+	want := []Span{{"eautiful", MatchInfix}, {"head", MatchWord}, {"foo", MatchWord}, {"ba", MatchWord}}
+
+	if len(got) != len(want) {
+		t.Fatalf("spans %v", got)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("span %d: %v, want %v", i, got[i], want[i])
+		}
+	}
+
+	if got := Spans("Hello wor"); len(got) != 2 || got[1] != (Span{"wor", MatchPrefix}) {
+		t.Errorf("last word: %v", got)
+	}
+
+	if got := Spans("x"); got != nil {
+		t.Errorf("one letter: %v", got)
+	}
+}
+
+func TestLongWordMarker(t *testing.T) {
+	terms := termSet("Subject: s\r\n\r\nshort " + strings.Repeat("a", maxToken+1) + "\r\n")
+	if !terms["b:"+LongWord] || terms["s:"+LongWord] {
+		t.Errorf("terms %v", terms)
+	}
+}
+
+func TestHeaderNamesAndValues(t *testing.T) {
+	terms := termSet("X-Extra: one\r\nX-Extra: two\r\nSubject: first\r\nSubject: second\r\n\r\nb\r\n")
+	for _, w := range []string{"h:extra", "h:one", "h:two", "s:first", "s:second"} {
+		if !terms[w] {
+			t.Errorf("missing %s", w)
+		}
 	}
 }

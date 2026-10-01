@@ -236,6 +236,10 @@ type User interface {
 
 	SearchField(field, query string) (map[string]bool, error)
 	SearchFields(fields []string, query string) (map[string]bool, error)
+	// SearchCandidates returns a superset of the messages whose text in
+	// one of the fields contains query as a case-insensitive substring,
+	// or nil when the index cannot narrow them; see fts.Spans.
+	SearchCandidates(fields []string, query string) (map[string]bool, error)
 
 	QuotaUsage() (Quota, error)
 	QuotaLimit() (Quota, error)

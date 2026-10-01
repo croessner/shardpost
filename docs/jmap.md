@@ -252,7 +252,7 @@ The conditions:
 | `before`, `after`, `minSize`, `maxSize` | The index record (`receivedAt`, `size`) |
 | `hasKeyword`, `notKeyword` | The keywords across the copies |
 | `allInThreadHaveKeyword`, `someInThreadHaveKeyword`, `noneInThreadHaveKeyword` | The keywords of every message of the thread, through the locator, once per thread and query |
-| `text`, `subject`, `body` | The full-text index, with the word semantics IMAP `SEARCH` has here; body text converted to UTF-8 and HTML reduced to its visible text (see [configuration](configuration.md#full-text-index-fts)) |
+| `text`, `subject`, `body` | The full-text index alone, by word: every word of the value, in any order, as a word, its stem or part of a word (IMAP `SEARCH` matches substrings instead, unless `fts.imap_search: word`); body text converted to UTF-8 and HTML reduced to its visible text (see [configuration](configuration.md#full-text-index-fts)) |
 | `from`, `to`, `cc`, `bcc` | The full-text index narrows by the words of the value (`to`, `cc` and `bcc` share an index field); the envelope decides: every word has to occur, without regard to case, in `name <address>` of one address |
 | `header` | The full-text index narrows a value; the header block of each candidate decides, its values decoded as the index decodes them (encoded words, raw 8-bit text in `fts.fallback_charset`). A name alone, or a value without an indexable word, reads the header of every candidate |
 | `hasAttachment` | Refused with `unsupportedFilter`: it would mean parsing every candidate |

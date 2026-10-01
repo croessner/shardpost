@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/htmlindex"
 )
 
@@ -79,12 +80,35 @@ func isUTF8(label string) bool {
 	return label == utf8Name || label == "utf8" || label == "unicode-1-1-utf-8"
 }
 
+func normalize(label string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(label), `"'`))
+}
+
+// Declared reports whether a charset label names a charset that is
+// known and says more than ASCII: not empty, not US-ASCII, not unknown.
+// An HTML part whose label is not declared is read in the charset its
+// <meta> element names, if it names one.
+func Declared(label string) bool {
+	label = normalize(label)
+	if unlabelled(label) {
+		return false
+	}
+
+	_, err := htmlindex.Get(label)
+
+	return err == nil
+}
+
 // ToUTF8 converts text in the named charset to UTF-8. Text without a
 // charset (or labelled US-ASCII) that is not valid UTF-8 is read in the
 // fallback charset; so is text in a charset that is not known. Invalid
-// sequences in text labelled UTF-8 become U+FFFD.
+// sequences in text labelled UTF-8 become U+FFFD. Text labelled with a
+// single-byte charset (ISO-8859-x, Windows-125x, KOI8, …) that is valid
+// UTF-8 with at least one multi-byte sequence is kept as UTF-8: it is
+// UTF-8 under a wrong label far more often than it is the rare byte
+// sequence of a single-byte charset that happens to form valid UTF-8.
 func ToUTF8(b []byte, label string) string {
-	label = strings.ToLower(strings.Trim(strings.TrimSpace(label), `"'`))
+	label = normalize(label)
 
 	switch {
 	case isUTF8(label):
@@ -102,12 +126,28 @@ func ToUTF8(b []byte, label string) string {
 		return decodeFallback(b)
 	}
 
+	if _, single := enc.(*charmap.Charmap); single && multiByteUTF8(b) {
+		return string(b)
+	}
+
 	out, err := enc.NewDecoder().Bytes(b)
 	if err != nil {
 		return strings.ToValidUTF8(string(b), string(utf8.RuneError))
 	}
 
 	return string(out)
+}
+
+// multiByteUTF8 reports whether b is valid UTF-8 with at least one
+// character outside ASCII.
+func multiByteUTF8(b []byte) bool {
+	for _, c := range b {
+		if c >= utf8.RuneSelf {
+			return utf8.Valid(b)
+		}
+	}
+
+	return false
 }
 
 // decodeFallback returns valid UTF-8 as it is and reads anything else in

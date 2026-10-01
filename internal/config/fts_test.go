@@ -31,3 +31,19 @@ func TestFTSDefaultsAndChecks(t *testing.T) {
 		}
 	}
 }
+
+func TestFTSIMAPSearch(t *testing.T) {
+	c, err := Load(configFile(t, "fts:\n  imap_search: word\n"))
+	if err != nil || !c.FTS.IMAPWordSearch() {
+		t.Fatalf("word: %+v, %v", c, err)
+	}
+
+	c, err = Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil || c.FTS.IMAPWordSearch() || c.FTS.IMAPSearch != "substring" {
+		t.Fatalf("default: %+v, %v", c, err)
+	}
+
+	if _, err := Load(configFile(t, "fts:\n  imap_search: exact\n")); err == nil {
+		t.Error("accepted an unknown search mode")
+	}
+}

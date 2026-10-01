@@ -773,6 +773,158 @@ func (u *User) SearchFields(fields []string, query string) (hits map[string]bool
 	return result, nil
 }
 
+// SearchCandidates returns a superset of the messages whose text in one
+// of fields contains query as a substring (IMAP SEARCH semantics), or
+// nil when the index cannot narrow them. Every word of the query that
+// the index can look up completely narrows the set (fts.Spans): a whole
+// word by its term, a word's start by a bounded key scan, an inner part
+// through the substring dictionary, each with the messages that have a
+// word too long for a term. A word it cannot look up completely — an
+// inner part of a word in a field without the dictionary or of fewer
+// than three characters, a scan that reaches its bound, a dictionary
+// answer that reaches maxCandidates, an account still on the dictionary
+// layout before 0.35.0 — leaves the set as it is. The caller checks
+// every candidate against the message.
+func (u *User) SearchCandidates(fields []string, query string) (hits map[string]bool, err error) {
+	end := u.trace(spanFTSSearch, attribute.StringSlice("store.fields", fields))
+	defer func() { end(err) }()
+
+	var result map[string]bool
+
+	for _, sp := range fts.Spans(query) {
+		terms, ok, err := u.spanTerms(fields, sp)
+		if err != nil {
+			return nil, err
+		}
+
+		if !ok {
+			continue
+		}
+
+		hits, err := u.postingsUnion(terms)
+		if err != nil {
+			return nil, err
+		}
+
+		if result == nil {
+			result = hits
+		} else {
+			for g := range result {
+				if !hits[g] {
+					delete(result, g)
+				}
+			}
+		}
+
+		if len(result) == 0 {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// spanTerms returns every term of fields that can hold the span; false
+// when the index cannot list them all.
+func (u *User) spanTerms(fields []string, sp fts.Span) ([]string, bool, error) {
+	var terms []string
+
+	for _, f := range fields {
+		if !fts.SpanIndexed(f, sp) {
+			return nil, false, nil
+		}
+
+		if sp.Match == fts.MatchWord {
+			terms = append(terms, f+":"+sp.Token)
+
+			continue
+		}
+
+		var (
+			found    []string
+			complete bool
+			err      error
+		)
+
+		if tris := fts.Trigrams(sp.Token); fts.Substring(f) && len(tris) > 0 {
+			legacy, lerr := u.hasLegacyDict()
+			if lerr != nil || legacy {
+				return nil, false, lerr
+			}
+
+			found, complete, err = u.dictMatches(f, sp.Token, tris)
+		} else {
+			found, complete, err = u.prefixKeys(f + ":" + sp.Token)
+		}
+
+		if err != nil || !complete {
+			return nil, false, err
+		}
+
+		for _, t := range found {
+			if _, tok, _ := strings.Cut(t, ":"); fts.SpanTerm(sp, tok) {
+				terms = append(terms, t)
+			}
+		}
+
+		terms = append(terms, f+":"+fts.LongWord)
+	}
+
+	return terms, true, nil
+}
+
+// prefixKeys lists the terms that start with prefix across the posting
+// shards, keys only, at most maxCandidates of them, and whether they
+// are all of them.
+func (u *User) prefixKeys(prefix string) ([]string, bool, error) {
+	var (
+		mu       sync.Mutex
+		out      []string
+		complete = true
+	)
+
+	shards := map[string][]string{}
+	for i := 0; i < u.ftsShards; i++ {
+		shards[fmt.Sprintf("%s%02d", ftsPrefix, i)] = nil
+	}
+
+	err := parallel(shards, func(oid string, _ []string) error {
+		var (
+			after string
+			found []string
+		)
+
+		for more := true; more; {
+			var err error
+
+			more, err = listOmapKeys(u.idx, oid, after, prefix, omapPageSize, func(key string) {
+				after = key
+				found = append(found, key)
+			})
+			if err != nil {
+				return err
+			}
+
+			if more && len(found) >= maxCandidates {
+				mu.Lock()
+				complete = false
+				mu.Unlock()
+
+				break
+			}
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		out = append(out, found...)
+
+		return nil
+	})
+
+	return out, complete && len(out) <= maxCandidates, err
+}
+
 // candidateTerms returns the index terms of field that a query token
 // matches: exact, stemmed, and substring via the trigram dictionary.
 func (u *User) candidateTerms(field, tok string) ([]string, error) {
@@ -813,7 +965,7 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 
 // substringTerms adds the terms of field that contain tok to set.
 func (u *User) substringTerms(set map[string]struct{}, field, tok string, tris []string) error {
-	terms, err := u.dictMatches(field, tok, tris)
+	terms, _, err := u.dictMatches(field, tok, tris)
 	if err != nil {
 		return err
 	}
@@ -862,7 +1014,7 @@ func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
 }
 
 // dictMatches returns the terms of field that contain tok, at most about
-// maxCandidates of them.
+// maxCandidates of them, and whether they are all of them.
 //
 // Every such term is listed under each trigram of tok, so the key range
 // of any one trigram, read to its end and filtered, is the whole answer.
@@ -871,7 +1023,7 @@ func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
 // most the shortest range times the number of trigrams. That is one
 // round for a token with any trigram that is not among the most common
 // ones.
-func (u *User) dictMatches(field, tok string, tris []string) ([]string, error) {
+func (u *User) dictMatches(field, tok string, tris []string) ([]string, bool, error) {
 	scans := make([]*dictScan, len(tris))
 	for i, tri := range tris {
 		scans[i] = newDictScan(tri, field)
@@ -896,12 +1048,12 @@ func (u *User) dictMatches(field, tok string, tris []string) ([]string, error) {
 
 		for _, err := range errs {
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
 		if s := finishedScan(scans); s != nil {
-			return s.found, nil
+			return s.found, s.done, nil
 		}
 	}
 }
@@ -961,16 +1113,15 @@ const (
 	legacyDictAbsent
 )
 
-// legacyDictMatches adds the terms of field that contain tok and are
-// listed in the old dictionary layout to set. An account without the
-// old objects has none.
-func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tris []string) error {
-	// Looked up once per view: a converted account must not pay sixteen
-	// reads of objects that are gone for every token of every query.
+// hasLegacyDict reports whether the account still has objects of the
+// old dictionary layout. It is looked up once per view: a converted
+// account must not pay sixteen reads of objects that are gone for every
+// token of every query.
+func (u *User) hasLegacyDict() (bool, error) {
 	if u.legacyDict == legacyDictUnknown {
 		n, err := u.LegacyFTSDict()
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		u.legacyDict = legacyDictAbsent
@@ -979,8 +1130,16 @@ func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tri
 		}
 	}
 
-	if u.legacyDict == legacyDictAbsent {
-		return nil
+	return u.legacyDict == legacyDictPresent, nil
+}
+
+// legacyDictMatches adds the terms of field that contain tok and are
+// listed in the old dictionary layout to set. An account without the
+// old objects has none.
+func (u *User) legacyDictMatches(set map[string]struct{}, field, tok string, tris []string) error {
+	legacy, err := u.hasLegacyDict()
+	if err != nil || !legacy {
+		return err
 	}
 
 	inter, capped, err := u.legacyDictIntersect(tris)

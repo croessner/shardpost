@@ -18,7 +18,16 @@ type FTS struct {
 	// HTML is what is made of a text/html part: "text" indexes its
 	// visible text, "raw" the markup as it is, "skip" leaves it out.
 	HTML string `mapstructure:"html" validate:"oneof=text raw skip"`
+	// IMAPSearch is how IMAP SEARCH matches text: "substring" as RFC 9051
+	// specifies, the index narrowing the candidates and each candidate
+	// checked against the message; "word" lets the index answer SUBJECT,
+	// BODY, TEXT and HEADER Subject alone, by word, stem and in-word
+	// substring, without reading messages.
+	IMAPSearch string `mapstructure:"imap_search" validate:"oneof=substring word"`
 }
+
+// IMAPWordSearch reports whether IMAP SEARCH uses word semantics.
+func (f FTS) IMAPWordSearch() bool { return f.IMAPSearch == "word" }
 
 // Validate refuses a fallback charset that is unknown or cannot read
 // 8-bit text.

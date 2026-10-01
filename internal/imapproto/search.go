@@ -14,7 +14,6 @@ import (
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/htmlindex"
 
-	"shardpost/internal/charset"
 	"shardpost/internal/fts"
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/membudget"
@@ -718,8 +717,14 @@ func (c *conn) runSearch(cr *criteria) ([]int, []model.Meta, error) {
 	return seqs, metas, nil
 }
 
-// ftsCandidates resolves the top-level text criteria against the index and
-// removes them from cr. It returns nil when there are none.
+// ftsCandidates resolves the top-level text criteria against the index.
+// By default the index only narrows the candidates: it returns a
+// superset of the messages that contain the value as a substring (see
+// model.User.SearchCandidates), and every criterion stays in cr to be
+// checked against each candidate. With Options.WordSearch the index
+// answers SUBJECT, BODY, TEXT and HEADER Subject alone, by its word
+// semantics, and those criteria are removed from cr. It returns nil
+// when nothing narrows the candidates.
 func (c *conn) ftsCandidates(cr *criteria) (map[string]bool, error) {
 	var (
 		result map[string]bool
@@ -732,16 +737,20 @@ func (c *conn) ftsCandidates(cr *criteria) (map[string]bool, error) {
 			continue
 		}
 
-		hits, err := c.mu.SearchFields(t.fields, t.value)
+		var (
+			hits map[string]bool
+			err  error
+		)
+
+		if c.s.o.WordSearch && indexAnswers(t) {
+			hits, err = c.mu.SearchFields(t.fields, t.value)
+		} else {
+			hits, err = c.mu.SearchCandidates(t.fields, t.value)
+			rest = append(rest, t)
+		}
+
 		if err != nil {
 			return nil, err
-		}
-		// The index answers SUBJECT, FROM, BODY and TEXT exactly enough
-		// (token semantics, documented). HEADER <other> shares the "all
-		// headers" field and TO/CC/BCC share one field: for those the
-		// index only prunes candidates and the header line is verified.
-		if t.key != "" && headerFields(t.key)[0] == fts.FieldHeader || t.fields[0] == fts.FieldTo || t.fields[0] == fts.FieldFrom {
-			rest = append(rest, t)
 		}
 
 		if hits == nil {
@@ -763,6 +772,16 @@ func (c *conn) ftsCandidates(cr *criteria) (map[string]bool, error) {
 	cr.text = rest
 
 	return result, nil
+}
+
+// indexAnswers reports whether the index answers a criterion by itself
+// in word search: SUBJECT, BODY, TEXT and HEADER Subject. HEADER <other>
+// shares the "all headers" field, and FROM and TO/CC/BCC share fields:
+// for those the index only narrows the candidates.
+func indexAnswers(t textCrit) bool {
+	otherHeader := t.key != "" && headerFields(t.key)[0] == fts.FieldHeader
+
+	return !otherHeader && t.fields[0] != fts.FieldTo && t.fields[0] != fts.FieldFrom
 }
 
 // headerFieldContains checks the header lines that belong to an fts field
@@ -979,14 +998,6 @@ func (c *conn) textMatchErr(m *model.Meta, crits []textCrit) (bool, error) {
 
 	tm := &textMessage{m: m, raw: raw}
 
-	hdrEnd := bytes.Index(raw, []byte("\r\n\r\n"))
-	if hdrEnd < 0 {
-		hdrEnd = len(raw)
-	}
-	// unfold: continuation lines belong to the preceding field
-	tm.hdr = strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(string(raw[:hdrEnd])), "\r\n ", " "), "\r\n\t", " ") +
-		decodedHeader(raw)
-
 	for _, t := range crits {
 		if !tm.matches(t) {
 			return false, nil
@@ -996,12 +1007,12 @@ func (c *conn) textMatchErr(m *model.Meta, crits []textCrit) (bool, error) {
 	return true, nil
 }
 
-// decodedHeader returns the header fields of a raw message once more as
-// lower-cased "name: value" lines, each value decoded to UTF-8 the way
-// the full-text index decodes it (encoded words, raw 8-bit text in the
-// fallback charset), each line preceded by CRLF. Matching against these
-// lines as well as the raw ones lets a search find a decoded word that
-// the index finds, and still what the header literally says.
+// decodedHeader returns the header fields of a raw message as
+// lower-cased "name: value" lines, each preceded by CRLF, with the value
+// as the full-text index takes it (fts.HeaderValue: unfolded, encoded
+// words decoded, raw 8-bit text in the fallback charset). Searches match
+// against these lines only, not the raw header, so that what the index
+// can find and what is checked here are the same text.
 func decodedHeader(raw []byte) string {
 	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
 	if err != nil {
@@ -1012,27 +1023,37 @@ func decodedHeader(raw []byte) string {
 
 	fields := hdr.Fields()
 	for fields.Next() {
-		v := unbreak.Replace(charset.DecodeHeader(fields.Value()))
-
 		b.WriteString("\r\n")
 		b.WriteString(strings.ToLower(fields.Key()))
 		b.WriteString(": ")
-		b.WriteString(strings.ToLower(v))
+		b.WriteString(strings.ToLower(unbreak.Replace(fts.HeaderValue(fields.Value()))))
 	}
 
 	return b.String()
 }
 
-// unbreak turns the line breaks of a folded header value into spaces.
+// unbreak turns line breaks that decoding put into a value into spaces,
+// so that a value stays on its line.
 var unbreak = strings.NewReplacer("\r", " ", "\n", " ")
 
-// textMessage is a message prepared for brute-force text matching.
+// textMessage is a message prepared for brute-force text matching. Its
+// header and body text are computed on first use.
 type textMessage struct {
-	m    *model.Meta
-	raw  []byte
-	hdr  string // the lower-cased, unfolded header, then its decoded lines
-	body string // lower-cased body text, computed on first use
-	read bool   // body is set
+	m       *model.Meta
+	raw     []byte
+	hdr     string // decodedHeader
+	body    string // lower-cased fts.BodyText
+	hdrRead bool
+	read    bool
+}
+
+// header returns the decoded header lines.
+func (tm *textMessage) header() string {
+	if !tm.hdrRead {
+		tm.hdr, tm.hdrRead = decodedHeader(tm.raw), true
+	}
+
+	return tm.hdr
 }
 
 // bodyText returns the lower-cased body text as the index sees it.
@@ -1053,8 +1074,8 @@ func (tm *textMessage) matches(t textCrit) bool {
 		key := strings.ToLower(t.key) + ":"
 		found := false
 
-		for _, line := range strings.Split(tm.hdr, "\r\n") {
-			if strings.HasPrefix(line, key) && strings.Contains(line, v) {
+		for _, line := range strings.Split(tm.header(), "\r\n") {
+			if strings.HasPrefix(line, key) && strings.Contains(line[len(key):], v) {
 				found = true
 				break
 			}
@@ -1062,12 +1083,12 @@ func (tm *textMessage) matches(t textCrit) bool {
 
 		return found || envAddrContains(tm.m, strings.ToLower(t.key), v)
 	case len(t.fields) == 2: // TEXT: the header and the body text
-		return strings.Contains(tm.hdr, v) || strings.Contains(tm.bodyText(), v)
+		return strings.Contains(tm.header(), v) || strings.Contains(tm.bodyText(), v)
 	case t.fields[0] == fts.FieldBody:
 		return strings.Contains(tm.bodyText(), v)
 	}
 
-	return headerFieldContains(tm.hdr, t.fields[0], v) || envAddrContains(tm.m, t.fields[0], v)
+	return headerFieldContains(tm.header(), t.fields[0], v) || envAddrContains(tm.m, t.fields[0], v)
 }
 
 // envAddrContains matches an address search key against the parsed
