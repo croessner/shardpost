@@ -81,14 +81,15 @@ meanwhile keeps it).
 A namespace without registry is deleted only when the account directory
 says the account is being purged
 .RB ( purging ,
-a purge that stopped after the registry went) or a purge recorded it
+a purge that stopped after the registry went), or a purge recorded it
 (the index
 .B ix.purged
 in
-.BR ~accounts ;
-a repairing sweep removes, when it ends, the records of the purges older
-than its start). Any other one is reported and left alone: a lost
-registry
+.BR ~accounts )
+and the directory holds no entry for it; an active entry always wins. A
+repairing sweep removes, when it ends, the records of the namespaces it
+cleaned completely; registering the name again removes the record too.
+Any other one is reported and left alone: a lost registry
 .RB ( registry_missing ),
 an account that only kept Sieve scripts before 0.42.0 or the leftovers
 of a purge whose directory entry is gone

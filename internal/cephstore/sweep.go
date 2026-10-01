@@ -156,6 +156,9 @@ type sweepState struct {
 	After  string      `json:"after"`
 	// LastNS is the pool and namespace pass 2 counted last.
 	LastNS string      `json:"last_ns,omitempty"`
+	// Unclean are the purged namespaces the run could not clean
+	// completely (young objects, failures); their records stay.
+	Unclean map[string]bool `json:"unclean,omitempty"`
 	Report SweepReport `json:"report"`
 }
 
@@ -217,7 +220,7 @@ func (s *Store) Sweep(ctx context.Context, o SweepOptions) (*SweepReport, error)
 	// purges newer than the run's start (less its grace) stay for the
 	// next one.
 	if sw.o.Repair {
-		n, err := s.forgetPurged(sw.st.Report.Started.Add(-sw.o.Grace))
+		n, err := s.forgetPurged(sw.st.Report.Started.Add(-sw.o.Grace), sw.st.Unclean)
 		if err != nil {
 			sw.st.Report.fail(err)
 		}
@@ -617,6 +620,9 @@ type sweepNamespace struct {
 	u     *User
 	skip  bool          // left alone (import lock, error)
 	keep  bool          // reported only (no registry, not being purged)
+	// purgedNS: cleaned as a purged account's namespace (ix.purged); its
+	// record is forgotten at the end unless something was left.
+	purgedNS bool
 	named *namedObjects // nil: no registry, everything is a remnant
 	index map[string]bool
 	live  map[string]bool // public folders, read on demand
@@ -643,6 +649,7 @@ func (sw *sweeper) openNamespace(name, pool string) *sweepNamespace {
 		rep.fail(fmt.Errorf("namespace %q: %w", name, err))
 
 		ns.skip = true
+		ns.unclean()
 
 		return ns
 	}
@@ -653,6 +660,7 @@ func (sw *sweeper) openNamespace(name, pool string) *sweepNamespace {
 		rep.fail(fmt.Errorf("namespace %q: %w", name, err))
 
 		ns.skip = true
+		ns.unclean()
 	}
 
 	return ns
@@ -678,8 +686,12 @@ func (ns *sweepNamespace) load() error {
 			return err
 		}
 
+		// An active entry always wins: a lost registry is no debris,
+		// whatever an earlier purge of the name recorded.
 		switch {
-		case ok && state == model.AccountPurging, purged:
+		case ok && state == model.AccountPurging:
+		case !ok && purged:
+			ns.purgedNS = true
 		case ok:
 			rep.RegistryMissing++
 			rep.sample("registry missing: " + ns.name)
@@ -699,6 +711,7 @@ func (ns *sweepNamespace) load() error {
 		rep.ImportLocked++
 
 		ns.skip = true
+		ns.unclean()
 
 		return err
 	}
@@ -836,6 +849,17 @@ func (ns *sweepNamespace) close() {
 	}
 }
 
+// unclean records that the namespace was not cleaned completely: a
+// record of its purge must stay for the next run.
+func (ns *sweepNamespace) unclean() {
+	st := ns.sw.st
+	if st.Unclean == nil {
+		st.Unclean = map[string]bool{}
+	}
+
+	st.Unclean[ns.name] = true
+}
+
 // class names the remnant class of an object.
 func (ns *sweepNamespace) class(oid string) string {
 	switch {
@@ -867,9 +891,14 @@ func (ns *sweepNamespace) blobRemnant(guid string, chunks int) {
 	switch {
 	case err != nil && errCode(err) != syscall.ENOENT:
 		rep.fail(fmt.Errorf("%s: stat %s: %w", ns.name, guid, err))
+		ns.unclean()
+
 		return
 	case err == nil && st.ModTime.After(ns.cutoff()):
 		rep.Young++
+
+		ns.unclean()
+
 		return
 	case !ns.sw.o.Repair || ns.keep:
 		return
@@ -886,10 +915,13 @@ func (ns *sweepNamespace) blobRemnant(guid string, chunks int) {
 	gone, cerr := u.collectBlob(guid, size, chunks, size > 0 && ns.named != nil, ns.cutoff())
 	if cerr != nil {
 		rep.fail(cerr)
+		ns.unclean()
 	}
 
 	if gone {
 		rep.Removed++
+	} else {
+		ns.unclean()
 	}
 }
 
@@ -913,9 +945,14 @@ func (ns *sweepNamespace) objectRemnant(oid string) {
 		return
 	case err != nil:
 		rep.fail(fmt.Errorf("%s: stat %s: %w", ns.name, oid, err))
+		ns.unclean()
+
 		return
 	case st.ModTime.After(ns.cutoff()):
 		rep.Young++
+
+		ns.unclean()
+
 		return
 	case !ns.sw.o.Repair || ns.keep:
 		return
@@ -923,6 +960,8 @@ func (ns *sweepNamespace) objectRemnant(oid string) {
 
 	if err := ioctx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
 		rep.fail(fmt.Errorf("%s: delete %s: %w", ns.name, oid, err))
+		ns.unclean()
+
 		return
 	}
 

@@ -115,6 +115,18 @@ func TestSweepCleansAfterPurge(t *testing.T) {
 		t.Fatal("the purge found the legacy blob after all; the test proves nothing")
 	}
 
+	// The purge job's last phase removes the directory entry.
+	ix, release, err := s.AccountIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ix.Remove(u.name); err != nil {
+		t.Fatal(err)
+	}
+
+	release()
+
 	if purged, err := s.purged(u.name); err != nil || !purged {
 		t.Fatalf("not recorded as purged: %v", err)
 	}

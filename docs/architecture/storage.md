@@ -318,8 +318,12 @@ neither a registry nor a directory entry. So that the sweep can tell such
 a namespace from an account that only kept Sieve scripts before 0.42.0,
 every purge first records the account in the hint index `ix.purged`
 (`~accounts`); the sweep deletes what is left in a recorded namespace
-without registry, and a repairing sweep removes, when it ends, the
-records of purges older than its start less its grace period.
+without registry and without an active directory entry (an active entry
+always wins: a lost registry is no debris), and a repairing sweep
+removes, when it ends, the records of the namespaces it cleaned
+completely whose purge is older than its start less its grace period.
+An account registered again under the name, or set active again by a
+directory repair, loses its record at once.
 
 ## The sweep
 
@@ -344,7 +348,8 @@ runs as a one-off, not as a routine.
   (at least ten minutes) is deleted (a blob through its reference count,
   under the version of its chunk 0). A namespace without registry is
   deleted only when the account directory says the account is being
-  purged or the purge recorded it in `ix.purged`; any other one (a lost registry, an account that only kept
+  purged, or the purge recorded it in `ix.purged` and the directory holds
+  no entry for it; any other one (a lost registry, an account that only kept
   Sieve scripts before 0.42.0, the leftovers of a purge whose directory
   entry is gone) is reported (`registry_missing`, `unregistered`, class
   `namespace`) and left alone. An account whose data model cannot be

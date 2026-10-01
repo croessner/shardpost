@@ -20,10 +20,10 @@ import (
 //	  "ix.purged/head|<nn>"   "<account>" -> {"at": unix seconds}
 //
 // The sweep deletes the objects of a namespace without registry that is
-// recorded here, and when it ends it removes the records older than its
-// start minus its grace period: whatever such a namespace held, it has
-// looked at it. An account created again under the name has a registry
-// and is swept like any other.
+// recorded here and has no active directory entry, and when it ends it
+// removes the records of the namespaces it cleaned completely (older than
+// its start minus its grace period). An account registered again under
+// the name, or activated again by a directory repair, loses its record.
 
 // purgedRecord is the value of an entry.
 type purgedRecord struct {
@@ -55,6 +55,23 @@ func (u *User) markPurged() error {
 	return nil
 }
 
+var _ model.PurgedForgetter = (*Store)(nil)
+
+// ForgetPurged implements model.PurgedForgetter.
+func (s *Store) ForgetPurged(account string) error {
+	if !model.InDirectory(account) {
+		return nil
+	}
+
+	ix, release, err := s.PurgedIndex()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	return ix.Remove(account)
+}
+
 // purged reports whether the account is recorded as purged.
 func (s *Store) purged(account string) (bool, error) {
 	if !model.InDirectory(account) {
@@ -77,8 +94,9 @@ func (s *Store) purged(account string) (bool, error) {
 	return true, nil
 }
 
-// forgetPurged removes the records older than before and returns how many.
-func (s *Store) forgetPurged(before time.Time) (int, error) {
+// forgetPurged removes the records older than before, except those of
+// unclean, and returns how many.
+func (s *Store) forgetPurged(before time.Time, unclean map[string]bool) (int, error) {
 	ix, release, err := s.PurgedIndex()
 	if err != nil {
 		return 0, err
@@ -95,7 +113,7 @@ func (s *Store) forgetPurged(before time.Time) (int, error) {
 
 		for _, e := range entries {
 			var r purgedRecord
-			if json.Unmarshal(e.Value, &r) == nil && r.At >= before.Unix() {
+			if (json.Unmarshal(e.Value, &r) == nil && r.At >= before.Unix()) || unclean[e.ID] {
 				continue
 			}
 

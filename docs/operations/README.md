@@ -436,13 +436,15 @@ from its checkpoint when it is run again. `imapceph_rados_listings_total{site="s
 counts its listings. It needs `mon 'allow r'` (it reads each pool's
 `pg_num`), which the server's CephClient has. A namespace without
 registry is deleted only when the account directory says it is being
-purged or a purge of 0.42.0 or later recorded it (`ix.purged`); any
-other one is reported and left alone: `registry_missing` (the directory
+purged, or a purge of 0.42.0 or later recorded it (`ix.purged`) and the
+directory holds no entry (an active entry always wins); any other one is reported and left alone: `registry_missing` (the directory
 holds it as active: a lost registry), `unregistered` (no directory
 entry: an account that only kept Sieve scripts before 0.42.0, or what a
 purge of an older version left; remove the latter by hand once
-checked). A repairing sweep forgets, when it ends, the purges it cleaned
-after (`purged_forgotten`). See the
+checked). A repairing sweep forgets, when it ends, the purges whose namespace it
+cleaned completely (`purged_forgotten`); one with objects younger than
+the grace period keeps its record for the next run. Registering the
+name again removes the record as well. See the
 [manual page](../man/man1/shardpost-scrub.1).
 
 **The purge without listing.** `purge.listing` (default `true`) keeps the

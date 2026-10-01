@@ -395,6 +395,13 @@ func (u *User) registerAccount(session string) error {
 		return fmt.Errorf("account directory: %w", err)
 	}
 
+	if err == nil {
+		// An account created again is no purged one any more.
+		if ferr := u.store.ForgetPurged(u.name); ferr != nil {
+			u.log.Warn("purged account record not removed", "err", ferr)
+		}
+	}
+
 	return err
 }
 

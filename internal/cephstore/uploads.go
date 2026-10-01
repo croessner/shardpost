@@ -93,10 +93,10 @@ func (u *User) PutBlob(raw []byte) (string, error) {
 		return "", err
 	}
 
+	// writeBlob removes what it created when it fails; only the intent
+	// is left to go.
 	if _, err := u.writeBlob(guid, raw); err != nil {
-		if u.deleteBlobAll(guid, in.Chunks) {
-			_ = rmKeys(u.idx, oidRegistry, []string{uploadKey(guid)})
-		}
+		_ = rmKeys(u.idx, oidRegistry, []string{uploadKey(guid)})
 
 		return "", err
 	}

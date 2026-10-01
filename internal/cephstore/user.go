@@ -620,9 +620,12 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 	}
 
 	if final == nil {
-		// No shard 0 and no header read before: nothing is left to
-		// release or delete.
-		u.dropTombstone(mb, name)
+		// No shard 0 and no header read before. Higher shards that are
+		// left keep the tombstone, which names them for the scrubber
+		// (it probes above the range); otherwise nothing is left.
+		if u.lastShard(mb.ID, nil) == 0 {
+			u.dropTombstone(mb, name)
+		}
 
 		return u.releaseUsage(mb, Quota{})
 	}

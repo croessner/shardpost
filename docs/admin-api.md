@@ -956,7 +956,10 @@ imapsync cannot do this, because IMAP APPEND always assigns new UIDs.
   `internal_date`, `save_date`, `guid`, `pop3_uidl`). UIDs ascending. A
   UID whose message has the same size is skipped (resumption), one with a
   different size is a conflict. Quota is counted, not enforced. The same
-  source GUID in several mailboxes shares one blob.
+  source GUID in several mailboxes shares one blob: the import takes an
+  existing blob of that GUID when its size matches, without comparing the
+  content (a source GUID names one message); a blob of another size gets
+  a fresh GUID of its own.
 - **Deltas:** `POST .../changes` sets flags with the source MODSEQ and
   removes UIDs the source no longer has. `GET .../messages` returns the
   inventory page by page (`after`, `limit`).

@@ -816,7 +816,10 @@ func (u *User) prepareOne(m *model.ImportMessage, guids []string) (preparedImpor
 }
 
 // importBlob stores the blob of m: a source GUID (guids[0]) whose blob
-// already exists with the same size is shared (one more reference),
+// already exists with the same size is shared (one more reference); the
+// content is not compared, so two messages that a source stored under
+// one GUID with the same size share the blob of the first (a source
+// GUID names one message, and a repeated step must find its own blob),
 // otherwise a new blob is written under it or, where that cannot be, the
 // next of guids (the step's intent announced them all). The caller
 // indexes the blob in both cases.
