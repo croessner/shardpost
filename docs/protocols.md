@@ -207,8 +207,8 @@ during the search is no match; if a message cannot be read for another
 reason, the command fails with `NO [SERVERBUG]` instead of returning a
 partial result. A search whose client closes the connection stops
 checking messages, and the session ends without an answer. With
-`fts.imap_search: word` (default `substring`) the index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by
-word (all words in any order, stem, part of a word), without reading
+`fts.imap_search: word` (default `substring`) the index answers
+`SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by word (all words in any order, stem, part of a word), without reading
 messages. An account whose index lacks the version marker (indexed
 before this release, or a rebuild that has not completed) does not use
 the index and checks every message until `fts_rebuild` has run.
