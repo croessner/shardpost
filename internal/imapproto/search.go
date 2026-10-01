@@ -145,7 +145,7 @@ func (c *conn) parseSearchSet(cr *criteria, key, up string) error {
 		}
 
 		if set.searchRes {
-			cr.uidSets = append(cr.uidSets, fromUIDs(c.searchRes))
+			cr.uidSets = append(cr.uidSets, c.concrete(set))
 		} else {
 			cr.seqSets = append(cr.seqSets, set)
 		}
@@ -210,7 +210,7 @@ var searchKeys = map[string]searchKeyParser{
 	"SMALLER":    numKey(func(cr *criteria, n int64) { cr.smaller = n }),
 	"YOUNGER":    numKey(func(cr *criteria, n int64) { cr.younger = n }),
 	"OLDER":      numKey(func(cr *criteria, n int64) { cr.older = n }),
-	kwUID: func(_ *conn, r *reader, cr *criteria, _ string) error {
+	kwUID: func(c *conn, r *reader, cr *criteria, _ string) error {
 		s, err := r.atom()
 		if err != nil {
 			return err
@@ -221,7 +221,7 @@ var searchKeys = map[string]searchKeyParser{
 			return err
 		}
 
-		cr.uidSets = append(cr.uidSets, set)
+		cr.uidSets = append(cr.uidSets, c.concrete(set))
 
 		return nil
 	},

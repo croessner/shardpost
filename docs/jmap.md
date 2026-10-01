@@ -117,9 +117,10 @@ by the creation id of another creation in the same call, in whatever
 order the JSON object is read; the ids they receive go back in
 `createdIds`.
 
-**Sorting** compares bytes, and the session advertises `i;octet` alone
-rather than the collations this server does not actually apply. A
-comparator that asks for another one is `unsupportedSort`.
+**Sorting** by `name` uses `i;ascii-casemap` unless a comparator asks
+for `i;octet`; the session advertises these two, the collations this
+server actually applies. A comparator that asks for another one is
+`unsupportedSort`.
 
 **`Mailbox/queryChanges`** answers `cannotCalculateChanges`, and
 `Mailbox/query` says so up front with `canCalculateChanges: false`: the
@@ -1166,6 +1167,14 @@ server destroy a submission at any time after it was sent.
 answer to the message — its queue id included — as `smtpReply`; DSNs
 are not evaluated, so it never becomes `yes` or `no`, and `dsnBlobIds`
 and `mdnBlobIds` stay empty.
+
+`EmailSubmission/query` filters by `identityIds`, `emailIds`,
+`threadIds`, `undoStatus`, `before` and `after` (on `sendAt`), with the
+operators `AND`, `OR` and `NOT`, and sorts by `emailId`, `threadId` and
+`sentAt`. Any other property, an unknown operator or a date that is not
+a `UTCDate` is `unsupportedFilter`, a property of the wrong type
+`invalidArguments`, and another sort property or collation
+`unsupportedSort`: a condition left out would widen the result.
 
 ## Quotas
 

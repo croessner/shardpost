@@ -126,6 +126,8 @@ func (c *conn) reportVanished(set *numSet, since uint64) {
 
 	var in []uint32
 
+	set = c.concrete(set)
+
 	for _, u := range vanished {
 		if set.contains(u, c.lastUID()) {
 			in = append(in, u)

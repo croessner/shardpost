@@ -64,6 +64,16 @@ func fromUIDs(uids []uint32) *numSet {
 	return set
 }
 
+// concrete replaces the "$" marker by the saved SEARCH result (UIDs,
+// RFC 5182); any other set is returned as it is.
+func (c *conn) concrete(set *numSet) *numSet {
+	if set.searchRes {
+		return fromUIDs(c.searchRes)
+	}
+
+	return set
+}
+
 // contains reports whether n is in the set, with maxN standing in for "*".
 func (s *numSet) contains(n, maxN uint32) bool {
 	for _, r := range s.ranges {

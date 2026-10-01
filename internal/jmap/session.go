@@ -136,8 +136,8 @@ func (s *Server) core() *coreCapability {
 		MaxCallsInRequest:     l.MaxCallsInRequest,
 		MaxObjectsInGet:       l.MaxObjectsInGet,
 		MaxObjectsInSet:       l.MaxObjectsInSet,
-		// Only the one the sorts actually use: comparing the bytes.
-		// Advertising more would be a promise this server does not keep.
+		// The collations the sorts actually apply (collate); advertising
+		// more would be a promise this server does not keep.
 		CollationAlgorithms: []string{collationCasemap, collationOctet},
 	}
 }
@@ -183,9 +183,9 @@ func collate(collation, s string) string {
 	return string(b)
 }
 
-// mail is the mail capability of this server. The sort options of
-// Email/query are empty because there is no Email/query yet: a client
-// reads the list and asks for nothing this server cannot do.
+// mail is the mail capability of this server. The sort options are the
+// ones Email/query applies, so a client reads the list and asks for
+// nothing this server cannot do.
 func (s *Server) mail() *mailCapability {
 	return &mailCapability{
 		// No limit. An IMAP COPY keeps the GUID of the message, which

@@ -2450,8 +2450,14 @@ func (c *conn) readReplaceMessage(tag string, t token) (raw string, ok bool, err
 			return "", false, fmt.Errorf("%w: CATENATE needs a list", errSyntax)
 		}
 
-		if raw, _, err = c.catenate(lt.list); err != nil {
-			c.no(tag, "BADURL", err.Error())
+		var code string
+		if raw, code, err = c.catenate(lt.list); err != nil {
+			if code == "" { // a syntax error, answered BAD like APPEND's
+				return "", false, err
+			}
+
+			c.no(tag, code, err.Error())
+
 			return "", false, nil
 		}
 

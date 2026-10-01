@@ -23,6 +23,10 @@ import (
 
 const notifyMaxMailboxes = 64
 
+// notifyBadEvent is the response code for an event this server does not
+// report; it lists the ones it does (RFC 5465 5).
+const notifyBadEvent = "BADEVENT (MessageNew MessageExpunge FlagChange)"
+
 type notifyState struct {
 	selected      bool // SELECTED or SELECTED-DELAYED group present
 	selectedNone  bool
@@ -183,7 +187,7 @@ func (c *conn) checkNotifyGroup(tag string, g notifyGroup) bool {
 		switch ev {
 		case kwMessageNew, "MESSAGEEXPUNGE", "FLAGCHANGE":
 		case "MAILBOXNAME", "SUBSCRIPTIONCHANGE", "ANNOTATIONCHANGE":
-			c.no(tag, "BADEVENT", "Event "+ev+" is not supported")
+			c.no(tag, notifyBadEvent, "Event "+ev+" is not supported")
 			return false
 		default:
 			c.bad(tag, "Unknown event "+ev)

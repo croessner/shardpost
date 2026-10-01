@@ -33,7 +33,7 @@ func TestNotify(t *testing.T) {
 	a.ok("CREATE Work")
 	a.ok("SELECT Work")
 	// Unsupported event and unpaired events are refused.
-	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MailboxName))`), "BADEVENT")
+	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MailboxName))`), "NO [BADEVENT (MessageNew MessageExpunge FlagChange)]")
 
 	mustHave(t, a.cmd(`NOTIFY SET (SELECTED (MessageNew))`), "BAD")
 

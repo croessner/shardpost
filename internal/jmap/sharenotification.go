@@ -295,21 +295,8 @@ func noticeChild(f *noticeFilter, i int) *noticeFilter { return &f.Conditions[i]
 
 // parseDates reads the dates of a filter and the ones below it.
 func (f *noticeFilter) parseDates() *methodError {
-	for _, d := range []struct {
-		s    *string
-		into *time.Time
-		name string
-	}{{f.After, &f.after, filterAfter}, {f.Before, &f.before, filterBefore}} {
-		if d.s == nil {
-			continue
-		}
-
-		t, ok := parseUTCDate(*d.s)
-		if !ok {
-			return &methodError{Type: errUnsupportedFilter, Description: d.name + " is not a UTCDate"}
-		}
-
-		*d.into = t
+	if merr := parseFilterDates(filterDate{f.After, &f.after, filterAfter}, filterDate{f.Before, &f.before, filterBefore}); merr != nil {
+		return merr
 	}
 
 	for i := range f.Conditions {

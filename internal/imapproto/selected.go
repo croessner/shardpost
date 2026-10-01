@@ -396,6 +396,8 @@ func (c *conn) cmdExpunge(tag string, uid bool) error {
 		if set, err = parseSet(s); err != nil {
 			return err
 		}
+
+		set = c.concrete(set)
 	}
 
 	var (

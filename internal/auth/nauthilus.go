@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -612,7 +613,7 @@ func (m *MasterUser) Authenticate(ctx context.Context, r Request) (*Result, erro
 	}
 
 	target, master, _ := strings.Cut(r.Username, sep)
-	if master != m.Name || r.Password != m.Password {
+	if master != m.Name || subtle.ConstantTimeCompare([]byte(r.Password), []byte(m.Password)) != 1 {
 		return nil, ErrInvalid
 	}
 

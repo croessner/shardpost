@@ -86,9 +86,9 @@ type method struct {
 	shared bool
 }
 
-// methods are the methods this server implements. RFC 8621 adds the mail
-// data types on top; until they are here, a client that asks for them is
-// told unknownMethod rather than being served an empty result.
+// methods are the methods this server implements, each under the
+// capability that brings it; a method not listed is unknownMethod rather
+// than an empty result.
 var methods = map[string]method{
 	"Core/echo":            {capability: CapCore, run: coreEcho},
 	"PushSubscription/get": {capability: CapCore, run: pushSubscriptionGet},

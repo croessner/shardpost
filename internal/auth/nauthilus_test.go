@@ -274,8 +274,10 @@ func testNauthilusMasterUser(t *testing.T, f *nauthilusFixture) {
 		t.Fatalf("master: %v %v", res, err)
 	}
 
-	if _, err = m.Authenticate(ctx, Request{Username: "alias2@example.org*director", Password: "wrong", Mechanism: "PLAIN"}); !errors.Is(err, ErrInvalid) {
-		t.Fatal(err)
+	for _, pw := range []string{"wrong", "masterp", "masterpw2"} {
+		if _, err = m.Authenticate(ctx, Request{Username: "alias2@example.org*director", Password: pw, Mechanism: "PLAIN"}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("password %q: %v", pw, err)
+		}
 	}
 
 	if res, err := m.Authenticate(ctx, Request{Username: "alice", Password: "secret", Mechanism: "PLAIN"}); err != nil || res.Account != "alice@example.org" {

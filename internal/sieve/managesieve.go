@@ -219,6 +219,9 @@ func (c *conn) capabilities() {
 		c.printf("\"STARTTLS\"\r\n")
 	}
 
+	// enotify is always there, and mailto is its one method (RFC 5804
+	// 1.7 asks for NOTIFY whenever enotify is).
+	c.printf("\"NOTIFY\" \"mailto\"\r\n")
 	c.printf("\"MAXREDIRECTS\" \"%d\"\r\n", MaxRedirects)
 	c.printf("\"VERSION\" \"1.0\"\r\n")
 }
@@ -458,8 +461,18 @@ func (c *conn) cmdCapability(_ []string) (bool, error) {
 	return false, nil
 }
 
-func (c *conn) cmdNoop(_ []string) (bool, error) {
-	c.ok("Done")
+// cmdNoop answers NOOP; a tag argument comes back in the TAG response
+// code (RFC 5804 2.13), which clients use to resynchronise.
+func (c *conn) cmdNoop(args []string) (bool, error) {
+	switch len(args) {
+	case 0:
+		c.ok("Done")
+	case 1:
+		c.printf("OK (TAG %s) %s\r\n", quote(args[0]), quote("Done"))
+	default:
+		c.no("NOOP takes at most one tag")
+	}
+
 	return false, nil
 }
 

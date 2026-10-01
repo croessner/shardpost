@@ -55,6 +55,7 @@ const (
 const (
 	propIdentityID     = "identityId"
 	propEmailID        = "emailId"
+	propEmailIDs       = "emailIds"
 	propEnvelope       = "envelope"
 	propSendAt         = "sendAt"
 	propUndoStatus     = "undoStatus"
@@ -400,54 +401,101 @@ func submissionDelta(sess *session, b *submissionBook, since uint64, maxChanges 
 	return out
 }
 
-// submissionFilter is the filter of EmailSubmission/query.
+// submissionFilter is the filter of EmailSubmission/query (RFC 8621
+// 7.3): a condition, or an operator over further filters.
 type submissionFilter struct {
-	IdentityIDs []string `json:"identityIds"`
-	EmailIDs    []string `json:"emailIds"`
-	ThreadIDs   []string `json:"threadIds"`
-	UndoStatus  *string  `json:"undoStatus"`
-	Before      *string  `json:"before"`
-	After       *string  `json:"after"`
+	IdentityIDs   []string           `json:"identityIds"`
+	EmailIDs      []string           `json:"emailIds"`
+	ThreadIDs     []string           `json:"threadIds"`
+	UndoStatus    *string            `json:"undoStatus"`
+	Before        *string            `json:"before"`
+	After         *string            `json:"after"`
+	Operator      string             `json:"operator"`
+	Conditions    []submissionFilter `json:"conditions"`
+	before, after time.Time
 }
 
-// matches reports whether a submission matches the filter.
-func (f *submissionFilter) matches(s *submission) bool {
+// submissionFilterKeys are the properties a submission filter may have.
+var submissionFilterKeys = map[string]bool{
+	"identityIds": true, propEmailIDs: true, "threadIds": true, propUndoStatus: true,
+	filterBefore: true, filterAfter: true, filterOperator: true, filterConditions: true,
+}
+
+// operator implements opFilter.
+func (f *submissionFilter) operator() string { return f.Operator }
+
+// conditionCount implements opFilter.
+func (f *submissionFilter) conditionCount() int { return len(f.Conditions) }
+
+// submissionChild is the i-th filter below an operator.
+func submissionChild(f *submissionFilter, i int) *submissionFilter { return &f.Conditions[i] }
+
+// readSubmissionFilter decodes the filter of a query; nil when there is
+// none. A property, operator or date this server cannot evaluate is
+// unsupportedFilter rather than a condition silently left out.
+func readSubmissionFilter(raw json.RawMessage) (*submissionFilter, *methodError) {
+	if len(raw) == 0 || string(raw) == jsonNull {
+		return nil, nil
+	}
+
+	f := &submissionFilter{}
+	if merr := decodeOpFilter(raw, f, submissionFilterKeys, "a submission", submissionChild); merr != nil {
+		return nil, merr
+	}
+
+	if merr := f.parseDates(); merr != nil {
+		return nil, merr
+	}
+
+	return f, nil
+}
+
+// parseDates reads the dates of a filter and the ones below it.
+func (f *submissionFilter) parseDates() *methodError {
+	if merr := parseFilterDates(filterDate{f.Before, &f.before, filterBefore}, filterDate{f.After, &f.after, filterAfter}); merr != nil {
+		return merr
+	}
+
+	for i := range f.Conditions {
+		if merr := f.Conditions[i].parseDates(); merr != nil {
+			return merr
+		}
+	}
+
+	return nil
+}
+
+// condition evaluates a filter condition: every property given has to
+// hold.
+func (f *submissionFilter) condition(s *submission) bool {
 	switch {
-	case f == nil:
-		return true
 	case f.IdentityIDs != nil && !containsString(f.IdentityIDs, s.IdentityID),
 		f.EmailIDs != nil && !containsString(f.EmailIDs, s.EmailID),
 		f.ThreadIDs != nil && !containsString(f.ThreadIDs, s.ThreadID),
-		f.UndoStatus != nil && *f.UndoStatus != s.UndoStatus:
-		return false
-	}
-
-	if t, ok := parseOptionalDate(f.Before); ok && !s.SendAt.Before(t) {
-		return false
-	}
-
-	if t, ok := parseOptionalDate(f.After); ok && s.SendAt.Before(t) {
+		f.UndoStatus != nil && *f.UndoStatus != s.UndoStatus,
+		f.Before != nil && !s.SendAt.Before(f.before),
+		f.After != nil && s.SendAt.Before(f.after):
 		return false
 	}
 
 	return true
 }
 
-// parseOptionalDate reads a UTCDate that may be absent.
-func parseOptionalDate(s *string) (time.Time, bool) {
-	if s == nil {
-		return time.Time{}, false
+// matches reports whether a submission matches the filter.
+func (f *submissionFilter) matches(s *submission) bool {
+	if f == nil {
+		return true
 	}
 
-	return parseUTCDate(*s)
+	return matchOpFilter(f, func(c *submissionFilter) bool { return c.condition(s) }, submissionChild)
 }
 
 // submissionQueryRequest is the argument shape of EmailSubmission/query.
 type submissionQueryRequest struct {
 	paging
-	Filter    *submissionFilter `json:"filter"`
-	AccountID string            `json:"accountId"`
-	Sort      []comparator      `json:"sort"`
+	Filter    json.RawMessage `json:"filter"`
+	AccountID string          `json:"accountId"`
+	Sort      []comparator    `json:"sort"`
 }
 
 // submissionSortKeys are what EmailSubmission/query sorts by (RFC 8621
@@ -466,10 +514,13 @@ func emailSubmissionQuery(_ context.Context, sess *session, args json.RawMessage
 		return nil, merr
 	}
 
-	for _, c := range req.Sort {
-		if !submissionSortKeys[c.Property] || !validCollation(c.Collation) {
-			return nil, &methodError{Type: errUnsupportedSort, Description: "cannot sort by " + c.Property}
-		}
+	filter, merr := readSubmissionFilter(req.Filter)
+	if merr != nil {
+		return nil, merr
+	}
+
+	if merr := checkSort(req.Sort, submissionSortKeys); merr != nil {
+		return nil, merr
 	}
 
 	b, err := loadSubmissions(kv, sess.account, opts)
@@ -480,7 +531,7 @@ func emailSubmissionQuery(_ context.Context, sess *session, args json.RawMessage
 	var matched []*submission
 
 	for _, s := range b.Subs {
-		if req.Filter.matches(s) {
+		if filter.matches(s) {
 			matched = append(matched, s)
 		}
 	}

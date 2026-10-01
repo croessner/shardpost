@@ -158,9 +158,49 @@ func checkSubmissionRecord(t *testing.T, s *Server, id, emailID string) {
 		t.Errorf("query gave %#v", q)
 	}
 
+	checkSubmissionFilters(t, s, id, emailID)
+
 	upd := submissionCall(t, s, "EmailSubmission/set", `{"accountId":"test","update":{"`+id+`":{"undoStatus":"canceled"}}}`)
 	if got := setErrorType(upd, "notUpdated", id); got != setCannotUnsend {
 		t.Errorf("cancelling gave %q", got)
+	}
+}
+
+// checkSubmissionFilters: EmailSubmission/query evaluates operators and
+// dates, and refuses what it cannot evaluate instead of ignoring it.
+func checkSubmissionFilters(t *testing.T, s *Server, id, emailID string) {
+	t.Helper()
+
+	for _, c := range []struct {
+		filter string
+		want   int
+	}{
+		{`{"operator":"OR","conditions":[{"emailIds":["nope"]},{"emailIds":["` + emailID + `"]}]}`, 1},
+		{`{"operator":"NOT","conditions":[{"emailIds":["` + emailID + `"]}]}`, 0},
+		{`{"operator":"AND","conditions":[{"undoStatus":"final"},{"after":"2000-01-01T00:00:00Z"}]}`, 1},
+		{`{"before":"2000-01-01T00:00:00Z"}`, 0},
+	} {
+		q := submissionCall(t, s, "EmailSubmission/query", `{"accountId":"test","filter":`+c.filter+`}`)
+		if ids, _ := q["ids"].([]any); len(ids) != c.want || (c.want == 1 && ids[0] != id) {
+			t.Errorf("filter %s gave %#v", c.filter, q)
+		}
+	}
+
+	for _, c := range []struct{ args, want string }{
+		{`{"accountId":"test","filter":{"subject":"x"}}`, errUnsupportedFilter},
+		{`{"accountId":"test","filter":{"operator":"XOR","conditions":[]}}`, errUnsupportedFilter},
+		{`{"accountId":"test","filter":{"before":"yesterday"}}`, errUnsupportedFilter},
+		{`{"accountId":"test","filter":{"operator":"OR","conditions":[{"after":"soon"}]}}`, errUnsupportedFilter},
+		{`{"accountId":"test","filter":{"emailIds":"one"}}`, errInvalidArguments},
+		{`{"accountId":"test","sort":[{"property":"sentAt","collation":"i;unicode-casemap"}]}`, errUnsupportedSort},
+	} {
+		out := call(t, s, `{"using":["urn:ietf:params:jmap:core","`+CapSubmission+`"],
+			"methodCalls":[["EmailSubmission/query",`+c.args+`,"c1"]]}`)
+
+		got, _ := responses(t, out)[0].([]any)
+		if typ, _ := got[1].(map[string]any)["type"].(string); got[0] != kwError || typ != c.want {
+			t.Errorf("%s answered %#v, want %s", c.args, got, c.want)
+		}
 	}
 }
 

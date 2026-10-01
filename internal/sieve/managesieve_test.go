@@ -118,12 +118,33 @@ func TestCapabilityMatchesTheInterpreter(t *testing.T) {
 
 	got := out.String()
 	if !strings.Contains(got, "\"MAXREDIRECTS\" \"4\"\r\n") || !strings.Contains(got, " imapsieve\"\r\n") ||
-		!strings.Contains(got, "\"IMPLEMENTATION\" \"ShardPost\"\r\n") {
+		!strings.Contains(got, "\"IMPLEMENTATION\" \"ShardPost\"\r\n") || !strings.Contains(got, "\"NOTIFY\" \"mailto\"\r\n") {
 		t.Errorf("the capability is %q", got)
 	}
 
 	if opts := options(Hooks{}); opts.Interp.MaxRedirects != MaxRedirects {
 		t.Errorf("the interpreter allows %d redirects", opts.Interp.MaxRedirects)
+	}
+}
+
+// TestNoopTag: NOOP echoes its tag in the TAG response code (RFC 5804
+// 2.13), before and after authentication.
+func TestNoopTag(t *testing.T) {
+	var out bytes.Buffer
+
+	c := &conn{s: New(Options{}), bw: bufio.NewWriter(&out)}
+
+	for line, want := range map[string]string{
+		"NOOP":                    "OK \"Done\"\r\n",
+		`NOOP "STARTTLS-SYNC-42"`: "OK (TAG \"STARTTLS-SYNC-42\") \"Done\"\r\n",
+		`NOOP "a" "b"`:            "NO ",
+	} {
+		out.Reset()
+		handleLine(t, c, line)
+
+		if !strings.HasPrefix(out.String(), want) {
+			t.Errorf("%s answered %q, want %q", line, out.String(), want)
+		}
 	}
 }
 

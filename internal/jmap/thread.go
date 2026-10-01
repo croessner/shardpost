@@ -7,7 +7,7 @@ import (
 )
 
 // threadProperties are the properties of a Thread (RFC 8621 3).
-var threadProperties = map[string]bool{propID: true, "emailIds": true}
+var threadProperties = map[string]bool{propID: true, propEmailIDs: true}
 
 // threadGet implements Thread/get (RFC 8621 3.1). A thread is the
 // messages that share a conversation root; its emailIds are sorted by
@@ -47,8 +47,8 @@ func threadGet(_ context.Context, sess *session, args json.RawMessage) (any, *me
 		}
 
 		obj := map[string]any{propID: id}
-		if selected(req.Properties, "emailIds") {
-			obj["emailIds"] = byArrival(list)
+		if selected(req.Properties, propEmailIDs) {
+			obj[propEmailIDs] = byArrival(list)
 		}
 
 		out.List = append(out.List, obj)

@@ -3,11 +3,12 @@
 // data store: everything it answers comes from the same index, the same
 // blobs and the same account change log that IMAP reads.
 //
-// This is the Core of RFC 8620: the session resource, the API endpoint
-// with batching and back-references, the error model, the limits, and
-// blob upload and download. The mail data types (RFC 8621) are built on
-// top of it and are not here yet; a client that asks for a capability
-// this server does not have is told so rather than served something
+// The Core of RFC 8620 — the session resource, the API endpoint with
+// batching and back-references, the error model, the limits, and blob
+// upload and download — carries the data types built on top of it: mail
+// and submission (RFC 8621), Sieve scripts, quotas, sharing and the
+// others the session lists. A client that asks for a capability this
+// server does not have is told so rather than served something
 // half-correct.
 package jmap
 

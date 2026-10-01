@@ -1,6 +1,9 @@
 package jmap
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // The filters of the small /query methods — Quota, SieveScript — are
 // trees of the same shape: a node is a condition, or an operator over
@@ -100,6 +103,33 @@ func checkSort(by []comparator, keys map[string]bool) *methodError {
 		if !validCollation(c.Collation) {
 			return &methodError{Type: errUnsupportedSort, Description: "cannot sort with " + c.Collation}
 		}
+	}
+
+	return nil
+}
+
+// filterDate is one date condition of a filter node: the UTCDate the
+// client sent (nil when absent), where its time goes, and its name.
+type filterDate struct {
+	s    *string
+	into *time.Time
+	name string
+}
+
+// parseFilterDates reads the dates of one filter node; one that is not a
+// UTCDate is unsupportedFilter.
+func parseFilterDates(dates ...filterDate) *methodError {
+	for _, d := range dates {
+		if d.s == nil {
+			continue
+		}
+
+		t, ok := parseUTCDate(*d.s)
+		if !ok {
+			return &methodError{Type: errUnsupportedFilter, Description: d.name + " is not a UTCDate"}
+		}
+
+		*d.into = t
 	}
 
 	return nil
