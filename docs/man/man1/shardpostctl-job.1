@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-JOB 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-JOB 1 "2026-10-01" "ShardPost 0.36.1" "ShardPost Manual"
 .SH NAME
 shardpostctl-job \- plan, apply and watch maintenance jobs
 .SH SYNOPSIS
@@ -251,8 +251,15 @@ from the plan are removed, at most 40000 per plan.
 Role
 .BR delete ,
 locks the account. Withdraws shares in both directions, deletes the
-learning jobs and every object of the account. The identity itself (LDAP)
-is not touched: if the account logs in again, it gets an empty INBOX.
+learning jobs and every object of the account, and finally removes it
+from the account directory. Until that last step nothing can create the
+account again. The identity itself (LDAP) is not touched: if the account
+logs in again afterwards, it gets an empty INBOX. A purge that fails or
+is cancelled after it deleted the data leaves the account
+.B purging
+in the directory; every later job that locks it, a second purge included,
+then fails at once with "run shardpostctl account repair" (see
+.BR shardpostctl-account (1)).
 .SS The account lock
 Jobs marked above as "locks the account" take the same lock an import
 uses. While it is held, IMAP and POP3 answer "Mailbox maintenance in

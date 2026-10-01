@@ -40,6 +40,28 @@ func TestRepairAccountDirectory(t *testing.T) {
 	}
 }
 
+// TestGrantToPurgingAccount: the admin ACL change names the purge, not
+// an import, and writes nothing.
+func TestGrantToPurgingAccount(t *testing.T) {
+	store, c := serveDiag(t, nil, RoleDiagnose, RoleProvision)
+	id := mailboxID(t, c, "A")
+
+	carol, _ := store.User("carol")
+	_ = carol.EnsureMailbox("INBOX", nil)
+	_ = carol.(model.DirectoryPurger).MarkPurging("job-1")
+	_, _ = carol.(model.NamespacePurger).PurgeNamespace(func() error { return nil })
+
+	resp, err := c.SetACLEntryWithResponse(context.Background(), "alice", id, "carol", nil, adminapi.ACLChange{Rights: "lr"})
+	if err != nil || resp.StatusCode() != http.StatusConflict || resp.JSONDefault == nil || resp.JSONDefault.Code != adminapi.AccountPurging {
+		t.Fatalf("grant: %v %d %+v", err, resp.StatusCode(), resp.JSONDefault)
+	}
+
+	alice, _ := store.User("alice")
+	if acl, _ := alice.GetACL("A"); acl["carol"] != "" {
+		t.Fatalf("ACL written: %v", acl)
+	}
+}
+
 func TestRepairAccountDirectoryNeedsRole(t *testing.T) {
 	_, c := serveDiag(t, nil, RoleDiagnose)
 

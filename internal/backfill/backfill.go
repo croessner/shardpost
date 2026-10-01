@@ -22,7 +22,7 @@ const (
 	// MarkerAccounts records the last completed backfill (Report as
 	// JSON). Only a backfill that started after the last server without
 	// the directory hook stopped makes the directory complete.
-	MarkerAccounts = "backfill.accounts"
+	MarkerAccounts = model.AccountBackfillMarker
 	// markerProgress records the position of a running backfill ("" when
 	// none runs), so that an interrupted one resumes.
 	markerProgress = "backfill.accounts.progress"
@@ -38,9 +38,10 @@ type AccountSource interface {
 	// ListUsers lists every namespace of the index pool (one pool
 	// listing).
 	ListUsers() ([]string, error)
-	// RegistryTime reports whether the account's registry exists and its
-	// last modification (zero when unknown).
-	RegistryTime(account string) (time.Time, bool, error)
+	// RegistryStatter returns a function that reports whether an
+	// account's registry exists and its last modification (zero when
+	// unknown). It is used from one goroutine only; release closes it.
+	RegistryStatter() (stat func(account string) (time.Time, bool, error), release func(), err error)
 }
 
 // Report is the result of an account backfill.
@@ -54,7 +55,7 @@ type Report struct {
 	Namespaces int `json:"namespaces"`
 	Accounts   int `json:"accounts"`
 	Added      int `json:"added"`
-	// Repaired counts the entries the repair rules changed, by action.
+	// Repaired counts the entries the repair rules looked at, by action.
 	Repaired map[string]int `json:"repaired"`
 	// Resumed: the run continued an interrupted one.
 	Resumed bool `json:"resumed,omitempty"`
@@ -74,19 +75,34 @@ type Options struct {
 	Restart bool
 	// Cluster is recorded in the entries the backfill writes.
 	Cluster string
-	Log     *slog.Logger
-	Now     func() time.Time
+	// Grace is the age below which an active entry without registry is
+	// left alone (model.DefaultDirectoryGrace when 0).
+	Grace time.Duration
+	Log   *slog.Logger
+	Now   func() time.Time
 }
 
 // ErrLockLost stops a backfill whose lock could not be renewed.
 var ErrLockLost = errors.New("backfill lock lost")
 
+// run is one account backfill.
+type run struct {
+	ix   model.SortedIndex
+	src  AccountSource
+	kv   model.AdminKV
+	stat func(account string) (time.Time, bool, error)
+	o    Options
+	rep  Report
+	// known holds the accounts whose registry this run found.
+	known map[string]bool
+}
+
 // Accounts enters every account with a registry into the account
 // directory (state active, created = the registry's last change) and
-// applies the repair rules to every entry left purging (kv is the job
-// store that tells whether a purge still runs). It lists the pool once,
-// can be repeated (existing entries stay as they are) and resumes after
-// an interruption; the caller holds the backfill lock.
+// applies the repair rules to every entry (kv is the job store that tells
+// whether a purge still runs). It lists the pool once, can be repeated
+// (existing entries stay as they are) and resumes after an
+// interruption; the caller holds the backfill lock.
 func Accounts(src AccountSource, kv model.AdminKV, o Options) (Report, error) {
 	o = o.withDefaults()
 
@@ -96,38 +112,51 @@ func Accounts(src AccountSource, kv model.AdminKV, o Options) (Report, error) {
 	}
 	defer release()
 
-	rep := Report{Started: o.Now().UTC(), Repaired: map[string]int{}}
-
-	pos, err := resumePosition(ix, &rep, o)
+	stat, closeStat, err := src.RegistryStatter()
 	if err != nil {
-		return rep, err
+		return Report{}, err
 	}
+	defer closeStat()
 
-	names, err := src.ListUsers()
+	r := &run{ix: ix, src: src, kv: kv, stat: stat, o: o, known: map[string]bool{},
+		rep: Report{Started: o.Now().UTC(), Repaired: map[string]int{}}}
+
+	err = r.do()
+
+	return r.rep, err
+}
+
+func (r *run) do() error {
+	pos, err := r.resumePosition()
 	if err != nil {
-		return rep, fmt.Errorf("list namespaces: %w", err)
+		return err
 	}
 
-	if err := enter(ix, src, names, pos, &rep, o); err != nil {
-		return rep, err
+	names, err := r.src.ListUsers()
+	if err != nil {
+		return fmt.Errorf("list namespaces: %w", err)
 	}
 
-	if err := repairAll(ix, src, kv, &rep, o); err != nil {
-		return rep, err
+	if err := r.enter(names, pos); err != nil {
+		return err
 	}
 
-	if o.Lost() {
-		return rep, ErrLockLost
+	if err := r.repairAll(); err != nil {
+		return err
 	}
 
-	rep.Finished = o.Now().UTC()
-	b, _ := json.Marshal(rep)
-
-	if err := ix.SetMarker(MarkerAccounts, string(b)); err != nil {
-		return rep, err
+	if r.o.Lost() {
+		return ErrLockLost
 	}
 
-	return rep, ix.SetMarker(markerProgress, "")
+	r.rep.Finished = r.o.Now().UTC()
+	b, _ := json.Marshal(r.rep)
+
+	if err := r.ix.SetMarker(MarkerAccounts, string(b)); err != nil {
+		return err
+	}
+
+	return r.ix.SetMarker(markerProgress, "")
 }
 
 func (o Options) withDefaults() Options {
@@ -148,17 +177,17 @@ func (o Options) withDefaults() Options {
 
 // resumePosition returns the position of an interrupted run (unless
 // o.Restart) and takes over its start time.
-func resumePosition(ix model.SortedIndex, rep *Report, o Options) (*progress, error) {
+func (r *run) resumePosition() (*progress, error) {
 	pos := &progress{}
 
-	h, err := ix.Head()
+	h, err := r.ix.Head()
 	if err != nil {
 		return pos, err
 	}
 
-	if v := h.Markers[markerProgress]; v != "" && !o.Restart && json.Unmarshal([]byte(v), pos) == nil {
-		rep.Started, rep.Resumed = pos.Started, true
-		o.Log.Info("backfill resumes", "after", pos.After, "started", pos.Started)
+	if v := h.Markers[markerProgress]; v != "" && !r.o.Restart && json.Unmarshal([]byte(v), pos) == nil {
+		r.rep.Started, r.rep.Resumed = pos.Started, true
+		r.o.Log.Info("backfill resumes", "after", pos.After, "started", pos.Started)
 	}
 
 	return pos, nil
@@ -166,52 +195,65 @@ func resumePosition(ix model.SortedIndex, rep *Report, o Options) (*progress, er
 
 // enter writes the missing entries of the listed namespaces in name
 // order, from the resume position on.
-func enter(ix model.SortedIndex, src AccountSource, names []string, pos *progress, rep *Report, o Options) error {
-	pos.Started = rep.Started
+func (r *run) enter(names []string, pos *progress) error {
+	pos.Started = r.rep.Started
 
 	for i, name := range names {
 		if !model.InDirectory(name) || model.CheckNamespace(name) != nil {
 			continue
 		}
 
-		rep.Namespaces++
+		r.rep.Namespaces++
 
 		if name <= pos.After {
 			continue
 		}
 
-		mtime, ok, err := src.RegistryTime(name)
-		if err != nil {
-			return fmt.Errorf("registry of %q: %w", name, err)
-		}
-
-		if ok {
-			rep.Accounts++
-
-			if o.Lost() {
-				return ErrLockLost
-			}
-
-			added, err := addEntry(ix, name, o.Cluster, mtime, o.Now())
-			if err != nil {
-				return fmt.Errorf("directory entry of %q: %w", name, err)
-			}
-
-			if added {
-				rep.Added++
-			}
+		if err := r.enterOne(name); err != nil {
+			return err
 		}
 
 		pos.After = name
 
 		if (i+1)%progressEvery == 0 {
 			b, _ := json.Marshal(pos)
-			if err := ix.SetMarker(markerProgress, string(b)); err != nil {
+			if err := r.ix.SetMarker(markerProgress, string(b)); err != nil {
 				return err
 			}
 
-			o.Log.Info("backfill progress", "after", name, "added", rep.Added)
+			r.o.Log.Info("backfill progress", "after", name, "added", r.rep.Added)
 		}
+	}
+
+	return nil
+}
+
+// enterOne writes the entry of one namespace if it has a registry and no
+// entry.
+func (r *run) enterOne(name string) error {
+	mtime, ok, err := r.stat(name)
+	if err != nil {
+		return fmt.Errorf("registry of %q: %w", name, err)
+	}
+
+	if !ok {
+		return nil
+	}
+
+	r.rep.Accounts++
+	r.known[name] = true
+
+	if r.o.Lost() {
+		return ErrLockLost
+	}
+
+	added, err := addEntry(r.ix, name, r.o.Cluster, mtime, r.o.Now())
+	if err != nil {
+		return fmt.Errorf("directory entry of %q: %w", name, err)
+	}
+
+	if added {
+		r.rep.Added++
 	}
 
 	return nil
@@ -239,32 +281,21 @@ func addEntry(ix model.SortedIndex, name, cluster string, created, now time.Time
 	return added, err
 }
 
-// repairAll applies the repair rules to every entry that is purging.
-func repairAll(ix model.SortedIndex, src AccountSource, kv model.AdminKV, rep *Report, o Options) error {
+// repairAll applies the repair rules to every entry: purging ones, and
+// active ones whose registry this run did not find (stale entries).
+func (r *run) repairAll() error {
 	cursor := ""
 
 	for {
-		page, next, err := ix.List(cursor, 1000)
+		page, next, err := r.ix.List(cursor, 1000)
 		if err != nil {
 			return err
 		}
 
 		for _, e := range page {
-			if ent, err := model.DecodeAccountEntry(e.Value); err != nil || ent.State != model.AccountPurging {
-				continue
+			if err := r.repair(e); err != nil {
+				return err
 			}
-
-			if o.Lost() {
-				return ErrLockLost
-			}
-
-			r, err := jobs.RepairAccountEntry(kv, src, e.ID)
-			if err != nil {
-				return fmt.Errorf("repair %q: %w", e.ID, err)
-			}
-
-			rep.Repaired[r.Action]++
-			o.Log.Info("backfill repair", "account", e.ID, "action", r.Action)
 		}
 
 		if next == "" {
@@ -273,4 +304,36 @@ func repairAll(ix model.SortedIndex, src AccountSource, kv model.AdminKV, rep *R
 
 		cursor = next
 	}
+}
+
+func (r *run) repair(e model.IndexEntry) error {
+	ent, err := model.DecodeAccountEntry(e.Value)
+	if err != nil || (ent.State == model.AccountActive && r.known[e.ID]) {
+		return nil //nolint:nilerr // an unreadable entry is replaced by the next registration
+	}
+
+	if r.o.Lost() {
+		return ErrLockLost
+	}
+
+	res, err := model.RepairAccountEntry(r.ix, e.ID, model.RepairChecks{
+		HasRegistry: func() (bool, error) {
+			_, ok, err := r.stat(e.ID)
+			return ok, err
+		},
+		PurgeRunning: func(session string) (bool, error) { return jobs.PurgeRunning(r.kv, session) },
+		Now:          r.o.Now(),
+		Grace:        r.o.Grace,
+	})
+	if err != nil {
+		return fmt.Errorf("repair %q: %w", e.ID, err)
+	}
+
+	r.rep.Repaired[res.Action]++
+
+	if res.Action != model.RepairNone {
+		r.o.Log.Info("backfill repair", "account", e.ID, "action", res.Action)
+	}
+
+	return nil
 }

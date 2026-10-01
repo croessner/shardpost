@@ -329,6 +329,27 @@ paths:
                 $ref: "#/components/schemas/SharedList"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/directory:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: getAccountDirectory
+      summary: The account's directory entry
+      description: |
+        The account's entry in the account directory, whether its
+        registry exists, and the state of the directory itself (shard
+        count, phase, completion marker of the last backfill). Reads
+        only; the account is not resolved through Nauthilus. Requires the
+        role `diagnose`.
+      responses:
+        "200":
+          description: The entry and the directory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectoryStatus"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/directory/repair:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -340,9 +361,10 @@ paths:
         An entry the purge job left in the state `purging` (the job
         failed or was cancelled) while no purge job of that lock session
         still runs is removed when the account's registry is gone, and set
-        back to `active` when the registry exists. Any other entry is left
-        as it is (action `none`; `purge_running` while the purge job still
-        runs). The account is not resolved through Nauthilus: a purged
+        back to `active` when the registry exists. An `active` entry older
+        than ten minutes whose registry is missing is stale and removed
+        (`stale_removed`). Any other entry is left as it is (action
+        `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
         account may no longer exist there. Requires the role `repair`.
       responses:
         "200":
@@ -1458,6 +1480,9 @@ components:
         it, or sieve_reject_mode=protocol), `over_quota` (507), `temporary` (503, try again), `internal` (500),
         `conflict` (409, imported data contradicts the target),
         `import_locked` (409, another session holds the account),
+        `account_purging` (409, the account (or the grantee of an ACL change)
+        is being purged; if no purge job runs any more, see
+        `shardpostctl account repair`),
         `not_locked` (409, the session does not hold the lock),
         `precondition_failed` (412, If-Match does not match),
         `no_such_job` (404, job, plan or learning job), `no_such_message`
@@ -1473,7 +1498,7 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, not_locked, precondition_failed, no_such_job]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, account_purging, not_locked, precondition_failed, no_such_job]
         message:
           type: string
     Version:
@@ -1772,6 +1797,29 @@ components:
         cluster:
           type: string
           description: Ceph cluster (fsid) that holds the account.
+    DirectoryStatus:
+      type: object
+      required: [account, found, registry, shards, phase]
+      properties:
+        account:
+          type: string
+        found:
+          type: boolean
+          description: Whether the account has an entry.
+        entry:
+          $ref: "#/components/schemas/DirectoryEntry"
+        registry:
+          type: boolean
+          description: Whether the account's registry object exists.
+        shards:
+          type: integer
+          description: Shard count of the directory.
+        phase:
+          type: string
+          description: Phase of the directory (`stable` or `copying:<n>`).
+        backfill:
+          type: string
+          description: Completion marker of the last backfill (JSON with start, end and counts); absent before the first.
     DirectoryRepair:
       type: object
       required: [account, action, found]
@@ -1780,12 +1828,14 @@ components:
           type: string
         action:
           type: string
-          enum: [none, purge_running, removed, activated]
+          enum: [none, purge_running, removed, activated, stale_removed]
           description: |
             `none`: nothing to repair (or the account has no entry);
             `purge_running`: a purge job still works on the account;
             `removed`: purging without registry, the entry was removed;
-            `activated`: purging with registry, the entry is active again.
+            `activated`: purging with registry, the entry is active again;
+            `stale_removed`: active, older than the grace and without
+            registry, the entry was removed.
         found:
           type: boolean
           description: Whether the account had an entry.

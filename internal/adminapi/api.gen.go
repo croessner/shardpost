@@ -138,6 +138,7 @@ const (
 	None         DirectoryRepairAction = "none"
 	PurgeRunning DirectoryRepairAction = "purge_running"
 	Removed      DirectoryRepairAction = "removed"
+	StaleRemoved DirectoryRepairAction = "stale_removed"
 )
 
 // Valid indicates whether the value is a known member of the DirectoryRepairAction enum.
@@ -151,6 +152,8 @@ func (e DirectoryRepairAction) Valid() bool {
 		return true
 	case Removed:
 		return true
+	case StaleRemoved:
+		return true
 	default:
 		return false
 	}
@@ -158,6 +161,7 @@ func (e DirectoryRepairAction) Valid() bool {
 
 // Defines values for ErrorCode.
 const (
+	AccountPurging     ErrorCode = "account_purging"
 	BadRequest         ErrorCode = "bad_request"
 	Conflict           ErrorCode = "conflict"
 	Forbidden          ErrorCode = "forbidden"
@@ -180,6 +184,8 @@ const (
 // Valid indicates whether the value is a known member of the ErrorCode enum.
 func (e ErrorCode) Valid() bool {
 	switch e {
+	case AccountPurging:
+		return true
 	case BadRequest:
 		return true
 	case Conflict:
@@ -475,7 +481,9 @@ type DirectoryRepair struct {
 	// Action `none`: nothing to repair (or the account has no entry);
 	// `purge_running`: a purge job still works on the account;
 	// `removed`: purging without registry, the entry was removed;
-	// `activated`: purging with registry, the entry is active again.
+	// `activated`: purging with registry, the entry is active again;
+	// `stale_removed`: active, older than the grace and without
+	// registry, the entry was removed.
 	Action DirectoryRepairAction `json:"action"`
 
 	// After The account's entry in the account directory.
@@ -491,8 +499,33 @@ type DirectoryRepair struct {
 // DirectoryRepairAction `none`: nothing to repair (or the account has no entry);
 // `purge_running`: a purge job still works on the account;
 // `removed`: purging without registry, the entry was removed;
-// `activated`: purging with registry, the entry is active again.
+// `activated`: purging with registry, the entry is active again;
+// `stale_removed`: active, older than the grace and without
+// registry, the entry was removed.
 type DirectoryRepairAction string
+
+// DirectoryStatus defines model for DirectoryStatus.
+type DirectoryStatus struct {
+	Account string `json:"account"`
+
+	// Backfill Completion marker of the last backfill (JSON with start, end and counts); absent before the first.
+	Backfill *string `json:"backfill,omitempty"`
+
+	// Entry The account's entry in the account directory.
+	Entry *DirectoryEntry `json:"entry,omitempty"`
+
+	// Found Whether the account has an entry.
+	Found bool `json:"found"`
+
+	// Phase Phase of the directory (`stable` or `copying:<n>`).
+	Phase string `json:"phase"`
+
+	// Registry Whether the account's registry object exists.
+	Registry bool `json:"registry"`
+
+	// Shards Shard count of the directory.
+	Shards int `json:"shards"`
+}
 
 // Error defines model for Error.
 type Error struct {
@@ -1454,15 +1487,27 @@ type ClientInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
 	GetAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetAccountDirectory The account's directory entry
+	//
+	// The account's entry in the account directory, whether its
+	// registry exists, and the state of the directory itself (shard
+	// count, phase, completion marker of the last backfill). Reads
+	// only; the account is not resolved through Nauthilus. Requires the
+	// role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/directory (the `GetAccountDirectory` operationId).
+	GetAccountDirectory(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RepairAccountDirectory Repair the account's directory entry
 	//
 	// Applies the repair rules of the account directory to one account.
 	// An entry the purge job left in the state `purging` (the job
 	// failed or was cancelled) while no purge job of that lock session
 	// still runs is removed when the account's registry is gone, and set
-	// back to `active` when the registry exists. Any other entry is left
-	// as it is (action `none`; `purge_running` while the purge job still
-	// runs). The account is not resolved through Nauthilus: a purged
+	// back to `active` when the registry exists. An `active` entry older
+	// than ten minutes whose registry is missing is stale and removed
+	// (`stale_removed`). Any other entry is left as it is (action
+	// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
 	// account may no longer exist there. Requires the role `repair`.
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/directory/repair (the `RepairAccountDirectory` operationId).
@@ -2290,15 +2335,37 @@ func (c *Client) GetAccount(ctx context.Context, account Account, reqEditors ...
 	return c.Client.Do(req)
 }
 
+// GetAccountDirectory The account's directory entry
+//
+// The account's entry in the account directory, whether its
+// registry exists, and the state of the directory itself (shard
+// count, phase, completion marker of the last backfill). Reads
+// only; the account is not resolved through Nauthilus. Requires the
+// role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/directory (the `GetAccountDirectory` operationId).
+func (c *Client) GetAccountDirectory(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAccountDirectoryRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // RepairAccountDirectory Repair the account's directory entry
 //
 // Applies the repair rules of the account directory to one account.
 // An entry the purge job left in the state `purging` (the job
 // failed or was cancelled) while no purge job of that lock session
 // still runs is removed when the account's registry is gone, and set
-// back to `active` when the registry exists. Any other entry is left
-// as it is (action `none`; `purge_running` while the purge job still
-// runs). The account is not resolved through Nauthilus: a purged
+// back to `active` when the registry exists. An `active` entry older
+// than ten minutes whose registry is missing is stale and removed
+// (`stale_removed`). Any other entry is left as it is (action
+// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
 // account may no longer exist there. Requires the role `repair`.
 //
 // Corresponds with POST /admin/v1/accounts/{account}/directory/repair (the `RepairAccountDirectory` operationId).
@@ -3850,6 +3917,40 @@ func NewGetAccountRequest(server string, account Account) (*http.Request, error)
 	}
 
 	operationPath := fmt.Sprintf("/admin/v1/accounts/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetAccountDirectoryRequest constructs an http.Request for the GetAccountDirectory method
+func NewGetAccountDirectoryRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/directory", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -6769,15 +6870,29 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account} (the `GetAccount` operationId).
 	GetAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetAccountResponse, error)
 
+	// GetAccountDirectoryWithResponse The account's directory entry
+	//
+	// The account's entry in the account directory, whether its
+	// registry exists, and the state of the directory itself (shard
+	// count, phase, completion marker of the last backfill). Reads
+	// only; the account is not resolved through Nauthilus. Requires the
+	// role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/directory (the `GetAccountDirectory` operationId).
+	GetAccountDirectoryWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetAccountDirectoryResponse, error)
+
 	// RepairAccountDirectoryWithResponse Repair the account's directory entry
 	//
 	// Applies the repair rules of the account directory to one account.
 	// An entry the purge job left in the state `purging` (the job
 	// failed or was cancelled) while no purge job of that lock session
 	// still runs is removed when the account's registry is gone, and set
-	// back to `active` when the registry exists. Any other entry is left
-	// as it is (action `none`; `purge_running` while the purge job still
-	// runs). The account is not resolved through Nauthilus: a purged
+	// back to `active` when the registry exists. An `active` entry older
+	// than ten minutes whose registry is missing is stale and removed
+	// (`stale_removed`). Any other entry is left as it is (action
+	// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
 	// account may no longer exist there. Requires the role `repair`.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -7683,6 +7798,54 @@ func (r GetAccountResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetAccountResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetAccountDirectoryResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *DirectoryStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetAccountDirectoryResponse) GetJSON200() *DirectoryStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetAccountDirectoryResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetAccountDirectoryResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAccountDirectoryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAccountDirectoryResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetAccountDirectoryResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -10205,15 +10368,35 @@ func (c *ClientWithResponses) GetAccountWithResponse(ctx context.Context, accoun
 	return ParseGetAccountResponse(rsp)
 }
 
+// GetAccountDirectoryWithResponse The account's directory entry
+//
+// The account's entry in the account directory, whether its
+// registry exists, and the state of the directory itself (shard
+// count, phase, completion marker of the last backfill). Reads
+// only; the account is not resolved through Nauthilus. Requires the
+// role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/directory (the `GetAccountDirectory` operationId).
+func (c *ClientWithResponses) GetAccountDirectoryWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetAccountDirectoryResponse, error) {
+	rsp, err := c.GetAccountDirectory(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAccountDirectoryResponse(rsp)
+}
+
 // RepairAccountDirectoryWithResponse Repair the account's directory entry
 //
 // Applies the repair rules of the account directory to one account.
 // An entry the purge job left in the state `purging` (the job
 // failed or was cancelled) while no purge job of that lock session
 // still runs is removed when the account's registry is gone, and set
-// back to `active` when the registry exists. Any other entry is left
-// as it is (action `none`; `purge_running` while the purge job still
-// runs). The account is not resolved through Nauthilus: a purged
+// back to `active` when the registry exists. An `active` entry older
+// than ten minutes whose registry is missing is stale and removed
+// (`stale_removed`). Any other entry is left as it is (action
+// `none`; `purge_running` while the purge job still runs). The account is not resolved through Nauthilus: a purged
 // account may no longer exist there. Requires the role `repair`.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -11530,6 +11713,39 @@ func ParseGetAccountResponse(rsp *http.Response) (*GetAccountResponse, error) {
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AccountStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetAccountDirectoryResponse parses an HTTP response from a GetAccountDirectoryWithResponse call
+func ParseGetAccountDirectoryResponse(rsp *http.Response) (*GetAccountDirectoryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAccountDirectoryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DirectoryStatus
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -13328,6 +13544,9 @@ type ServerInterface interface {
 	// GetAccount Account overview
 	// (GET /admin/v1/accounts/{account})
 	GetAccount(w http.ResponseWriter, r *http.Request, account Account)
+	// GetAccountDirectory The account's directory entry
+	// (GET /admin/v1/accounts/{account}/directory)
+	GetAccountDirectory(w http.ResponseWriter, r *http.Request, account Account)
 	// RepairAccountDirectory Repair the account's directory entry
 	// (POST /admin/v1/accounts/{account}/directory/repair)
 	RepairAccountDirectory(w http.ResponseWriter, r *http.Request, account Account)
@@ -13512,6 +13731,32 @@ func (siw *ServerInterfaceWrapper) GetAccount(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetAccount(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetAccountDirectory operation middleware
+func (siw *ServerInterfaceWrapper) GetAccountDirectory(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAccountDirectory(w, r, account)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -16011,6 +16256,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes/{id}/acl/explain", wrapper.ExplainMailboxACL)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/quota", wrapper.GetQuota)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/shared", wrapper.ListSharedMailboxes)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/directory", wrapper.GetAccountDirectory)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/directory/repair", wrapper.RepairAccountDirectory)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/plans", wrapper.CreatePlan)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/plans/{plan}", wrapper.GetPlan)

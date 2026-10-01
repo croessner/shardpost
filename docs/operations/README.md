@@ -100,7 +100,14 @@ Servers with the account directory register an account when they create
 its registry (see
 [storage](../architecture/storage.md#store-wide-sorted-indexes-and-the-account-directory)).
 Accounts that already existed are entered by a backfill, run once the
-rollout is complete and no older server is left:
+rollout is complete and no older server is left. **The backfill after the
+rollout is mandatory**, not an optimisation: besides the missing entries
+it repairs what the mixed fleet left behind. A purge that a new server
+checkpointed after phase 4 and an old server then took over and finished
+leaves the account `purging` (the old server does not know phase 5), and
+a purge run entirely by an old server leaves a stale `active` entry.
+Neither heals by itself; the backfill (or `shardpostctl account repair`
+per account) does.
 
 ```sh
 shardpost index backfill accounts             # same image and configuration as the server
@@ -112,8 +119,12 @@ It takes the cls_lock `backfill` on `ix.accounts/lock` in `~accounts`
 running"), lists the namespaces of the index pool once, stats each
 registry and writes the missing entries as `active` with the registry's
 last change as `created`. Existing entries stay as they are, so it may be
-repeated. It then applies the repair rules to every entry that is
-`purging` (see [admin API](../admin-api.md#repairing-the-account-directory)).
+repeated. It then applies the repair rules to every entry (see
+[admin API](../admin-api.md#the-account-directory)): entries left
+`purging` are removed or activated, `active` entries older than ten
+minutes whose registry it did not find are removed as stale. The stat of
+each registry uses one index-pool context whose namespace it switches,
+not a full account view.
 At the end it records a completion marker with the start and end times
 and the counts in the directory head (`mark:backfill.accounts`). Every 500
 namespaces it records its position; a run that was interrupted continues
@@ -129,7 +140,14 @@ at a time, outside peak hours.
 
 A purge that failed or was cancelled can leave an account `purging`.
 `shardpostctl account repair <account>` (role `repair`) clears it for one
-account; the next backfill does it for all of them.
+account; the next backfill does it for all of them. Until then a new
+purge of that account fails at once with "run shardpostctl account
+repair". `shardpostctl account directory <account>` (role `diagnose`)
+shows the entry, whether the registry exists and the backfill marker.
+
+`hack/directory-smoke.sh` checks the directory on a cluster after a
+rollout: it creates a throwaway account, checks its entry, purges it and
+checks that the entry is gone, runs the backfill and prints its marker.
 
 **Rollback** is safe: older servers ignore `~accounts`, and an older
 purge does not set `purging`.

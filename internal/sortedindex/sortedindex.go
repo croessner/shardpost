@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -335,6 +336,7 @@ func (ix *Index) Update(id string, fn func(cur []byte) ([]byte, error)) error {
 
 		err = ix.b.Write(oid, ver, set, rm)
 		if errors.Is(err, ErrConflict) {
+			backoff(attempt)
 			continue
 		}
 
@@ -391,6 +393,14 @@ func (ix *Index) List(cursor string, limit int) ([]model.IndexEntry, string, err
 	}
 
 	return out, "", nil
+}
+
+// backoff waits a random time below 1 ms << attempt (at most 32 ms)
+// after a lost compare-and-swap, so that writers of one hot shard do not
+// collide again in lockstep. The backend counts the conflict
+// (cas_retries_total{kind="index"} for RADOS).
+func backoff(attempt int) {
+	time.Sleep(rand.N(time.Millisecond << min(attempt, 5)))
 }
 
 // ForgetHeads empties the head cache (tests).

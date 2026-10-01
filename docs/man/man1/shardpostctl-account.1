@@ -14,11 +14,15 @@ shardpostctl-account \- look up an account, its quota and its shares; repair its
 .RB [ \-\-json ]
 .I account
 .br
+.B shardpostctl account directory
+.RB [ \-\-json ]
+.I account
+.br
 .B shardpostctl account repair
 .RB [ \-\-json ]
 .I account
 .SH DESCRIPTION
-The first three commands read. They change nothing and are the usual
+All but the last command read. They change nothing and are the usual
 first step when someone reports a problem with an account.
 .B account repair
 is the exception; see below.
@@ -72,6 +76,33 @@ For the other direction (who may see this account's mailboxes) use
 .PP
 These three commands require the role
 .BR diagnose .
+.SS account directory
+Shows the account's entry in the account directory, the store-wide list
+of accounts:
+.TP
+.B entry
+.B active
+or
+.B purging
+(with the lock session of the purge job), or no entry.
+.TP
+.B created
+When the entry was written.
+.TP
+.B registry
+Whether the account's data still exists (its registry object).
+.TP
+.B directory
+Shard count and phase of the directory.
+.TP
+.B backfill
+The completion marker of the last
+.B shardpost index backfill accounts
+(start, end and counts as JSON), or none.
+.PP
+The account is not looked up in the user database. The command requires
+the role
+.BR diagnose .
 .SS account repair
 Repairs the account's entry in the account directory, the store-wide
 list of accounts. The purge job marks an account
@@ -101,10 +132,15 @@ registry): the entry is
 .B active
 again.
 .TP
-.B none
+.B stale_removed
 The entry is
-.B active
-or the account has none: nothing to do.
+.BR active ,
+older than ten minutes, and the account's data is gone: the entry is
+stale (a purge by an older server version, a crash between the entry and
+the creation of the account) and is removed.
+.TP
+.B none
+Anything else: nothing to do.
 .PP
 The output shows the action and the state before and after. The account
 is not looked up in the user database, since a purged account may no
@@ -113,6 +149,12 @@ longer exist there. The command requires the role
 The backfill
 .RB ( "shardpost index backfill accounts" )
 applies the same rules to every account.
+.PP
+While an account is left
+.B purging
+by a purge that ended, no other maintenance job can lock it \(em a second
+purge included. Such a job fails at once with "run shardpostctl account
+repair"; run the repair first, then plan the job again.
 .SH OPTIONS
 .TP
 .B \-\-json
@@ -156,6 +198,7 @@ delivery with "try again later":
 .nf
 .RS
 shardpostctl job list -account user@example.org
+shardpostctl account directory user@example.org
 shardpostctl account repair user@example.org
 .RE
 .fi

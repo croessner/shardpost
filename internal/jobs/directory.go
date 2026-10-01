@@ -3,6 +3,7 @@ package jobs
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"shardpost/internal/model"
 )
@@ -44,9 +45,35 @@ func RepairAccountEntry(kv model.AdminKV, dir model.AccountDirectory, account st
 	}
 	defer release()
 
-	return model.RepairAccountEntry(ix, account,
-		func() (bool, error) { return dir.HasRegistry(account) },
-		func(session string) (bool, error) { return PurgeRunning(kv, session) })
+	return model.RepairAccountEntry(ix, account, model.RepairChecks{
+		HasRegistry:  func() (bool, error) { return dir.HasRegistry(account) },
+		PurgeRunning: func(session string) (bool, error) { return PurgeRunning(kv, session) },
+		Now:          time.Now(),
+	})
+}
+
+// ErrLeftPurging refuses an exclusive job on an account that an ended
+// purge left purging: nothing can take its lock until the entry is
+// repaired.
+var ErrLeftPurging = errors.New("the account was left purging by an ended purge job; run shardpostctl account repair")
+
+// leftPurging reports whether the account's lock is refused because an
+// ended purge of another session left it purging (and its registry is
+// gone): waiting for the lock would not help.
+func (m *Manager) leftPurging(u model.User, jobID string) bool {
+	dp, ok := u.(model.DirectoryPurger)
+	if !ok {
+		return false
+	}
+
+	session, purging, err := dp.PurgingSession()
+	if err != nil || !purging || session == lockSession(jobID) {
+		return false
+	}
+
+	running, err := PurgeRunning(m.st.kv, session)
+
+	return err == nil && !running
 }
 
 // KV returns the admin store of the job system.

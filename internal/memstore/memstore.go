@@ -1233,7 +1233,7 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	}
 
 	if blocked && rights != "" {
-		return model.ErrImportLocked
+		return model.ErrAccountPurging
 	}
 
 	u.mu.Lock()
@@ -1384,7 +1384,7 @@ func (u *User) modifyEntry(name, identifier string, expectGen int64, change func
 	}
 
 	if blocked && rights != "" {
-		return aclChange{}, model.ErrImportLocked
+		return aclChange{}, model.ErrAccountPurging
 	}
 
 	changed := setACLEntry(b, identifier, rights)

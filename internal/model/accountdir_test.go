@@ -148,6 +148,8 @@ type repairCase struct {
 	wantAction  string
 	wantPresent bool
 	wantState   string
+	// age is how old the entry is at the repair.
+	age time.Duration
 }
 
 func (c repairCase) check(t *testing.T) {
@@ -162,9 +164,11 @@ func (c repairCase) check(t *testing.T) {
 
 	var asked string
 
-	rep, err := model.RepairAccountEntry(ix, "alice",
-		func() (bool, error) { return c.registry, nil },
-		func(s string) (bool, error) { asked = s; return c.running, nil })
+	rep, err := model.RepairAccountEntry(ix, "alice", model.RepairChecks{
+		HasRegistry:  func() (bool, error) { return c.registry, nil },
+		PurgeRunning: func(s string) (bool, error) { asked = s; return c.running, nil },
+		Now:          time.Now().Add(c.age),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,19 +189,44 @@ func (c repairCase) check(t *testing.T) {
 
 func TestRepairAccountEntry(t *testing.T) {
 	cases := []repairCase{
-		{"active", false, false, true, model.RepairNone, true, model.AccountActive},
-		{"purge running", true, true, false, model.RepairRunning, true, model.AccountPurging},
-		{"purging without registry", true, false, false, model.RepairRemoved, false, ""},
-		{"purging with registry", true, false, true, model.RepairActivated, true, model.AccountActive},
+		{"active", false, false, true, model.RepairNone, true, model.AccountActive, time.Hour},
+		{"purge running", true, true, false, model.RepairRunning, true, model.AccountPurging, 0},
+		{"purging without registry", true, false, false, model.RepairRemoved, false, "", 0},
+		{"purging with registry", true, false, true, model.RepairActivated, true, model.AccountActive, 0},
+		{"young active without registry", false, false, false, model.RepairNone, true, model.AccountActive, time.Minute},
+		{"stale active without registry", false, false, false, model.RepairStale, false, "", time.Hour},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, c.check)
 	}
 
-	rep, err := model.RepairAccountEntry(directory(), "nobody",
-		func() (bool, error) { return false, nil }, func(string) (bool, error) { return false, nil })
+	rep, err := model.RepairAccountEntry(directory(), "nobody", model.RepairChecks{
+		HasRegistry: func() (bool, error) { return false, nil }, PurgeRunning: func(string) (bool, error) { return false, nil },
+	})
 	if err != nil || rep.Found || rep.Action != model.RepairNone {
 		t.Fatalf("absent entry: %+v %v", rep, err)
+	}
+}
+
+// TestStaleRepairRestoresRaced: an account created while the stale
+// entry was removed gets its entry back.
+func TestStaleRepairRestoresRaced(t *testing.T) {
+	ix := directory()
+	_ = model.RegisterAccount(ix, "alice", "", "", time.Now().Add(-time.Hour))
+
+	calls := 0
+
+	rep, err := model.RepairAccountEntry(ix, "alice", model.RepairChecks{
+		HasRegistry:  func() (bool, error) { calls++; return calls > 1, nil },
+		PurgeRunning: func(string) (bool, error) { return false, nil },
+		Now:          time.Now(),
+	})
+	if err != nil || rep.Action != model.RepairNone {
+		t.Fatalf("repair %+v %v", rep, err)
+	}
+
+	if e, ok := entryOf(t, ix, "alice"); !ok || e.State != model.AccountActive {
+		t.Fatalf("entry lost: %+v %v", e, ok)
 	}
 }

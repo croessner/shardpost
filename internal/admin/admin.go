@@ -415,6 +415,7 @@ func operation(path string) string {
 const (
 	segMailboxes = "mailboxes"
 	segACL       = "acl"
+	segDirectory = "directory"
 )
 
 // accountOperation is the metric label of a path below an account
@@ -431,10 +432,8 @@ func accountOperation(path string, parts []string) string {
 		if len(parts) == 2 {
 			return parts[1]
 		}
-	case "directory":
-		if len(parts) == 3 && parts[2] == "repair" {
-			return "directory_repair"
-		}
+	case segDirectory:
+		return directoryOperation(parts[2:])
 	case segMailboxes:
 		return mailboxOperation(parts[2:])
 	}

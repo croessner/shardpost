@@ -864,6 +864,8 @@ func (s *Server) importError(w http.ResponseWriter, r *http.Request, err error) 
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, bad.msg)
 	case errors.As(err, &conflict):
 		writeError(w, http.StatusConflict, adminapi.Conflict, conflict.Reason)
+	case errors.Is(err, model.ErrAccountPurging):
+		writeError(w, http.StatusConflict, adminapi.AccountPurging, "the account is being purged; if no purge job runs any more, run shardpostctl account repair")
 	case errors.Is(err, model.ErrImportLocked):
 		writeError(w, http.StatusConflict, adminapi.ImportLocked, "another import session holds the account")
 	case errors.Is(err, model.ErrImportNotHeld):

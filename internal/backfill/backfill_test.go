@@ -178,6 +178,31 @@ func TestBackfillRepairs(t *testing.T) {
 	}
 }
 
+// TestBackfillRemovesStaleEntries: an active entry without registry
+// (a purge of an older version, a failed creation) is removed once it is
+// older than the grace; a young one stays.
+func TestBackfillRemovesStaleEntries(t *testing.T) {
+	store, ix := legacyStore(t, "alice")
+
+	for name, age := range map[string]time.Duration{"ghost": time.Hour, "young": time.Minute} {
+		b, _ := json.Marshal(model.AccountEntry{Created: time.Now().Add(-age), State: model.AccountActive})
+		if err := ix.Set(name, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rep, err := Accounts(store, memstore.NewAdminKV(), Options{})
+	if err != nil || rep.Repaired[model.RepairStale] != 1 {
+		t.Fatalf("report %+v %v", rep, err)
+	}
+
+	for name, want := range map[string]bool{"ghost": false, "young": true, "alice": true} {
+		if _, ok, _ := model.GetAccountEntry(ix, name); ok != want {
+			t.Errorf("%s: present %v, want %v", name, ok, want)
+		}
+	}
+}
+
 func TestBackfillStopsWhenLockLost(t *testing.T) {
 	store, ix := legacyStore(t, "alice")
 

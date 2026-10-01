@@ -78,11 +78,13 @@ func (s *Store) ListUsers() ([]string, error) {
 	return out, nil
 }
 
-// RegistryTime reports whether the user has a registry; this store
-// keeps no modification time.
-func (s *Store) RegistryTime(account string) (time.Time, bool, error) {
-	ok, err := s.HasRegistry(account)
-	return time.Time{}, ok, err
+// RegistryStatter mirrors cephstore: whether a user has a registry
+// (this store keeps no modification time).
+func (s *Store) RegistryStatter() (func(account string) (time.Time, bool, error), func(), error) {
+	return func(account string) (time.Time, bool, error) {
+		ok, err := s.HasRegistry(account)
+		return time.Time{}, ok, err
+	}, func() {}, nil
 }
 
 // register is the directory hook of a registry creation: it runs on the
@@ -126,6 +128,14 @@ func (u *User) MarkPurging(session string) error {
 	defer release()
 
 	return model.MarkAccountPurging(ix, u.name, session, "", time.Now())
+}
+
+// PurgingSession implements model.DirectoryPurger.
+func (u *User) PurgingSession() (string, bool, error) {
+	ix, release, _ := u.store.AccountIndex()
+	defer release()
+
+	return model.PurgingSession(ix, u.name)
 }
 
 // FinishPurge implements model.DirectoryPurger.

@@ -245,7 +245,7 @@ func failure(stderr io.Writer, e *adminapi.Error, status int) int {
 		return exNoUser
 	case adminapi.OverQuota:
 		return exCantCreate
-	case adminapi.Temporary:
+	case adminapi.Temporary, adminapi.AccountPurging:
 		return exTempFail
 	case adminapi.Unauthenticated, adminapi.Forbidden:
 		return exNoPerm

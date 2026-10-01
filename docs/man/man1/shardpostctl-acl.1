@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-ACL 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-ACL 1 "2026-10-01" "ShardPost 0.36.1" "ShardPost Manual"
 .SH NAME
 shardpostctl-acl \- read, explain and change mailbox permissions
 .SH SYNOPSIS
@@ -180,6 +180,13 @@ or the request conflicts with the current state.
 .TP
 .B 67
 No such account or mailbox.
+.TP
+.B 75
+The grantee is being purged (error
+.BR account_purging ):
+a grant would outlive it. Try again later; if no purge job runs any more,
+see
+.BR "shardpostctl account repair" .
 .TP
 .B 77
 The caller lacks the role, or the identifier is outside its account

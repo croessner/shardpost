@@ -105,7 +105,7 @@ func (u *User) SetACL(name, identifier, rights string) error {
 	}
 
 	if blocked && rights != "" {
-		return model.ErrImportLocked
+		return model.ErrAccountPurging
 	}
 
 	acct, err := u.beginKnownMailbox(name)
@@ -244,7 +244,7 @@ func (o *aclOutcome) failure(name string, err error) error {
 	case o.bad != nil:
 		return o.bad
 	case o.refused:
-		return model.ErrImportLocked
+		return model.ErrAccountPurging
 	default:
 		return nil
 	}

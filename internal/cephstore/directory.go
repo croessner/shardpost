@@ -148,33 +148,60 @@ func (s *Store) AccountIndex() (model.SortedIndex, func(), error) {
 
 // HasRegistry implements model.AccountDirectory.
 func (s *Store) HasRegistry(account string) (bool, error) {
-	_, ok, err := s.RegistryTime(account)
+	stat, release, err := s.RegistryStatter()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	_, ok, err := stat(account)
+
 	return ok, err
 }
 
-// RegistryTime reports whether the account's registry exists and when it
-// was last modified (the backfill takes it as the creation time).
-func (s *Store) RegistryTime(account string) (time.Time, bool, error) {
-	if err := model.CheckNamespace(account); err != nil {
-		return time.Time{}, false, err
-	}
+// RegistryStatter returns a function that reports whether an account's
+// registry exists and when it was last modified (the backfill takes it
+// as the creation time). It uses one index-pool context, switching its
+// namespace per call, so it must not be shared between goroutines;
+// release closes it.
+func (s *Store) RegistryStatter() (func(account string) (time.Time, bool, error), func(), error) {
+	r := s.ref()
 
-	u, err := s.User(account)
+	s.mu.RLock()
+	pool := s.cfg.IndexPool
+	s.mu.RUnlock()
+
+	ioctx, err := r.conn.OpenIOContext(pool)
 	if err != nil {
-		return time.Time{}, false, err
-	}
-	defer u.Close()
-
-	st, err := u.idx.Stat(oidRegistry)
-	if errCode(err) == syscall.ENOENT {
-		return time.Time{}, false, nil
+		r.refs.Done()
+		return nil, nil, fmt.Errorf("open index pool %q: %w", pool, err)
 	}
 
-	if err != nil {
-		return time.Time{}, false, err
+	release := func() {
+		ioctx.Destroy()
+		r.refs.Done()
 	}
 
-	return st.ModTime, true, nil
+	stat := func(account string) (time.Time, bool, error) {
+		if err := model.CheckNamespace(account); err != nil {
+			return time.Time{}, false, err
+		}
+
+		ioctx.SetNamespace(account)
+
+		st, err := ioctx.Stat(oidRegistry)
+		if errCode(err) == syscall.ENOENT {
+			return time.Time{}, false, nil
+		}
+
+		if err != nil {
+			return time.Time{}, false, err
+		}
+
+		return st.ModTime, true, nil
+	}
+
+	return stat, release, nil
 }
 
 // LockAccountIndex takes the exclusive cls_lock of the account
@@ -313,6 +340,21 @@ func (u *User) MarkPurging(session string) error {
 	defer release()
 
 	return model.MarkAccountPurging(ix, u.name, session, u.store.Cluster(), time.Now())
+}
+
+// PurgingSession implements model.DirectoryPurger.
+func (u *User) PurgingSession() (string, bool, error) {
+	if u.store == nil {
+		return "", false, nil
+	}
+
+	ix, release, err := u.store.AccountIndex()
+	if err != nil {
+		return "", false, fmt.Errorf("account directory: %w", err)
+	}
+	defer release()
+
+	return model.PurgingSession(ix, u.name)
 }
 
 // FinishPurge implements model.DirectoryPurger.

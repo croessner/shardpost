@@ -206,8 +206,10 @@ while the phase is not `stable` (resharding is a later stage and this
 version does not write the new layout); a newer format is refused
 altogether. One entry is read, set or removed with one operation on its
 shard object; an update is a compare-and-swap on the shard object's
-version, because go-ceph offers no omap comparison. A listing returns
-the entries in (shard, id) order, page by page, with the cursor
+version, because go-ceph offers no omap comparison; a short random
+backoff separates the attempts, and each lost round counts as
+`imapceph_rados_cas_retries_total{kind="index"}`. A listing returns the
+entries in (shard, id) order, page by page, with the cursor
 `<shard>:<id>`; a page reads the shard of the cursor and continues with
 the following shards until it is full.
 
@@ -245,9 +247,10 @@ Without the directory, a late session or delivery could then create the account
 again. Now the purge job sets the entry to `purging` with its lock
 session (`job-<id>`) while it still holds the lock, before it deletes the
 namespace. From then on, while the registry is missing, the registry
-hook refuses every creation with `ErrImportLocked` (LMTP answers 451,
-IMAP `NO [UNAVAILABLE]`), except an `ImportLock` of the job's
-own session, so that a restarted job can take its lock again. That
+hook refuses every creation with `ErrAccountPurging`, a kind of
+`ErrImportLocked` (LMTP answers 451, IMAP `NO [UNAVAILABLE]`), except an
+`ImportLock` of the job's own session, so that a restarted job can take
+its lock again. That
 restart leaves an empty registry with only the lock key behind, which is
 why the last purge phase stops renewing the lock, fences, deletes the
 registry once more (absent is fine) and only then removes the entry.
@@ -256,19 +259,49 @@ account. While the registry exists, `purging` does not block anything
 beyond the import lock itself.
 
 A grant (SETACL, the admin ACL operations, JMAP sharing) to an account
-that is `purging` without registry is refused with `ErrImportLocked`
+that is `purging` without registry is refused with `ErrAccountPurging`
+(an `ErrImportLocked`; the admin API answers `409 account_purging`)
 before the ACL is written: the pointer write into the grantee's registry
 would fail, but the ACL entry would stay and pass to whoever gets the
-name next. A removal of rights goes through and writes no pointer.
+name next. A removal of rights goes through and writes no pointer. The
+check narrows the window, it does not close it: a grant whose check ran
+just before the purge deleted the grantee's registry still writes its
+ACL entry, and its pointer write then fails (`ErrPointerSync`). Closing
+it would need the ACL write and the grantee's state in one atomic step,
+which two objects in two namespaces cannot give.
 
-An entry left `purging` by a purge that failed or was cancelled is
-repaired by `shardpostctl account repair` and by the backfill: without
-registry and without a running purge job of that session it is removed,
-with registry it becomes `active` again.
+**Repair.** `shardpostctl account repair` and the backfill apply these
+rules:
+
+| Entry | Condition | Action |
+|---|---|---|
+| `purging` | a purge job of its session still runs | none (`purge_running`) |
+| `purging` | no such job, registry missing | entry removed (`removed`) |
+| `purging` | no such job, registry exists | back to `active` (`activated`) |
+| `active` | older than 10 minutes, registry missing | entry removed (`stale_removed`) |
+
+A stale `active` entry comes from a purge by an older version during the
+rollout, from a crash between the registry hook and the registry
+creation, or from a creation whose write failed. The grace keeps a
+repair away from an account that is being created right now (the hook
+writes the entry just before it creates the registry); an account whose
+registry appears while its stale entry is removed gets the entry back.
+
+While an account is `purging` without registry, no exclusive job can
+take its lock, a second purge included. A job that finds the account
+left so by an ended purge fails at once with "run shardpostctl account
+repair" instead of waiting for the lock.
 
 **Rollback.** Older servers ignore `~accounts` (the scrub's namespace
 listing skips reserved names), and an older purge sets no `purging`, so
-for its purges the behaviour before the directory applies.
+for its purges the behaviour before the directory applies; it leaves the
+entry `active`, which the repair later removes as stale.
+
+**Reshard (later stage).** Resharding the directory will announce itself
+in the head (`phase: copying:<n>`). Servers of this version refuse every
+directory write in that phase, so creating an account then fails with a
+temporary error (LMTP 451). A reshard therefore requires every server to
+run a version that writes during the copy phase first.
 
 ## Notifications and search
 

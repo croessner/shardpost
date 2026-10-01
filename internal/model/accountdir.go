@@ -28,6 +28,9 @@ const (
 const (
 	AccountIndexName   = "accounts"
 	AccountIndexShards = 256
+	// AccountBackfillMarker is the head marker of the last completed
+	// account backfill.
+	AccountBackfillMarker = "backfill.accounts"
 )
 
 // Directory states.
@@ -54,6 +57,11 @@ type AccountEntry struct {
 	Shard string          `json:"shard"`
 	Scrub json.RawMessage `json:"scrub,omitempty"`
 }
+
+// ErrAccountPurging refuses the creation of an account's registry, or a
+// grant to it, while the account is being purged. It is an
+// ErrImportLocked, so every protocol answers "try again later".
+var ErrAccountPurging = fmt.Errorf("%w: the account is being purged", ErrImportLocked)
 
 // ErrNamespace rejects a namespace that is no account and no namespace
 // of the store itself (the empty name, an unknown "~" name).
@@ -106,6 +114,9 @@ type DirectoryPurger interface {
 	// FinishPurge deletes the registry once more (a restarted job's
 	// ImportLock creates an empty one) and then removes the entry.
 	FinishPurge() error
+	// PurgingSession returns the lock session of the purge that marked
+	// the account, when its entry is purging.
+	PurgingSession() (string, bool, error)
 }
 
 // DecodeAccountEntry decodes a directory value.
@@ -154,7 +165,7 @@ func RegisterAccount(ix SortedIndex, account, session, cluster string, now time.
 					return cur, nil
 				}
 
-				return nil, ErrImportLocked
+				return nil, ErrAccountPurging
 			}
 
 			if err == nil {
@@ -187,6 +198,17 @@ func MarkAccountPurging(ix SortedIndex, account, session, cluster string, now ti
 	})
 }
 
+// PurgingSession returns the lock session of the purge that marked the
+// account, when its entry is purging.
+func PurgingSession(ix SortedIndex, account string) (string, bool, error) {
+	e, ok, err := GetAccountEntry(ix, account)
+	if err != nil || !ok || e.State != AccountPurging {
+		return "", false, err
+	}
+
+	return e.Session, true, nil
+}
+
 // GrantBlocked reports whether a grant to account must be refused: the
 // account is being purged and its registry is gone, so a pointer write
 // would fail and the ACL entry would wait for whoever gets the name
@@ -212,6 +234,7 @@ const (
 	RepairRunning   = "purge_running" // a purge job still works on the account
 	RepairRemoved   = "removed"       // purging without registry: entry removed
 	RepairActivated = "activated"     // purging with registry: back to active
+	RepairStale     = "stale_removed" // active, old, without registry: entry removed
 )
 
 // DirectoryRepair is the outcome of RepairAccountEntry.
@@ -223,14 +246,32 @@ type DirectoryRepair struct {
 	After   *AccountEntry `json:"after,omitempty"`
 }
 
-// RepairAccountEntry applies the repair rules to one entry: an account
-// left purging without a purge job that still runs loses its entry when
-// its registry is gone and becomes active again when the registry
-// exists. purgeRunning tells whether the job of a lock session is still
-// running.
-func RepairAccountEntry(ix SortedIndex, account string, hasRegistry func() (bool, error),
-	purgeRunning func(session string) (bool, error),
-) (DirectoryRepair, error) {
+// DefaultDirectoryGrace is how old an active entry without registry
+// must be before a repair removes it: the registry hook writes the entry
+// right before it creates the registry, so a young entry may belong to
+// an account being created.
+const DefaultDirectoryGrace = 10 * time.Minute
+
+// RepairChecks are what RepairAccountEntry asks outside the directory.
+type RepairChecks struct {
+	// HasRegistry reports whether the account's registry exists.
+	HasRegistry func() (bool, error)
+	// PurgeRunning reports whether the job of a lock session still runs.
+	PurgeRunning func(session string) (bool, error)
+	// Now and Grace (DefaultDirectoryGrace when 0) decide whether an
+	// active entry without registry is stale.
+	Now   time.Time
+	Grace time.Duration
+}
+
+// RepairAccountEntry applies the repair rules to one entry:
+//
+//   - purging, and no purge job of its session still runs: without
+//     registry the entry is removed, with registry it is active again;
+//   - active, older than the grace and without registry: the entry is
+//     stale and removed (a purge of an older version, a crash between
+//     the hook and the registry creation, a creation that failed).
+func RepairAccountEntry(ix SortedIndex, account string, c RepairChecks) (DirectoryRepair, error) {
 	out := DirectoryRepair{Account: account, Action: RepairNone}
 
 	e, ok, err := GetAccountEntry(ix, account)
@@ -238,31 +279,87 @@ func RepairAccountEntry(ix SortedIndex, account string, hasRegistry func() (bool
 		return out, err
 	}
 
-	out.Found, out.Before = true, &e
+	out.Found, out.Before, out.After = true, &e, &e
+
 	if e.State != AccountPurging {
-		out.After = &e
-		return out, nil
+		return repairStale(ix, account, e, c, out)
 	}
 
-	running, err := purgeRunning(e.Session)
+	running, err := c.PurgeRunning(e.Session)
 	if err != nil {
 		return out, err
 	}
 
 	if running {
-		out.Action, out.After = RepairRunning, &e
+		out.Action = RepairRunning
 		return out, nil
 	}
 
 	// While the entry is purging and the registry is missing, only the
 	// purge's own session can create the registry, and its job has
 	// ended: the answer stays valid until the update below.
-	reg, err := hasRegistry()
+	reg, err := c.HasRegistry()
 	if err != nil {
 		return out, err
 	}
 
 	err = ix.Update(account, func(cur []byte) ([]byte, error) { return repairUpdate(cur, e.Session, reg, &out) })
+
+	return out, err
+}
+
+// repairStale removes an active entry that is older than the grace and
+// has no registry. The entry is removed only if it is unchanged; an
+// account created between the check and the removal gets its entry
+// back.
+func repairStale(ix SortedIndex, account string, e AccountEntry, c RepairChecks, out DirectoryRepair) (DirectoryRepair, error) {
+	grace := c.Grace
+	if grace <= 0 {
+		grace = DefaultDirectoryGrace
+	}
+
+	if c.Now.Sub(e.Created) < grace {
+		return out, nil
+	}
+
+	if reg, err := c.HasRegistry(); err != nil || reg {
+		return out, err
+	}
+
+	err := ix.Update(account, func(cur []byte) ([]byte, error) {
+		if cur2, err := DecodeAccountEntry(cur); cur == nil || err != nil || cur2.State != AccountActive || !cur2.Created.Equal(e.Created) {
+			return cur, nil // changed meanwhile: leave it
+		}
+
+		out.Action, out.After = RepairStale, nil
+
+		return nil, nil
+	})
+	if err != nil || out.Action != RepairStale {
+		return out, err
+	}
+
+	return restoreIfCreated(ix, account, e, c, out)
+}
+
+// restoreIfCreated puts a removed stale entry back when the registry
+// appeared meanwhile: the hook of a creation that found the entry wrote
+// nothing.
+func restoreIfCreated(ix SortedIndex, account string, e AccountEntry, c RepairChecks, out DirectoryRepair) (DirectoryRepair, error) {
+	if reg, err := c.HasRegistry(); err != nil || !reg {
+		return out, err
+	}
+
+	b, _ := json.Marshal(e)
+
+	err := ix.Update(account, func(cur []byte) ([]byte, error) {
+		if cur != nil {
+			return cur, nil
+		}
+
+		return b, nil
+	})
+	out.Action, out.After = RepairNone, &e
 
 	return out, err
 }

@@ -202,6 +202,33 @@ func TestRepairAfterFailedPurge(t *testing.T) {
 	expectRepair(t, kv, store, "back", model.RepairNone)
 }
 
+// TestSecondPurgeFailsFastWhenLeftPurging: a purge that ended after it
+// deleted the registry leaves the account purging; another exclusive
+// job cannot take the lock and says what to do instead of waiting.
+func TestSecondPurgeFailsFastWhenLeftPurging(t *testing.T) {
+	store, kv := memstore.New(), memstore.NewAdminKV()
+	alice, _ := store.User("alice")
+	_ = alice.EnsureMailbox("INBOX", nil)
+
+	m := newTestManager(kv, store, "pod-a", Kinds(time.Hour)...)
+	first := submitPurge(t, m, "alice")
+	purgeAndDie(t, m, store, first, 4)
+
+	if _, err := m.st.updateJob(first.ID, func(cur *Job) error { cur.State = StateFailed; return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	k := &stepKind{name: "lock", exclusive: true, steps: 1}
+	m2 := newTestManager(kv, store, "pod-b", k)
+	j, _, _ := m2.Submit(k, "alice", nil, "", "tester", "")
+	runManager(t, m2)
+
+	done := waitState(t, m2, j.ID, StateFailed)
+	if len(done.Errors) == 0 || done.Errors[0] != ErrLeftPurging.Error() {
+		t.Fatalf("errors %v", done.Errors)
+	}
+}
+
 func TestPurgeRunning(t *testing.T) {
 	kv := memstore.NewAdminKV()
 
