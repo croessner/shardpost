@@ -396,7 +396,7 @@ func TestExpiryMatchesCleanup(t *testing.T) {
 	for _, step := range []time.Duration{exp.cfg.Retention - time.Second, 2 * time.Second, exp.cfg.PlanTTL} {
 		c.add(step)
 
-		exp.expireDue(func() bool { return false })
+		exp.expireDue(context.Background(), func() bool { return false })
 		cln.cleanup()
 
 		for _, prefix := range []string{prefixJob, prefixPlan} {
@@ -473,14 +473,14 @@ func TestExpiryPlaceholders(t *testing.T) {
 	}
 
 	c.add(ret - time.Second)
-	m.expireDue(func() bool { return false })
+	m.expireDue(context.Background(), func() bool { return false })
 
 	if _, err := kv.Get(orphan); err != nil {
 		t.Fatalf("orphan key deleted before its placeholder: %v", err)
 	}
 
 	c.add(2 * time.Second)
-	m.expireDue(func() bool { return false })
+	m.expireDue(context.Background(), func() bool { return false })
 
 	if _, err := kv.Get(orphan); !errors.Is(err, model.ErrNotFound) {
 		t.Fatalf("orphan key kept: %v", err)
@@ -507,7 +507,7 @@ func TestExpiryRetryReturnsJobWhileItExists(t *testing.T) {
 	}
 
 	c.add(m.cfg.Retention - time.Second)
-	m.expireDue(func() bool { return false })
+	m.expireDue(context.Background(), func() bool { return false })
 
 	again, created, err := m.Submit(k, "alice", nil, "", "tester", "key")
 	if err != nil || created || again.ID != j.ID {
@@ -515,7 +515,7 @@ func TestExpiryRetryReturnsJobWhileItExists(t *testing.T) {
 	}
 
 	c.add(2 * time.Second)
-	m.expireDue(func() bool { return false })
+	m.expireDue(context.Background(), func() bool { return false })
 
 	fresh, created, err := m.Submit(k, "alice", nil, "", "tester", "key")
 	if err != nil || !created || fresh.ID == j.ID {
@@ -523,16 +523,100 @@ func TestExpiryRetryReturnsJobWhileItExists(t *testing.T) {
 	}
 }
 
-// TestRunWakesOnSubmit: with a poll far away, a runner claims a job
-// submitted after its start at once, woken by the queue notify; in write
-// and in read mode.
+// failKV fails the creation of records with a prefix.
+type failKV struct {
+	*memstore.AdminKV
+	prefix string
+}
+
+func (f *failKV) Update(key string, fn func([]byte) ([]byte, error)) error {
+	if strings.HasPrefix(key, f.prefix) {
+		return errors.New("injected")
+	}
+
+	return f.AdminKV.Update(key, fn)
+}
+
+// TestQueueEntriesWithoutRecord: a retry of an idempotency key writes no
+// placeholder, and a plan or job whose record could not be stored leaves
+// no queue entry.
+func TestQueueEntriesWithoutRecord(t *testing.T) {
+	kv := memstore.NewAdminKV()
+	k := &stepKind{name: "count", steps: 1}
+	m := newTestManager(kv, memstore.New(), "pod-a", k)
+
+	if _, _, err := m.Submit(k, "alice", nil, "", "tester", "key"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := entries(t, kv, model.JobsExpiryQueue)
+
+	if _, created, err := m.Submit(k, "alice", nil, "", "tester", "key"); err != nil || created {
+		t.Fatalf("retry: %v %v", created, err)
+	}
+
+	if after := entries(t, kv, model.JobsExpiryQueue); len(after) != len(before) {
+		t.Fatalf("a retry wrote expiry entries: %d -> %d", len(before), len(after))
+	}
+
+	planned := &stepKind{name: "wipe", planned: true, steps: 1}
+
+	for _, prefix := range []string{prefixPlan, prefixJob} {
+		empty := memstore.NewAdminKV()
+		fm := newTestManager(&failKV{AdminKV: empty, prefix: prefix}, memstore.New(), "pod-a", k, planned)
+
+		if prefix == prefixPlan {
+			_, err := fm.CreatePlan(context.Background(), planned, "alice", nil, "tester", nil)
+			if err == nil {
+				t.Fatal("plan stored")
+			}
+		} else if _, _, err := fm.Submit(k, "alice", nil, "", "tester", ""); err == nil {
+			t.Fatal("job stored")
+		}
+
+		for _, q := range []string{model.JobsClaimableQueue, model.JobsExpiryQueue} {
+			if left := entries(t, empty, q); len(left) != 0 {
+				t.Fatalf("%s: entries without record in %s: %+v", prefix, q, left)
+			}
+		}
+	}
+}
+
+// TestExpiryStopsWithContext: a cancelled context stops the expiry
+// before its next deletion.
+func TestExpiryStopsWithContext(t *testing.T) {
+	kv, c := memstore.NewAdminKV(), newClock()
+	k := &stepKind{name: "count", steps: 1}
+	m := clockManager(kv, c, "pod-a", k)
+
+	j, _, _ := m.Submit(k, "alice", nil, "", "tester", "")
+	if _, err := m.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	c.add(2 * m.cfg.Retention)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	m.expireDue(ctx, func() bool { return false })
+
+	if _, err := m.Get(j.ID); err != nil {
+		t.Fatalf("deleted after the context ended: %v", err)
+	}
+}
+
+// TestRunWakesOnSubmit: in read mode, with a poll far away, a runner
+// claims a job submitted after its start at once, woken by the queue
+// notify. In write mode it does not watch (a wake-up would cost a
+// listing per submit on every server) and finds the job by its poll.
 func TestRunWakesOnSubmit(t *testing.T) {
-	for _, mode := range []model.KVIndexMode{model.KVIndexWrite, model.KVIndexRead} {
+	for mode, poll := range map[model.KVIndexMode]time.Duration{model.KVIndexRead: time.Hour, model.KVIndexWrite: 20 * time.Millisecond} {
 		t.Run(string(mode), func(t *testing.T) {
 			kv, store := memstore.NewAdminKVMode(mode), memstore.New()
 			k := &stepKind{name: "count", steps: 1}
 			m := newTestManager(kv, store, "pod-a", k)
-			m.cfg.Poll = time.Hour
+			m.cfg.Poll = poll
 
 			runManager(t, m)
 			time.Sleep(50 * time.Millisecond) // the first poll is over
@@ -546,8 +630,8 @@ func TestRunWakesOnSubmit(t *testing.T) {
 
 			waitState(t, m, j.ID, StateSucceeded)
 
-			if wakeups(t) <= woken {
-				t.Fatal("the runner was not woken by a notify")
+			if notified := wakeups(t) > woken; notified != (mode == model.KVIndexRead) {
+				t.Fatalf("woken by a notify: %v", notified)
 			}
 		})
 	}

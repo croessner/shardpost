@@ -176,18 +176,32 @@ func (m *Manager) CreatePlan(ctx context.Context, kind Kind, account string, par
 	p := &Plan{ID: newID(now), Kind: kind.Name(), Account: account, Params: params, Summary: b, Fingerprint: fp, Touched: touched,
 		Principal: principal, Created: now, Expires: now.Add(m.cfg.PlanTTL)}
 
-	// The expiry entry comes before the record (completeness).
-	if m.q != nil {
-		if err := m.q.expiry.Move(prefixPlan+p.ID, nil, new(planExpiryKey(p, m.cfg.Retention))); err != nil {
-			return nil, fmt.Errorf("expiry queue: %w", err)
-		}
-	}
-
-	if err := m.st.create(prefixPlan+p.ID, p); err != nil {
+	if err := m.storePlan(p); err != nil {
 		return nil, err
 	}
 
 	return p, nil
+}
+
+// storePlan stores a new plan: its expiry entry before the record
+// (completeness), removed again when the record could not be stored.
+func (m *Manager) storePlan(p *Plan) error {
+	if m.q == nil {
+		return m.st.create(prefixPlan+p.ID, p)
+	}
+
+	expiry := planExpiryKey(p, m.cfg.Retention)
+
+	if err := m.q.expiry.Move(prefixPlan+p.ID, nil, &expiry); err != nil {
+		return fmt.Errorf("expiry queue: %w", err)
+	}
+
+	if err := m.st.create(prefixPlan+p.ID, p); err != nil {
+		_ = m.q.expiry.Move(prefixPlan+p.ID, []model.DueKey{expiry}, nil)
+		return err
+	}
+
+	return nil
 }
 
 // GetPlan returns a plan.
@@ -234,6 +248,17 @@ func (m *Manager) claimIdem(j *Job, principal, idemKey string) (*Job, error) {
 	hash := requestHash(j.Kind, j.Account, j.Params, j.PlanID)
 	j.IdemKey = idemKeyOf(principal, idemKey)
 
+	// A retry of an existing key writes nothing (a key that vanished in
+	// between is claimed anew below).
+	switch _, err := m.st.kv.Get(j.IdemKey); {
+	case err == nil:
+		if existing, gerr := m.byIdempotency(principal, idemKey, hash); gerr != nil || existing != nil {
+			return existing, gerr
+		}
+	case !errors.Is(err, model.ErrNotFound):
+		return nil, err
+	}
+
 	// The key expires with its job; its placeholder comes before the
 	// record, so a crash before the job is stored cannot block the key
 	// for good.
@@ -248,6 +273,8 @@ func (m *Manager) claimIdem(j *Job, principal, idemKey string) (*Job, error) {
 		return nil, nil
 	}
 
+	// A concurrent submit created the key meanwhile; the placeholder
+	// left behind is cleaned by the expiry worker.
 	existing, gerr := m.byIdempotency(principal, idemKey, hash)
 	if gerr != nil || existing != nil {
 		return existing, gerr

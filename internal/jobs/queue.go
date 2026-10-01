@@ -325,10 +325,12 @@ func (m *Manager) dropEntry(e model.DueEntry) bool {
 }
 
 // watchClaimable watches jobs/claimable and returns the channel of its
-// notifies (nil without a queue or when the watch failed: the poll
-// remains) and a function that ends the watch.
+// notifies and a function that ends the watch. Only a runner that claims
+// from the queue (read mode) watches: in write mode a wake-up would cost
+// a listing of the admin namespace on every server per submit. nil
+// without a watch: the poll remains.
 func (m *Manager) watchClaimable() (<-chan struct{}, <-chan error, func()) {
-	if m.q == nil {
+	if !m.q.reads() {
 		return nil, nil, func() {}
 	}
 
@@ -370,7 +372,7 @@ func (m *Manager) runExpiry(ctx context.Context) {
 		}
 
 		if lease != nil {
-			m.expireDue(lease.Lost)
+			m.expireDue(ctx, lease.Lost)
 		}
 
 		select {
@@ -384,7 +386,7 @@ func (m *Manager) runExpiry(ctx context.Context) {
 // takeExpiryLease takes the expiry worker's lease (nil when another
 // server holds it or the lock failed).
 func (m *Manager) takeExpiryLease() model.Lease {
-	l, err := m.q.kv.LockQueue(model.JobsExpiryQueue, m.cfg.LeaseTTL)
+	l, err := m.q.kv.LockQueue(model.JobsExpiryQueue, expiryLockTTL(m.cfg.LeaseTTL))
 
 	switch {
 	case err == nil:
@@ -397,9 +399,20 @@ func (m *Manager) takeExpiryLease() model.Lease {
 	return nil
 }
 
+// expiryLockSlack is added to jobs.lease_seconds for the TTL of the
+// expiry worker's cls_lock. The lock is renewed every third of its TTL;
+// a renewal that waits out the OSD op timeout (rados_osd_op_timeout,
+// 60 s) must still land before the lock runs out, so the TTL has to
+// exceed period + op timeout: with the slack, TTL/3 < TTL - 60 s holds
+// for every allowed lease (10 s and more).
+const expiryLockSlack = 2 * time.Minute
+
+// expiryLockTTL is the TTL of the expiry worker's lock.
+func expiryLockTTL(lease time.Duration) time.Duration { return lease + expiryLockSlack }
+
 // expireDue deletes the due entries of jobs/expiry and their records,
-// page by page, until none is due or the lease is lost.
-func (m *Manager) expireDue(lost func() bool) {
+// page by page, until none is due, the lease is lost or ctx ends.
+func (m *Manager) expireDue(ctx context.Context, lost func() bool) {
 	const page = 100
 
 	for round := 0; round < 100; round++ {
@@ -412,7 +425,7 @@ func (m *Manager) expireDue(lost func() bool) {
 		}
 
 		for _, e := range due {
-			if lost() {
+			if lost() || ctx.Err() != nil {
 				return
 			}
 

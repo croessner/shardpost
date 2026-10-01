@@ -393,13 +393,19 @@ the move) moves it to the record's lease end; an entry of an ended job
 is removed; a claim removes the entry it came from together with the
 record's own. The compare-and-swap on the record stays the fence.
 
-**Wake instead of poll.** Every runner watches shard 0 of
-`jobs/claimable`. A writer notifies it when an entry becomes due earlier
-than before: a submit, and a release at shutdown. The runner then looks
-for claimable jobs at once; its poll (`jobs.poll_seconds`) stays as the
-fallback, and a broken watch is set up again on the next poll.
-`imapceph_job_wakeups_total{cause}` counts both. In `write` mode the
-look is still the listing.
+**Wake instead of poll.** A writer notifies shard 0 of
+`jobs/claimable` when an entry becomes due earlier than before: a
+submit, and a release at shutdown. In `read` mode every runner watches
+that object and then claims from the queue at once; its poll
+(`jobs.poll_seconds`) stays as the fallback, and a watch that reports
+an error (the OSD dropped it, or the store rotated its connection) is
+set up again on the next poll. In `write` mode runners do not watch:
+their look for jobs is still a listing of the admin namespace, and a
+wake-up per submit on every server would multiply those listings; they
+find new jobs by the poll as before. `imapceph_job_wakeups_total{cause}`
+counts the looks by cause. Watch errors are coalesced into one pending
+error per watch, so the librados thread that reports them never waits
+for the runner.
 
 **Expiry** (`jobs/expiry`). The entries carry the retention of
 `cleanup()`:
@@ -411,8 +417,12 @@ look is still the listing.
 | plan | `Expires + retention` |
 
 One server of the cluster runs the expiry worker: it holds the
-cls_lock `ix.jobs/expiry/lock` (renewed with `MAY_RENEW` every third of
-`jobs.lease_seconds`) instead of taking it per step, and every
+cls_lock `ix.jobs/expiry/lock` instead of taking it per step. The lock
+lives `jobs.lease_seconds` + 120 s and is renewed with `MAY_RENEW` every
+third of that, so a renewal that waits out the OSD op timeout (60 s)
+still lands before the lock runs out; releasing it waits for a renewal
+in flight before the unlock, so a late renewal cannot take the lock
+again. Every
 `jobs.expiry_seconds` deletes what is due. For a job it deletes the
 idempotency key first (only while the key still names this job; absent
 is fine), then the job (a compare-and-swap that checks the job is still
@@ -425,7 +435,19 @@ deletion is a compare-and-swap on the record. When the store rotates
 its cephx key (`Store.Rotate`), the worker's lock is unlocked through
 the old connection while its key is still valid and reported lost; the
 worker takes it again on the new connection. A lock whose holder died
-stays held until its TTL (`jobs.lease_seconds`) ran out.
+stays held until its TTL (`jobs.lease_seconds` + 120 s) ran out. A key
+that `Due` cannot parse is skipped and counted
+(`imapceph_queue_stale_entries_total{action="unparsable"}`).
+
+**Key rotation.** The admin store is opened once and kept for the
+process lifetime by the job runner, JMAP and the push worker. It does
+not hold one connection for good: it is a view registered with the
+store, and `Store.Rotate` (a new cephx key from Rook) reopens it on the
+new connection and swaps it in. Requests that already run finish on the
+old view, which is closed once they are done (so the old connection
+shuts down); the queue watch on the old view gets an error and the
+runner watches again on the new one. No restart is needed after a key
+rotation.
 
 In this version `cleanup()` keeps running beside the expiry worker,
 because `jobs/expiry` knows only the records written since the rollout

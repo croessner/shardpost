@@ -41,7 +41,8 @@ type KVReport struct {
 	// first run began).
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished,omitzero"`
-	// Records is the number of records listed, Indexed the hint index
+	// Records is the number of records this run handled (a resumed run
+	// does not count those before its position), Indexed the hint index
 	// entries written, Queued the queue entries written.
 	Records int `json:"records"`
 	Indexed int `json:"indexed"`
@@ -94,11 +95,11 @@ func KV(src KVSource, o KVOptions) (KVReport, error) {
 	}
 
 	for i, key := range keys {
-		rep.Records++
-
 		if key <= pos.After {
-			continue
+			continue // done by the interrupted run
 		}
+
+		rep.Records++
 
 		if err := kvStep(src, marks, key, i, pos, o, &rep, log); err != nil {
 			return rep, err

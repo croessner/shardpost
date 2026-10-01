@@ -113,6 +113,10 @@ const (
 	// queues ("shardpost index backfill kv [--restart]").
 	commandBackfillKV        = "index backfill kv"
 	commandBackfillKVRestart = "index backfill kv --restart"
+	// commandShowKV prints the state of the admin store indexes and
+	// queues ("shardpost index show kv [<key>...]", read-only); the keys
+	// follow in the command, separated by spaces.
+	commandShowKV = "index show kv"
 )
 
 // capabilityEnabled is the ManageSieve capability value for enabled features.

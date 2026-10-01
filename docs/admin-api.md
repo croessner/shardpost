@@ -390,9 +390,9 @@ only the repairs that were planned and are still needed.
   Run `shardpostctl account repair` first (below), then plan again.
 - Finished jobs and plans stay retrievable for `jobs.retention_days`
   (a job from its end, a plan from its expiry), together with the
-  idempotency key of a job. A new job is picked up at once by a server
-  with free capacity (the runners are woken); `jobs.poll_seconds` is the
-  fallback.
+  idempotency key of a job. With `admin.kv_index: read` a new job is
+  picked up at once by a server with free capacity (the runners are
+  woken); otherwise, and as the fallback, within `jobs.poll_seconds`.
 
 ### The account directory
 

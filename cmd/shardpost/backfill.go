@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"shardpost/internal/backfill"
@@ -13,8 +17,10 @@ import (
 )
 
 // backfillLockTTL is the lifetime of the backfill's cls_lock without
-// renewal (it is renewed every third of it).
-const backfillLockTTL = time.Minute
+// renewal. It is renewed every third of it; a renewal that waits out the
+// OSD op timeout (60 s) still lands before the lock runs out, because
+// TTL/3 + 60 s < TTL.
+const backfillLockTTL = 3 * time.Minute
 
 // backfillCommand returns the backfill of an "index backfill" command.
 func backfillCommand(command string) (func(*cephstore.Store, *slog.Logger, *config.Config) error, bool) {
@@ -27,9 +33,37 @@ func backfillCommand(command string) (func(*cephstore.Store, *slog.Logger, *conf
 		return func(store *cephstore.Store, log *slog.Logger, settings *config.Config) error {
 			return backfillKV(store, log, settings, command == commandBackfillKVRestart)
 		}, true
-	default:
-		return nil, false
 	}
+
+	if rest, ok := strings.CutPrefix(command, commandShowKV); ok {
+		return func(store *cephstore.Store, _ *slog.Logger, _ *config.Config) error {
+			return showKV(store, os.Stdout, strings.Fields(rest))
+		}, true
+	}
+
+	return nil, false
+}
+
+// showKV runs "shardpost index show kv [<key>...]": it prints the index
+// mode, the backfill marker, the size of the due queues and, for each
+// key (a job brings its idempotency key along), the record, its hint
+// index entry and its queue entries, as JSON. It only reads.
+func showKV(store *cephstore.Store, w io.Writer, keys []string) error {
+	kv, err := store.AdminKV()
+	if err != nil {
+		return err
+	}
+	defer kv.Close()
+
+	out, err := backfill.InspectKV(kv, keys, time.Now())
+	if err != nil {
+		return fmt.Errorf("admin store: %w", err)
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+
+	return enc.Encode(out)
 }
 
 // backfillAccounts runs "shardpost index backfill accounts": it enters

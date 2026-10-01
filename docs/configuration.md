@@ -8,6 +8,7 @@ shardpost --config /etc/shardpost/server.yaml config check
 shardpost --config /etc/shardpost/server.yaml scrub
 shardpost --config /etc/shardpost/server.yaml index backfill accounts [--restart]
 shardpost --config /etc/shardpost/server.yaml index backfill kv [--restart]
+shardpost --config /etc/shardpost/server.yaml index show kv [<key>...]
 ```
 
 `index backfill accounts` fills the account directory once after a
@@ -15,7 +16,9 @@ rollout (see [Operations](operations/README.md#account-directory-backfill));
 it has no configuration keys of its own. `index backfill kv` fills the
 admin store's hint indexes and due queues (see
 [Operations](operations/README.md#admin-store-backfill)); it uses
-`admin.kv_index` (refuses `off`) and `jobs.retention_days`.
+`admin.kv_index` (refuses `off`) and `jobs.retention_days`. `index show
+kv` prints their state and that of the given admin store keys
+(read-only).
 
 Alternatively, `SHARDPOST_CONFIG` determines the file path. `IMAP_CONFIG`
 is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
@@ -384,8 +387,8 @@ and granted through the admin API, see
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `jobs.enabled` | true | runner in this server (all servers share the jobs) |
-| `jobs.poll_seconds` | 5 | interval between scans for new jobs; with `admin.kv_index` `write` or `read` a runner is also woken at once when a job is submitted or handed over at shutdown, and the poll is the fallback |
-| `jobs.lease_seconds` | 60 | how long a claim holds without renewal (another server may take over afterwards); also the TTL of the expiry worker's lock |
+| `jobs.poll_seconds` | 5 | interval between scans for new jobs; with `admin.kv_index: read` a runner is also woken at once when a job is submitted or handed over at shutdown, and the poll is the fallback |
+| `jobs.lease_seconds` | 60 | how long a claim holds without renewal (another server may take over afterwards); the expiry worker's lock lives this plus 120 s |
 | `jobs.retention_days` | 14 | retention of finished jobs, their idempotency keys and plans (after `expires`) |
 | `jobs.expiry_seconds` | 60 | how often the expiry worker (one server of the cluster, `admin.kv_index` `write` or `read`) deletes the jobs, idempotency keys and plans whose retention ended, and how often the other servers try to take its lock (5–3600) |
 | `jobs.plan_ttl_seconds` | 3600 | how long a plan stays valid |

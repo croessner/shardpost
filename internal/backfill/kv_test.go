@@ -159,6 +159,66 @@ func TestKVBackfillThenReadMode(t *testing.T) {
 	}
 }
 
+// TestInspectKV: the inspection shows the marker, the queue sizes and,
+// for a job, its record, index entry and queue entries and those of the
+// idempotency key it names.
+func TestInspectKV(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	kv := legacyKV(t, now)
+
+	if _, err := KV(kv, KVOptions{Retention: retention, Now: func() time.Time { return now }}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := InspectKV(kv, []string{"job/d1", "job/q1", "job/none"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if out.Mode != model.KVIndexWrite || out.Backfill == nil || out.Queues[model.JobsClaimableQueue].Entries != 2 ||
+		out.Queues[model.JobsClaimableQueue].Due != 1 || out.Queues[model.JobsExpiryQueue].Entries != 6 {
+		t.Fatalf("summary %+v", out)
+	}
+
+	checkInspected(t, out.Keys)
+}
+
+// checkInspected checks the keys TestInspectKV asked for.
+func checkInspected(t *testing.T, inspected []KeyInspection) {
+	t.Helper()
+
+	keys := map[string]KeyInspection{}
+	for _, k := range inspected {
+		keys[k.Key] = k
+	}
+
+	// record, index entry, queues of the entries
+	for key, want := range map[string]struct {
+		record, index bool
+		queues        []string
+	}{
+		"job/d1":   {true, true, []string{model.JobsExpiryQueue}},
+		"idem/k1":  {true, true, []string{model.JobsExpiryQueue}},
+		"job/q1":   {true, true, []string{model.JobsClaimableQueue, model.JobsExpiryQueue}},
+		"job/none": {false, false, nil},
+	} {
+		got := keys[key]
+
+		var queues []string
+		for _, e := range got.Entries {
+			queues = append(queues, e.Queue)
+		}
+
+		if got.Record != want.record || (len(got.Index) > 0) != want.index || !slices.Equal(queues, want.queues) {
+			t.Errorf("%s: %+v", key, got)
+		}
+	}
+
+	if d1 := keys["job/d1"]; len(d1.Entries) != 1 || d1.Entries[0].Gen != 1 {
+		t.Fatalf("job/d1 expiry not final: %+v", d1)
+	}
+}
+
 func TestKVBackfillResumes(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	kv := legacyKV(t, now)
@@ -175,7 +235,7 @@ func TestKVBackfillResumes(t *testing.T) {
 	}
 
 	// Only job/r1 and plan/p1 follow job/q1.
-	if !rep.Resumed || !rep.Started.Equal(started) || rep.Indexed != 2 || rep.Queued != 3 {
+	if !rep.Resumed || !rep.Started.Equal(started) || rep.Records != 2 || rep.Indexed != 2 || rep.Queued != 3 {
 		t.Fatalf("resumed report %+v", rep)
 	}
 

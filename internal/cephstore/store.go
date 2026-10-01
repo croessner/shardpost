@@ -84,9 +84,12 @@ type Store struct {
 	// fsid identifies the cluster in the account directory.
 	fsid string
 
-	// held are the worker locks Rotate gives up (holdLock).
-	heldMu sync.Mutex
-	held   map[*lease]struct{}
+	// held are the worker locks Rotate gives up (holdLock); handles are
+	// the long-lived views Rotate moves to the new connection
+	// (handle.go).
+	heldMu  sync.Mutex
+	held    map[*lease]struct{}
+	handles map[*userHandle]struct{}
 }
 
 // connRef is a reference-counted librados connection.
@@ -133,6 +136,10 @@ func (s *Store) Rotate(key, monHost string) error {
 	// Worker locks are unlocked through the old connection while its key
 	// is still valid; their holders take them again on the new one.
 	s.releaseHeld()
+
+	// Long-lived views (the admin store) move to the new connection;
+	// their requests that run finish on the old one.
+	s.rotateHandles()
 
 	old.old = true
 	go func() {

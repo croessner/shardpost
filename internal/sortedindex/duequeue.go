@@ -2,6 +2,7 @@ package sortedindex
 
 import (
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -45,6 +46,10 @@ const (
 	opMove = "move"
 	opDue  = "due"
 )
+
+// staleUnparsable is the action of imapceph_queue_stale_entries_total
+// for a key Due cannot parse.
+const staleUnparsable = "unparsable"
 
 func (q *Queue) count(op string, err error) {
 	outcome := "ok"
@@ -127,7 +132,15 @@ func (q *Queue) Due(now time.Time, limit int) (out []model.DueEntry, err error) 
 		}
 
 		e, err := model.ParseDueKey(k)
-		if err != nil || e.Due.After(now) {
+		if err != nil {
+			// Not written by this layout: counted, never handed out.
+			metrics.QueueStale.WithLabelValues(q.ix.name, staleUnparsable).Inc()
+			slog.Debug("queue: unparsable key", "queue", q.ix.name, "key", k, "err", err)
+
+			continue
+		}
+
+		if e.Due.After(now) {
 			continue
 		}
 

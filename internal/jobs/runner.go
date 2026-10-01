@@ -103,8 +103,10 @@ func (r *Run) LoadCheckpoint(v any) bool {
 }
 
 // Run claims and executes jobs until ctx ends. It looks for claimable
-// jobs every Config.Poll and whenever a writer notifies the claimable
-// queue (a job was submitted or handed over); with the queues it also
+// jobs every Config.Poll and, in read mode, whenever a writer notifies
+// the claimable queue (a job was submitted or handed over); a watch that
+// reports an error (dropped by the OSD, or the store rotated its
+// connection) is set up again at the next poll. With the queues it also
 // runs the expiry worker when this server holds its lease. cleanup()
 // keeps running on the poll beside it until the readers switch to the
 // indexes.
@@ -147,7 +149,7 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-tick.C:
 			cause = wakePoll
 
-			if events == nil && m.q != nil {
+			if events == nil && m.q.reads() {
 				events, errs, unwatch = m.watchClaimable()
 			}
 		case <-events:

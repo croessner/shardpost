@@ -31,13 +31,10 @@ type radosOmap struct {
 	ioctx   *rados.IOContext
 	key     string
 	keysVer func(oid string, keys []string) (map[string][]byte, uint64, error)
-	// waker watches and notifies queue objects (nil: not supported).
-	waker sortedindex.Waker
 }
 
 var (
 	_ sortedindex.Backend = (*radosOmap)(nil)
-	_ sortedindex.Waker   = (*radosOmap)(nil)
 )
 
 // CacheKey implements sortedindex.Backend.
@@ -50,55 +47,6 @@ func (b *radosOmap) ReadKeys(oid string, keys []string) (map[string][]byte, uint
 	}
 
 	return getOmapKeysVer(b.ioctx, oid, keys)
-}
-
-// Watch implements sortedindex.Waker.
-func (b *radosOmap) Watch(oid string) (model.Watch, error) {
-	if b.waker == nil {
-		return nil, sortedindex.ErrNoWatch
-	}
-
-	return b.waker.Watch(oid)
-}
-
-// Notify implements sortedindex.Waker.
-func (b *radosOmap) Notify(oid string) {
-	if b.waker != nil {
-		b.waker.Notify(oid)
-	}
-}
-
-// queueWaker watches and notifies queue shard objects of a namespace
-// (RADOS watch/notify, see watch.go).
-type queueWaker struct{ u *User }
-
-// Watch creates oid if needed (a watch needs the object) and watches it.
-func (w queueWaker) Watch(oid string) (model.Watch, error) {
-	op := rados.CreateWriteOp()
-	defer op.Release()
-
-	op.Create(rados.CreateIdempotent)
-
-	if err := op.Operate(w.u.idx, oid, rados.OperationNoFlag); err != nil {
-		return nil, fmt.Errorf("create %s: %w", oid, err)
-	}
-
-	return w.u.watchObject(oid)
-}
-
-// Notify wakes the watchers of oid in the background (best effort).
-func (w queueWaker) Notify(oid string) {
-	u := w.u
-
-	u.inflight.Add(1)
-
-	go func() {
-		defer u.inflight.Done()
-
-		if _, _, err := u.idx.NotifyWithTimeout(oid, nil, notifyTimeout); err != nil && errCode(err) != syscall.ENOENT {
-			u.log.Debug("queue notify failed", "object", oid, "err", err)
-		}
-	}()
 }
 
 // indexKey identifies namespace ns of the index pool in the process-wide
@@ -393,8 +341,11 @@ func (s *Store) releaseHeld() {
 func (u *User) keepLock(l *lease, every time.Duration, take func(flags *byte) error) {
 	u.inflight.Add(1)
 
+	l.done = make(chan struct{})
+
 	go func() {
 		defer u.inflight.Done()
+		defer close(l.done)
 
 		renew := byte(1) // LIBRADOS_LOCK_FLAG_MAY_RENEW
 

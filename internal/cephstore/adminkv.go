@@ -43,14 +43,17 @@ var _ model.IndexedKV = (*AdminKV)(nil)
 
 // adminRecords is the record layer of the admin store (List lists the
 // namespace).
-type adminRecords struct{ u *User }
+// It works on a handle that follows key rotations (handle.go), because
+// the job runner, JMAP and the push worker keep it open for the process
+// lifetime.
+type adminRecords struct{ h *userHandle }
 
 var _ model.AdminKV = (*adminRecords)(nil)
 
 // AdminKV opens the admin store with the configured index mode; Close
 // releases it.
 func (s *Store) AdminKV() (*AdminKV, error) {
-	u, err := s.User(adminNamespace)
+	h, err := s.openHandle(adminNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -59,10 +62,8 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 	mode, shards := s.cfg.KVIndex, s.cfg.KVQueueShards
 	s.mu.RUnlock()
 
-	recs := &adminRecords{u: u}
-	b := &radosOmap{ioctx: u.idx, key: u.store.indexKey(adminNamespace), keysVer: func(oid string, keys []string) (map[string][]byte, uint64, error) {
-		return u.getKeysVer(u.idx, oid, keys)
-	}, waker: queueWaker{u}}
+	recs := &adminRecords{h: h}
+	b := &handleOmap{h: h, key: s.indexKey(adminNamespace)}
 
 	st := kvindex.New(recs, kvindex.Options{Mode: mode, QueueShards: shards, Backend: b, Log: s.log.With("component", "kvindex"),
 		Lock: func(name string, ttl time.Duration) (model.Lease, error) {
@@ -73,12 +74,15 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 }
 
 // Close releases the store.
-func (kv *AdminKV) Close() { kv.recs.u.Close() }
+func (kv *AdminKV) Close() { kv.recs.h.close() }
 
 // Keys lists the keys of every record (one listing of the namespace, for
 // the backfill).
 func (kv *AdminKV) Keys() ([]string, error) {
-	it, err := listObjects(kv.recs.u.idx, listAdminBackfill)
+	u, done := kv.recs.h.get()
+	defer done()
+
+	it, err := listObjects(u.idx, listAdminBackfill)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +111,10 @@ func adminOID(key string) string { return "kv." + key }
 // The version is only meaningful on a context nobody else uses between
 // the read and the query, so the read takes a private one (verpool.go).
 func (kv *adminRecords) read(key string) ([]byte, uint64, error) {
-	pool := kv.u.poolFor(kv.u.idx)
+	u, done := kv.h.get()
+	defer done()
+
+	pool := u.poolFor(u.idx)
 
 	c, err := pool.get()
 	if err != nil {
@@ -231,32 +238,19 @@ func (kv *adminRecords) write(key string, ver uint64, exists bool, next []byte) 
 		op.WriteFull(next)
 	}
 
-	return op.Operate(kv.u.idx, adminOID(key), rados.OperationNoFlag)
+	u, done := kv.h.get()
+	defer done()
+
+	return op.Operate(u.idx, adminOID(key), rados.OperationNoFlag)
 }
 
 // List implements model.AdminKV. It lists the namespace (admin state is
 // small) and reads the selected records.
 func (kv *adminRecords) List(prefix, after string, limit int) ([]model.KVEntry, error) {
-	it, err := listObjects(kv.u.idx, listAdminKV)
+	keys, err := kv.listKeys(prefix, after)
 	if err != nil {
 		return nil, err
 	}
-	defer it.Close()
-
-	var keys []string
-
-	for it.Next() {
-		key, ok := strings.CutPrefix(it.Value(), "kv.")
-		if ok && strings.HasPrefix(key, prefix) && key > after {
-			keys = append(keys, key)
-		}
-	}
-
-	if err := it.Err(); err != nil {
-		return nil, err
-	}
-
-	sort.Strings(keys)
 
 	out := make([]model.KVEntry, 0, min(limit, len(keys)))
 
@@ -278,4 +272,33 @@ func (kv *adminRecords) List(prefix, after string, limit int) ([]model.KVEntry, 
 	}
 
 	return out, nil
+}
+
+// listKeys lists the record keys with prefix after after, sorted.
+func (kv *adminRecords) listKeys(prefix, after string) ([]string, error) {
+	u, done := kv.h.get()
+	defer done()
+
+	it, err := listObjects(u.idx, listAdminKV)
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+
+	var keys []string
+
+	for it.Next() {
+		key, ok := strings.CutPrefix(it.Value(), "kv.")
+		if ok && strings.HasPrefix(key, prefix) && key > after {
+			keys = append(keys, key)
+		}
+	}
+
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Strings(keys)
+
+	return keys, nil
 }
