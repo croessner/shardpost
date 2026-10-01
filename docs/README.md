@@ -43,6 +43,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [ShardPost 0.42.0](reports/2026-10-02-shardpost-0.42.0.md): intents, scrub and purge without per-account listings, sweep (scaling stage R3).
 - [ShardPost 0.41.0](reports/2026-10-01-shardpost-0.41.0.md): auth cache with cluster-wide flush, configurable Nauthilus client, JMAP wait queue and limits.
 - [ShardPost 0.40.0](reports/2026-10-01-shardpost-0.40.0.md): batch over all accounts, partitioned scrub with skip-if-idle, IMAP watch hub (scaling stage R2b).
 - [ShardPost 0.39.0](reports/2026-10-01-shardpost-0.39.0.md): no pool listing in running paths, per-account limits (scaling stage R2a).
