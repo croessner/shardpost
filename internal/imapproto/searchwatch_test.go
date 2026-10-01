@@ -1,16 +1,34 @@
 package imapproto
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"shardpost/internal/memstore"
 )
 
 // TestSearchStopsWhenClientGoes: a search that reads many messages stops
-// reading when its client closes the connection.
+// reading when its client closes the connection — also when that
+// happens after the idle timeout the command loop armed has passed —
+// and the session ends without a storage error.
 func TestSearchStopsWhenClientGoes(t *testing.T) {
-	c, reads, _ := newCountingServer(t, 1)
+	var logs syncBuffer
+
+	reads := &atomic.Int64{}
+
+	c, _ := newTestServer(t, func(o *Options, store *memstore.Store) {
+		o.Store = countingStore{inner: store, reads: reads, gone: &sync.Map{}}
+		o.VerifyParallel = 1
+		o.IdleTimeout = 300 * time.Millisecond
+		o.Log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	})
+	c.ok("LOGIN test test")
 
 	var msgs []string
 
@@ -27,7 +45,8 @@ func TestSearchStopsWhenClientGoes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// past the idle timeout of the command loop
+	time.Sleep(600 * time.Millisecond)
 
 	_ = c.conn.Close()
 
@@ -40,6 +59,30 @@ func TestSearchStopsWhenClientGoes(t *testing.T) {
 	if after := reads.Load(); after != n || n >= int64(len(msgs)) {
 		t.Errorf("reads went on after the client left: %d, then %d of %d", n, after, len(msgs))
 	}
+
+	if out := logs.String(); strings.Contains(out, "storage error") || strings.Contains(out, "level=ERROR") {
+		t.Errorf("the lost client was logged as an error:\n%s", out)
+	}
+}
+
+// syncBuffer is a buffer for a logger that several goroutines write to.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
 }
 
 // TestSearchKeepsPipelinedCommand: the watch for a client going away

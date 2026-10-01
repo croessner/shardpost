@@ -1,6 +1,7 @@
 package cephstore
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -163,24 +164,48 @@ func (u *User) freshIndex() (bool, error) {
 	return !exist, err
 }
 
-// startFTSRebuild sets ftsRebuildKey; the index is not trusted until
-// finishFTSRebuild.
-func (u *User) startFTSRebuild() error {
-	u.ftsCurrent = ftsCurrentUnknown
+// errRebuildSuperseded is what a rebuild gets whose key another rebuild
+// replaced: that one deleted what this one indexed, and it sets the
+// marker when it is done.
+var errRebuildSuperseded = errors.New("another rebuild of the index started meanwhile")
 
-	return casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
-		return map[string][]byte{ftsRebuildKey: nil}, nil
+// startFTSRebuild sets ftsRebuildKey to a token of this run and returns
+// it; the index is not trusted until finishFTSRebuild with the token.
+func (u *User) startFTSRebuild() (string, error) {
+	u.ftsCurrent = ftsCurrentUnknown
+	token := newGUID()
+
+	return token, casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{ftsRebuildKey: []byte(token)}, nil
 	})
 }
 
 // finishFTSRebuild sets the version marker and removes ftsRebuildKey in
-// one write.
-func (u *User) finishFTSRebuild() error {
+// one write — only while the key still holds the token of this run.
+func (u *User) finishFTSRebuild(token string) error {
 	u.ftsCurrent = ftsCurrentUnknown
 
-	return casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+	var superseded bool
+
+	err := casOmap(u, u.idx, oidFTSMap, []string{ftsRebuildKey}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		if superseded = !rebuildOwned(cur, token); superseded {
+			return nil, nil
+		}
+
 		return map[string][]byte{ftsVersionKey: []byte(ftsVersion)}, []string{ftsRebuildKey}
 	})
+	if err == nil && superseded {
+		err = errRebuildSuperseded
+	}
+
+	return err
+}
+
+// rebuildOwned reports whether the rebuild key holds token.
+func rebuildOwned(cur map[string][]byte, token string) bool {
+	v, ok := cur[ftsRebuildKey]
+
+	return ok && string(v) == token
 }
 
 // SearchCandidates returns a superset of the messages whose text in one

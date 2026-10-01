@@ -42,8 +42,7 @@ func (c *conn) cmdSort(tag string, uid bool) error {
 
 	seqs, metas, err := c.runSearch(cr)
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return c.searchFailed(tag, err)
 	}
 
 	idx := make([]int, len(metas))
@@ -246,8 +245,7 @@ func (c *conn) cmdThread(tag string, uid bool) error {
 
 	seqs, metas, err := c.runSearch(cr)
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return c.searchFailed(tag, err)
 	}
 
 	num := func(i int) uint32 {

@@ -417,8 +417,7 @@ func (c *conn) cmdSearch(tag string, uid bool) error {
 
 	seqs, metas, err := c.runSearch(cr)
 	if err != nil {
-		c.storeErr(tag, err)
-		return nil
+		return c.searchFailed(tag, err)
 	}
 
 	nums, highest := searchNums(seqs, metas, uid)

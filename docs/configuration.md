@@ -406,7 +406,10 @@ index can narrow by (`BODY ab`, a single letter) reads every message of
 the mailbox. `fts.verify_parallel` messages are checked at once, each
 under the memory budget; a message that is expunged meanwhile is no
 match, and a read the budget refuses is retried before the command
-fails. `word` costs index lookups only and answers what earlier versions
+fails. A search stops when its client closes the connection (noticed
+without reading what the client sends; not in a session with
+`COMPRESS=DEFLATE`) or the server closes it; the session then ends
+without an answer. `word` costs index lookups only and answers what earlier versions
 answered: all words of the value in any order, by stem and by part of
 a word.
 

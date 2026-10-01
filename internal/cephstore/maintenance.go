@@ -116,7 +116,8 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 	// The version marker goes on only when every message is indexed;
 	// until then the rebuild key keeps substring search from trusting
 	// the index, also when the rebuild stops midway (see ftsRebuildKey).
-	if err := u.startFTSRebuild(); err != nil {
+	token, err := u.startFTSRebuild()
+	if err != nil {
 		return fmt.Errorf("index version: %w", err)
 	}
 
@@ -124,7 +125,7 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 		return err
 	}
 
-	if err := u.finishFTSRebuild(); err != nil {
+	if err := u.finishFTSRebuild(token); err != nil {
 		return fmt.Errorf("index version: %w", err)
 	}
 
