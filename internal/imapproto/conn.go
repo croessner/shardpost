@@ -1157,7 +1157,7 @@ func (c *conn) finishLogin(tag string, req auth.Request, res *auth.Result, err e
 	c.log = c.log.With("user", account)
 	provision.Apply(u, res, c.log)
 
-	if err := provision.Mailboxes(u, c.s.o.Autocreate); err != nil {
+	if err := provision.Mailboxes(u, account, c.s.o.Autocreate, c.log); err != nil {
 		c.log.Error("provision user", "err", err)
 	}
 

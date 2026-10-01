@@ -476,7 +476,7 @@ collection.
 with a start after the last server without the indexes stopped: records
 such a server wrote are missing from the indexes until then. A server
 configured for `read` therefore checks the completion marker
-`backfill.kv`: while it is missing, the server logs an error at start
+`backfill.kv`: while it is missing, the server logs a warning at start
 ("admin.kv_index=read without a completed …") and behaves as in
 `write` mode (it lists, runs `cleanup()` and does not watch the
 claimable queue). It looks for the marker again every 30 seconds and
@@ -567,11 +567,16 @@ index names. In `write` mode all three list the namespace as before
 `read` needs the marker of a completed `shardpost index backfill
 learning` that started after the last server without the index stopped
 (jobs such a server enqueued have no entries until then). Without the
-marker the server logs an error at start and behaves as in `write` mode
+marker the server logs a warning at start and behaves as in `write` mode
 until the marker exists; it looks for it every 30 seconds. The backfill
 lists the namespace once (`{site="learning_backfill"}`) under the
 cls_lock `ix.learning/lock`, reads every job again and sets its queue
 and owner entry; it can be repeated and resumes after an interruption.
+It then removes the queue entries whose job is gone: those at the dead
+position, which no reader of due entries reaches, and those due for
+longer than ten minutes. A delete that finds the job already gone
+removes the id's entries at the dead position as well (one bounded read
+of its shard).
 See [Operations](../operations/README.md#learning-queue-backfill).
 
 **Rollback.** Older servers ignore the index objects and the field

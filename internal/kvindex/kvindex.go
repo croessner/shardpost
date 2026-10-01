@@ -223,7 +223,7 @@ func New(raw model.AdminKV, o Options) *Store {
 	if o.Mode == model.KVIndexRead && o.RequireBackfill {
 		s.gate = &sortedindex.Gate{Head: s.MarkerIndex(), Marker: MarkerKV, Now: o.Now,
 			Closed: func(err error) {
-				o.Log.Error("admin.kv_index=read without a completed \"shardpost index backfill kv\": "+
+				o.Log.Warn("admin.kv_index=read without a completed \"shardpost index backfill kv\": "+
 					"behaving as admin.kv_index=write (listing) until the marker exists", "err", err)
 			},
 			Opened: func() { o.Log.Info("admin.kv_index=read: backfill marker found, readers use the indexes now") },

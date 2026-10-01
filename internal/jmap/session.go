@@ -294,7 +294,7 @@ func (s *Server) baseURL(r *http.Request) string {
 func (s *Server) provision(sess *session) {
 	provision.Apply(sess.user, sess.auth, sess.log)
 
-	if err := provision.Mailboxes(sess.user, s.o.Autocreate); err != nil {
+	if err := provision.Mailboxes(sess.user, sess.account, s.o.Autocreate, sess.log); err != nil {
 		sess.log.Error("jmap: provision account", "err", err)
 	}
 }

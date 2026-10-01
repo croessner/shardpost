@@ -22,7 +22,9 @@ type LearningReport struct {
 	Finished time.Time `json:"finished,omitzero"`
 	// Jobs is the number of jobs this run handled (a resumed run does not
 	// count those before its position).
-	Jobs    int  `json:"jobs"`
+	Jobs int `json:"jobs"`
+	// Removed counts the queue entries removed whose job is gone.
+	Removed int  `json:"removed,omitempty"`
 	Resumed bool `json:"resumed,omitempty"`
 }
 
@@ -46,13 +48,7 @@ type LearningOptions struct {
 // the readers, which move or remove them. The caller holds the
 // backfill lock.
 func Learning(q *learnindex.Queue, o LearningOptions) (LearningReport, error) {
-	if o.Now == nil {
-		o.Now = time.Now
-	}
-
-	if o.Lost == nil {
-		o.Lost = func() bool { return false }
-	}
+	o = o.withDefaults()
 
 	if q.DueQueue() == nil || q.ConfiguredMode() == model.KVIndexOff {
 		return LearningReport{}, errors.New("imapsieve.learning.index is off: the indexes are not kept, a backfill would go stale")
@@ -82,6 +78,10 @@ func Learning(q *learnindex.Queue, o LearningOptions) (LearningReport, error) {
 		if err := learningStep(q, j.ID, i, pos, o, &rep, log); err != nil {
 			return rep, err
 		}
+	}
+
+	if err := learningSweep(q, o, &rep); err != nil {
+		return rep, err
 	}
 
 	if o.Lost() {
@@ -145,6 +145,59 @@ func learningStep(q *learnindex.Queue, id string, i int, pos *progress, o Learni
 	}
 
 	log.Info("backfill progress", "after", id, "jobs", rep.Jobs)
+
+	return nil
+}
+
+// withDefaults fills in the clock and a lock that is never lost.
+func (o LearningOptions) withDefaults() LearningOptions {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+
+	if o.Lost == nil {
+		o.Lost = func() bool { return false }
+	}
+
+	return o
+}
+
+// learningSweep removes the queue entries whose job is gone: those at the
+// dead position (never due, so no reader reaches them) and those due for
+// longer than model.DueQueueGrace (the entry is written before the
+// record, so a younger one may belong to a job being created).
+func learningSweep(q *learnindex.Queue, o LearningOptions, rep *LearningReport) error {
+	entries, err := q.DueQueue().All()
+	if err != nil {
+		return fmt.Errorf("read the learning queue: %w", err)
+	}
+
+	now := o.Now()
+
+	for _, e := range entries {
+		if !e.Due.Equal(learnindex.DeadDue) && now.Sub(e.Due) < model.DueQueueGrace {
+			continue
+		}
+
+		if o.Lost() {
+			return ErrLockLost
+		}
+
+		_, err := q.Records().Get(e.ID)
+
+		switch {
+		case err == nil:
+			continue
+		case !errors.Is(err, imapsieve.ErrNoJob):
+			return fmt.Errorf("learning job %s: %w", e.ID, err)
+		}
+
+		if err := q.DueQueue().Move(e.ID, []model.DueKey{e.DueKey}, nil); err != nil {
+			return fmt.Errorf("queue entry of %s: %w", e.ID, err)
+		}
+
+		rep.Removed++
+	}
 
 	return nil
 }

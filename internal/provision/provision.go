@@ -101,8 +101,10 @@ type Folder struct {
 // Mailboxes creates INBOX and the configured mailboxes of an account that
 // does not have them. A mailbox is subscribed when it is created, never
 // afterwards. A mailbox added to the configuration later reaches the
-// accounts that log in after it, as it does in Dovecot.
-func Mailboxes(u model.User, folders []Folder) error {
+// accounts that log in after it, as it does in Dovecot. A folder the
+// account's mailbox limits refuse is skipped and logged to log (nil:
+// not logged) with the account.
+func Mailboxes(u model.User, account string, folders []Folder, log *slog.Logger) error {
 	fresh, err := ensureMailbox(u, "INBOX", nil)
 	if err != nil {
 		return err
@@ -122,6 +124,11 @@ func Mailboxes(u model.User, folders []Folder) error {
 		if errors.Is(err, model.ErrLimit) {
 			// An account at its mailbox limit (limits.mailboxes) goes
 			// without the folder rather than without the rest.
+			if log != nil {
+				log.Warn("autocreate folder skipped at the account limit", "account", account, "folder", f.Name,
+					"limit", string(model.LimitKindOf(err)))
+			}
+
 			continue
 		}
 

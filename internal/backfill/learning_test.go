@@ -167,3 +167,35 @@ func TestLearningBackfillResumes(t *testing.T) {
 		t.Fatal("backfill with the index off")
 	}
 }
+
+// TestLearningBackfillSweepsOrphans: the backfill removes queue entries
+// whose job is gone at the dead position and when due for longer than
+// the grace; a young one (a job being created) stays.
+func TestLearningBackfillSweepsOrphans(t *testing.T) {
+	q, rec := legacyLearning(t, model.KVIndexWrite, 3)
+	now := time.Now()
+
+	for id, due := range map[string]time.Time{"dead": learnindex.DeadDue, "old": now.Add(-model.DueQueueGrace - time.Minute), "young": now} {
+		if err := q.DueQueue().Move(id, nil, &model.DueKey{Due: due, Gen: 2}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rep, err := Learning(q, LearningOptions{Now: func() time.Time { return now }})
+	if err != nil || rep.Removed != 2 {
+		t.Fatalf("backfill %+v %v", rep, err)
+	}
+
+	entries, _ := q.DueQueue().All()
+
+	var ids []string
+
+	for _, e := range entries {
+		ids = append(ids, e.ID)
+	}
+
+	jobs, _ := rec.List("")
+	if len(ids) != len(jobs)+1 || !slices.Contains(ids, "young") || slices.Contains(ids, "dead") || slices.Contains(ids, "old") {
+		t.Fatalf("entries after the sweep: %v", ids)
+	}
+}

@@ -138,7 +138,7 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 // warnUnbackfilled reports at startup how admin.kv_index=read is met.
 // Without a completed "shardpost index backfill kv" the records of older
 // servers would be missing from the indexes, so the store behaves as in
-// write mode until the marker exists (it logs that as an error itself).
+// write mode until the marker exists (it logs that as a warning itself).
 func warnUnbackfilled(log *slog.Logger, kv *cephstore.AdminKV) {
 	if kv.ConfiguredMode() != model.KVIndexRead || kv.IndexMode() != model.KVIndexRead {
 		return

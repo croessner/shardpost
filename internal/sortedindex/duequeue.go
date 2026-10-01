@@ -176,6 +176,49 @@ func (q *Queue) Notify() {
 	}
 }
 
+// EntriesAt returns the entries of id due exactly at due, whatever their
+// generation: one bounded read of the id's shard from the key prefix
+// "<due>/<id>/" on (a key of another id with that prefix would need a
+// "/" in id, which ParseDueKey splits off at the last "/").
+func (q *Queue) EntriesAt(id string, due time.Time) ([]model.DueEntry, error) {
+	h, err := q.ix.head()
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := strings.TrimSuffix(model.FormatDueKey(id, model.DueKey{Due: due}), "0")
+	oid := ShardOID(q.ix.name, model.IndexShard(id, h.Shards))
+
+	var out []model.DueEntry
+
+	for after := prefix; ; {
+		page, more, err := q.ix.b.ReadPage(oid, after, entriesAtPage)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, kv := range page {
+			if !strings.HasPrefix(kv.Key, prefix) {
+				return out, nil
+			}
+
+			if e, err := model.ParseDueKey(kv.Key); err == nil && e.ID == id {
+				out = append(out, e)
+			}
+
+			after = kv.Key
+		}
+
+		if !more {
+			return out, nil
+		}
+	}
+}
+
+// entriesAtPage is the page size of EntriesAt (an id has one or two
+// entries at one due time).
+const entriesAtPage = 16
+
 // All returns every entry of the queue in shard order (tests and
 // diagnosis).
 func (q *Queue) All() ([]model.DueEntry, error) {

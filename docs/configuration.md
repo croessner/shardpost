@@ -419,15 +419,17 @@ YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
 | `admin.kv_index` | `read` | `off`: no hint indexes, no due queues, no expiry worker (the behaviour before the indexes); `write`: keep them up to date while readers still list the admin namespace (and the listing cleanup of old jobs and plans runs on every runner poll); `read`: also read from them (job runner, job lists, expiry of old records, push subscription scan) and list nothing on a running path. Environment: `ADMIN_KV_INDEX` |
 | `admin.kv_queue_shards` | 4 | shard objects of a due queue (1–8) when its first writer creates it; an existing queue keeps its count |
 
-`read` (the default since 0.38.0's backfill on the cluster) is only
-correct after `shardpost index backfill kv` completed with a start after
-the last server without the indexes stopped. A server configured for
-`read` without the completion marker logs an error and behaves as in
-`write` mode until the marker exists (it looks for it every 30
-seconds). Set the same mode on every server (a server in `read` mode
-does not see what a server in `off` mode writes); a cluster that still
-runs servers older than 0.38.0 sets `write` until the backfill ran after
-the last of them stopped. Back to `write` is always possible. See
+`read` is the default. It is correct on a cluster whose
+`shardpost index backfill kv` completed after the last server without
+the indexes (before 0.38.0, or with `admin.kv_index: off`) stopped.
+Without the completion marker a server configured for `read` logs a
+warning and behaves as in `write` mode until the marker exists (it
+looks for it every 30 seconds), so the gate keeps such a cluster on
+`write` until the backfill ran. A new installation runs the backfill
+once as well (it finds no records and completes at once). Set the same
+mode on every server (a server in `read` mode does not see what a server
+in `off` mode writes). Back to `write` is always possible. See
+
 [Storage: admin store](architecture/storage.md#admin-store-hint-indexes-and-due-queues)
 and [Operations](operations/README.md#admin-store-backfill).
 
@@ -441,7 +443,7 @@ and [Operations](operations/README.md#admin-store-backfill).
 Switch to `read` only after `shardpost index backfill learning`
 completed with a start after the last server without the index stopped,
 on every server. Without the completion marker a server in `read` mode
-logs an error and behaves as in `write` mode until the marker exists.
+logs a warning and behaves as in `write` mode until the marker exists.
 See [Storage: learning queue](architecture/storage.md#learning-queue-due-queue-and-owner-index)
 and [Operations](operations/README.md#learning-queue-backfill).
 

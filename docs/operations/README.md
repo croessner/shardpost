@@ -201,21 +201,24 @@ verifies that the ended job has no claimable entry and that it and its
 idempotency key have their expiry entries at `Finished + retention`,
 and prints the queue metrics.
 
-**`read` is the default.** `read` is only correct after a backfill
-completed whose start lies after the last server without the indexes
-(an older version, or one with `admin.kv_index: off`) stopped. On the
-cluster this happened with 0.38.0, so servers from the next release on
-run in `read` mode from their start. A server configured for `read`
-that finds no completion marker logs an error at start
-("admin.kv_index=read without a completed …") and behaves as in `write`
-mode (listing) until the marker exists; it looks for it every 30
-seconds, so a backfill run after the rollout switches the running
-servers to `read` without a restart. The server cannot tell when the
-last older server stopped: if in doubt, run the backfill again with
-`--restart` after the rollout. For a cluster that still has servers
-older than 0.38.0, set `admin.kv_index: write` until the backfill ran
-after the last of them stopped. Going back to `write` is always
-possible.
+**`read` is the default.** `read` is correct on a cluster whose
+backfill completed after the last server without the indexes (a version
+before 0.38.0, or one with `admin.kv_index: off`) stopped. A server
+configured for `read` that finds no completion marker logs a warning at
+start ("admin.kv_index=read without a completed …") and behaves as in
+`write` mode (listing) until the marker exists; it looks for it every
+30 seconds, so the gate keeps a cluster without the backfill on `write`,
+and a backfill run after the rollout switches the running servers to
+`read` without a restart. The server cannot tell when the last older
+server stopped: if in doubt, run the backfill again with `--restart`
+once no older server is left. Going back to `write` is always possible.
+
+**New installations** run `shardpost index backfill kv` and
+`shardpost index backfill learning` once after the first deployment:
+with no records they complete at once and set the completion markers,
+so `read` mode is reached (without them the servers stay on `write`
+behaviour and log the warning at every start).
+
 
 **Expiry.** With `write` or `read`, one server (the holder of the lock
 `ix.jobs/expiry/lock`) deletes jobs and their idempotency keys
@@ -262,8 +265,15 @@ worker every second). Rollout order:
    `mark:backfill.learning`. It refuses to run with
    `imapsieve.learning.index: off`.
 3. Set `imapsieve.learning.index: read` on every server. A server in
-   `read` mode without the marker logs an error and behaves as in
+   `read` mode without the marker logs a warning and behaves as in
    `write` mode until it exists.
+
+The backfill is also the repair: an owner or queue entry whose write
+failed after its job was written is counted in
+`imapceph_kv_index_errors_total{collection="learning/owner"}` (or
+`collection="learning"`); run `shardpost index backfill learning`
+again when that counter rises. It also removes queue entries whose job is
+gone (at the dead position, or due for longer than ten minutes).
 
 `shardpost index show learning [<id>...]` (read-only) prints as JSON
 the configured and the effective mode, the backfill marker, the number

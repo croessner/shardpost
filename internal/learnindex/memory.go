@@ -66,6 +66,22 @@ func (m *MemRecords) Get(id string) (imapsieve.Job, error) {
 	return j, nil
 }
 
+// GetMany implements Records.
+func (m *MemRecords) GetMany(ids []string) (map[string]imapsieve.Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := map[string]imapsieve.Job{}
+
+	for _, id := range ids {
+		if j, ok := m.jobs[id]; ok {
+			out[id] = j
+		}
+	}
+
+	return out, nil
+}
+
 // Set implements Records.
 func (m *MemRecords) Set(j imapsieve.Job) error {
 	m.mu.Lock()

@@ -79,6 +79,9 @@ type Records interface {
 	Create(j imapsieve.Job, raw []byte) (bool, error)
 	// Get reads a job; imapsieve.ErrNoJob when it does not exist.
 	Get(id string) (imapsieve.Job, error)
+	// GetMany reads the jobs of ids on one store view (a worker pass, an
+	// admin list); a job that does not exist is missing from the map.
+	GetMany(ids []string) (map[string]imapsieve.Job, error)
 	// Set rewrites the job of an existing record; imapsieve.ErrNoJob
 	// when it is gone (a deleted job is not recreated).
 	Set(j imapsieve.Job) error
@@ -154,7 +157,7 @@ func New(rec Records, o Options) *Queue {
 	if o.Mode == model.KVIndexRead && o.RequireBackfill && q.q != nil {
 		q.gate = &sortedindex.Gate{Head: q.q, Marker: MarkerBackfill, Now: o.Now,
 			Closed: func(err error) {
-				o.Log.Error("imapsieve.learning.index=read without a completed \"shardpost index backfill learning\": "+
+				o.Log.Warn("imapsieve.learning.index=read without a completed \"shardpost index backfill learning\": "+
 					"behaving as write (listing) until the marker exists", "err", err)
 			},
 			Opened: func() {
@@ -311,6 +314,9 @@ func (q *Queue) Update(j imapsieve.Job) error {
 
 // Delete implements imapsieve.Queue: the owner entry, the record, then
 // the queue entries of the record as it was and as the caller saw it.
+// When the record is already gone, the id's entries at the dead position
+// go as well (a delete whose queue removal failed would otherwise leave
+// one there for good: readers of due entries never reach it).
 func (q *Queue) Delete(j imapsieve.Job) error {
 	if !q.writes() {
 		return q.rec.Remove(j.ID)
@@ -326,6 +332,15 @@ func (q *Queue) Delete(j imapsieve.Job) error {
 		from = append(from, Position(cur))
 	case !errors.Is(err, imapsieve.ErrNoJob):
 		return err
+	default:
+		dead, err := q.q.EntriesAt(j.ID, DeadDue)
+		if err != nil {
+			return fmt.Errorf("learning queue: %w", err)
+		}
+
+		for _, e := range dead {
+			from = append(from, e.DueKey)
+		}
 	}
 
 	if j.Owner != "" {
@@ -382,15 +397,21 @@ func (q *Queue) List() ([]imapsieve.Job, error) {
 		return nil, err
 	}
 
+	ids := make([]string, 0, len(due))
+	for _, e := range due {
+		ids = append(ids, e.ID)
+	}
+
+	recs, err := q.rec.GetMany(ids)
+	if err != nil {
+		return nil, err
+	}
+
 	jobs := make([]imapsieve.Job, 0, len(due))
 
 	for _, e := range due {
-		j, ok, err := q.checkEntry(e, now)
-		if err != nil {
-			return nil, err
-		}
-
-		if ok {
+		j, found := recs[e.ID]
+		if q.checkEntry(e, j, found, now) {
 			jobs = append(jobs, j)
 		}
 	}
@@ -398,24 +419,20 @@ func (q *Queue) List() ([]imapsieve.Job, error) {
 	return jobs, nil
 }
 
-// checkEntry compares a due entry with its record: ok when the record is
+// checkEntry compares a due entry with its record j (found false: there
+// is none): true when the record is
 // a live job that is due at the entry's position. An entry the record
 // does not match is moved to the record's position; an entry without
 // record is removed once it is older than model.DueQueueGrace (the
 // entry is written before the record).
-func (q *Queue) checkEntry(e model.DueEntry, now time.Time) (imapsieve.Job, bool, error) {
-	j, err := q.rec.Get(e.ID)
-
-	switch {
-	case errors.Is(err, imapsieve.ErrNoJob):
+func (q *Queue) checkEntry(e model.DueEntry, j imapsieve.Job, found bool, now time.Time) bool {
+	if !found {
 		if now.Sub(e.Due) >= model.DueQueueGrace {
 			q.move(e.ID, []model.DueKey{e.DueKey}, nil)
 			stale(staleRemoved)
 		}
 
-		return j, false, nil
-	case err != nil:
-		return j, false, err
+		return false
 	}
 
 	pos := Position(j)
@@ -424,7 +441,7 @@ func (q *Queue) checkEntry(e model.DueEntry, now time.Time) (imapsieve.Job, bool
 		stale(staleMoved)
 	}
 
-	return j, !j.Dead && !now.Before(j.Next), nil
+	return !j.Dead && !now.Before(j.Next)
 }
 
 // listDue is List from a listing of the namespace.
@@ -512,22 +529,27 @@ func (q *Queue) ownedJobs(account string) ([]imapsieve.Job, error) {
 		return nil, err
 	}
 
-	jobs := make([]imapsieve.Job, 0, len(ids))
-
+	jobIDs := make([]string, 0, len(ids))
 	for _, oid := range ids {
 		_, id, _ := strings.Cut(oid, "/")
+		jobIDs = append(jobIDs, id)
+	}
 
-		j, err := q.rec.Get(id)
+	recs, err := q.rec.GetMany(jobIDs)
+	if err != nil {
+		return nil, err
+	}
 
-		switch {
-		case errors.Is(err, imapsieve.ErrNoJob):
+	jobs := make([]imapsieve.Job, 0, len(ids))
+
+	for i, oid := range ids {
+		j, ok := recs[jobIDs[i]]
+		if !ok {
 			if err := q.owner.Remove(oid); err != nil {
-				q.indexError(OwnerIndex, id, err)
+				q.indexError(OwnerIndex, jobIDs[i], err)
 			}
 
 			continue
-		case err != nil:
-			return nil, err
 		}
 
 		jobs = append(jobs, j)

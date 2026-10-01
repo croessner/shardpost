@@ -2,6 +2,7 @@ package cephstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -123,6 +124,36 @@ func (q learningRecords) Get(id string) (imapsieve.Job, error) {
 	return getLearningJob(u, id)
 }
 
+// GetMany implements learnindex.Records: one store view for all ids.
+func (q learningRecords) GetMany(ids []string) (map[string]imapsieve.Job, error) {
+	out := map[string]imapsieve.Job{}
+
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	u, err := q.s.User(model.LearningNamespace)
+	if err != nil {
+		return nil, err
+	}
+	defer u.Close()
+
+	for _, id := range ids {
+		j, err := getLearningJob(u, id)
+		if errors.Is(err, imapsieve.ErrNoJob) {
+			continue
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		out[id] = j
+	}
+
+	return out, nil
+}
+
 // getLearningJob reads the job attribute of a record.
 func getLearningJob(u *User, id string) (imapsieve.Job, error) {
 	buf := make([]byte, maxLearningJob)
@@ -167,7 +198,7 @@ func (q learningRecords) List(site string) ([]imapsieve.Job, error) {
 		}
 
 		j, err := getLearningJob(u, id)
-		if err == imapsieve.ErrNoJob {
+		if errors.Is(err, imapsieve.ErrNoJob) {
 			continue
 		}
 

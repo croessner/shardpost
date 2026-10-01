@@ -601,3 +601,28 @@ func waitFor(t *testing.T, cond func() bool) {
 
 	t.Fatal("condition not reached")
 }
+
+// TestDeleteWithoutRecord: deleting a job whose record is gone removes
+// its entries at the dead position (whatever their generation) and
+// leaves those of other ids alone.
+func TestDeleteWithoutRecord(t *testing.T) {
+	f := newFixture(t, model.KVIndexRead)
+
+	for _, e := range []model.DueEntry{
+		{ID: "a", DueKey: model.DueKey{Due: DeadDue, Gen: 1}},
+		{ID: "a", DueKey: model.DueKey{Due: DeadDue, Gen: 3}},
+		{ID: "ab", DueKey: model.DueKey{Due: DeadDue, Gen: 1}},
+	} {
+		if err := f.q.DueQueue().Move(e.ID, nil, &e.DueKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := f.q.Delete(imapsieve.Job{ID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if es := entries(t, f.q); len(es) != 1 || es[0].ID != "ab" {
+		t.Fatalf("entries after the delete: %+v", es)
+	}
+}

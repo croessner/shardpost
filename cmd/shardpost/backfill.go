@@ -103,7 +103,7 @@ func backfillLearning(store *cephstore.Store, log *slog.Logger, restart bool) er
 		return fmt.Errorf("learning queue backfill: %w", err)
 	}
 
-	log.Info("learning queue backfill finished", "started", rep.Started, "jobs", rep.Jobs, "resumed", rep.Resumed)
+	log.Info("learning queue backfill finished", "started", rep.Started, "jobs", rep.Jobs, "removed", rep.Removed, "resumed", rep.Resumed)
 
 	return nil
 }

@@ -51,19 +51,35 @@ func TestMailboxSetCreateAtLimit(t *testing.T) {
 }
 
 // TestEmailSetKeywordsAtLimit: a keyword the mailboxes of the email may
-// not take any more makes the update tooLarge; known keywords pass.
+// not take any more makes the update tooManyKeywords; known keywords pass.
 func TestEmailSetKeywordsAtLimit(t *testing.T) {
 	s, u := limitServer(t, model.Limits{KeywordsPerMailbox: 1})
 	m := deliver(t, u, inboxName, plainMessage, "known")
 
 	res := mailCall(t, s, "Email/set", `{"accountId":"test","update":{"`+m.GUID+`":{"keywords/other":true}}}`)
-	if typ := setErrorType(res, "notUpdated", m.GUID); typ != setTooLarge {
+	if typ := setErrorType(res, "notUpdated", m.GUID); typ != setTooManyKeywords {
 		t.Fatalf("the update gave %q: %#v", typ, res)
 	}
 
 	res = mailCall(t, s, "Email/set", `{"accountId":"test","update":{"`+m.GUID+`":{"keywords/$flagged":true,"keywords/known":true}}}`)
 	if _, ok := res["updated"].(map[string]any)[m.GUID]; !ok {
 		t.Fatalf("the update of known keywords failed: %#v", res)
+	}
+}
+
+// TestEmailImportKeywordsAtLimit: an Email/import whose keywords the
+// mailbox may not take any more is tooManyKeywords (RFC 8621 4.8).
+func TestEmailImportKeywordsAtLimit(t *testing.T) {
+	s, u := limitServer(t, model.Limits{KeywordsPerMailbox: 1})
+	deliver(t, u, inboxName, plainMessage, "known")
+
+	boxes := boxIDs(t, u)
+	blob := upload(t, s, plainMessage, "message/rfc822")
+
+	res := mailCall(t, s, "Email/import", `{"accountId":"test","emails":{
+		"a":{"blobId":"`+blob+`","mailboxIds":{"`+boxes[inboxName]+`":true},"keywords":{"other":true}}}}`)
+	if typ := setErrorType(res, "notCreated", "a"); typ != setTooManyKeywords {
+		t.Fatalf("the import gave %q: %#v", typ, res)
 	}
 }
 
