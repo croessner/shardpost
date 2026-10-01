@@ -36,6 +36,7 @@ func TestNotify(t *testing.T) {
 	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MailboxName))`), "NO [BADEVENT (MessageNew MessageExpunge FlagChange)]")
 	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MailboxMetadataChange))`), "NO [BADEVENT (MessageNew MessageExpunge FlagChange)]")
 	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (ServerMetadataChange))`), "NO [BADEVENT (MessageNew MessageExpunge FlagChange)]")
+	mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (X-FutureEvent))`), "NO [BADEVENT (MessageNew MessageExpunge FlagChange)]")
 
 	mustHave(t, a.cmd(`NOTIFY SET (SELECTED (MessageNew))`), "BAD")
 

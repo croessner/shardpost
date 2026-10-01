@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -66,7 +67,7 @@ func TestPersonal(t *testing.T) {
 func TestFail(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tr := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("t")
-	err := errors.New("no such mailbox Entwürfe")
+	err := fmt.Errorf("select: %w", errors.New("no such mailbox Entwürfe"))
 
 	_, span := tr.Start(context.Background(), "off")
 	Fail(span, err)

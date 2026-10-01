@@ -215,11 +215,10 @@ func (c *conn) checkNotifyGroup(tag string, g notifyGroup) bool {
 	for ev := range g.events {
 		switch ev {
 		case kwMessageNew, "MESSAGEEXPUNGE", "FLAGCHANGE":
-		case "MAILBOXNAME", "SUBSCRIPTIONCHANGE", "ANNOTATIONCHANGE", "MAILBOXMETADATACHANGE", "SERVERMETADATACHANGE":
-			c.no(tag, notifyBadEvent, "Event "+ev+" is not supported")
-			return false
 		default:
-			c.bad(tag, "Unknown event "+ev)
+			// Every other event, a known one or an extension atom, is
+			// one this server does not report (RFC 5465 3.1: NO, not BAD).
+			c.no(tag, notifyBadEvent, "Event "+ev+" is not supported")
 			return false
 		}
 	}

@@ -237,7 +237,7 @@ func activeScripts(t *testing.T, store *memstore.Store, scripts map[string]strin
 	}
 }
 
-// TestLMTPRcptBeforeAuth: with service credentials a recipient before
+// TestLMTPRcptBeforeAuth: with service credentials a transaction before
 // AUTH is refused with 530 5.7.0 (RFC 4954 6).
 func TestLMTPRcptBeforeAuth(t *testing.T) {
 	store := memstore.New()
@@ -268,11 +268,7 @@ func TestLMTPRcptBeforeAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.Mail("sender@example.org", nil); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := c.Rcpt("ok@example.org", nil); !hasStatus(err, 530, smtp.EnhancedCode{5, 7, 0}) {
-		t.Fatalf("RCPT before AUTH: %v, want 530 5.7.0", err)
+	if err := c.Mail("sender@example.org", nil); !hasStatus(err, 530, smtp.EnhancedCode{5, 7, 0}) {
+		t.Fatalf("MAIL before AUTH: %v, want 530 5.7.0", err)
 	}
 }

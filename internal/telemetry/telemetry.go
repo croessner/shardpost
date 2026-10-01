@@ -5,6 +5,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -106,7 +107,8 @@ func hostname() string {
 
 // Fail marks a span as failed. The error text goes into the span only
 // with personal attributes switched on: it may echo client input, mailbox
-// names or object names. Otherwise the span records the error's type.
+// names or object names. Otherwise the span records the type of the
+// innermost wrapped error.
 func Fail(span trace.Span, err error) {
 	if personal.Load() {
 		span.RecordError(err)
@@ -115,7 +117,12 @@ func Fail(span trace.Span, err error) {
 		return
 	}
 
-	span.SetAttributes(attribute.String("error.type", fmt.Sprintf("%T", err)))
+	root := err
+	for u := errors.Unwrap(root); u != nil; u = errors.Unwrap(root) {
+		root = u
+	}
+
+	span.SetAttributes(attribute.String("error.type", fmt.Sprintf("%T", root)))
 	span.SetStatus(codes.Error, "")
 }
 

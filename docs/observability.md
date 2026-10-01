@@ -50,9 +50,10 @@ quantiles are not meaningful.
 One trace is started per unit of work: an IMAP, POP3 or ManageSieve
 command (`imap.FETCH`, `pop3.RETR`, `managesieve.PUTSCRIPT`; an unknown
 command is `managesieve.UNKNOWN`), a delivery (`lmtp.deliver`,
-`delivery.deliver`), an admin request (`admin.<operation>`, the operation
-label carries no account name), a JMAP request and a maintenance job
-(`job.<kind>` with `job.id`, and `job.account` when personal attributes are on). The store reports its own work below them,
+`delivery.deliver`), an admin request (`admin.<operation>`, the
+operation label carries no account name), a JMAP request and a
+maintenance job (`job.<kind>` with `job.id`, and `job.account` when
+personal attributes are on). The store reports its own work below them,
 so a trace shows where the time of a command actually goes:
 
 ```
@@ -122,9 +123,8 @@ admin client (`admin.principal`), the IMAP mailbox (`imap.mailbox`), the
 client address (`net.peer`, IMAP and JMAP) and the text of an error,
 which can echo client input or mailbox names — are only added with
 `telemetry.user_attributes: true` (env `TELEMETRY_USER_ATTRIBUTES`,
-default off). Off, a failed span records the error's type
-(`error.type`) instead of its text, a trace holds no personal data and
-the collector
+default off). Off, a failed span records the error's type (`error.type`)
+instead of its text, a trace holds no personal data and the collector
 filter accepted on 2026-09-15 (below) is a second line of defence, not
 the only one; on, the collector configuration and the access rights have
 to implement the applicable rules for this data. ManageSieve spans carry

@@ -145,11 +145,16 @@ func (s *session) Logout() error {
 }
 
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	if s.be.ServiceUser != "" && !s.authed {
+		return errAuthRequired
+	}
+
 	s.from = from
+
 	return nil
 }
 
-// errAuthRequired answers a recipient before authentication when service
+// errAuthRequired answers MAIL or RCPT before authentication when service
 // credentials are configured (RFC 4954 6: 530 5.7.0).
 var errAuthRequired = &smtp.SMTPError{Code: 530, EnhancedCode: smtp.EnhancedCode{5, 7, 0}, Message: "Authentication required"}
 

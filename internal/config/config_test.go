@@ -41,6 +41,7 @@ func TestFileEnvDefaults(t *testing.T) {
 		t.Fatalf("insecure_auth must default to false: %v", err)
 	}
 }
+
 // TestUserAttributesOptIn: personal span attributes are off unless the
 // operator switches them on.
 func TestUserAttributesOptIn(t *testing.T) {

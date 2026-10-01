@@ -298,7 +298,7 @@ IMAPSieve script entry.
 |---|---|---|
 | `NOTIFY SET [STATUS]`, `NOTIFY NONE` | ✅ | RFC 5465. |
 | Filters | ◐ | `SELECTED`, `SELECTED-DELAYED`, `INBOXES` (INBOX only), `PERSONAL`, `SUBSCRIBED`, `SUBTREE`, `MAILBOXES`; own namespace only, at most 64 mailboxes (`[LIMIT]`). |
-| Events | ◐ | `MessageNew` (with fetch attributes), `MessageExpunge`, `FlagChange`. `MailboxName`, `SubscriptionChange`, `MailboxMetadataChange` and `ServerMetadataChange` get `NO [BADEVENT (MessageNew MessageExpunge FlagChange)]`; an unknown event is `BAD`. `MessageNew` and `MessageExpunge` must be given together; `FlagChange` needs both. |
+| Events | ◐ | `MessageNew` (with fetch attributes), `MessageExpunge`, `FlagChange`. Every other event (`MailboxName`, `SubscriptionChange`, `MailboxMetadataChange`, `ServerMetadataChange`, extension events) gets `NO [BADEVENT (MessageNew MessageExpunge FlagChange)]` (RFC 5465 §3.1). `MessageNew` and `MessageExpunge` must be given together; `FlagChange` needs both. |
 | Other mailboxes | ✅ | Reported as `STATUS` (`MESSAGES UIDNEXT UIDVALIDITY`, plus `HIGHESTMODSEQ` with CONDSTORE or `FlagChange`). |
 | `IDLE` | ✅ | Authenticated and selected state. |
 
@@ -366,7 +366,7 @@ Behaviour:
 | `SIZE` | RFC 1870 | ✅ | 256 MiB, fixed (not configurable). |
 | `LIMITS RCPTMAX=100` | RFC 9422 | ✅ | |
 | `STARTTLS` | RFC 3207 | ⚙ | With a certificate configured. |
-| `AUTH PLAIN` | RFC 4954 | ⚙ | Optional service credentials (`server.lmtp_auth_user`); advertised only with TLS or `server.insecure_auth`. When configured, `RCPT` before `AUTH` gets `530 5.7.0`. |
+| `AUTH PLAIN` | RFC 4954 | ⚙ | Optional service credentials (`server.lmtp_auth_user`); advertised only with TLS or `server.insecure_auth`. When configured, `MAIL` or `RCPT` before `AUTH` gets `530 5.7.0` (RFC 4954 §6). |
 | `BINARYMIME`, `DSN`, `REQUIRETLS`, `DELIVERBY`, `XCLIENT` | — | ✗ | |
 
 Delivery:
