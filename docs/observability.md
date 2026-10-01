@@ -28,7 +28,8 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_lmtp_deliveries_total{outcome}` | Successful and failed instrumented delivery attempts. |
 | `imapceph_lmtp_delivered_bytes_total` | Bytes of successful LMTP deliveries. |
 | `imapceph_rados_op_seconds{op}` | Latencies of selected header/index operations: `header_read`, `header_cas`, `list_entries`, `get_entries`. Not a complete RADOS I/O profile. |
-| `imapceph_rados_cas_retries_total{kind}` | Retries after compare-and-swap conflicts. |
+| `imapceph_rados_cas_retries_total{kind}` | Retries after compare-and-swap conflicts; `kind="index"` for the shard objects of the store-wide sorted indexes (account directory). |
+| `imapceph_rados_listings_total{site}` | RADOS object listings by call site. A listing visits every placement group of the pool, so its cost grows with the whole pool, not with the namespace listed. Sites: `list_users` (namespace listing of the scrub and the account backfill), `scrub_orphans` and `scrub_unknown_index` (once per account and scrub), `purge_objects` (twice per purge), `admin_kv` (job runner: every poll and cleanup on every server; push worker; admin API), `learning_all` (learning worker, every second), `learning_purge_owner` (per purge). No account labels. The aim is that routine paths stop listing; a rising rate at a site shows where they still do. |
 | `imapceph_rados_notify_seconds` | Registered, but currently without a measuring call. Do not interpret it as a confirmed notify latency. |
 | `imapceph_scrub_findings_total{kind}` | Findings in the respective scrubber process. A server scrape is no proof of a successful external scrub run. |
 

@@ -67,7 +67,8 @@ Commands are grouped by subject. Each group has its own manual page:
 Version and state of the server itself.
 .TP
 .BR shardpostctl-account (1)
-Look up an account, its quota and the mailboxes shared with it.
+Look up an account, its quota and the mailboxes shared with it; repair
+its entry in the account directory.
 .TP
 .BR shardpostctl-mailbox (1)
 List and inspect mailboxes; create, rename and subscribe them.
@@ -167,7 +168,8 @@ Switch the protocol trace of an account.
 Create, rename and subscribe mailboxes; change ACLs.
 .TP
 .B repair
-Maintenance jobs that repair; retry learning jobs.
+Maintenance jobs that repair; retry learning jobs; repair an account's
+directory entry.
 .TP
 .B delete
 Delete mailboxes and messages, and purge accounts.

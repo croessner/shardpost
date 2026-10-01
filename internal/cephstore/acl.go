@@ -97,6 +97,17 @@ func (u *User) SetACL(name, identifier, rights string) error {
 
 	changed := false
 
+	// A grant to an account under purge would outlive it (see
+	// grantBlocked); a removal goes through.
+	blocked, err := u.grantBlocked(identifier)
+	if err != nil {
+		return fmt.Errorf("set acl %q: %w", name, err)
+	}
+
+	if blocked && rights != "" {
+		return model.ErrAccountPurging
+	}
+
 	acct, err := u.beginKnownMailbox(name)
 	if err != nil {
 		return err
@@ -117,7 +128,9 @@ func (u *User) SetACL(name, identifier, rights string) error {
 		return ErrNoMailbox
 	}
 
-	if identifier == identAnyone {
+	// The grantee's registry is gone with its purge: there is no pointer
+	// left to remove.
+	if identifier == identAnyone || blocked {
 		return nil
 	}
 
@@ -169,34 +182,37 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 
 	var out aclOutcome
 
+	// The grantee's state is read before the ACL is written: a grant to
+	// an account under purge would stay in the ACL (only the pointer
+	// write would fail) and pass to whoever gets the name next. Such a
+	// grant is refused unwrapped, so protocols answer "try again later";
+	// a removal goes through without a pointer to remove.
+	blocked, err := u.grantBlocked(identifier)
+	if err != nil {
+		return "", 0, fmt.Errorf("modify acl %q: %w", name, err)
+	}
+
 	acct, err := u.beginKnownMailbox(name)
 	if err != nil {
 		return "", 0, err
 	}
 
 	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
-		out = aclOutcome{}
+		out = aclOutcome{blocked: blocked}
 		return out.apply(cur, regKey(name), identifier, expectGen, change)
 	})
 	u.invalidate()
 
 	acct.settle(err, out.changed, out.id)
 
-	switch {
-	case err != nil:
-		return "", 0, fmt.Errorf("modify acl %q: %w", name, err)
-	case out.missing:
-		return "", 0, ErrNoMailbox
-	case out.conflict:
-		return "", 0, model.ErrVersionConflict
-	case out.bad != nil:
-		return "", 0, out.bad
+	if err := out.failure(name, err); err != nil {
+		return "", 0, err
 	}
 
 	// A pointer is written whenever rights remain (idempotent; this also
 	// repairs a missing one). An unchanged removal writes nothing: its
 	// tombstone could even create the registry of an account without store.
-	if identifier != identAnyone && (out.changed || out.rights != "") {
+	if identifier != identAnyone && !blocked && (out.changed || out.rights != "") {
 		if err := u.syncSharedRef(name, identifier); err != nil {
 			return out.rights, out.gen, fmt.Errorf("%w: %v", model.ErrPointerSync, err)
 		}
@@ -208,10 +224,30 @@ func (u *User) ModifyACL(name, identifier string, expectGen int64, change func(o
 // aclOutcome is the result of one ModifyACL CAS round.
 type aclOutcome struct {
 	missing, conflict, changed bool
-	bad                        error
-	rights                     string
-	id                         string
-	gen                        uint64
+	// blocked: the grantee is under purge, a grant is refused.
+	blocked, refused bool
+	bad              error
+	rights           string
+	id               string
+	gen              uint64
+}
+
+// failure is the error of a ModifyACL whose CAS ended with err, or nil.
+func (o *aclOutcome) failure(name string, err error) error {
+	switch {
+	case err != nil:
+		return fmt.Errorf("modify acl %q: %w", name, err)
+	case o.missing:
+		return ErrNoMailbox
+	case o.conflict:
+		return model.ErrVersionConflict
+	case o.bad != nil:
+		return o.bad
+	case o.refused:
+		return model.ErrAccountPurging
+	default:
+		return nil
+	}
 }
 
 // apply computes the new registry record for one CAS round.
@@ -230,6 +266,11 @@ func (o *aclOutcome) apply(cur map[string][]byte, key, identifier string, expect
 	}
 
 	if o.rights, o.bad = normalizeACLRights(change(rec.ACL[identifier])); o.bad != nil {
+		return nil, nil
+	}
+
+	if o.blocked && o.rights != "" {
+		o.refused = true
 		return nil, nil
 	}
 

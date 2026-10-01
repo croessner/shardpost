@@ -175,7 +175,7 @@ func (kv *AdminKV) write(key string, ver uint64, exists bool, next []byte) error
 // List implements model.AdminKV. It lists the namespace (admin state is
 // small) and reads the selected records.
 func (kv *AdminKV) List(prefix, after string, limit int) ([]model.KVEntry, error) {
-	it, err := kv.u.idx.Iter()
+	it, err := listObjects(kv.u.idx, listAdminKV)
 	if err != nil {
 		return nil, err
 	}

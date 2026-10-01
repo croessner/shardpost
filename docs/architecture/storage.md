@@ -24,6 +24,7 @@ user namespaces.
 | Script/metadata objects | Sieve texts, the active script, private/shared metadata | [scripts.go](../../internal/cephstore/scripts.go), [metadata.go](../../internal/cephstore/metadata.go) |
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
+| `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
 
 The index pool is replicated because its omap structures require it.
 The data pool is EC 2+1 in the existing manifest. That is one concrete
@@ -178,6 +179,133 @@ move every key.
 
 The scrubber leaves these objects alone, and an account purge removes
 them with the rest of the namespace.
+
+## Store-wide sorted indexes and the account directory
+
+Listing a RADOS namespace visits every placement group of the pool, so
+its cost grows with everything in the pool, not with what the namespace
+holds. Enumerations that run routinely therefore read sorted indexes
+instead; a listing is acceptable only in a repeatable backfill or a
+manual tool. The metric `imapceph_rados_listings_total{site}` counts the
+listings that remain (see [Observability](../observability.md)).
+
+**Sorted index.** A store-wide map from ids to small values
+([sortedindex](../../internal/sortedindex/sortedindex.go)), stored in a
+system namespace of the index pool:
+
+| Object | Content |
+|---|---|
+| `ix.<name>/head` | omap `shards`, `format`, `phase` (`stable`, or `copying:<n>` while a later reshard copies), `mark:<name>` markers |
+| `ix.<name>/<nn>` | one omap key per id whose `FNV-1a(id) mod shards` is `nn` |
+
+The names never start with `kv.` (older servers read those as admin
+records) and are distinct from the per-account `ix/<space>/<nn>` above.
+The first writer creates the head; readers without a head use the
+defaults. Each process caches the head for ten seconds. A write refuses
+while the phase is not `stable` (resharding is a later stage and this
+version does not write the new layout); a newer format is refused
+altogether. One entry is read, set or removed with one operation on its
+shard object; an update is a compare-and-swap on the shard object's
+version, because go-ceph offers no omap comparison; a short random
+backoff separates the attempts, and each lost round counts as
+`imapceph_rados_cas_retries_total{kind="index"}`. A listing returns the
+entries in (shard, id) order, page by page, with the cursor
+`<shard>:<id>`; a page reads the shard of the cursor and continues with
+the following shards until it is full.
+
+**Account directory.** The sorted index `accounts` in the namespace
+`~accounts`, 256 shards. An account is in it exactly when its registry
+object (`mailboxes`) exists; this includes `~public` and accounts that
+only received a shared-folder pointer, and never the store's own
+namespaces (`~admin`, `~learning`, `~server`, `~accounts`). The value is
+JSON:
+
+| Field | Meaning |
+|---|---|
+| `created` | When the registry was last created (the hook writes it on every creation); the registry's last change for accounts a backfill entered. Concurrent creators race, the last one wins: it is only a time. |
+| `state` | `active` or `purging` |
+| `session` | The purge job's maintenance lock session while `purging` |
+| `cluster` | fsid of the Ceph cluster that holds the account |
+| `shard`, `scrub` | Reserved for later stages, empty |
+
+The store registers an account in the compare-and-swap that creates its
+registry (`casOmapOpAs`, version 0, the account's own index context),
+right before the exclusive create: one read and one write (an `active`
+entry is written again with the new `created`). That happens once per
+account lifetime, so an existing account pays nothing. `shardpost index backfill accounts` enters the
+accounts that existed before the directory (see
+[Operations](../operations/README.md#account-directory-backfill)).
+
+`Store.User` refuses the empty name and reserved names other than
+`~public`, `~server`, `~admin`, `~learning` and `~accounts`: the empty
+name would put a registry into the default namespace, where it belongs
+to nobody.
+
+**Purge.** The import lock that keeps protocols out of an account lives
+in its registry, so it disappears when the purge deletes the registry.
+Without the directory, a late session or delivery could then create the account
+again. Now the purge job sets the entry to `purging` with its lock
+session (`job-<id>`) while it still holds the lock, before it deletes the
+namespace. From then on, while the registry is missing, the registry
+hook refuses every creation with `ErrAccountPurging`, a kind of
+`ErrImportLocked` (LMTP answers 451, IMAP `NO [UNAVAILABLE]`), except an
+`ImportLock` of the job's own session, so that a restarted job can take
+its lock again. That
+restart leaves an empty registry with only the lock key behind, which is
+why the last purge phase stops renewing the lock, fences, deletes the
+registry once more (absent is fine) and only then removes the entry.
+After that the name is free; a later account of the same name is a new
+account. While the registry exists, `purging` does not block anything
+beyond the import lock itself.
+
+A grant (SETACL, the admin ACL operations, JMAP sharing) to an account
+that is `purging` without registry is refused with `ErrAccountPurging`
+(an `ErrImportLocked`; the admin API answers `409 account_purging`)
+before the ACL is written: the pointer write into the grantee's registry
+would fail, but the ACL entry would stay and pass to whoever gets the
+name next. A removal of rights goes through and writes no pointer. The
+check narrows the window, it does not close it: a grant whose check ran
+just before the purge deleted the grantee's registry still writes its
+ACL entry, and its pointer write then fails (`ErrPointerSync`). Closing
+it would need the ACL write and the grantee's state in one atomic step,
+which two objects in two namespaces cannot give.
+
+**Repair.** `shardpostctl account repair` and the backfill apply these
+rules:
+
+| Entry | Condition | Action |
+|---|---|---|
+| `purging` | a purge job of its session still runs | none (`purge_running`) |
+| `purging` | no such job, registry missing | entry removed (`removed`) |
+| `purging` | no such job, registry exists | back to `active` (`activated`) |
+| `active` | older than 10 minutes, registry missing | entry removed (`stale_removed`) |
+
+A stale `active` entry comes from a purge by an older version during the
+rollout, from a crash between the registry hook and the registry
+creation, or from a creation whose write failed. The grace keeps a
+repair away from an account that is being created right now. The
+removal is a compare-and-swap on the entry the repair read, including
+its `created`, and the hook writes the entry (with a new `created`)
+before it creates the registry. So a creation racing the repair always
+keeps its entry: if the hook writes first, the repair finds the entry
+changed and leaves it; if the repair removes first, the hook finds no
+entry and writes one.
+
+While an account is `purging` without registry, no exclusive job can
+take its lock, a second purge included. A job that finds the account
+left so by an ended purge fails at once with "run shardpostctl account
+repair" instead of waiting for the lock.
+
+**Rollback.** Older servers ignore `~accounts` (the scrub's namespace
+listing skips reserved names), and an older purge sets no `purging`, so
+for its purges the behaviour before the directory applies; it leaves the
+entry `active`, which the repair later removes as stale.
+
+**Reshard (later stage).** Resharding the directory will announce itself
+in the head (`phase: copying:<n>`). Servers of this version refuse every
+directory write in that phase, so creating an account then fails with a
+temporary error (LMTP 451). A reshard therefore requires every server to
+run a version that writes during the copy phase first.
 
 ## Notifications and search
 

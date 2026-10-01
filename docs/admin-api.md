@@ -362,7 +362,59 @@ only the repairs that were planned and are still needed.
 - **purge** removes only the data in the store. The identity (LDAP)
   belongs to its owner. If the account logs in again afterwards, ShardPost
   creates an empty INBOX.
+- **Purge phases** (checkpointed, a takeover continues with the next
+  one): 1 withdraw the account's grants to others, 2 withdraw the grants
+  others gave it (public folders included), 3 delete its learning jobs,
+  4 mark the account `purging` in the account directory (still under the
+  account lock) and delete every object of its namespaces, the registry
+  last, 5 remove the directory entry. From phase 4 on, while the registry
+  is gone, nothing can create the account again: deliveries are deferred
+  (`451 4.2.1`), sessions get `NO [UNAVAILABLE]`, and a grant to the
+  account is refused (`409 account_purging` here, `NO [UNAVAILABLE]` for
+  SETACL) before the ACL is written. Only the job's own lock session gets
+  through, so that a takeover can take the account lock again; that
+  leaves an empty registry, which phase 5 deletes once more before it
+  removes the entry. After phase 5 the name is free. See
+  [storage](architecture/storage.md#store-wide-sorted-indexes-and-the-account-directory).
+- **A purge that ended after phase 4** without finishing (failed,
+  cancelled) leaves the account `purging` and without registry. Nothing
+  can use the account then, and no exclusive job can take its lock — a
+  second purge included: such a job fails at once with "the account was
+  left purging by an ended purge job; run shardpostctl account repair".
+  Run `shardpostctl account repair` first (below), then plan again.
 - Finished jobs and plans stay retrievable for `jobs.retention_days`.
+
+### The account directory
+
+```sh
+shardpostctl account directory user@example.org   # role diagnose
+shardpostctl account repair user@example.org      # role repair
+shardpostctl account repair --json user@example.org
+```
+
+`GET /admin/v1/accounts/{account}/directory` (role `diagnose`) shows the
+account's directory entry (state, creation time, the purge's lock
+session), whether its registry exists, and the directory itself: shard
+count, phase and the completion marker of the last backfill.
+
+`POST /admin/v1/accounts/{account}/directory/repair` (role `repair`)
+applies the repair rules to one account:
+
+- `purging`, and no purge job of the recorded lock session still runs
+  (`queued`, `running` or `cancel_requested`): the entry is removed when
+  the registry is gone (`removed`) and set back to `active` when it
+  exists (`activated`); while the job runs, nothing changes
+  (`purge_running`).
+- `active`, older than ten minutes and without registry: the entry is
+  stale and removed (`stale_removed`). It comes from a purge by an older
+  version, a crash between the registry hook and the registry creation,
+  or a creation whose write failed.
+
+Anything else is `none`. The answer shows the entry before and after.
+Neither command resolves the account through Nauthilus: a purged account
+may no longer exist there. The same rules run for every entry in
+`shardpost index backfill accounts` (see
+[Operations](operations/README.md#account-directory-backfill)).
 
 ### Upgrade: modified UTF-7 mailbox names
 

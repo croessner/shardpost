@@ -24,15 +24,16 @@ import (
 //	acl explain <account> <mailbox> <principal>
 //	quota show <account>
 //	shared list <account>
+//	account directory <account>
 //
 // Every command takes --json.
 
 const diagnoseUsage = `usage: shardpostctl server status | account show <account> | mailbox list [-limit n] [-after name] [-all] <account> |
   mailbox show <account> <mailbox> | acl list <account> <mailbox> | acl explain <account> <mailbox> <principal> |
-  quota show <account> | shared list <account>   (each with --json) |
+  quota show <account> | shared list <account> | account directory <account>   (each with --json) |
   mailbox create [-special-use \Archive] <account> <name> | mailbox rename [-if-match E] <account> <mailbox> <new> |
   mailbox subscribe|unsubscribe <account> <mailbox> | acl set [-mode add|remove] [-if-match E] <account> <mailbox> <identifier> <rights> |
-  acl delete [-if-match E] <account> <mailbox> <identifier>`
+  acl delete [-if-match E] <account> <mailbox> <identifier> | account repair <account>`
 
 // labelStore labels the store row.
 const labelStore = "store"
@@ -134,6 +135,8 @@ func diagCommand(verb string) (diagFunc, int) {
 		return aclExplain, 3
 	case "quota show":
 		return quotaShow, 1
+	case "account directory":
+		return accountDirectory, 1
 	case "shared list":
 		return sharedList, 1
 	default:

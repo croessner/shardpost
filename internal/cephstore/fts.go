@@ -1305,6 +1305,17 @@ func casOmap(u *User, ioctx *rados.IOContext, oid string, keys []string, fn func
 func casOmapOp(u *User, ioctx *rados.IOContext, oid string, keys []string,
 	fn func(cur map[string][]byte) (set map[string][]byte, rm []string, extra func(*rados.WriteOp)),
 ) (err error) {
+	return casOmapOpAs(u, ioctx, oid, keys, "", fn)
+}
+
+// casOmapOpAs is casOmapOp on behalf of an import lock session (the
+// ImportLock CAS; "" for every other). Creating the account's registry
+// registers the account in the directory first (registerAccount): once
+// per account lifetime, and refused with ErrImportLocked while a purge
+// of the account is under way, unless session is the purge's own.
+func casOmapOpAs(u *User, ioctx *rados.IOContext, oid string, keys []string, session string,
+	fn func(cur map[string][]byte) (set map[string][]byte, rm []string, extra func(*rados.WriteOp)),
+) (err error) {
 	end := u.trace(spanOmapCAS, attrOID(oid), attrCount(len(keys)))
 	defer func() { end(err) }()
 
@@ -1319,25 +1330,13 @@ func casOmapOp(u *User, ioctx *rados.IOContext, oid string, keys []string,
 			return nil
 		}
 
-		op := rados.CreateWriteOp()
-		if ver == 0 {
-			op.Create(rados.CreateExclusive)
-		} else {
-			op.AssertVersion(ver)
+		if ver == 0 && oid == oidRegistry && ioctx == u.idx {
+			if err := u.registerAccount(session); err != nil {
+				return err
+			}
 		}
 
-		if len(set) > 0 {
-			op.SetOmap(set)
-		}
-
-		if len(rm) > 0 {
-			op.RmOmapKeys(rm)
-		}
-
-		if extra != nil {
-			extra(op)
-		}
-
+		op := casWriteOp(ver, set, rm, extra)
 		err = op.Operate(ioctx, oid, rados.OperationNoFlag)
 		op.Release()
 
@@ -1355,4 +1354,29 @@ func casOmapOp(u *User, ioctx *rados.IOContext, oid string, keys []string,
 	}
 
 	return fmt.Errorf("%s: too many concurrent writers", oid)
+}
+
+// casWriteOp builds the write of one CAS round: an exclusive create at
+// version 0, otherwise guarded by the version read.
+func casWriteOp(ver uint64, set map[string][]byte, rm []string, extra func(*rados.WriteOp)) *rados.WriteOp {
+	op := rados.CreateWriteOp()
+	if ver == 0 {
+		op.Create(rados.CreateExclusive)
+	} else {
+		op.AssertVersion(ver)
+	}
+
+	if len(set) > 0 {
+		op.SetOmap(set)
+	}
+
+	if len(rm) > 0 {
+		op.RmOmapKeys(rm)
+	}
+
+	if extra != nil {
+		extra(op)
+	}
+
+	return op
 }

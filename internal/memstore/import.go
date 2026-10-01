@@ -33,6 +33,12 @@ func (u *User) ImportLock(session string, ttl time.Duration) (time.Time, error) 
 		return time.Time{}, model.ErrImportLocked
 	}
 
+	// The lock creates the registry; a purge job that restarts after it
+	// deleted the registry passes with its own session.
+	if err := u.register(session); err != nil {
+		return time.Time{}, err
+	}
+
 	u.imp = &importLock{session: session, expires: now.Add(ttl)}
 
 	return u.imp.expires, nil

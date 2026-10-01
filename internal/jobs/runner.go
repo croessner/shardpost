@@ -288,6 +288,8 @@ func (m *Manager) lock(run *Run, j *Job, gen uint64, log *slog.Logger) bool {
 		return true
 	case j.State == StateCancelRequested:
 		err = context.Canceled
+	case errors.Is(err, model.ErrAccountPurging) && m.leftPurging(run.User, j.ID):
+		err = ErrLeftPurging
 	case errors.Is(err, model.ErrImportLocked) && m.now().Sub(j.Created) < m.cfg.PlanTTL:
 		m.postpone(run, log)
 		return false
