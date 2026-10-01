@@ -174,7 +174,7 @@ var (
 	// AuthCacheFlushes counts the flushes of the auth cache by scope
 	// (account, all) and source (local: this server's admin API; remote:
 	// the flush log of another server; resync: a full flush after a
-	// lost watch or a gap in the flush log).
+	// lost watch, a failed first read of the flush log or a gap in it).
 	AuthCacheFlushes = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: subsystemAuth, Name: "cache_flushes_total",
 		Help: "Auth cache flushes by scope and source.",
