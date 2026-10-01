@@ -447,7 +447,9 @@ new connection and swaps it in. Requests that already run finish on the
 old view, which is closed once they are done (so the old connection
 shuts down); the queue watch on the old view gets an error and the
 runner watches again on the new one. No restart is needed after a key
-rotation.
+rotation. `Store.Rotate` releases each held worker lock only after a
+renewal in flight returned, so a rotation can take up to the OSD op
+timeout (60 s) per held lock.
 
 In this version `cleanup()` keeps running beside the expiry worker,
 because `jobs/expiry` knows only the records written since the rollout

@@ -15,6 +15,8 @@
 #
 # The job only reads the account (index_check), so any account with a
 # mailbox will do; the agreed throwaway account is the safe choice.
+# `shardpost index …` runs without --config and relies on SHARDPOST_CONFIG
+# being set in the server container (as the overlays do).
 set -euo pipefail
 
 CONTEXT=${CONTEXT:-croessner}
@@ -55,7 +57,7 @@ if echo "$shown" | grep -q '"queue": "jobs/claimable"'; then
 	fail "an ended job still has a claimable entry"
 fi
 [ "$(echo "$shown" | grep -c '"queue": "jobs/expiry"')" -ge 2 ] || fail "expiry entries of job and idempotency key missing"
-[ "$(echo "$shown" | grep -c '"gen": 1')" -ge 2 ] || fail "expiry entries not moved to Finished + retention"
+[ "$(echo "$shown" | grep -c '"gen": 1$')" -ge 2 ] || fail "expiry entries not moved to Finished + retention"
 
 echo; echo "== queue and index metrics =="
 inpod sh -c 'wget -qO- http://127.0.0.1:8080/metrics 2>/dev/null || curl -s http://127.0.0.1:8080/metrics' |

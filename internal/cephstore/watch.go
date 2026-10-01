@@ -77,7 +77,7 @@ func (u *User) watchObj(oid string) (*Watch, error) {
 
 	u.inflight.Add(1)
 
-	w := &Watch{w: rw, events: make(chan struct{}, 1), errs: make(chan error, 1), done: make(chan struct{})}
+	w := &Watch{w: rw, unwatch: rw.Delete, events: make(chan struct{}, 1), errs: make(chan error, 1), done: make(chan struct{})}
 	go w.pump(u)
 
 	return w, nil
@@ -85,8 +85,10 @@ func (u *User) watchObj(oid string) (*Watch, error) {
 
 // Watch is a live subscription to changes of one object.
 type Watch struct {
-	w      *rados.Watcher
-	events chan struct{}
+	w *rados.Watcher
+	// unwatch removes the watch (w.Delete; tests replace it).
+	unwatch func() error
+	events  chan struct{}
 	// errs carries the watch errors, coalesced into one pending error,
 	// so that the librados callback thread that reports them never
 	// blocks on a reader that does not read.
@@ -145,10 +147,19 @@ func (w *Watch) Events() <-chan struct{} { return w.events }
 func (w *Watch) Errors() <-chan error { return w.errs }
 
 // Close removes the watch.
+//
+// The unwatch comes first, while the pump still runs: the pump holds an
+// inflight reference on the view, and User.Close destroys the view's
+// IOContext only after inflight drained. Ending the pump first would let
+// a closing view (after a key rotation, or a session that closes its
+// account) destroy the IOContext concurrently with rados_unwatch2. The
+// pump ends when the unwatch closes the event channel, or at done when
+// the unwatch failed and left it open.
 func (w *Watch) Close() {
 	w.once.Do(func() {
+		_ = w.unwatch()
+
 		close(w.done)
-		_ = w.w.Delete()
 
 		if w.onClose != nil {
 			w.onClose()

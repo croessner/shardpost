@@ -102,6 +102,45 @@ func TestRotateMovesHandles(t *testing.T) {
 	}
 }
 
+// TestWatchCloseUnwatchesBeforeThePumpEnds: Close removes the watch
+// while the pump (which pins the view through inflight) still runs, so
+// a closing view cannot destroy its IOContext during rados_unwatch2.
+func TestWatchCloseUnwatchesBeforeThePumpEnds(t *testing.T) {
+	u := &User{name: "~admin"}
+	u.inflight.Add(1) // the pump's reference
+
+	w := &Watch{errs: make(chan error, 1), done: make(chan struct{})}
+
+	go func() { // the pump: ends at done
+		<-w.done
+		u.inflight.Done()
+	}()
+
+	pinned, calls := false, 0
+	w.unwatch = func() error {
+		calls++
+
+		select {
+		case <-w.done:
+		default:
+			pinned = true
+		}
+
+		return nil
+	}
+
+	closedHook := false
+	w.onClose = func() { closedHook = true }
+
+	w.Close()
+	w.Close()
+	u.inflight.Wait() // what User.Close waits for before Destroy
+
+	if !pinned || calls != 1 || !closedHook {
+		t.Fatalf("unwatch while pinned %v, calls %d, onClose %v", pinned, calls, closedHook)
+	}
+}
+
 // waitRotated waits for the rotation error of w, which must come before
 // the rotation ends.
 func waitRotated(t *testing.T, w *Watch, rotated <-chan struct{}) {

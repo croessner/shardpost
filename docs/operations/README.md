@@ -422,7 +422,9 @@ watcher and does not run with a static key. With Rook, a rotated key
 needs no restart: new sessions use the new connection, and the
 long-lived views (the admin store of the job runner, of JMAP and of the
 push worker) are moved to it; requests that run finish on the old one,
-and the expiry worker's lock is released and taken again (see
+and the expiry worker's lock is released and taken again; the rotation
+waits for a lock renewal in flight, up to the OSD op timeout (60 s) per
+held lock (see
 [storage](../architecture/storage.md#admin-store-hint-indexes-and-due-queues)). Changing the key of the
 existing identity in place invalidates it for every node at once. The
 interruption-free way is a second identity with the same capabilities:
