@@ -216,6 +216,13 @@ func TestIndexVersionMarker(t *testing.T) {
 		}
 	}
 
+	// a rebuild finishes only over its own key
+	if !rebuildOwned(map[string][]byte{ftsRebuildKey: []byte("t1")}, "t1") ||
+		rebuildOwned(map[string][]byte{ftsRebuildKey: []byte("t2")}, "t1") ||
+		rebuildOwned(map[string][]byte{}, "t1") {
+		t.Error("rebuildOwned")
+	}
+
 	for _, c := range []struct {
 		cur   map[string][]byte
 		fresh bool

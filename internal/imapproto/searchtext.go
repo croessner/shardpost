@@ -383,20 +383,41 @@ func (c *conn) verifyBatch(cr *criteria, batch []int, hit []bool, texts map[stri
 // errClientGone ends a search whose client went away.
 var errClientGone = errors.New("search: the client is gone")
 
+// searchFailed answers a SEARCH, SORT or THREAD whose search failed. A
+// search whose client went away is not answered and not logged as a
+// storage error: the error goes back to the command loop, which ends
+// the session.
+func (c *conn) searchFailed(tag string, err error) error {
+	if errors.Is(err, errClientGone) {
+		return err
+	}
+
+	c.storeErr(tag, err)
+
+	return nil
+}
+
 // clientWatch notices, while a search checks messages, that its client
-// went away (the connection closed, the server shut it down, the
-// command's context ended), so that the search stops instead of reading
-// messages for nobody. It peeks at the connection without consuming
-// what a client sends: a pipelined command stays for the command loop.
+// went away (it closed the connection, or the server closed it), so that
+// the search stops instead of reading messages for nobody. It peeks at
+// the connection without consuming what a client sends — a pipelined
+// command stays for the command loop — under read deadlines of its own,
+// re-armed every watchInterval, so that it keeps watching however long
+// the search takes.
 type clientWatch struct {
 	c        *conn
 	lost     atomic.Bool
+	mu       sync.Mutex // orders re-arming the deadline against stop
+	stopped  bool
 	wg       sync.WaitGroup
 	watching bool
 }
 
+// watchInterval is the read deadline of one peek of the watch.
+const watchInterval = time.Second
+
 // watchClient starts the watch. A compressed session is not peeked at:
-// the read deadline that ends the peek would break the inflate stream;
+// the read deadline that ends a peek would break the inflate stream;
 // there only the server closing the connection is noticed.
 func (c *conn) watchClient() *clientWatch {
 	w := &clientWatch{c: c}
@@ -407,33 +428,61 @@ func (c *conn) watchClient() *clientWatch {
 	w.watching = true
 	w.wg.Add(1)
 
-	go func() {
-		defer w.wg.Done()
-
-		// a timeout is the end of the watch, anything else a lost client
-		var ne net.Error
-		if _, err := c.r.br.Peek(1); err != nil && (!errors.As(err, &ne) || !ne.Timeout()) {
-			w.lost.Store(true)
-		}
-	}()
+	go w.run()
 
 	return w
 }
 
-// gone reports whether the search should stop.
-func (w *clientWatch) gone() bool {
-	return w.lost.Load() || w.c.closing.Load() || w.c.requestContext().Err() != nil
+// run peeks until the client sends something (the watch is done), the
+// connection fails (the client is gone) or stop.
+func (w *clientWatch) run() {
+	defer w.wg.Done()
+
+	for {
+		w.mu.Lock()
+		if w.stopped {
+			w.mu.Unlock()
+
+			return
+		}
+
+		_ = w.c.nc.SetReadDeadline(time.Now().Add(watchInterval))
+		w.mu.Unlock()
+
+		_, err := w.c.r.br.Peek(1)
+		if err == nil {
+			return
+		}
+
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			w.lost.Store(true)
+
+			return
+		}
+	}
 }
 
-// stop ends the peek: an expired read deadline returns it at once; the
-// command loop sets its own deadline before it reads again.
+// gone reports whether the search should stop.
+func (w *clientWatch) gone() bool {
+	return w.lost.Load() || w.c.closing.Load()
+}
+
+// stop ends the watch: an expired read deadline returns the peek at
+// once. The deadline is cleared afterwards; the command loop sets its
+// own before it reads again.
 func (w *clientWatch) stop() {
 	if !w.watching {
 		return
 	}
 
+	w.mu.Lock()
+	w.stopped = true
 	_ = w.c.nc.SetReadDeadline(time.Now())
+	w.mu.Unlock()
+
 	w.wg.Wait()
+
 	_ = w.c.nc.SetReadDeadline(time.Time{})
 }
 

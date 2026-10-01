@@ -294,11 +294,13 @@ The version marker `v` in `ftsmap` says that every message of the
 account was indexed by this version. A fresh index gets it with its
 first document ID — only when the id map has no `n` yet, no rebuild is
 running and no posting shard exists (an index from before document IDs
-has posting lists of GUIDs and no `n`). `fts_rebuild` sets `r` right
+has posting lists of GUIDs and no `n`). `fts_rebuild` sets `r` to a token of its run right
 after deleting the old index and, when every message is indexed again,
-sets `v` and removes `r` in one compare-and-swap; a rebuild that stops
-midway, or a delivery into the index it is rebuilding, leaves no
-trusted marker. Without `v`, or with `r`, `SearchCandidates` does not
+sets `v` and removes `r` in one compare-and-swap — only if `r` still
+holds its own token, so a rebuild that another one replaced does not
+mark the index that one is still writing. A rebuild that stops midway,
+or a delivery into the index it is rebuilding, leaves no trusted
+marker. Without `v`, or with `r`, `SearchCandidates` does not
 narrow at all — an older index (markup, undecoded words, no file
 names) cannot be trusted even for whole words — and every message is
 checked: correct, but slow, until the rebuild.
