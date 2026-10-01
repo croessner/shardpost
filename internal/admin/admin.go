@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"path"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -81,6 +82,11 @@ type Options struct {
 	// address (path.Match patterns); identities without an entry may
 	// address every account. Socket callers are not limited.
 	ClientScopes map[string][]string
+	// AllAccountsClients are the client certificate identities with the
+	// scope of all accounts: they may list the account directory and
+	// plan, apply and cancel batches over every account. Socket callers
+	// always have it.
+	AllAccountsClients []string
 	// Import opens accounts for imports; unlike the protocol store it
 	// does not refuse accounts under an import lock. nil disables the
 	// import operations.
@@ -163,6 +169,11 @@ func New(o Options) *Server {
 	}
 
 	o.ClientScopes = scopes
+
+	for i, id := range o.AllAccountsClients {
+		o.AllAccountsClients[i] = strings.ToLower(id)
+	}
+
 	s := &Server{o: o}
 	mux := http.NewServeMux()
 	adminapi.HandlerWithOptions(s, adminapi.StdHTTPServerOptions{
@@ -196,6 +207,9 @@ type principal struct {
 	// accounts limits the addressable accounts (path.Match patterns on
 	// the lower-cased account); empty means all.
 	accounts []string
+	// allAccounts is the scope of all accounts: listing the account
+	// directory and batches over every account.
+	allAccounts bool
 }
 
 // inScope reports whether the principal may address account.
@@ -310,6 +324,7 @@ func (s *Server) certPrincipal(r *http.Request) *principal {
 		if roles, ok := s.o.Clients[strings.ToLower(id)]; ok {
 			p := newPrincipal(id, "mtls", roles)
 			p.accounts = s.o.ClientScopes[strings.ToLower(id)]
+			p.allAccounts = slices.Contains(s.o.AllAccountsClients, strings.ToLower(id))
 
 			return p
 		}
@@ -358,6 +373,21 @@ func requireAccount(w http.ResponseWriter, r *http.Request, role, account string
 	return true
 }
 
+// requireAllAccounts writes 403 unless the caller holds role and the
+// scope of all accounts.
+func requireAllAccounts(w http.ResponseWriter, r *http.Request, role string) bool {
+	if !require(w, r, role) {
+		return false
+	}
+
+	if !principalOf(r.Context()).allAccounts {
+		writeError(w, http.StatusForbidden, adminapi.Forbidden, "the client lacks the scope of all accounts")
+		return false
+	}
+
+	return true
+}
+
 // recorder remembers the status and error code of a response.
 type recorder struct {
 	http.ResponseWriter
@@ -390,6 +420,10 @@ func operation(path string) string {
 		return "server"
 	case "/admin/v1/jobs":
 		return "jobs"
+	case "/admin/v1/accounts":
+		return "accounts"
+	case "/admin/v1/plans":
+		return "batch_plan"
 	default:
 		if rest, ok := strings.CutPrefix(path, "/admin/v1/jobs/"); ok {
 			if strings.HasSuffix(rest, "/cancel") {

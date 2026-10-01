@@ -149,6 +149,12 @@ shows the entry, whether the registry exists and the backfill marker.
 rollout: it creates a throwaway account, checks its entry, purges it and
 checks that the entry is gone, runs the backfill and prints its marker.
 
+The completion marker is also what batches over all accounts wait for
+(`shardpostctl plan -all`, the nightly batch scrub): until it exists they
+are refused, and `shardpost scrub` lists the index pool instead of
+reading the directory. `shardpostctl account list` (role `diagnose`,
+scope of all accounts) pages through the directory.
+
 **Rollback** is safe: older servers ignore `~accounts`, and an older
 purge does not set `purging`.
 
@@ -289,6 +295,77 @@ on a real message).
 well: older servers ignore the index objects. A job they rewrite or
 delete leaves its queue entry behind, which the readers of this version
 move or remove.
+
+## Nightly scrub
+
+From this version the nightly scrub runs as a batch job on the servers
+instead of a loop in the CronJob's pod: the CronJob only submits it.
+
+```sh
+shardpost scrub --batch      # same image and configuration as the server
+```
+
+`shardpost scrub --batch` plans the batch scrub over every account of the
+account directory with `skip_idle` and submits it through the admin
+store (it needs the Ceph credentials, not the admin socket), then exits;
+the job runners of the servers (`jobs.enabled`, the default) run it. It
+submits nothing while a batch scrub of an earlier night has not ended
+(queued, running or cancel requested), so a scrub that takes longer than
+a day is not started twice. With `scrub.dry_run` it submits a batch of
+`index_check` instead (no repairs, no skipping). `scrub.users` does not
+go with `--batch` (the command fails); use `shardpost scrub` for chosen
+accounts. Without a completed backfill of the account directory it falls
+back to the scrub run in its own process over a listing of the index
+pool, as before, and logs a warning.
+
+The servers run the batch with `scrub.parallel` accounts at once and
+`scrub.grace_seconds`; an account whose last batch scrub was complete and
+found nothing and that did not change since is skipped, for at most
+`scrub.interval_days` (7) (see
+[storage](../architecture/storage.md#batches-over-all-accounts-and-the-batch-scrub)).
+The first night after the change scrubs every account and records its
+state; the nights after scrub only what changed. Follow it with
+`shardpostctl job list -state running`, `shardpostctl job wait <id>` and
+the metric `imapceph_batch_accounts_total{kind="scrub"}`; the result names
+the first 50 accounts that failed or had findings. A batch scrub that
+needs to stop is cancelled with `shardpostctl job cancel <id>`; it stops
+between two accounts, and the next night starts from the beginning of the
+directory (the skipped accounts cost one directory read and, at most, a
+few omap reads each).
+
+**The CronJob change to make** (`deploy/base/server/scrub-cronjob.yaml`,
+owned by the deployment; this version does not change `deploy/`):
+
+```yaml
+          containers:
+            - name: scrub
+              image: docker.io/chrroessner/shardpost:<this version>
+              args: ["scrub", "--batch"]
+              env:                      # unchanged: CEPH_*, ROOK_NAMESPACE
+                - name: SCRUB_DRY_RUN
+                  value: "false"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+```
+
+`SCRUB_GRACE_SECONDS` in the CronJob no longer matters for the batch (the
+servers' `scrub.grace_seconds` applies, 3600 by default); `SCRUB_PARALLEL`
+and `SCRUB_INTERVAL_DAYS` belong into the servers' configuration, not
+into the CronJob. The pod runs for seconds, so `activeDeadlineSeconds:
+600` may be added. Roll the CronJob out only after every server runs this
+version, and plan no batch (`shardpostctl plan -all`) before: an older
+server that claims a batch job does not know the kind `batch` and fails
+it ("unknown job kind"). Rollback: set the
+CronJob's `args` back to `["scrub"]`; a batch scrub already submitted is
+cancelled with `shardpostctl job cancel`.
+
+`shardpost scrub` without `--batch` still scrubs in its own process:
+`scrub.users`, else every account of the directory (once its backfill
+completed), else every namespace of an index pool listing.
 
 ## Scrub, backup and observability
 
@@ -460,7 +537,7 @@ Type=oneshot
 User=shardpost
 Group=shardpost
 EnvironmentFile=/etc/shardpost/ceph.env
-ExecStart=/usr/local/bin/shardpost --config /etc/shardpost/shardpost.yaml scrub
+ExecStart=/usr/local/bin/shardpost --config /etc/shardpost/shardpost.yaml scrub --batch
 ```
 
 ```ini
@@ -472,7 +549,10 @@ OnCalendar=*-*-* 03:17:00
 WantedBy=timers.target
 ```
 
-`scrub.grace_seconds` and `scrub.dry_run` apply as described above.
+`scrub --batch` submits the batch scrub the servers run (see
+[Nightly scrub](#nightly-scrub)); without `--batch` the timer scrubs in
+its own process. `scrub.grace_seconds` and `scrub.dry_run` apply as
+described above.
 
 ### What Kubernetes did and who does it now
 

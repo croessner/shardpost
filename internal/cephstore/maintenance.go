@@ -18,11 +18,80 @@ var (
 	_ model.FTSRebuilder     = (*User)(nil)
 	_ model.FTSDictConverter = (*User)(nil)
 	_ model.NamespacePurger  = (*User)(nil)
+	_ model.ScrubProber      = (*User)(nil)
 )
 
 // RunScrub implements model.Scrubber.
 func (u *User) RunScrub(req model.ScrubRequest) (any, error) {
 	return u.Scrub(ScrubOptions{DryRun: req.DryRun, Repairs: req.Repairs, Grace: req.Grace, Fence: req.Fence})
+}
+
+// ScrubState implements model.ScrubProber: the account counter and the
+// version of the registry object (two reads; 0 for an absent object).
+func (u *User) ScrubState() (model.ScrubState, error) {
+	seq, _, err := u.acctBounds()
+	if err != nil {
+		return model.ScrubState{}, err
+	}
+
+	// One key is read along: go-ceph wants a non-empty key list.
+	_, ver, err := u.getKeysVer(u.idx, oidRegistry, []string{regImportLock})
+	if err != nil {
+		return model.ScrubState{}, fmt.Errorf("read registry: %w", err)
+	}
+
+	return model.ScrubState{AccountSeq: seq, RegistryVersion: ver}, nil
+}
+
+// ScrubPending implements model.ScrubProber: any key of the scrub object
+// (orphan candidates "o:", the quota count), a delivery intent in the
+// registry, or a MOVE intent on a mailbox (one read per mailbox, no
+// listing).
+func (u *User) ScrubPending() (string, error) {
+	switch n, err := u.firstKeys(oidScrub, ""); {
+	case err != nil:
+		return "", fmt.Errorf("read scrub state: %w", err)
+	case n > 0:
+		return "scrub candidates", nil
+	}
+
+	switch n, err := u.firstKeys(oidRegistry, regDeliveryPrefix); {
+	case err != nil:
+		return "", fmt.Errorf("read delivery intents: %w", err)
+	case n > 0:
+		return "delivery intents", nil
+	}
+
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		return "", err
+	}
+
+	for i := range boxes {
+		switch n, err := u.firstKeys(mboxOID(boxes[i].ID), keyIntentPrefix); {
+		case err != nil:
+			return "", fmt.Errorf("read move intents of %q: %w", boxes[i].Name, err)
+		case n > 0:
+			return "move intents", nil
+		}
+	}
+
+	return "", nil
+}
+
+// firstKeys reports whether an object of the index pool has a key with
+// the prefix (it reads at most one; an absent object has none).
+func (u *User) firstKeys(oid, prefix string) (int, error) {
+	vals, err := u.idx.GetOmapValues(oid, "", prefix, 1)
+	if err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return 0, nil
+		}
+
+		return 0, err
+	}
+
+	return len(vals), nil
 }
 
 // RecountQuota implements model.QuotaRecounter: the usage is counted

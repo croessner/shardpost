@@ -43,6 +43,51 @@ paths:
                 $ref: "#/components/schemas/ServerStatus"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts:
+    get:
+      operationId: listAccounts
+      summary: Accounts of the account directory, one page
+      description: |
+        Reads the account directory (no listing of a pool): every account
+        that has a registry, and the public namespace, with its directory
+        entry. The order is the directory's (shard, then account), not
+        alphabetical; continue with `cursor` = `next` until `next` is
+        absent. With `state` a page may hold fewer than `limit` items
+        while `next` is present (at most ten times `limit` entries are
+        read per page). Requires the role `diagnose` and the scope of all
+        accounts (socket callers; mutual-TLS clients with `all_accounts`).
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: Position `<shard>:<account>` from `next` of the previous page.
+          schema:
+            type: string
+            maxLength: 400
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: state
+          in: query
+          required: false
+          description: Only entries in this state (`active` or `purging`).
+          schema:
+            type: string
+            pattern: "^(active|purging)$"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountPage"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -406,6 +451,41 @@ paths:
                 $ref: "#/components/schemas/Plan"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/plans:
+    post:
+      operationId: createBatchPlan
+      summary: Plan a batch over all accounts (dry run)
+      description: |
+        Plans a batch job: `kind` run on every account of the account
+        directory, one account after another with a bounded parallelism
+        (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+        `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+        `attachment_backfill` (role `repair`); the batch needs the role of
+        its kind and the scope of all accounts (socket callers; mutual-TLS
+        clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+        takes the maintenance lock per account; an account another job or
+        an import holds is tried again at the end. `skip_idle` (scrub
+        only) skips the accounts that did not change since their last
+        complete batch scrub found nothing, for at most
+        `scrub.interval_days`. The plan's account is empty and its kind
+        `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+        `conflict` (409) while the account directory has no completed
+        backfill (`shardpost index backfill accounts`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchPlanRequest"
+      responses:
+        "201":
+          description: The plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Plan"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/plans/{plan}:
     parameters:
       - name: plan
@@ -476,7 +556,11 @@ paths:
         With `plan_id` the plan is applied (once, before it expires; the
         apply refuses when the account drifted from the plan). Without
         it, `kind` `index_check` (role `diagnose`) checks the `account`
-        read-only. The job runs on any server and survives restarts.
+        read-only. The job runs on any server and survives restarts. A
+        batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+        `batch` without account; its result counts the accounts (`done`,
+        `skipped`, `gone`, `failed`, `findings`) and names the first 50
+        that failed or had findings.
         `Idempotency-Key` returns the same job for a repeated request
         (200) and refuses the key for another request (409).
       parameters:
@@ -532,7 +616,9 @@ paths:
       summary: Ask a job to stop
       description: |
         A queued job is cancelled at once, a running one at its next safe
-        point (no rollback of what it did). Requires the role of the kind.
+        point (no rollback of what it did; a batch stops between two
+        accounts). Requires the role of the kind (of a batch: of the kind
+        it runs, and the scope of all accounts).
       responses:
         "200":
           description: The job.
@@ -1479,7 +1565,8 @@ components:
         (404), `too_large` (413), `rejected` (422, Sieve ereject, or a
         reject that sends no rejection message: no relay, the relay refused
         it, or sieve_reject_mode=protocol), `over_quota` (507), `temporary` (503, try again), `internal` (500),
-        `conflict` (409, imported data contradicts the target),
+        `conflict` (409, imported data contradicts the target, or the
+        account directory is not ready for a batch),
         `import_locked` (409, another session holds the account),
         `account_purging` (409, the account (or the grantee of an ACL change)
         is being purged; if no purge job runs any more, see
@@ -1782,6 +1869,68 @@ components:
           type: integer
           minimum: 1
           description: How long the trace lasts (capped at the configured maximum).
+    BatchPlanRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          pattern: "^(index_check|scrub|fts_rebuild|attachment_backfill)$"
+          description: The kind to run on every account.
+        params:
+          type: object
+          additionalProperties: true
+          description: |
+            Parameters of the kind for every account; scrub: `classes`
+            (empty = all). The other kinds take none.
+        skip_idle:
+          type: boolean
+          description: |
+            scrub only: skip the accounts whose last batch scrub was
+            complete, found nothing and is younger than
+            `scrub.interval_days`, and which did not change since.
+    AccountPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountListEntry"
+        next:
+          type: string
+          description: Cursor of the next page; absent on the last.
+    AccountListEntry:
+      type: object
+      required: [account, entry]
+      properties:
+        account:
+          type: string
+        entry:
+          $ref: "#/components/schemas/DirectoryEntry"
+    AccountScrub:
+      type: object
+      description: The last batch scrub of the account.
+      required: [at, complete, findings, account_seq, registry_version]
+      properties:
+        at:
+          type: string
+          format: date-time
+          description: When it ended.
+        complete:
+          type: boolean
+          description: Whether it looked at everything (no import, no error, no change during the run).
+        findings:
+          type: integer
+          description: Number of findings (repaired or reported).
+        account_seq:
+          type: integer
+          format: int64
+          description: Account change counter it left the account at.
+        registry_version:
+          type: integer
+          format: int64
+          description: Object version of the registry it left the account at.
     DirectoryEntry:
       type: object
       description: The account's entry in the account directory.
@@ -1800,6 +1949,8 @@ components:
         cluster:
           type: string
           description: Ceph cluster (fsid) that holds the account.
+        scrub:
+          $ref: "#/components/schemas/AccountScrub"
     DirectoryStatus:
       type: object
       required: [account, found, registry, shards, phase]
@@ -2163,8 +2314,10 @@ components:
           type: string
         kind:
           type: string
+          description: The kind; `batch` for a plan over all accounts.
         account:
           type: string
+          description: The account; empty for a batch.
         params:
           type: object
           additionalProperties: true
@@ -2214,8 +2367,10 @@ components:
           type: string
         kind:
           type: string
+          description: The kind; `batch` for a job over all accounts.
         account:
           type: string
+          description: The account; empty for a batch.
         plan_id:
           type: string
         state:

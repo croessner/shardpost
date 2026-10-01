@@ -17,6 +17,17 @@ import (
 // FETCH with the requested attributes for new messages; for other
 // mailboxes a STATUS line when MESSAGES, UIDNEXT or HIGHESTMODSEQ changed.
 //
+// The notifier follows the account object of the account through the
+// process-wide watch hub (one watch per account and process, not one per
+// mailbox and session) and reads what changed from the account change
+// log: the mailboxes the new entries name get their STATUS (one header
+// read each), the selected one its poll. When the log no longer covers
+// the position the notifier read up to, every notified mailbox is looked
+// at. A selected mailbox of another namespace (shared or public) is
+// followed through its owner's account object the same way. Where an
+// account object cannot be watched, the notifier falls back to watching
+// the mailbox objects, as it did before.
+//
 // Supported events: MessageNew, MessageExpunge, FlagChange. MailboxName,
 // SubscriptionChange and AnnotationChange are refused with BADEVENT.
 // Filters address the account's own namespace; the number of watched
@@ -29,19 +40,70 @@ const notifyMaxMailboxes = 64
 const notifyBadEvent = "BADEVENT (MessageNew MessageExpunge FlagChange)"
 
 type notifyState struct {
-	selected      bool // SELECTED or SELECTED-DELAYED group present
-	selectedNone  bool
-	delayed       bool
-	selectedAtts  string          // raw fetch-atts for MessageNew, "" = none
-	flagChange    bool            // any group asked for FlagChange (STATUS carries HIGHESTMODSEQ)
-	boxes         map[string]bool // own mailbox names with message events
-	events        chan string     // mailbox name ("" = selected) that changed
-	stop          chan struct{}
-	wg            sync.WaitGroup
-	mu            sync.Mutex
+	selected     bool // SELECTED or SELECTED-DELAYED group present
+	selectedNone bool
+	delayed      bool
+	selectedAtts string          // raw fetch-atts for MessageNew, "" = none
+	flagChange   bool            // any group asked for FlagChange (STATUS carries HIGHESTMODSEQ)
+	boxes        map[string]bool // own mailbox names with message events
+	// ids maps the ids of the notified own mailboxes to their names.
+	ids    map[string]string
+	events chan string // mailbox name ("" = selected) that changed
+	// own follows the account's change log, sel the one of the owner of
+	// a selected mailbox in another namespace; ownWake and selWake fire
+	// when their account object changed.
+	own, sel         *acctFollow
+	ownWake, selWake chan struct{}
+	stop             chan struct{}
+	wg               sync.WaitGroup
+	mu               sync.Mutex
+	// watches (per notified mailbox) and selectedWatch are the mailbox
+	// watches of the fallback without account watch.
 	watches       map[string]model.Watch
 	selectedWatch model.Watch
 	last          map[string]string // last STATUS line per mailbox
+}
+
+// acctFollow is a notifier's position in an account change log.
+type acctFollow struct {
+	w   model.Watch
+	seq uint64
+}
+
+// notifyChangePage is how many account log entries one read takes.
+const notifyChangePage = 256
+
+// changed reads the entries after the position and returns the ids of
+// the mailboxes they name; all is true when an entry names none or the
+// log no longer covers the position (or cannot be read): then every
+// mailbox has to be looked at. The position moves to the last entry read.
+func (f *acctFollow) changed(u model.User) (ids map[string]bool, all bool) {
+	ids = map[string]bool{}
+
+	for {
+		changes, ok, err := u.AccountChanges(f.seq, notifyChangePage)
+		if err != nil || !ok {
+			if seq, err := u.AccountState(); err == nil {
+				f.seq = seq
+			}
+
+			return nil, true
+		}
+
+		for i := range changes {
+			if changes[i].Mailbox == "" {
+				all = true
+			} else {
+				ids[changes[i].Mailbox] = true
+			}
+
+			f.seq = changes[i].Seq
+		}
+
+		if len(changes) < notifyChangePage {
+			return ids, all
+		}
+	}
 }
 
 type notifyGroup struct {
@@ -165,8 +227,8 @@ func (c *conn) readNotifySet() (sendStatus bool, groups []notifyGroup, err error
 // buildNotifyState validates the event groups and collects them into a
 // new notifier state; ok is false when the client was answered.
 func (c *conn) buildNotifyState(tag string, groups []notifyGroup) (*notifyState, bool) {
-	st := &notifyState{boxes: map[string]bool{}, events: make(chan string, 64), stop: make(chan struct{}),
-		watches: map[string]model.Watch{}, last: map[string]string{}}
+	st := &notifyState{boxes: map[string]bool{}, ids: map[string]string{}, events: make(chan string, 64), stop: make(chan struct{}),
+		ownWake: make(chan struct{}, 1), selWake: make(chan struct{}, 1), watches: map[string]model.Watch{}, last: map[string]string{}}
 	seenSelected := false
 
 	for _, g := range groups {
@@ -236,31 +298,63 @@ func (c *conn) checkNotifyGroup(tag string, g notifyGroup) bool {
 	return true
 }
 
-// startNotifyWatches arms the watches of the notified mailboxes and, with
-// sendStatus, reports their initial STATUS (except the selected one).
+// startNotifyWatches follows the account (or, without an account watch,
+// the notified mailboxes) and, with sendStatus, reports the initial
+// STATUS of the notified mailboxes (except the selected one).
 func (c *conn) startNotifyWatches(st *notifyState, sendStatus bool) {
 	for name := range st.boxes {
-		mb, err := c.user.Lookup(name)
-		if err != nil {
-			continue
+		if mb, err := c.user.Lookup(name); err == nil {
+			st.ids[mb.ID] = name
 		}
+	}
 
-		w, err := c.user.Watch(mb.ID)
-		if err != nil {
-			c.log.Warn("notify watch failed", "mailbox", name, "err", err)
-			continue
-		}
-
-		st.watches[name] = w
-		st.forward(w, name)
-
-		if sendStatus && !c.isSelectedOwn(name) {
-			if line, err := c.statusLine(&target{u: c.user, name: name, full: name}, c.notifyStatusItems()); err == nil {
-				st.last[name] = line
-				c.w.untagged("%s", line)
+	if st.selected || len(st.ids) > 0 {
+		if f := c.followAccount(c.name, c.user); f != nil {
+			st.own = f
+			st.wake(f.w, st.ownWake)
+		} else {
+			for id, name := range st.ids {
+				if w := c.watchMailbox(c.name, id); w != nil {
+					st.watches[name] = w
+					st.forward(w, name)
+				}
 			}
 		}
 	}
+
+	if !sendStatus {
+		return
+	}
+
+	for name := range st.boxes {
+		if c.isSelectedOwn(name) {
+			continue
+		}
+
+		if line, err := c.statusLine(&target{u: c.user, name: name, full: name}, c.notifyStatusItems()); err == nil {
+			st.last[name] = line
+			c.w.untagged("%s", line)
+		}
+	}
+}
+
+// followAccount follows the change log of namespace ns (u is a view of
+// it) from its current state on; nil when the account object cannot be
+// watched. The watch is armed before the state is read, so no change
+// falls between them.
+func (c *conn) followAccount(ns string, u model.User) *acctFollow {
+	w, err := c.watchAccount(ns)
+	if err != nil {
+		return nil
+	}
+
+	seq, err := u.AccountState()
+	if err != nil {
+		w.Close()
+		return nil
+	}
+
+	return &acctFollow{w: w, seq: seq}
 }
 
 // isSelectedOwn reports whether name is the selected mailbox of the
@@ -517,8 +611,33 @@ func (st *notifyState) forward(w model.Watch, name string) {
 	}()
 }
 
-// notifyReselect (re)arms the watch on the selected mailbox; called on
-// SELECT and UNSELECT.
+// wake pumps the events of an account watch into wake (coalesced) until
+// stop.
+func (st *notifyState) wake(w model.Watch, wake chan<- struct{}) {
+	st.wg.Add(1)
+	go func() {
+		defer st.wg.Done()
+
+		for {
+			select {
+			case <-st.stop:
+				return
+			case <-w.Events():
+				select {
+				case wake <- struct{}{}:
+				default: // one pending wake-up reads every change
+				}
+			case <-w.Errors():
+				return
+			}
+		}
+	}()
+}
+
+// notifyReselect follows the selected mailbox; called on SELECT and
+// UNSELECT. One of the account's own namespace is covered by the
+// account's change log; one of another namespace is followed through
+// its owner's change log (or, failing that, its mailbox object).
 func (c *conn) notifyReselect() {
 	st := c.notify
 	if st == nil {
@@ -533,18 +652,28 @@ func (c *conn) notifyReselect() {
 		st.selectedWatch = nil
 	}
 
-	if !st.selected || st.selectedNone || c.mbox == nil {
+	if st.sel != nil {
+		st.sel.w.Close()
+		st.sel = nil
+	}
+
+	if !st.selected || st.selectedNone || c.mbox == nil || (c.mu == c.user && st.own != nil) {
 		return
 	}
 
-	w, err := c.mu.Watch(c.mbox.ID)
-	if err != nil {
-		c.log.Warn("notify watch failed", "mailbox", c.mbox.Name, "err", err)
-		return
+	if c.mu != c.user {
+		if f := c.followAccount(c.selectedNS(), c.mu); f != nil {
+			st.sel = f
+			st.wake(f.w, st.selWake)
+
+			return
+		}
 	}
 
-	st.selectedWatch = w
-	st.forward(w, "")
+	if w := c.watchMailbox(c.selectedNS(), c.mbox.ID); w != nil {
+		st.selectedWatch = w
+		st.forward(w, "")
+	}
 }
 
 func (c *conn) notifyStop() {
@@ -559,6 +688,12 @@ func (c *conn) notifyStop() {
 	st.mu.Lock()
 	for _, w := range st.watches {
 		w.Close()
+	}
+
+	for _, f := range []*acctFollow{st.own, st.sel} {
+		if f != nil {
+			f.w.Close()
+		}
 	}
 
 	if st.selectedWatch != nil {
@@ -578,25 +713,92 @@ func (c *conn) notifyLoop(st *notifyState) {
 		case <-st.stop:
 			return
 		case name := <-st.events:
-			c.cmdMu.Lock()
-			if c.notify != st {
-				c.cmdMu.Unlock()
+			if !c.notifyLocked(st, func() { c.notifyName(st, name) }) {
 				return
 			}
-
-			if name == "" {
-				c.notifySelected(st)
-			} else {
-				c.notifyStatus(st, name)
+		case <-st.ownWake:
+			if !c.notifyLocked(st, func() { c.notifyOwnChanges(st) }) {
+				return
 			}
-
-			err := c.w.flush()
-			c.cmdMu.Unlock()
-
-			if err != nil {
+		case <-st.selWake:
+			if !c.notifyLocked(st, func() { c.notifySelectedChanges(st) }) {
 				return
 			}
 		}
+	}
+}
+
+// notifyLocked runs fn under the command mutex and flushes; false when
+// the notifier is replaced or the connection broke.
+func (c *conn) notifyLocked(st *notifyState, fn func()) bool {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
+	if c.notify != st {
+		return false
+	}
+
+	fn()
+
+	return c.w.flush() == nil
+}
+
+// notifyName reports a change of a mailbox watched by its object.
+func (c *conn) notifyName(st *notifyState, name string) {
+	if name == "" {
+		c.notifySelected(st)
+	} else {
+		c.notifyStatus(st, name)
+	}
+}
+
+// notifyOwnChanges reports the mailboxes the new entries of the account's
+// change log name: STATUS for the notified ones, a poll for the selected
+// one of the own namespace.
+func (c *conn) notifyOwnChanges(st *notifyState) {
+	if st.own == nil {
+		return
+	}
+
+	ids, all := st.own.changed(c.user)
+	selectedOwn := st.selected && !st.selectedNone && c.mbox != nil && c.mu == c.user
+
+	if all {
+		for name := range st.boxes {
+			c.notifyStatus(st, name)
+		}
+
+		if selectedOwn {
+			c.notifySelected(st)
+		}
+
+		return
+	}
+
+	for id := range ids {
+		if name, ok := st.ids[id]; ok {
+			c.notifyStatus(st, name)
+		}
+	}
+
+	if selectedOwn && ids[c.mbox.ID] {
+		c.notifySelected(st)
+	}
+}
+
+// notifySelectedChanges polls the selected mailbox of another namespace
+// when its owner's change log names it.
+func (c *conn) notifySelectedChanges(st *notifyState) {
+	st.mu.Lock()
+	f := st.sel
+	st.mu.Unlock()
+
+	if f == nil || c.mbox == nil || c.mu == c.user {
+		return
+	}
+
+	if ids, all := f.changed(c.mu); all || ids[c.mbox.ID] {
+		c.notifySelected(st)
 	}
 }
 

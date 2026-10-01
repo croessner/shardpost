@@ -12,6 +12,13 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-\-json ]
 .I kind account
 .br
+.B shardpostctl plan \-all
+.RB [ \-classes
+.IR list ]
+.RB [ \-skip-idle ]
+.RB [ \-\-json ]
+.I kind
+.br
 .B shardpostctl plan show
 .RB [ \-\-json ]
 .I plan-id
@@ -76,6 +83,9 @@ with the plan: if it drifted, the job ends without changing anything.
 .PP
 .B check
 needs no plan: it runs the read-only index check on an account.
+.PP
+.B plan \-all
+plans a batch: one kind run on every account of the account directory.
 .SS plan
 Computes what a job of that kind would do to the account and stores the
 result. Nothing is changed. The plan carries a fingerprint of the state
@@ -84,6 +94,47 @@ it was computed from, and it expires
 Role: the one the kind needs, see
 .B Kinds
 below.
+.SS plan \-all
+Plans a batch of the kind over every account of the account directory:
+.BR index_check ,
+.BR scrub ,
+.B fts_rebuild
+or
+.BR attachment_backfill .
+.B \-classes
+selects the repair classes of a scrub as for one account;
+.B \-skip-idle
+(scrub only) leaves out the accounts that did not change since their
+last batch scrub was complete and found nothing, for at most
+.I scrub.interval_days
+(7). The plan names the kind, its role, whether it locks the accounts,
+the parallelism and the directory it walks; its account is empty and
+its kind
+.BR batch .
+.B apply
+runs it as one job: it walks the directory a page at a time and works on
+.I jobs.batch_parallel
+accounts at once
+.RI ( scrub.parallel
+for a scrub). The result counts the accounts done, skipped, gone (purged
+meanwhile), failed and with findings, and names the first 50 that failed
+or had findings; a batch with a failed account ends
+.IR partially_failed .
+A kind that locks the account takes the lock per account; an account an
+import or another job holds is tried again at the end, up to three
+times a lease period apart, and then counted as failed. A cancel stops
+the batch between two accounts. A server that takes the batch over
+continues after the last page done.
+.PP
+A batch is refused (exit 65) until the account directory has completed
+its backfill
+.RB ( "shardpost index backfill accounts" ),
+since accounts from before the directory would be missed. Role: the one
+the kind needs, and the scope of all accounts: socket callers have it,
+mutual-TLS clients only with
+.I all_accounts
+in their configuration. An export of every account is no batch kind:
+the export streams one archive per request to the caller.
 .SS plan show
 Prints a stored plan again, by its id: what it would do, when it was
 made and when it expires. Role:
@@ -122,7 +173,8 @@ Role:
 .SS job cancel
 Asks a job to stop. A job that has not started yet never starts; a
 running one stops at its next safe point, and what it has already done
-stays done. Role: the one the kind needs.
+stays done. Role: the one the kind needs (for a batch the one of the
+kind it runs, and the scope of all accounts).
 .SS Kinds
 .TP
 .B index_check
@@ -308,6 +360,14 @@ comma-separated.
 takes every message flagged
 .IR \eDeleted .
 .TP
+.B \-all
+.B plan
+a batch of the kind over every account instead of one account.
+.TP
+.B \-skip-idle
+.B plan \-all scrub
+skips the accounts unchanged since their last clean batch scrub.
+.TP
 .B \-wait
 Wait until the job ends. The exit code is then the job's outcome.
 .TP
@@ -429,6 +489,36 @@ shardpostctl apply -wait <plan-id>
 .RE
 .fi
 .PP
+Check every account read-only and see which ones have findings:
+.PP
+.nf
+.RS
+shardpostctl plan -all index_check
+shardpostctl apply -wait <plan-id>        # done, failed, findings, finding_accounts
+.RE
+.fi
+.PP
+After an upgrade that changes how text is indexed, rebuild the index of
+every account (each account is locked while its turn runs):
+.PP
+.nf
+.RS
+shardpostctl plan -all fts_rebuild
+shardpostctl apply <plan-id>
+shardpostctl job wait <job-id>
+.RE
+.fi
+.PP
+What the nightly scrub does (it is submitted by
+.BR "shardpost scrub \-\-batch" ):
+.PP
+.nf
+.RS
+shardpostctl plan -all -skip-idle scrub
+shardpostctl apply <plan-id>
+.RE
+.fi
+.PP
 Offboarding: remove every trace of an account from the store (the
 identity stays in LDAP):
 .PP
@@ -473,7 +563,8 @@ The job succeeded.
 The job partly failed; its errors are printed.
 .TP
 .B 65
-The plan was already applied or has expired.
+The plan was already applied or has expired, or a batch was planned
+before the account directory completed its backfill.
 .TP
 .B 67
 No such job, plan or account.

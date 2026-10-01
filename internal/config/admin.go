@@ -65,6 +65,10 @@ type Jobs struct {
 	// idempotency keys whose retention ended, and how often the other
 	// servers try to take its lease.
 	ExpirySeconds int `mapstructure:"expiry_seconds" validate:"gte=5,lte=3600"`
+	// BatchParallel is how many accounts a batch over all accounts works
+	// on at once in the server that runs it (scrub batches use
+	// scrub.parallel).
+	BatchParallel int `mapstructure:"batch_parallel" validate:"gte=1,lte=32"`
 }
 
 // Trace configures the per-account protocol trace (role trace): an
@@ -110,6 +114,11 @@ type AdminClient struct {
 	// patterns on the lower-cased canonical account, e.g. "*@example.org");
 	// empty means all accounts.
 	Accounts []string `mapstructure:"accounts" validate:"dive,required"`
+	// AllAccounts grants the scope of all accounts: listing the account
+	// directory and planning, applying and cancelling batches over every
+	// account (each still needs its role). Socket callers always have it;
+	// it excludes Accounts.
+	AllAccounts bool `mapstructure:"all_accounts"`
 }
 
 // Validate checks the listener settings and refuses settings without
@@ -162,6 +171,10 @@ func (c Admin) validateTLS() error {
 		}
 
 		seen[id] = true
+
+		if cl.AllAccounts && len(cl.Accounts) > 0 {
+			return fmt.Errorf("admin client %q: all_accounts and accounts exclude each other", cl.Identity)
+		}
 
 		for _, p := range cl.Accounts {
 			if _, err := path.Match(p, ""); err != nil {

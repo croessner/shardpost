@@ -67,8 +67,8 @@ Commands are grouped by subject. Each group has its own manual page:
 Version and state of the server itself.
 .TP
 .BR shardpostctl-account (1)
-Look up an account, its quota and the mailboxes shared with it; repair
-its entry in the account directory.
+Look up an account, its quota and the mailboxes shared with it; list
+the account directory and repair an entry of it.
 .TP
 .BR shardpostctl-mailbox (1)
 List and inspect mailboxes; create, rename and subscribe them.
@@ -83,7 +83,8 @@ List, search, show, export, flag, copy and move messages.
 Manage Sieve scripts and run a script without side effects.
 .TP
 .BR shardpostctl-job (1)
-Maintenance jobs: plan, apply, watch and cancel.
+Maintenance jobs, for one account or as a batch over all accounts:
+plan, apply, watch and cancel.
 .TP
 .BR shardpostctl-learning (1)
 Inspect and retry jobs of the IMAPSieve learning queue.

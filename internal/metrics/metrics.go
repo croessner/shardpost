@@ -15,6 +15,7 @@ const (
 	subsystemRados = "rados"
 	subsystemLMTP  = "lmtp"
 	subsystemScrub = "scrub"
+	subsystemIMAP  = "imap"
 )
 
 // Label names.
@@ -29,6 +30,7 @@ const (
 	labelAction  = "action"
 	labelColl    = "collection"
 	labelCause   = "cause"
+	labelObject  = "object"
 )
 
 var (
@@ -115,6 +117,39 @@ var (
 		Namespace: namespace, Name: "job_wakeups_total",
 		Help: "Job runner looks for claimable jobs by cause (poll, notify).",
 	}, []string{labelCause})
+	// BatchAccounts counts the accounts a batch job (a kind over every
+	// account of the directory) handled, by kind and outcome: done,
+	// skipped (idle, scrub), gone (purged meanwhile), deferred (locked,
+	// tried again at the end) and failed.
+	BatchAccounts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "batch_accounts_total",
+		Help: "Accounts handled by batch jobs, by kind and outcome.",
+	}, []string{labelKind, labelOutcome})
+	// IMAPWatches is the number of RADOS watches the IMAP watch hub of
+	// this process holds, by object (mailbox, account): one per object
+	// however many sessions follow it.
+	IMAPWatches = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemIMAP, Name: "watches",
+		Help: "RADOS watches held by the IMAP watch hub of this process, by object.",
+	}, []string{labelObject})
+	// IMAPWatchSubscribers is the number of sessions following a watch
+	// of the hub, by object.
+	IMAPWatchSubscribers = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemIMAP, Name: "watch_subscribers",
+		Help: "Session subscriptions to the watches of the IMAP watch hub, by object.",
+	}, []string{labelObject})
+	// IMAPWatchRearms counts the watches the hub set up again after an
+	// error (the OSD dropped it, the store rotated its connection).
+	IMAPWatchRearms = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemIMAP, Name: "watch_rearms_total",
+		Help: "Watches the IMAP watch hub set up again after an error.",
+	})
+	// IMAPWatchRefused counts subscriptions a connection was refused for
+	// being at its watch limit (it polls instead).
+	IMAPWatchRefused = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemIMAP, Name: "watch_refused_total",
+		Help: "Watch subscriptions refused because the connection was at its limit.",
+	})
 )
 
 // Timer measures one RADOS operation.

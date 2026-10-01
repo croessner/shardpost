@@ -56,7 +56,30 @@ type ScrubReport struct {
 	RetiredRepaired  int  // mailboxes left retired by an interrupted import replacement
 	UncoveredEntries int  // entries at or above UIDNEXT (interrupted import) removed
 	StaleMarkObjects int  // private \Seen marks of public folders that are gone
-	Errors           []string
+	// IndexIncomplete: an index could not be read in full (or a registry
+	// entry did not parse), so the destructive repairs were skipped.
+	IndexIncomplete bool `json:",omitempty"`
+	Errors          []string
+}
+
+var _ model.ScrubOutcome = (*ScrubReport)(nil)
+
+// Findings implements model.ScrubOutcome: every finding of the run,
+// repaired or only reported (orphan candidates count: they are looked at
+// again by the next run).
+func (r *ScrubReport) Findings() int {
+	n := r.OrphanBlobs + r.MissingBlobs + r.RefsFixed + r.MoveIntents + r.DeliveryIntents + r.OrphanCandidates +
+		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects
+	if r.QuotaFixed {
+		n++
+	}
+
+	return n
+}
+
+// Complete implements model.ScrubOutcome.
+func (r *ScrubReport) Complete() bool {
+	return !r.ImportSkipped && !r.IndexIncomplete && len(r.Errors) == 0
 }
 
 // ScrubOptions tunes a scrub run.
@@ -204,6 +227,8 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 	idx, complete := sr.scanIndex(boxes, registryOK)
 
 	if !complete {
+		rep.IndexIncomplete = true
+
 		log.Warn("scrub: index scan incomplete, skipping repairs", "errors", rep.Errors)
 		sr.logDone()
 
@@ -1054,7 +1079,19 @@ func (sr *scrubRun) fixQuota(quota Quota) {
 	u, rep, log := sr.u, sr.rep, sr.log
 
 	cur, err := u.QuotaUsage()
-	if err == nil && (cur.Bytes != quota.Bytes || cur.Msgs != quota.Msgs) {
+	if err == nil && cur.Bytes == quota.Bytes && cur.Msgs == quota.Msgs {
+		// No drift: a count an earlier run remembered is moot, and left
+		// behind it would keep a batch scrub from skipping the account.
+		if sr.o.Allowed(RepairQuota) {
+			if prev, err := u.scrubState(scrubKeyQuotaCounted); err == nil && prev != "" {
+				_ = u.clearScrubState(scrubKeyQuotaCounted)
+			}
+		}
+
+		return
+	}
+
+	if err == nil {
 		prev, _ := u.scrubState(scrubKeyQuotaCounted)
 
 		counted := fmt.Sprintf("%d/%d", quota.Bytes, quota.Msgs)
@@ -1143,5 +1180,11 @@ func (u *User) scrubState(key string) (string, error) {
 func (u *User) setScrubState(key, val string) error {
 	return casOmap(u, u.idx, oidScrub, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
 		return map[string][]byte{key: []byte(val)}, nil
+	})
+}
+
+func (u *User) clearScrubState(key string) error {
+	return casOmap(u, u.idx, oidScrub, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return nil, []string{key}
 	})
 }

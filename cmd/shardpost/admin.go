@@ -48,7 +48,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		return a, nil
 	}
 
-	clients, scopes := adminClients(c.Clients)
+	clients, scopes, all := adminClients(c.Clients)
 	importer := importStore{store}
 	instance, _ := os.Hostname()
 
@@ -70,7 +70,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		ImportShardSize: c.Import.ShardSize, Accounts: importer,
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
-		ClientScopes:         scopes, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
+		ClientScopes:         scopes, AllAccountsClients: all, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
 		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: learning, SearchScanLimit: c.SearchScanLimit,
 		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices})
 
@@ -96,8 +96,9 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 }
 
 // adminClients maps the configured client identities to their roles and,
-// for clients with an account scope, to their account patterns.
-func adminClients(cs []config.AdminClient) (clients, scopes map[string][]string) {
+// for clients with an account scope, to their account patterns; all are
+// the identities with the scope of all accounts.
+func adminClients(cs []config.AdminClient) (clients, scopes map[string][]string, all []string) {
 	clients, scopes = map[string][]string{}, map[string][]string{}
 
 	for _, cl := range cs {
@@ -106,9 +107,13 @@ func adminClients(cs []config.AdminClient) (clients, scopes map[string][]string)
 		if len(cl.Accounts) > 0 {
 			scopes[cl.Identity] = cl.Accounts
 		}
+
+		if cl.AllAccounts {
+			all = append(all, cl.Identity)
+		}
 	}
 
-	return clients, scopes
+	return clients, scopes, all
 }
 
 // newJobs builds the maintenance job system (roadmap 8c).
@@ -122,12 +127,13 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
-	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning}
+	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store}
 
 	a.jobsKV = kv
 	a.jobs = jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),
 		Retention: time.Duration(c.RetentionDays) * 24 * time.Hour, PlanTTL: sec(c.PlanTTLSeconds), MaxParallel: c.MaxParallel,
-		Settle: sec(c.SettleSeconds), ExpiryPoll: sec(c.ExpirySeconds)},
+		Settle: sec(c.SettleSeconds), ExpiryPoll: sec(c.ExpirySeconds), BatchParallel: c.BatchParallel,
+		ScrubParallel: settings.Scrub.Parallel, ScrubInterval: time.Duration(settings.Scrub.IntervalDays) * 24 * time.Hour},
 		instance, jobs.Kinds(time.Duration(settings.Scrub.GraceSeconds)*time.Second)...)
 
 	warnUnbackfilled(log, kv)

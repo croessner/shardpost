@@ -28,6 +28,7 @@ import (
 	"shardpost/internal/provision"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/telemetry"
+	"shardpost/internal/watchhub"
 )
 
 // Auth verifies credentials.
@@ -89,6 +90,13 @@ type Options struct {
 	// ShareNotices records the share notifications of the grantees whose
 	// rights a SETACL or DELETEACL changes (RFC 9670 3); nil records none.
 	ShareNotices *sharenotice.Recorder
+	// WatchStore opens the views the process-wide watch hub watches on
+	// (nil: Store). It need not refuse locked accounts: a watch only
+	// reads.
+	WatchStore watchhub.Opener
+	// MaxWatches bounds the hub subscriptions of one connection (IDLE,
+	// NOTIFY); beyond it the connection polls (0 = 8).
+	MaxWatches int
 }
 
 // TraceOptions configure the protocol trace of accounts whose trace
@@ -103,7 +111,9 @@ type TraceOptions struct {
 
 // Server accepts IMAP connections.
 type Server struct {
-	o      Options
+	o Options
+	// hub shares the RADOS watches of the sessions of this process.
+	hub    *watchhub.Hub
 	mu     sync.Mutex
 	conns  map[*conn]struct{}
 	lns    map[net.Listener]struct{}
@@ -138,7 +148,16 @@ func New(o Options) *Server {
 		o.Trace.Recheck = time.Minute
 	}
 
-	return &Server{o: o, conns: map[*conn]struct{}{}, lns: map[net.Listener]struct{}{}, perIP: map[string]int{}, perUsr: map[string]int{}}
+	if o.MaxWatches <= 0 {
+		o.MaxWatches = defaultMaxWatches
+	}
+
+	if o.WatchStore == nil {
+		o.WatchStore = o.Store
+	}
+
+	return &Server{o: o, hub: watchhub.New(o.WatchStore, o.Log.With("component", "watchhub")),
+		conns: map[*conn]struct{}{}, lns: map[net.Listener]struct{}{}, perIP: map[string]int{}, perUsr: map[string]int{}}
 }
 
 // Serve accepts connections on ln until Close.
@@ -254,6 +273,7 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 		s.mu.Unlock()
 
 		if n == 0 {
+			s.hub.Close()
 			return nil
 		}
 
@@ -266,6 +286,10 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 		_ = c.nc.Close()
 	}
 	s.mu.Unlock()
+
+	// The sessions left poll from now on; the watches and their views go
+	// before the store closes.
+	s.hub.Close()
 
 	return nil
 }
@@ -365,6 +389,9 @@ type conn struct {
 	// session state and the writer; released while waiting for input.
 	cmdMu  sync.Mutex
 	notify *notifyState
+	// watches counts the hub subscriptions the connection holds
+	// (Options.MaxWatches bounds them).
+	watches atomic.Int32
 
 	// ENABLE; utf8 is UTF8=ACCEPT, rev2 IMAP4rev2. Both switch the
 	// session to UTF-8 mailbox names (see mboxname.go). rev2 also drops
@@ -1431,32 +1458,24 @@ func (c *conn) idleRead() <-chan error {
 	return done
 }
 
-// idleWatch arms the change watch on the selected mailbox; nil means
-// polling only.
+// idleWatch follows the selected mailbox through the watch hub; nil
+// means polling only.
 func (c *conn) idleWatch() model.Watch {
 	if c.mbox == nil {
 		return nil
 	}
 
-	watch, err := c.mu.Watch(c.mbox.ID)
-	if err != nil {
-		c.log.Warn("watch failed, polling only", "err", err)
-	}
-
-	return watch
+	return c.watchMailbox(c.selectedNS(), c.mbox.ID)
 }
 
 // rearmWatch replaces a watch that reported werr; nil if re-arming fails.
+// A hub subscription reports no errors (the hub watches again itself), so
+// this only runs for a watch the hub does not hold.
 func (c *conn) rearmWatch(watch model.Watch, werr error) model.Watch {
 	c.log.Warn("watch error, re-arming", "err", werr)
 	watch.Close()
 
-	watch, err := c.mu.Watch(c.mbox.ID)
-	if err != nil {
-		return nil
-	}
-
-	return watch
+	return c.idleWatch()
 }
 
 // idlePush sends pending changes during IDLE under the command lock.

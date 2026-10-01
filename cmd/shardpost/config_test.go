@@ -63,6 +63,8 @@ func TestBackfillCommandLine(t *testing.T) {
 		"index backfill learning --restart": commandBackfillLearningRestart,
 		"index show learning":               commandShowLearning,
 		"index show learning a1 b2":         commandShowLearning + " a1 b2",
+		"scrub":                             commandScrub,
+		"scrub --batch":                     commandScrubBatch,
 	} {
 		if _, command, err := loadConfig(strings.Fields(args)); err != nil || command != want {
 			t.Errorf("%q: %q %v", args, command, err)
@@ -70,7 +72,7 @@ func TestBackfillCommandLine(t *testing.T) {
 	}
 
 	for _, bad := range []string{"index", "index backfill", "index backfill jobs", "--restart", "scrub --restart", "index show kv --restart",
-		"index show accounts", "index show learning --restart", "index backfill accounts learning"} {
+		"index show accounts", "index show learning --restart", "index backfill accounts learning", "--batch", "push --batch"} {
 		if _, _, err := loadConfig(strings.Fields(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

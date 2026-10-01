@@ -26,8 +26,11 @@ func loadConfig(args []string) (*config.Config, string, error) {
 			}
 
 			path = args[i]
-		case commandScrub, commandPush:
-			command = args[i]
+		case commandScrub, commandPush, flagBatch:
+			var err error
+			if command, err = runCommand(command, args[i]); err != nil {
+				return nil, "", err
+			}
 		case "index":
 			n, cmd, err := indexCommand(args[i+1:])
 			if err != nil {
@@ -51,6 +54,23 @@ func loadConfig(args []string) (*config.Config, string, error) {
 	c, err := config.Load(path)
 
 	return c, command, err
+}
+
+// flagBatch makes scrub submit the batch job (commandScrubBatch).
+const flagBatch = "--batch"
+
+// runCommand applies a command word: scrub, push, or --batch after
+// scrub.
+func runCommand(command, arg string) (string, error) {
+	if arg != flagBatch {
+		return arg, nil
+	}
+
+	if command != commandScrub {
+		return "", fmt.Errorf("--batch belongs to scrub")
+	}
+
+	return commandScrubBatch, nil
 }
 
 // showCommand builds "index show kv|learning" (command) with the keys

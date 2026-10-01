@@ -27,6 +27,9 @@ type Env struct {
 	Learning interface {
 		PurgeOwner(account string) (int, error)
 	}
+	// Directory is the account directory a batch walks (nil: no
+	// batches).
+	Directory model.AccountDirectory
 }
 
 // Kind is one job kind.
@@ -62,6 +65,14 @@ type Config struct {
 	// ExpiryPoll is how often the expiry worker deletes what is due and
 	// a server without the worker lease tries to take it.
 	ExpiryPoll time.Duration
+	// BatchParallel is how many accounts a batch works on at once,
+	// ScrubParallel the same for a batch of scrubs (both 1 when 0).
+	BatchParallel int
+	ScrubParallel int
+	// ScrubInterval is how long a batch scrub with skip_idle may leave an
+	// idle account alone: after it, the account is scrubbed again in any
+	// case (7 days when 0; negative: no bound).
+	ScrubInterval time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -73,6 +84,15 @@ func (c Config) withDefaults() Config {
 
 	if c.MaxParallel <= 0 {
 		c.MaxParallel = 1
+	}
+
+	c.BatchParallel, c.ScrubParallel = max(c.BatchParallel, 1), max(c.ScrubParallel, 1)
+
+	switch {
+	case c.ScrubInterval == 0:
+		c.ScrubInterval = 7 * 24 * time.Hour
+	case c.ScrubInterval < 0:
+		c.ScrubInterval = 0
 	}
 
 	return c
@@ -109,6 +129,11 @@ func NewManager(kv model.AdminKV, env *Env, cfg Config, instance string, kinds .
 		m.kinds[k.Name()] = k
 	}
 
+	// Every manager can run a batch of the kinds it has.
+	if _, ok := m.kinds[KindBatch]; !ok {
+		m.kinds[KindBatch] = newBatchKind()
+	}
+
 	return m
 }
 
@@ -139,6 +164,10 @@ func (m *Manager) CreatePlan(ctx context.Context, kind Kind, account string, par
 ) (*Plan, error) {
 	if !kind.Planned() {
 		return nil, ErrNoPlan
+	}
+
+	if IsBatch(kind) {
+		return nil, fmt.Errorf("%w: plan a batch over all accounts instead", ErrInvalidParams)
 	}
 
 	u, err := m.env.Accounts.User(account)
@@ -212,11 +241,8 @@ func (m *Manager) GetPlan(id string) (*Plan, error) { return m.st.getPlan(id) }
 // returns the existing job (created false); the key is claimed before
 // the job exists, so concurrent repeats cannot both create one.
 func (m *Manager) Submit(kind Kind, account string, params json.RawMessage, planID, principal, idemKey string) (*Job, bool, error) {
-	switch {
-	case kind.Planned() && planID == "":
-		return nil, false, ErrNeedsPlan
-	case !kind.Planned() && planID != "":
-		return nil, false, ErrNoPlan
+	if err := checkSubmit(kind, account, planID); err != nil {
+		return nil, false, err
 	}
 
 	now := m.now()
@@ -240,6 +266,23 @@ func (m *Manager) Submit(kind Kind, account string, params json.RawMessage, plan
 	}
 
 	return j, true, nil
+}
+
+// checkSubmit refuses submitting a kind the wrong way.
+func checkSubmit(kind Kind, account, planID string) error {
+	switch {
+	case kind.Planned() && planID == "":
+		return ErrNeedsPlan
+	case !kind.Planned() && planID != "":
+		return ErrNoPlan
+	case IsBatch(kind) && account != "":
+		return fmt.Errorf("%w: a batch runs over all accounts, not for one", ErrInvalidParams)
+	case !IsBatch(kind) && account == "":
+		// Only a batch is without an account; the empty name is none.
+		return fmt.Errorf("%w: %s needs an account", ErrInvalidParams, kind.Name())
+	default:
+		return nil
+	}
 }
 
 // claimIdem claims the idempotency key for j; when the key exists it

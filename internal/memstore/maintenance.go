@@ -1,6 +1,8 @@
 package memstore
 
 import (
+	"encoding/json"
+	"hash/fnv"
 	"strings"
 
 	"shardpost/internal/model"
@@ -14,6 +16,8 @@ var (
 	_ model.FTSRebuilder     = (*User)(nil)
 	_ model.FTSDictConverter = (*User)(nil)
 	_ model.NamespacePurger  = (*User)(nil)
+	_ model.ScrubProber      = (*User)(nil)
+	_ model.ScrubOutcome     = (*ScrubReport)(nil)
 )
 
 // ScrubReport is the memstore scrub report (nothing to repair).
@@ -22,6 +26,37 @@ type ScrubReport struct {
 	DryRun  bool
 	Repairs []string
 }
+
+// Findings implements model.ScrubOutcome (this store has nothing to
+// find).
+func (r *ScrubReport) Findings() int { return 0 }
+
+// Complete implements model.ScrubOutcome.
+func (r *ScrubReport) Complete() bool { return true }
+
+// ScrubState implements model.ScrubProber. This store has no registry
+// object and so no version; a hash of what the RADOS registry holds
+// (mailbox records, quota counters and limits, the import lock) stands
+// in for it, so a change of any of them changes the state as there.
+func (u *User) ScrubState() (model.ScrubState, error) {
+	boxes, err := u.ListMailboxes()
+	if err != nil {
+		return model.ScrubState{}, err
+	}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	h := fnv.New64a()
+	b, _ := json.Marshal([]any{boxes, u.usage, u.limit, u.imp != nil, u.registered.Load()})
+	_, _ = h.Write(b)
+
+	return model.ScrubState{AccountSeq: u.acct.seq, RegistryVersion: h.Sum64()}, nil
+}
+
+// ScrubPending implements model.ScrubProber: this store keeps no scrub
+// state and no intents.
+func (u *User) ScrubPending() (string, error) { return "", nil }
 
 // RunScrub implements model.Scrubber.
 func (u *User) RunScrub(req model.ScrubRequest) (any, error) {

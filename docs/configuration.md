@@ -5,7 +5,7 @@ The server loads its configuration once, before it opens Ceph, authentication an
 ```sh
 shardpost --config /etc/shardpost/server.yaml
 shardpost --config /etc/shardpost/server.yaml config check
-shardpost --config /etc/shardpost/server.yaml scrub
+shardpost --config /etc/shardpost/server.yaml scrub [--batch]
 shardpost --config /etc/shardpost/server.yaml index backfill accounts [--restart]
 shardpost --config /etc/shardpost/server.yaml index backfill kv [--restart]
 shardpost --config /etc/shardpost/server.yaml index show kv [<key>...]
@@ -13,6 +13,11 @@ shardpost --config /etc/shardpost/server.yaml index backfill learning [--restart
 shardpost --config /etc/shardpost/server.yaml index show learning [<id>...]
 ```
 
+`scrub` scrubs in its own process (`scrub.users`, else every account of
+the account directory, else every namespace of an index pool listing);
+`scrub --batch` submits the batch scrub the servers run and exits (see
+[Scrub](#scrub-scrub) and
+[Operations](operations/README.md#nightly-scrub)).
 `index backfill accounts` fills the account directory once after a
 rollout (see [Operations](operations/README.md#account-directory-backfill));
 it has no configuration keys of its own. `index backfill kv` fills the
@@ -402,7 +407,42 @@ and granted through the admin API, see
 | `jobs.max_parallel` | 2 | concurrent jobs per server |
 | `jobs.settle_seconds` | 10 | how long an exclusive job waits after setting the maintenance lock, so that running deliveries can finish and open IMAP/POP3 sessions notice the lock (they check it at most every 5 s when a command starts and disconnect with BYE) |
 
-YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c).
+| `jobs.batch_parallel` | 2 | how many accounts a batch over all accounts works on at once in the server that runs it (1–32; a batch scrub uses `scrub.parallel`) |
+
+YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c)
+and [batches over all accounts](admin-api.md#batches-over-all-accounts).
+
+### Scrub (`scrub`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `scrub.users` | `SCRUB_USERS` | "" | accounts `shardpost scrub` scrubs, comma-separated; empty: every account (not with `--batch`) |
+| `scrub.grace_seconds` | `SCRUB_GRACE_SECONDS` | 3600 | objects younger than this are left alone (operations in flight); the batch scrub uses the servers' value |
+| `scrub.dry_run` | `SCRUB_DRY_RUN` | false | report only; `scrub --batch` then submits a batch of `index_check` |
+| `scrub.parallel` | `SCRUB_PARALLEL` | 2 | accounts a batch scrub works on at once in the server that runs it (1–32) |
+| `scrub.interval_days` | `SCRUB_INTERVAL_DAYS` | 7 | a batch scrub with `skip_idle` scrubs an idle account again at the latest after this many days (1–365) |
+
+`scrub.parallel` and `scrub.interval_days` take effect in the servers
+that run the batch, not in the pod that submits it.
+
+### IMAP watches (`server.imap_max_watches`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `server.imap_max_watches` | `IMAP_MAX_WATCHES` | 8 | change watches one IMAP connection follows (1–1024): IDLE takes one, NOTIFY one, or two with a selected mailbox of another account; beyond it the connection polls |
+
+The sessions of a process share their watches: one RADOS watch per
+mailbox or account object however many sessions follow it (see
+[storage](architecture/storage.md#notifications-and-search) and the
+metric `imapceph_imap_watches`).
+
+### Admin clients with the scope of all accounts
+
+`admin.clients[].all_accounts: true` (YAML only) lets an mTLS client
+list the account directory and plan, apply and cancel batches over every
+account, each with its role; it excludes `admin.clients[].accounts`.
+Socket callers always have it. See
+[Admin API](admin-api.md#listeners-and-identity).
 
 ### Support tools (`admin.search_scan_limit`)
 

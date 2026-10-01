@@ -396,6 +396,40 @@ type ACLExplanation struct {
 // ACLExplanationLookup defines model for ACLExplanation.Lookup.
 type ACLExplanationLookup string
 
+// AccountListEntry defines model for AccountListEntry.
+type AccountListEntry struct {
+	Account string `json:"account"`
+
+	// Entry The account's entry in the account directory.
+	Entry DirectoryEntry `json:"entry"`
+}
+
+// AccountPage defines model for AccountPage.
+type AccountPage struct {
+	Items []AccountListEntry `json:"items"`
+
+	// Next Cursor of the next page; absent on the last.
+	Next *string `json:"next,omitempty"`
+}
+
+// AccountScrub The last batch scrub of the account.
+type AccountScrub struct {
+	// AccountSeq Account change counter it left the account at.
+	AccountSeq int64 `json:"account_seq"`
+
+	// At When it ended.
+	At time.Time `json:"at"`
+
+	// Complete Whether it looked at everything (no import, no error, no change during the run).
+	Complete bool `json:"complete"`
+
+	// Findings Number of findings (repaired or reported).
+	Findings int `json:"findings"`
+
+	// RegistryVersion Object version of the registry it left the account at.
+	RegistryVersion int64 `json:"registry_version"`
+}
+
 // AccountStatus defines model for AccountStatus.
 type AccountStatus struct {
 	Account          string  `json:"account"`
@@ -417,6 +451,21 @@ type AccountStatus struct {
 // AccountStatusLookup Outcome of the Nauthilus lookup of `account`; `public` is the
 // public namespace, which has no user database entry.
 type AccountStatusLookup string
+
+// BatchPlanRequest defines model for BatchPlanRequest.
+type BatchPlanRequest struct {
+	// Kind The kind to run on every account.
+	Kind string `json:"kind"`
+
+	// Params Parameters of the kind for every account; scrub: `classes`
+	// (empty = all). The other kinds take none.
+	Params *map[string]interface{} `json:"params,omitempty"`
+
+	// SkipIdle scrub only: skip the accounts whose last batch scrub was
+	// complete, found nothing and is younger than
+	// `scrub.interval_days`, and which did not change since.
+	SkipIdle *bool `json:"skip_idle,omitempty"`
+}
 
 // CopiedMessage defines model for CopiedMessage.
 type CopiedMessage struct {
@@ -468,6 +517,9 @@ type DirectoryEntry struct {
 
 	// Created When the account's registry was last created (for accounts a backfill entered, the registry's last change).
 	Created time.Time `json:"created"`
+
+	// Scrub The last batch scrub of the account.
+	Scrub *AccountScrub `json:"scrub,omitempty"`
 
 	// Session Lock session of the purge job (only while purging).
 	Session *string             `json:"session,omitempty"`
@@ -683,12 +735,15 @@ type ImportSieveScript struct {
 
 // Job defines model for Job.
 type Job struct {
-	Account   string                  `json:"account"`
-	Attempts  int                     `json:"attempts"`
-	Created   time.Time               `json:"created"`
-	Errors    []string                `json:"errors"`
-	Finished  *time.Time              `json:"finished,omitempty"`
-	Id        string                  `json:"id"`
+	// Account The account; empty for a batch.
+	Account  string     `json:"account"`
+	Attempts int        `json:"attempts"`
+	Created  time.Time  `json:"created"`
+	Errors   []string   `json:"errors"`
+	Finished *time.Time `json:"finished,omitempty"`
+	Id       string     `json:"id"`
+
+	// Kind The kind; `batch` for a job over all accounts.
 	Kind      string                  `json:"kind"`
 	PlanId    *string                 `json:"plan_id,omitempty"`
 	Principal string                  `json:"principal"`
@@ -883,14 +938,17 @@ type MessageSearch struct {
 
 // Plan defines model for Plan.
 type Plan struct {
-	Account    string                  `json:"account"`
-	AppliedJob *string                 `json:"applied_job,omitempty"`
-	Created    time.Time               `json:"created"`
-	Expires    time.Time               `json:"expires"`
-	Id         string                  `json:"id"`
-	Kind       string                  `json:"kind"`
-	Params     *map[string]interface{} `json:"params,omitempty"`
-	Principal  string                  `json:"principal"`
+	// Account The account; empty for a batch.
+	Account    string    `json:"account"`
+	AppliedJob *string   `json:"applied_job,omitempty"`
+	Created    time.Time `json:"created"`
+	Expires    time.Time `json:"expires"`
+	Id         string    `json:"id"`
+
+	// Kind The kind; `batch` for a plan over all accounts.
+	Kind      string                  `json:"kind"`
+	Params    *map[string]interface{} `json:"params,omitempty"`
+	Principal string                  `json:"principal"`
 
 	// Summary What the job would do (kind-specific).
 	Summary map[string]interface{} `json:"summary"`
@@ -1153,6 +1211,16 @@ type UID = int64
 // UIDValidity defines model for UIDValidity.
 type UIDValidity = int64
 
+// ListAccountsParams defines parameters for ListAccounts.
+type ListAccountsParams struct {
+	// Cursor Position `<shard>:<account>` from `next` of the previous page.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// State Only entries in this state (`active` or `purging`).
+	State *string `form:"state,omitempty" json:"state,omitempty"`
+}
+
 // CloseImportParams defines parameters for CloseImport.
 type CloseImportParams struct {
 	// XImportSession The session that holds the import lock.
@@ -1404,6 +1472,9 @@ type SubmitJobJSONRequestBody = JobRequest
 // RetryLearningJobJSONRequestBody defines body for RetryLearningJob for application/json ContentType.
 type RetryLearningJobJSONRequestBody = LearningRetry
 
+// CreateBatchPlanJSONRequestBody defines body for CreateBatchPlan for application/json ContentType.
+type CreateBatchPlanJSONRequestBody = BatchPlanRequest
+
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
 
@@ -1477,6 +1548,20 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+
+	// ListAccounts Accounts of the account directory, one page
+	//
+	// Reads the account directory (no listing of a pool): every account
+	// that has a registry, and the public namespace, with its directory
+	// entry. The order is the directory's (shard, then account), not
+	// alphabetical; continue with `cursor` = `next` until `next` is
+	// absent. With `state` a page may hold fewer than `limit` items
+	// while `next` is present (at most ten times `limit` entries are
+	// read per page). Requires the role `diagnose` and the scope of all
+	// accounts (socket callers; mutual-TLS clients with `all_accounts`).
+	//
+	// Corresponds with GET /admin/v1/accounts (the `ListAccounts` operationId).
+	ListAccounts(ctx context.Context, params *ListAccountsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetAccount Account overview
 	//
@@ -2214,7 +2299,11 @@ type ClientInterface interface {
 	// With `plan_id` the plan is applied (once, before it expires; the
 	// apply refuses when the account drifted from the plan). Without
 	// it, `kind` `index_check` (role `diagnose`) checks the `account`
-	// read-only. The job runs on any server and survives restarts.
+	// read-only. The job runs on any server and survives restarts. A
+	// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+	// `batch` without account; its result counts the accounts (`done`,
+	// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+	// that failed or had findings.
 	// `Idempotency-Key` returns the same job for a repeated request
 	// (200) and refuses the key for another request (409).
 	//
@@ -2228,7 +2317,11 @@ type ClientInterface interface {
 	// With `plan_id` the plan is applied (once, before it expires; the
 	// apply refuses when the account drifted from the plan). Without
 	// it, `kind` `index_check` (role `diagnose`) checks the `account`
-	// read-only. The job runs on any server and survives restarts.
+	// read-only. The job runs on any server and survives restarts. A
+	// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+	// `batch` without account; its result counts the accounts (`done`,
+	// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+	// that failed or had findings.
 	// `Idempotency-Key` returns the same job for a repeated request
 	// (200) and refuses the key for another request (409).
 	//
@@ -2247,7 +2340,9 @@ type ClientInterface interface {
 	// CancelJob Ask a job to stop
 	//
 	// A queued job is cancelled at once, a running one at its next safe
-	// point (no rollback of what it did). Requires the role of the kind.
+	// point (no rollback of what it did; a batch stops between two
+	// accounts). Requires the role of the kind (of a batch: of the kind
+	// it runs, and the scope of all accounts).
 	//
 	// Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
 	CancelJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2293,6 +2388,52 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
 	RetryLearningJob(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// CreateBatchPlanWithBody Plan a batch over all accounts (dry run)
+	//
+	// Plans a batch job: `kind` run on every account of the account
+	// directory, one account after another with a bounded parallelism
+	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// its kind and the scope of all accounts (socket callers; mutual-TLS
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// takes the maintenance lock per account; an account another job or
+	// an import holds is tried again at the end. `skip_idle` (scrub
+	// only) skips the accounts that did not change since their last
+	// complete batch scrub found nothing, for at most
+	// `scrub.interval_days`. The plan's account is empty and its kind
+	// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+	// `conflict` (409) while the account directory has no completed
+	// backfill (`shardpost index backfill accounts`).
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+	CreateBatchPlanWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateBatchPlan Plan a batch over all accounts (dry run)
+	//
+	// Plans a batch job: `kind` run on every account of the account
+	// directory, one account after another with a bounded parallelism
+	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// its kind and the scope of all accounts (socket callers; mutual-TLS
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// takes the maintenance lock per account; an account another job or
+	// an import holds is tried again at the end. `skip_idle` (scrub
+	// only) skips the accounts that did not change since their last
+	// complete batch scrub found nothing, for at most
+	// `scrub.interval_days`. The plan's account is empty and its kind
+	// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+	// `conflict` (409) while the account directory has no completed
+	// backfill (`shardpost index backfill accounts`).
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+	CreateBatchPlan(ctx context.Context, body CreateBatchPlanJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetPlan A plan
 	//
 	// Requires the role `diagnose`.
@@ -2315,6 +2456,30 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/version (the `GetVersion` operationId).
 	GetVersion(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+// ListAccounts Accounts of the account directory, one page
+//
+// Reads the account directory (no listing of a pool): every account
+// that has a registry, and the public namespace, with its directory
+// entry. The order is the directory's (shard, then account), not
+// alphabetical; continue with `cursor` = `next` until `next` is
+// absent. With `state` a page may hold fewer than `limit` items
+// while `next` is present (at most ten times `limit` entries are
+// read per page). Requires the role `diagnose` and the scope of all
+// accounts (socket callers; mutual-TLS clients with `all_accounts`).
+//
+// Corresponds with GET /admin/v1/accounts (the `ListAccounts` operationId).
+func (c *Client) ListAccounts(ctx context.Context, params *ListAccountsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAccountsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 // GetAccount Account overview
@@ -3693,7 +3858,11 @@ func (c *Client) ListJobs(ctx context.Context, params *ListJobsParams, reqEditor
 // With `plan_id` the plan is applied (once, before it expires; the
 // apply refuses when the account drifted from the plan). Without
 // it, `kind` `index_check` (role `diagnose`) checks the `account`
-// read-only. The job runs on any server and survives restarts.
+// read-only. The job runs on any server and survives restarts. A
+// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+// `batch` without account; its result counts the accounts (`done`,
+// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+// that failed or had findings.
 // `Idempotency-Key` returns the same job for a repeated request
 // (200) and refuses the key for another request (409).
 //
@@ -3717,7 +3886,11 @@ func (c *Client) SubmitJobWithBody(ctx context.Context, params *SubmitJobParams,
 // With `plan_id` the plan is applied (once, before it expires; the
 // apply refuses when the account drifted from the plan). Without
 // it, `kind` `index_check` (role `diagnose`) checks the `account`
-// read-only. The job runs on any server and survives restarts.
+// read-only. The job runs on any server and survives restarts. A
+// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+// `batch` without account; its result counts the accounts (`done`,
+// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+// that failed or had findings.
 // `Idempotency-Key` returns the same job for a repeated request
 // (200) and refuses the key for another request (409).
 //
@@ -3756,7 +3929,9 @@ func (c *Client) GetJob(ctx context.Context, job JobID, reqEditors ...RequestEdi
 // CancelJob Ask a job to stop
 //
 // A queued job is cancelled at once, a running one at its next safe
-// point (no rollback of what it did). Requires the role of the kind.
+// point (no rollback of what it did; a batch stops between two
+// accounts). Requires the role of the kind (of a batch: of the kind
+// it runs, and the scope of all accounts).
 //
 // Corresponds with POST /admin/v1/jobs/{job}/cancel (the `CancelJob` operationId).
 func (c *Client) CancelJob(ctx context.Context, job JobID, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -3852,6 +4027,72 @@ func (c *Client) RetryLearningJob(ctx context.Context, job JobID, body RetryLear
 	return c.Client.Do(req)
 }
 
+// CreateBatchPlanWithBody Plan a batch over all accounts (dry run)
+//
+// Plans a batch job: `kind` run on every account of the account
+// directory, one account after another with a bounded parallelism
+// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+// `attachment_backfill` (role `repair`); the batch needs the role of
+// its kind and the scope of all accounts (socket callers; mutual-TLS
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// takes the maintenance lock per account; an account another job or
+// an import holds is tried again at the end. `skip_idle` (scrub
+// only) skips the accounts that did not change since their last
+// complete batch scrub found nothing, for at most
+// `scrub.interval_days`. The plan's account is empty and its kind
+// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+// `conflict` (409) while the account directory has no completed
+// backfill (`shardpost index backfill accounts`).
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+func (c *Client) CreateBatchPlanWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateBatchPlanRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateBatchPlan Plan a batch over all accounts (dry run)
+//
+// Plans a batch job: `kind` run on every account of the account
+// directory, one account after another with a bounded parallelism
+// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+// `attachment_backfill` (role `repair`); the batch needs the role of
+// its kind and the scope of all accounts (socket callers; mutual-TLS
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// takes the maintenance lock per account; an account another job or
+// an import holds is tried again at the end. `skip_idle` (scrub
+// only) skips the accounts that did not change since their last
+// complete batch scrub found nothing, for at most
+// `scrub.interval_days`. The plan's account is empty and its kind
+// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+// `conflict` (409) while the account directory has no completed
+// backfill (`shardpost index backfill accounts`).
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+func (c *Client) CreateBatchPlan(ctx context.Context, body CreateBatchPlanJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateBatchPlanRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetPlan A plan
 //
 // Requires the role `diagnose`.
@@ -3903,6 +4144,84 @@ func (c *Client) GetVersion(ctx context.Context, reqEditors ...RequestEditorFn) 
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewListAccountsRequest constructs an http.Request for the ListAccounts method
+func NewListAccountsRequest(server string, params *ListAccountsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "state", *params.State, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewGetAccountRequest constructs an http.Request for the GetAccount method
@@ -6729,6 +7048,46 @@ func NewRetryLearningJobRequestWithBody(server string, job JobID, contentType st
 	return req, nil
 }
 
+// NewCreateBatchPlanRequest calls the generic CreateBatchPlan builder with application/json body
+func NewCreateBatchPlanRequest(server string, body CreateBatchPlanJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateBatchPlanRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewCreateBatchPlanRequestWithBody constructs an http.Request for the CreateBatchPlan method, with any body, and a specified content type
+func NewCreateBatchPlanRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/plans")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetPlanRequest constructs an http.Request for the GetPlan method
 func NewGetPlanRequest(server string, plan string) (*http.Request, error) {
 	var err error
@@ -6860,6 +7219,22 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+
+	// ListAccountsWithResponse Accounts of the account directory, one page
+	//
+	// Reads the account directory (no listing of a pool): every account
+	// that has a registry, and the public namespace, with its directory
+	// entry. The order is the directory's (shard, then account), not
+	// alphabetical; continue with `cursor` = `next` until `next` is
+	// absent. With `state` a page may hold fewer than `limit` items
+	// while `next` is present (at most ten times `limit` entries are
+	// read per page). Requires the role `diagnose` and the scope of all
+	// accounts (socket callers; mutual-TLS clients with `all_accounts`).
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts (the `ListAccounts` operationId).
+	ListAccountsWithResponse(ctx context.Context, params *ListAccountsParams, reqEditors ...RequestEditorFn) (*ListAccountsResponse, error)
 
 	// GetAccountWithResponse Account overview
 	//
@@ -7645,7 +8020,11 @@ type ClientWithResponsesInterface interface {
 	// With `plan_id` the plan is applied (once, before it expires; the
 	// apply refuses when the account drifted from the plan). Without
 	// it, `kind` `index_check` (role `diagnose`) checks the `account`
-	// read-only. The job runs on any server and survives restarts.
+	// read-only. The job runs on any server and survives restarts. A
+	// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+	// `batch` without account; its result counts the accounts (`done`,
+	// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+	// that failed or had findings.
 	// `Idempotency-Key` returns the same job for a repeated request
 	// (200) and refuses the key for another request (409).
 	//
@@ -7659,7 +8038,11 @@ type ClientWithResponsesInterface interface {
 	// With `plan_id` the plan is applied (once, before it expires; the
 	// apply refuses when the account drifted from the plan). Without
 	// it, `kind` `index_check` (role `diagnose`) checks the `account`
-	// read-only. The job runs on any server and survives restarts.
+	// read-only. The job runs on any server and survives restarts. A
+	// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+	// `batch` without account; its result counts the accounts (`done`,
+	// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+	// that failed or had findings.
 	// `Idempotency-Key` returns the same job for a repeated request
 	// (200) and refuses the key for another request (409).
 	//
@@ -7680,7 +8063,9 @@ type ClientWithResponsesInterface interface {
 	// CancelJobWithResponse Ask a job to stop
 	//
 	// A queued job is cancelled at once, a running one at its next safe
-	// point (no rollback of what it did). Requires the role of the kind.
+	// point (no rollback of what it did; a batch stops between two
+	// accounts). Requires the role of the kind (of a batch: of the kind
+	// it runs, and the scope of all accounts).
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -7732,6 +8117,52 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
 	RetryLearningJobWithResponse(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*RetryLearningJobResponse, error)
 
+	// CreateBatchPlanWithBodyWithResponse Plan a batch over all accounts (dry run)
+	//
+	// Plans a batch job: `kind` run on every account of the account
+	// directory, one account after another with a bounded parallelism
+	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// its kind and the scope of all accounts (socket callers; mutual-TLS
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// takes the maintenance lock per account; an account another job or
+	// an import holds is tried again at the end. `skip_idle` (scrub
+	// only) skips the accounts that did not change since their last
+	// complete batch scrub found nothing, for at most
+	// `scrub.interval_days`. The plan's account is empty and its kind
+	// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+	// `conflict` (409) while the account directory has no completed
+	// backfill (`shardpost index backfill accounts`).
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+	CreateBatchPlanWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateBatchPlanResponse, error)
+
+	// CreateBatchPlanWithResponse Plan a batch over all accounts (dry run)
+	//
+	// Plans a batch job: `kind` run on every account of the account
+	// directory, one account after another with a bounded parallelism
+	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// its kind and the scope of all accounts (socket callers; mutual-TLS
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// takes the maintenance lock per account; an account another job or
+	// an import holds is tried again at the end. `skip_idle` (scrub
+	// only) skips the accounts that did not change since their last
+	// complete batch scrub found nothing, for at most
+	// `scrub.interval_days`. The plan's account is empty and its kind
+	// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+	// `conflict` (409) while the account directory has no completed
+	// backfill (`shardpost index backfill accounts`).
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+	CreateBatchPlanWithResponse(ctx context.Context, body CreateBatchPlanJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateBatchPlanResponse, error)
+
 	// GetPlanWithResponse A plan
 	//
 	// Requires the role `diagnose`.
@@ -7760,6 +8191,54 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/version (the `GetVersion` operationId).
 	GetVersionWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetVersionResponse, error)
+}
+
+type ListAccountsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AccountPage
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListAccountsResponse) GetJSON200() *AccountPage {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListAccountsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListAccountsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAccountsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAccountsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListAccountsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type GetAccountResponse struct {
@@ -10210,6 +10689,54 @@ func (r RetryLearningJobResponse) ContentType() string {
 	return ""
 }
 
+type CreateBatchPlanResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *Plan
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r CreateBatchPlanResponse) GetJSON201() *Plan {
+	return r.JSON201
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CreateBatchPlanResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CreateBatchPlanResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateBatchPlanResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateBatchPlanResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CreateBatchPlanResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetPlanResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -10352,6 +10879,28 @@ func (r GetVersionResponse) ContentType() string {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
+}
+
+// ListAccountsWithResponse Accounts of the account directory, one page
+//
+// Reads the account directory (no listing of a pool): every account
+// that has a registry, and the public namespace, with its directory
+// entry. The order is the directory's (shard, then account), not
+// alphabetical; continue with `cursor` = `next` until `next` is
+// absent. With `state` a page may hold fewer than `limit` items
+// while `next` is present (at most ten times `limit` entries are
+// read per page). Requires the role `diagnose` and the scope of all
+// accounts (socket callers; mutual-TLS clients with `all_accounts`).
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts (the `ListAccounts` operationId).
+func (c *ClientWithResponses) ListAccountsWithResponse(ctx context.Context, params *ListAccountsParams, reqEditors ...RequestEditorFn) (*ListAccountsResponse, error) {
+	rsp, err := c.ListAccounts(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAccountsResponse(rsp)
 }
 
 // GetAccountWithResponse Account overview
@@ -11522,7 +12071,11 @@ func (c *ClientWithResponses) ListJobsWithResponse(ctx context.Context, params *
 // With `plan_id` the plan is applied (once, before it expires; the
 // apply refuses when the account drifted from the plan). Without
 // it, `kind` `index_check` (role `diagnose`) checks the `account`
-// read-only. The job runs on any server and survives restarts.
+// read-only. The job runs on any server and survives restarts. A
+// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+// `batch` without account; its result counts the accounts (`done`,
+// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+// that failed or had findings.
 // `Idempotency-Key` returns the same job for a repeated request
 // (200) and refuses the key for another request (409).
 //
@@ -11542,7 +12095,11 @@ func (c *ClientWithResponses) SubmitJobWithBodyWithResponse(ctx context.Context,
 // With `plan_id` the plan is applied (once, before it expires; the
 // apply refuses when the account drifted from the plan). Without
 // it, `kind` `index_check` (role `diagnose`) checks the `account`
-// read-only. The job runs on any server and survives restarts.
+// read-only. The job runs on any server and survives restarts. A
+// batch plan (`POST /admin/v1/plans`) becomes a job of the kind
+// `batch` without account; its result counts the accounts (`done`,
+// `skipped`, `gone`, `failed`, `findings`) and names the first 50
+// that failed or had findings.
 // `Idempotency-Key` returns the same job for a repeated request
 // (200) and refuses the key for another request (409).
 //
@@ -11575,7 +12132,9 @@ func (c *ClientWithResponses) GetJobWithResponse(ctx context.Context, job JobID,
 // CancelJobWithResponse Ask a job to stop
 //
 // A queued job is cancelled at once, a running one at its next safe
-// point (no rollback of what it did). Requires the role of the kind.
+// point (no rollback of what it did; a batch stops between two
+// accounts). Requires the role of the kind (of a batch: of the kind
+// it runs, and the scope of all accounts).
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -11657,6 +12216,64 @@ func (c *ClientWithResponses) RetryLearningJobWithResponse(ctx context.Context, 
 	return ParseRetryLearningJobResponse(rsp)
 }
 
+// CreateBatchPlanWithBodyWithResponse Plan a batch over all accounts (dry run)
+//
+// Plans a batch job: `kind` run on every account of the account
+// directory, one account after another with a bounded parallelism
+// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+// `attachment_backfill` (role `repair`); the batch needs the role of
+// its kind and the scope of all accounts (socket callers; mutual-TLS
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// takes the maintenance lock per account; an account another job or
+// an import holds is tried again at the end. `skip_idle` (scrub
+// only) skips the accounts that did not change since their last
+// complete batch scrub found nothing, for at most
+// `scrub.interval_days`. The plan's account is empty and its kind
+// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+// `conflict` (409) while the account directory has no completed
+// backfill (`shardpost index backfill accounts`).
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+func (c *ClientWithResponses) CreateBatchPlanWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateBatchPlanResponse, error) {
+	rsp, err := c.CreateBatchPlanWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateBatchPlanResponse(rsp)
+}
+
+// CreateBatchPlanWithResponse Plan a batch over all accounts (dry run)
+//
+// Plans a batch job: `kind` run on every account of the account
+// directory, one account after another with a bounded parallelism
+// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
+// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
+// `attachment_backfill` (role `repair`); the batch needs the role of
+// its kind and the scope of all accounts (socket callers; mutual-TLS
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// takes the maintenance lock per account; an account another job or
+// an import holds is tried again at the end. `skip_idle` (scrub
+// only) skips the accounts that did not change since their last
+// complete batch scrub found nothing, for at most
+// `scrub.interval_days`. The plan's account is empty and its kind
+// `batch`; apply it with `POST /admin/v1/jobs`. Refused with
+// `conflict` (409) while the account directory has no completed
+// backfill (`shardpost index backfill accounts`).
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/plans (the `CreateBatchPlan` operationId).
+func (c *ClientWithResponses) CreateBatchPlanWithResponse(ctx context.Context, body CreateBatchPlanJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateBatchPlanResponse, error) {
+	rsp, err := c.CreateBatchPlan(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateBatchPlanResponse(rsp)
+}
+
 // GetPlanWithResponse A plan
 //
 // Requires the role `diagnose`.
@@ -11702,6 +12319,39 @@ func (c *ClientWithResponses) GetVersionWithResponse(ctx context.Context, reqEdi
 		return nil, err
 	}
 	return ParseGetVersionResponse(rsp)
+}
+
+// ParseListAccountsResponse parses an HTTP response from a ListAccountsWithResponse call
+func ParseListAccountsResponse(rsp *http.Response) (*ListAccountsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAccountsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AccountPage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseGetAccountResponse parses an HTTP response from a GetAccountWithResponse call
@@ -13447,6 +14097,39 @@ func ParseRetryLearningJobResponse(rsp *http.Response) (*RetryLearningJobRespons
 	return response, nil
 }
 
+// ParseCreateBatchPlanResponse parses an HTTP response from a CreateBatchPlanWithResponse call
+func ParseCreateBatchPlanResponse(rsp *http.Response) (*CreateBatchPlanResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateBatchPlanResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest Plan
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetPlanResponse parses an HTTP response from a GetPlanWithResponse call
 func ParseGetPlanResponse(rsp *http.Response) (*GetPlanResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -13548,6 +14231,9 @@ func ParseGetVersionResponse(rsp *http.Response) (*GetVersionResponse, error) {
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ListAccounts Accounts of the account directory, one page
+	// (GET /admin/v1/accounts)
+	ListAccounts(w http.ResponseWriter, r *http.Request, params ListAccountsParams)
 	// GetAccount Account overview
 	// (GET /admin/v1/accounts/{account})
 	GetAccount(w http.ResponseWriter, r *http.Request, account Account)
@@ -13701,6 +14387,9 @@ type ServerInterface interface {
 	// RetryLearningJob Retry a dead learning job
 	// (POST /admin/v1/learning/{job}/retry)
 	RetryLearningJob(w http.ResponseWriter, r *http.Request, job JobID)
+	// CreateBatchPlan Plan a batch over all accounts (dry run)
+	// (POST /admin/v1/plans)
+	CreateBatchPlan(w http.ResponseWriter, r *http.Request)
 	// GetPlan A plan
 	// (GET /admin/v1/plans/{plan})
 	GetPlan(w http.ResponseWriter, r *http.Request, plan string)
@@ -13720,6 +14409,65 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListAccounts operation middleware
+func (siw *ServerInterfaceWrapper) ListAccounts(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListAccountsParams
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListAccounts(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetAccount operation middleware
 func (siw *ServerInterfaceWrapper) GetAccount(w http.ResponseWriter, r *http.Request) {
@@ -16076,6 +16824,20 @@ func (siw *ServerInterfaceWrapper) RetryLearningJob(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// CreateBatchPlan operation middleware
+func (siw *ServerInterfaceWrapper) CreateBatchPlan(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateBatchPlan(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetPlan operation middleware
 func (siw *ServerInterfaceWrapper) GetPlan(w http.ResponseWriter, r *http.Request) {
 
@@ -16252,6 +17014,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/version", wrapper.GetVersion)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/server", wrapper.GetServerStatus)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts", wrapper.ListAccounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}", wrapper.GetAccount)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes", wrapper.ListMailboxes)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes", wrapper.CreateMailbox)
@@ -16266,6 +17029,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/directory", wrapper.GetAccountDirectory)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/directory/repair", wrapper.RepairAccountDirectory)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/plans", wrapper.CreatePlan)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/plans", wrapper.CreateBatchPlan)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/plans/{plan}", wrapper.GetPlan)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/jobs", wrapper.ListJobs)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/jobs", wrapper.SubmitJob)

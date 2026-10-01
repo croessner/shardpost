@@ -107,19 +107,23 @@ type Server struct {
 	// PublicQuotaBytes and PublicQuotaMsgs bound the public namespace as
 	// a whole (0 = unlimited). Public folders do not count against the
 	// quota of the account that files into them.
-	PublicQuotaBytes  int64  `mapstructure:"public_quota_bytes" env:"PUBLIC_QUOTA_BYTES" validate:"gte=0"`
-	PublicQuotaMsgs   int64  `mapstructure:"public_quota_msgs" env:"PUBLIC_QUOTA_MSGS" validate:"gte=0"`
-	KeyPollSeconds    int64  `mapstructure:"key_poll_seconds" env:"KEY_POLL_SECONDS" validate:"gte=0,lte=86400"`
-	MemoryBudgetBytes int64  `mapstructure:"memory_budget_bytes" env:"MEMORY_BUDGET_BYTES" validate:"gte=0"`
-	InsecureAuth      bool   `mapstructure:"insecure_auth" env:"INSECURE_AUTH"`
-	MaxConnsPerIP     int64  `mapstructure:"max_conns_per_ip" env:"MAX_CONNS_PER_IP" validate:"gte=0"`
-	MaxConnsPerUser   int64  `mapstructure:"max_conns_per_user" env:"MAX_CONNS_PER_USER" validate:"gte=0"`
-	QuotaSelfService  bool   `mapstructure:"quota_self_service" env:"QUOTA_SELF_SERVICE"`
-	QuotaAttribute    string `mapstructure:"quota_attribute" env:"QUOTA_ATTRIBUTE"`
-	LmtpAddr          string `mapstructure:"lmtp_addr" env:"LMTP_ADDR"`
-	LmtpHostname      string `mapstructure:"lmtp_hostname" env:"LMTP_HOSTNAME"`
-	LmtpAuthUser      string `mapstructure:"lmtp_auth_user" env:"LMTP_AUTH_USER"`
-	LmtpAuthPassword  string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD" secret:"true"`
+	PublicQuotaBytes  int64 `mapstructure:"public_quota_bytes" env:"PUBLIC_QUOTA_BYTES" validate:"gte=0"`
+	PublicQuotaMsgs   int64 `mapstructure:"public_quota_msgs" env:"PUBLIC_QUOTA_MSGS" validate:"gte=0"`
+	KeyPollSeconds    int64 `mapstructure:"key_poll_seconds" env:"KEY_POLL_SECONDS" validate:"gte=0,lte=86400"`
+	MemoryBudgetBytes int64 `mapstructure:"memory_budget_bytes" env:"MEMORY_BUDGET_BYTES" validate:"gte=0"`
+	InsecureAuth      bool  `mapstructure:"insecure_auth" env:"INSECURE_AUTH"`
+	MaxConnsPerIP     int64 `mapstructure:"max_conns_per_ip" env:"MAX_CONNS_PER_IP" validate:"gte=0"`
+	MaxConnsPerUser   int64 `mapstructure:"max_conns_per_user" env:"MAX_CONNS_PER_USER" validate:"gte=0"`
+	// ImapMaxWatches bounds the change watches one IMAP connection
+	// follows through the process-wide watch hub (IDLE one, NOTIFY one or
+	// two); beyond it the connection polls.
+	ImapMaxWatches   int64  `mapstructure:"imap_max_watches" env:"IMAP_MAX_WATCHES" validate:"gte=1,lte=1024"`
+	QuotaSelfService bool   `mapstructure:"quota_self_service" env:"QUOTA_SELF_SERVICE"`
+	QuotaAttribute   string `mapstructure:"quota_attribute" env:"QUOTA_ATTRIBUTE"`
+	LmtpAddr         string `mapstructure:"lmtp_addr" env:"LMTP_ADDR"`
+	LmtpHostname     string `mapstructure:"lmtp_hostname" env:"LMTP_HOSTNAME"`
+	LmtpAuthUser     string `mapstructure:"lmtp_auth_user" env:"LMTP_AUTH_USER"`
+	LmtpAuthPassword string `mapstructure:"lmtp_auth_password" env:"LMTP_AUTH_PASSWORD" secret:"true"`
 	// LmtpReturnPath adds "Return-Path: <envelope sender>" to every
 	// delivered copy (LMTP and local delivery) and removes the
 	// Return-Path fields the message brought along.
@@ -181,11 +185,19 @@ type SMTP struct {
 	PasswordFile string `mapstructure:"password_file" env:"SMTP_RELAY_PASSWORD_FILE"`
 }
 
-// Scrub configures the "shardpost scrub" repair run.
+// Scrub configures the scrub: the "shardpost scrub" run and the batch
+// scrub job over all accounts ("shardpost scrub --batch" submits it).
 type Scrub struct {
 	Users        string `mapstructure:"users" env:"SCRUB_USERS"`
 	GraceSeconds int64  `mapstructure:"grace_seconds" env:"SCRUB_GRACE_SECONDS" validate:"gte=0,lte=86400"`
 	DryRun       bool   `mapstructure:"dry_run" env:"SCRUB_DRY_RUN"`
+	// Parallel is how many accounts a batch scrub works on at once in the
+	// server that runs it.
+	Parallel int `mapstructure:"parallel" env:"SCRUB_PARALLEL" validate:"gte=1,lte=32"`
+	// IntervalDays bounds how long a batch scrub with skip_idle leaves an
+	// idle account alone: an account whose last complete scrub is older
+	// is scrubbed again in any case.
+	IntervalDays int `mapstructure:"interval_days" env:"SCRUB_INTERVAL_DAYS" validate:"gte=1,lte=365"`
 }
 
 // Nauthilus configures the Nauthilus authentication backend.
@@ -311,6 +323,7 @@ var defaults = []struct {
 	{"jobs.max_parallel", 2},
 	{"jobs.settle_seconds", 10},
 	{"jobs.expiry_seconds", 60},
+	{"jobs.batch_parallel", 2},
 	{"trace.max_line_bytes", 2048},
 	{"trace.max_duration_seconds", 86400},
 	{"trace.default_duration_seconds", 1800},
@@ -420,6 +433,7 @@ var defaults = []struct {
 	{"server.insecure_auth", false},
 	{"server.max_conns_per_ip", 0},
 	{"server.max_conns_per_user", 0},
+	{"server.imap_max_watches", 8},
 	{"server.quota_self_service", false},
 	{"sieve.settings", ""},
 	{"sieve.global_dir", ""},
@@ -447,6 +461,8 @@ var defaults = []struct {
 	{"scrub.users", ""},
 	{"scrub.grace_seconds", 3600},
 	{"scrub.dry_run", false},
+	{"scrub.parallel", 2},
+	{"scrub.interval_days", 7},
 	{"server.auth_backend", "static"},
 	{"server.users", "test:test"},
 	{"nauthilus.url", ""},

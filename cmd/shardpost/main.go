@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"shardpost/internal/config"
 	"shardpost/internal/logging"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -103,8 +102,11 @@ func main() {
 const (
 	commandServe = "serve"
 	commandScrub = "scrub"
-	commandCheck = "check"
-	commandPush  = "push"
+	// commandScrubBatch submits the scrub of every account as a batch
+	// job the servers run ("shardpost scrub --batch").
+	commandScrubBatch = "scrub --batch"
+	commandCheck      = "check"
+	commandPush       = "push"
 	// commandBackfillAccounts fills the account directory and repairs it
 	// ("shardpost index backfill accounts [--restart]").
 	commandBackfillAccounts = "index backfill accounts"
@@ -178,9 +180,13 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		rotate(store)
 	}
 
-	// "shardpost scrub" runs the scrubber over all users and exits.
-	if command == commandScrub {
+	// "shardpost scrub" runs the scrubber over all users and exits;
+	// "shardpost scrub --batch" submits the batch scrub job instead.
+	switch command {
+	case commandScrub:
 		return scrub(store, log, settings)
+	case commandScrubBatch:
+		return scrubBatch(store, log, settings)
 	}
 
 	if backfill, ok := backfillCommand(command); ok {
@@ -523,6 +529,8 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 		MaxLiteral:       cephstore.MaxMessageLen,
 		MaxConnsPerIP:    int(settings.Server.MaxConnsPerIP),
 		MaxConnsPerUser:  int(settings.Server.MaxConnsPerUser),
+		WatchStore:       importStore{store},
+		MaxWatches:       int(settings.Server.ImapMaxWatches),
 		QuotaSelfService: settings.Server.QuotaSelfService,
 		WordSearch:       settings.FTS.IMAPWordSearch(),
 		VerifyParallel:   settings.FTS.VerifyParallel,
@@ -688,55 +696,4 @@ func (srv *servers) closeJMAP() {
 	if srv.jmapFront != nil {
 		srv.jmapFront.Close()
 	}
-}
-
-// scrub walks all users (or SCRUB_USERS) and repairs what a crash may
-// have left behind. SCRUB_DRY_RUN=true only reports.
-func scrub(store *cephstore.Store, log *slog.Logger, settings *config.Config) error {
-	users := strings.Split(settings.Scrub.Users, ",")
-	if strings.TrimSpace(users[0]) == "" {
-		var err error
-		if users, err = store.ListUsers(); err != nil {
-			return fmt.Errorf("list users: %w", err)
-		}
-	}
-
-	opts := cephstore.ScrubOptions{
-		Grace:  time.Duration(settings.Scrub.GraceSeconds) * time.Second,
-		DryRun: settings.Scrub.DryRun,
-		Log:    log,
-	}
-	failed := 0
-
-	for _, name := range users {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-
-		u, err := store.User(name)
-		if err != nil {
-			log.Error("scrub: open user", "user", name, "err", err)
-
-			failed++
-
-			continue
-		}
-
-		if _, err := u.Scrub(opts); err != nil {
-			log.Error("scrub failed", "user", name, "err", err)
-
-			failed++
-		}
-
-		u.Close()
-	}
-
-	log.Info("scrub finished", "users", len(users), "failed", failed, "dryRun", opts.DryRun)
-
-	if failed > 0 {
-		return fmt.Errorf("%d users failed", failed)
-	}
-
-	return nil
 }

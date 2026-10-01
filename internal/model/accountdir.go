@@ -53,10 +53,11 @@ type AccountEntry struct {
 	Session string `json:"session,omitempty"`
 	// Cluster is the Ceph cluster (fsid) that holds the account.
 	Cluster string `json:"cluster"`
-	// Shard and Scrub are reserved for later stages (placement, scrub
-	// state); empty for now. A registration rewrites the whole entry
-	// (Cluster of the creating store, Shard and Scrub empty): it only
-	// happens while the registry is missing, so the account is new.
+	// Shard is reserved for a later stage (placement); empty for now.
+	// Scrub is the record of the last batch scrub (AccountScrub, see
+	// scrubstate.go). A registration rewrites the whole entry (Cluster
+	// of the creating store, Shard and Scrub empty): it only happens
+	// while the registry is missing, so the account is new.
 	Shard string          `json:"shard"`
 	Scrub json.RawMessage `json:"scrub,omitempty"`
 }
