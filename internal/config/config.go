@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"shardpost/internal/charset"
 )
 
 // Config is the complete server configuration, read from YAML and the
@@ -41,6 +43,8 @@ type Config struct {
 	Jobs Jobs `mapstructure:"jobs"`
 	// JMAP configures the JMAP front-end (off without an address).
 	JMAP JMAP `mapstructure:"jmap"`
+	// FTS configures the text preparation of the full-text index.
+	FTS FTS `mapstructure:"fts"`
 }
 
 // Logging configures the log output.
@@ -292,6 +296,8 @@ var defaults = []struct {
 	{"trace.max_duration_seconds", 86400},
 	{"trace.default_duration_seconds", 1800},
 	{"trace.recheck_seconds", 60},
+	{"fts.fallback_charset", charset.DefaultFallback},
+	{"fts.html", "text"},
 	{"quota.over_flag.enabled", false},
 	{"quota.over_flag.attribute", ""},
 	{"quota.over_flag.over_value", "TRUE"},
@@ -546,6 +552,10 @@ func (c *Config) checkServer() error {
 	}
 
 	if err := c.JMAP.Validate(c.TLS); err != nil {
+		return err
+	}
+
+	if err := c.FTS.Validate(); err != nil {
 		return err
 	}
 

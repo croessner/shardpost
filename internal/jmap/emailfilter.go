@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 
+	"shardpost/internal/charset"
 	"shardpost/internal/fts"
 	"shardpost/internal/model"
 )
@@ -441,7 +442,8 @@ func (q *emailQuery) headerHas(m *model.Meta, name, value string) bool {
 	}
 
 	for _, v := range h.Values(name) {
-		if value == "" || strings.Contains(strings.ToLower(textForm(v)), value) {
+		// decoded as the index decodes it, raw 8-bit text included
+		if value == "" || strings.Contains(strings.ToLower(strings.TrimSpace(charset.DecodeHeader(unfold(v)))), value) {
 			return true
 		}
 	}

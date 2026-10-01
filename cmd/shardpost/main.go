@@ -24,8 +24,10 @@ import (
 	"shardpost/internal/auth"
 	"shardpost/internal/cephstore"
 	"shardpost/internal/certfile"
+	"shardpost/internal/charset"
 	"shardpost/internal/delivery"
 	"shardpost/internal/extprograms"
+	"shardpost/internal/fts"
 	"shardpost/internal/imapproto"
 	"shardpost/internal/imapsieve"
 	"shardpost/internal/lmtpd"
@@ -135,6 +137,16 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	}
 
 	membudget.SetLimit(settings.Server.MemoryBudgetBytes)
+
+	// Load validated both; they are package settings because the index,
+	// IMAP SEARCH and the preview share one text preparation.
+	if err := charset.SetFallback(settings.FTS.FallbackCharset); err != nil {
+		return err
+	}
+
+	if err := fts.SetHTMLMode(settings.FTS.HTML); err != nil {
+		return err
+	}
 
 	store, err := cephstore.Open(cfg, log)
 	if err != nil {

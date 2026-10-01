@@ -233,6 +233,22 @@ lists and deleted the old objects; `fts_rebuild` does the same from the
 messages. A server older than 0.35.0 does not read `ftst/`: after a
 downgrade, substring search needs an `fts_rebuild`.
 
+What is indexed is UTF-8 text. Header values are decoded from RFC 2047
+encoded words in any charset of the WHATWG list; every `text/*` body
+part is converted from its charset parameter (a `text/html` part
+without one by its `<meta charset>`), and text without a usable label
+that is not valid UTF-8 — unlabelled or US-ASCII-labelled 8-bit text,
+raw 8-bit header values — is read in `fts.fallback_charset`
+(Windows-1252 by default). A `text/html` part is reduced to its
+visible text (`fts.html`, see [configuration](../configuration.md#full-text-index-fts)).
+The body text stays bounded to 4 MiB per message. One function
+([body.go](../../internal/fts/body.go)) prepares the body text for the
+index, for IMAP `SEARCH` keys matched against the message and for the
+cached preview, so they agree. A message is indexed once, when it is
+stored: messages indexed by a version without this conversion, or
+before a change of either key, are found by their new text only after
+an `fts_rebuild`.
+
 Not every SEARCH combination can be answered completely from this
 index. The protocol layer can read message data on demand; the
 historical claim "no mail is read for a search" is too sweeping.

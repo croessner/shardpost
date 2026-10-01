@@ -8,14 +8,13 @@ package fts
 import (
 	"bufio"
 	"bytes"
-	"io"
 	"sort"
 	"strings"
 	"unicode"
 
-	"github.com/emersion/go-message"
-	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
+
+	"shardpost/internal/charset"
 )
 
 // Fields of the index. A term is stored as "<field>:<token>".
@@ -96,7 +95,10 @@ func Tokenize(text string) []string {
 }
 
 // Terms extracts all index terms of a raw message: every token and its
-// stems, qualified by field.
+// stems, qualified by field. Header values are decoded to UTF-8 by
+// charset.DecodeHeader (encoded words in any charset of the WHATWG
+// list, raw 8-bit text in the fallback charset); the body text is what
+// BodyText returns.
 func Terms(raw []byte) []Term {
 	set := map[Term]struct{}{}
 	add := func(field, text string) {
@@ -109,26 +111,18 @@ func Terms(raw []byte) []Term {
 
 	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
 	if err == nil {
-		mh := mail.Header{Header: message.Header{Header: hdr}}
 		for _, kv := range []struct{ key, field string }{
 			{"Subject", FieldSubject}, {"From", FieldFrom}, {"Sender", FieldFrom}, {"Reply-To", FieldFrom},
 			{"To", FieldTo}, {"Cc", FieldTo}, {"Bcc", FieldTo},
 		} {
-			if v, err := mh.Text(kv.key); err == nil && v != "" {
-				add(kv.field, v)
-			} else if v := hdr.Get(kv.key); v != "" {
-				add(kv.field, v)
+			if v := hdr.Get(kv.key); v != "" {
+				add(kv.field, charset.DecodeHeader(v))
 			}
 		}
 
-		fields := mh.Fields()
+		fields := hdr.Fields()
 		for fields.Next() {
-			v, err := fields.Text()
-			if err != nil {
-				v = fields.Value()
-			}
-
-			add(FieldHeader, v)
+			add(FieldHeader, charset.DecodeHeader(fields.Value()))
 		}
 	}
 
@@ -142,47 +136,4 @@ func Terms(raw []byte) []Term {
 	sort.Strings(out)
 
 	return out
-}
-
-// BodyText returns the concatenated, decoded text/* parts of a message
-// (bounded by MaxBodyBytes). Non-text parts are skipped. If the message
-// cannot be parsed, the raw body after the header is used.
-func BodyText(raw []byte) string {
-	var buf bytes.Buffer
-
-	ent, err := message.Read(bytes.NewReader(raw))
-	if err != nil && ent == nil {
-		if i := bytes.Index(raw, []byte("\r\n\r\n")); i >= 0 {
-			return string(raw[i+4:])
-		}
-
-		return string(raw)
-	}
-
-	walk(ent, &buf)
-
-	return buf.String()
-}
-
-func walk(e *message.Entity, buf *bytes.Buffer) {
-	if buf.Len() >= MaxBodyBytes {
-		return
-	}
-
-	if mr := e.MultipartReader(); mr != nil {
-		for {
-			p, err := mr.NextPart()
-			if err != nil {
-				return
-			}
-
-			walk(p, buf)
-		}
-	}
-
-	ct, _, _ := e.Header.ContentType()
-	if ct == "" || strings.HasPrefix(ct, "text/") {
-		_, _ = io.Copy(buf, io.LimitReader(e.Body, int64(MaxBodyBytes-buf.Len())))
-		buf.WriteByte(' ')
-	}
 }

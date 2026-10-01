@@ -13,7 +13,7 @@ is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
 explicit `--config` takes precedence over both variables. An explicitly
 empty `SHARDPOST_CONFIG` disables the old fallback. Precedence: built-in defaults, explicit YAML file, explicitly set legacy env variables. There is no implicit file lookup and no automatic reload. Changes in Kubernetes are applied through a controlled deployment rollout. Go runtime settings such as `GOMEMLIMIT` remain environment variables; additional standardized OTEL SDK options are still evaluated by the SDK.
 
-The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin` and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
+The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin`, `fts` and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go`, `internal/config/fts.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
 
 ```yaml
 server:
@@ -334,3 +334,35 @@ YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#mai
 | `admin.search_scan_limit` | 50000 | a search request examines at most this many messages (role `content`); a longer search resumes with its cursor |
 
 YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
+
+### Full-text index (`fts`)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `fts.fallback_charset` | `windows-1252` | charset of text that is not valid UTF-8 and has no charset label, is labelled US-ASCII or names a charset that is not known (body parts and raw 8-bit header values); any ASCII-compatible charset of the WHATWG list, e.g. `iso-8859-15`, `iso-8859-2`, `koi8-r`; UTF-8, UTF-16 and `replacement` are refused |
+| `fts.html` | `text` | what is indexed of a `text/html` part: `text` its visible text (tags, comments, `script`, `style`, `template` and `title` dropped, character references decoded, a line break at every block element), `raw` the markup as it is (what earlier versions indexed), `skip` nothing |
+
+YAML only. Before it is indexed, every `text/*` body part is converted
+from its charset to UTF-8 (a `text/html` part without a charset
+parameter by its `<meta charset>`), and header values are decoded from
+RFC 2047 encoded words in any charset of the WHATWG list. The same text
+answers IMAP `SEARCH` keys that are matched against the message
+directly and the JMAP `header` filter, and it is what the cached
+preview is cut from, so all of them find the same words.
+
+The index keeps what a message was indexed with. A changed key, and
+the conversion itself for messages indexed by versions without it
+(body text in its raw charset, HTML with its markup, encoded words
+outside UTF-8 and ISO-8859-1 not decoded), reach the messages stored
+before only when the job `fts_rebuild` has indexed them again; until
+then the index and the direct matching, which always uses the current
+settings, can disagree on them. See
+[Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c):
+
+```sh
+shardpostctl plan fts_rebuild user@example.org
+shardpostctl apply -wait <plan-id>
+```
+
+The cached preview of an existing message is not recomputed by the
+rebuild.

@@ -1,6 +1,8 @@
 package imapproto
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"strconv"
@@ -8,9 +10,11 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-message/textproto"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/htmlindex"
 
+	"shardpost/internal/charset"
 	"shardpost/internal/fts"
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/membudget"
@@ -973,14 +977,15 @@ func (c *conn) textMatchErr(m *model.Meta, crits []textCrit) (bool, error) {
 		return false, err
 	}
 
-	tm := &textMessage{m: m, raw: raw, lower: strings.ToLower(string(raw))}
+	tm := &textMessage{m: m, raw: raw}
 
-	hdrEnd := strings.Index(tm.lower, "\r\n\r\n")
+	hdrEnd := bytes.Index(raw, []byte("\r\n\r\n"))
 	if hdrEnd < 0 {
-		hdrEnd = len(tm.lower)
+		hdrEnd = len(raw)
 	}
 	// unfold: continuation lines belong to the preceding field
-	tm.hdr = strings.ReplaceAll(strings.ReplaceAll(tm.lower[:hdrEnd], "\r\n ", " "), "\r\n\t", " ")
+	tm.hdr = strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(string(raw[:hdrEnd])), "\r\n ", " "), "\r\n\t", " ") +
+		decodedHeader(raw)
 
 	for _, t := range crits {
 		if !tm.matches(t) {
@@ -991,13 +996,52 @@ func (c *conn) textMatchErr(m *model.Meta, crits []textCrit) (bool, error) {
 	return true, nil
 }
 
+// decodedHeader returns the header fields of a raw message once more as
+// lower-cased "name: value" lines, each value decoded to UTF-8 the way
+// the full-text index decodes it (encoded words, raw 8-bit text in the
+// fallback charset), each line preceded by CRLF. Matching against these
+// lines as well as the raw ones lets a search find a decoded word that
+// the index finds, and still what the header literally says.
+func decodedHeader(raw []byte) string {
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	fields := hdr.Fields()
+	for fields.Next() {
+		v := unbreak.Replace(charset.DecodeHeader(fields.Value()))
+
+		b.WriteString("\r\n")
+		b.WriteString(strings.ToLower(fields.Key()))
+		b.WriteString(": ")
+		b.WriteString(strings.ToLower(v))
+	}
+
+	return b.String()
+}
+
+// unbreak turns the line breaks of a folded header value into spaces.
+var unbreak = strings.NewReplacer("\r", " ", "\n", " ")
+
 // textMessage is a message prepared for brute-force text matching.
 type textMessage struct {
-	m     *model.Meta
-	raw   []byte
-	lower string // the whole message, lower-cased
-	hdr   string // the lower-cased, unfolded header
-	body  string // lower-cased body text, computed on first use
+	m    *model.Meta
+	raw  []byte
+	hdr  string // the lower-cased, unfolded header, then its decoded lines
+	body string // lower-cased body text, computed on first use
+	read bool   // body is set
+}
+
+// bodyText returns the lower-cased body text as the index sees it.
+func (tm *textMessage) bodyText() string {
+	if !tm.read {
+		tm.body, tm.read = strings.ToLower(fts.BodyText(tm.raw)), true
+	}
+
+	return tm.body
 }
 
 // matches checks one text criterion (RFC 3501 substring matching).
@@ -1017,14 +1061,10 @@ func (tm *textMessage) matches(t textCrit) bool {
 		}
 
 		return found || envAddrContains(tm.m, strings.ToLower(t.key), v)
-	case len(t.fields) == 2: // TEXT
-		return strings.Contains(tm.lower, v)
+	case len(t.fields) == 2: // TEXT: the header and the body text
+		return strings.Contains(tm.hdr, v) || strings.Contains(tm.bodyText(), v)
 	case t.fields[0] == fts.FieldBody:
-		if tm.body == "" {
-			tm.body = strings.ToLower(fts.BodyText(tm.raw))
-		}
-
-		return strings.Contains(tm.body, v)
+		return strings.Contains(tm.bodyText(), v)
 	}
 
 	return headerFieldContains(tm.hdr, t.fields[0], v) || envAddrContains(tm.m, t.fields[0], v)
