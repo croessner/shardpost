@@ -52,7 +52,7 @@ func (c *ClientCredentials) client() *http.Client {
 		return c.HTTP
 	}
 
-	return &http.Client{Timeout: 10 * time.Second}
+	return sharedClient()
 }
 
 // Token implements TokenSource.

@@ -164,7 +164,7 @@ func (s *Server) canonical(w http.ResponseWriter, r *http.Request, account strin
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), lookupTimeout)
 	defer cancel()
 
-	res, err := s.o.Auth.Lookup(ctx, account, "lmtp", clientAddr(r))
+	res, err := s.o.Auth.Lookup(auth.AdminLookup(ctx), account, "lmtp", clientAddr(r))
 	if err != nil {
 		s.importError(w, r, err)
 		return false
@@ -666,7 +666,7 @@ func (s *Server) aclAccount(r *http.Request, ident string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), lookupTimeout)
 	defer cancel()
 
-	res, err := s.o.Auth.Lookup(ctx, ident, "lmtp", clientAddr(r))
+	res, err := s.o.Auth.Lookup(auth.AdminLookup(ctx), ident, "lmtp", clientAddr(r))
 	if err != nil {
 		return "", err
 	}

@@ -119,7 +119,7 @@ func testGRPCAuthenticate(t *testing.T, n *Nauthilus, fa *fakeAuthority) {
 	ctx := context.Background()
 	client := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 5555}
 
-	res, err := n.Authenticate(ctx, Request{Username: "alice", Password: "secret", Mechanism: "PLAIN", Protocol: "imap", Client: client, TLS: true})
+	res, err := n.Authenticate(ctx, Request{Username: "alice", Password: "secret", Mechanism: "PLAIN", Protocol: "imap", Client: client, TLS: true, Attempt: 1})
 	if err != nil || res.Account != "alice@example.org" {
 		t.Fatalf("%v %v", res, err)
 	}

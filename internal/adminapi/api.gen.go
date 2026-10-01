@@ -452,6 +452,23 @@ type AccountStatus struct {
 // public namespace, which has no user database entry.
 type AccountStatusLookup string
 
+// AuthFlush defines model for AuthFlush.
+type AuthFlush struct {
+	// Account The name that was flushed, in lower case; `*` for every entry.
+	Account string `json:"account"`
+
+	// Cached Whether this server has an auth cache (false with the static
+	// backend or `auth.cache.ttl` 0; nothing was flushed then).
+	Cached bool `json:"cached"`
+}
+
+// AuthFlushRequest defines model for AuthFlushRequest.
+type AuthFlushRequest struct {
+	// Account The account, login name or address whose entries are dropped;
+	// empty or `*` drops every entry.
+	Account *string `json:"account,omitempty"`
+}
+
 // BatchPlanRequest defines model for BatchPlanRequest.
 type BatchPlanRequest struct {
 	// Kind The kind to run on every account.
@@ -1466,6 +1483,9 @@ type PutSieveScriptJSONRequestBody = SievePut
 // SetTraceJSONRequestBody defines body for SetTrace for application/json ContentType.
 type SetTraceJSONRequestBody = TraceRequest
 
+// FlushAuthCacheJSONRequestBody defines body for FlushAuthCache for application/json ContentType.
+type FlushAuthCacheJSONRequestBody = AuthFlushRequest
+
 // SubmitJobJSONRequestBody defines body for SubmitJob for application/json ContentType.
 type SubmitJobJSONRequestBody = JobRequest
 
@@ -2271,6 +2291,42 @@ type ClientInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
 	SetTrace(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FlushAuthCacheWithBody Flush the auth cache
+	//
+	// Drops the cached logins and lookups of one account — every entry
+	// whose login name, lookup name or canonical account is the given
+	// name, compared without regard to case — or, without an account
+	// (or with `*`), every entry. This server's cache is flushed before
+	// the answer; the flush is recorded in the cluster's flush log
+	// (object `auth-flush` in the admin namespace) and the other servers
+	// apply it when they are notified, at the latest after their next
+	// poll (60 seconds). The answer does not wait for them. Neither the
+	// Director's routing cache nor the Nauthilus cache is flushed.
+	// Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+	FlushAuthCacheWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FlushAuthCache Flush the auth cache
+	//
+	// Drops the cached logins and lookups of one account — every entry
+	// whose login name, lookup name or canonical account is the given
+	// name, compared without regard to case — or, without an account
+	// (or with `*`), every entry. This server's cache is flushed before
+	// the answer; the flush is recorded in the cluster's flush log
+	// (object `auth-flush` in the admin namespace) and the other servers
+	// apply it when they are notified, at the latest after their next
+	// poll (60 seconds). The answer does not wait for them. Neither the
+	// Director's routing cache nor the Nauthilus cache is flushed.
+	// Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+	FlushAuthCache(ctx context.Context, body FlushAuthCacheJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeliverWithBody Local delivery (LDA)
 	//
@@ -3801,6 +3857,62 @@ func (c *Client) SetTraceWithBody(ctx context.Context, account Account, contentT
 // Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
 func (c *Client) SetTrace(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSetTraceRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// FlushAuthCacheWithBody Flush the auth cache
+//
+// Drops the cached logins and lookups of one account — every entry
+// whose login name, lookup name or canonical account is the given
+// name, compared without regard to case — or, without an account
+// (or with `*`), every entry. This server's cache is flushed before
+// the answer; the flush is recorded in the cluster's flush log
+// (object `auth-flush` in the admin namespace) and the other servers
+// apply it when they are notified, at the latest after their next
+// poll (60 seconds). The answer does not wait for them. Neither the
+// Director's routing cache nor the Nauthilus cache is flushed.
+// Requires the role `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+func (c *Client) FlushAuthCacheWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFlushAuthCacheRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// FlushAuthCache Flush the auth cache
+//
+// Drops the cached logins and lookups of one account — every entry
+// whose login name, lookup name or canonical account is the given
+// name, compared without regard to case — or, without an account
+// (or with `*`), every entry. This server's cache is flushed before
+// the answer; the flush is recorded in the cluster's flush log
+// (object `auth-flush` in the admin namespace) and the other servers
+// apply it when they are notified, at the latest after their next
+// poll (60 seconds). The answer does not wait for them. Neither the
+// Director's routing cache nor the Nauthilus cache is flushed.
+// Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+func (c *Client) FlushAuthCache(ctx context.Context, body FlushAuthCacheJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFlushAuthCacheRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6564,6 +6676,46 @@ func NewSetTraceRequestWithBody(server string, account Account, contentType stri
 	return req, nil
 }
 
+// NewFlushAuthCacheRequest calls the generic FlushAuthCache builder with application/json body
+func NewFlushAuthCacheRequest(server string, body FlushAuthCacheJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewFlushAuthCacheRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewFlushAuthCacheRequestWithBody constructs an http.Request for the FlushAuthCache method, with any body, and a specified content type
+func NewFlushAuthCacheRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/auth/flush")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewDeliverRequestWithBody constructs an http.Request for the Deliver method, with any body, and a specified content type
 func NewDeliverRequestWithBody(server string, params *DeliverParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
@@ -7990,6 +8142,42 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/trace (the `SetTrace` operationId).
 	SetTraceWithResponse(ctx context.Context, account Account, body SetTraceJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTraceResponse, error)
+
+	// FlushAuthCacheWithBodyWithResponse Flush the auth cache
+	//
+	// Drops the cached logins and lookups of one account — every entry
+	// whose login name, lookup name or canonical account is the given
+	// name, compared without regard to case — or, without an account
+	// (or with `*`), every entry. This server's cache is flushed before
+	// the answer; the flush is recorded in the cluster's flush log
+	// (object `auth-flush` in the admin namespace) and the other servers
+	// apply it when they are notified, at the latest after their next
+	// poll (60 seconds). The answer does not wait for them. Neither the
+	// Director's routing cache nor the Nauthilus cache is flushed.
+	// Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+	FlushAuthCacheWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FlushAuthCacheResponse, error)
+
+	// FlushAuthCacheWithResponse Flush the auth cache
+	//
+	// Drops the cached logins and lookups of one account — every entry
+	// whose login name, lookup name or canonical account is the given
+	// name, compared without regard to case — or, without an account
+	// (or with `*`), every entry. This server's cache is flushed before
+	// the answer; the flush is recorded in the cluster's flush log
+	// (object `auth-flush` in the admin namespace) and the other servers
+	// apply it when they are notified, at the latest after their next
+	// poll (60 seconds). The answer does not wait for them. Neither the
+	// Director's routing cache nor the Nauthilus cache is flushed.
+	// Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+	FlushAuthCacheWithResponse(ctx context.Context, body FlushAuthCacheJSONRequestBody, reqEditors ...RequestEditorFn) (*FlushAuthCacheResponse, error)
 
 	// DeliverWithBodyWithResponse Local delivery (LDA)
 	//
@@ -10298,6 +10486,54 @@ func (r SetTraceResponse) ContentType() string {
 	return ""
 }
 
+type FlushAuthCacheResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AuthFlush
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r FlushAuthCacheResponse) GetJSON200() *AuthFlush {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r FlushAuthCacheResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r FlushAuthCacheResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r FlushAuthCacheResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FlushAuthCacheResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r FlushAuthCacheResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type DeliverResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -12028,6 +12264,54 @@ func (c *ClientWithResponses) SetTraceWithResponse(ctx context.Context, account 
 		return nil, err
 	}
 	return ParseSetTraceResponse(rsp)
+}
+
+// FlushAuthCacheWithBodyWithResponse Flush the auth cache
+//
+// Drops the cached logins and lookups of one account — every entry
+// whose login name, lookup name or canonical account is the given
+// name, compared without regard to case — or, without an account
+// (or with `*`), every entry. This server's cache is flushed before
+// the answer; the flush is recorded in the cluster's flush log
+// (object `auth-flush` in the admin namespace) and the other servers
+// apply it when they are notified, at the latest after their next
+// poll (60 seconds). The answer does not wait for them. Neither the
+// Director's routing cache nor the Nauthilus cache is flushed.
+// Requires the role `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+func (c *ClientWithResponses) FlushAuthCacheWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FlushAuthCacheResponse, error) {
+	rsp, err := c.FlushAuthCacheWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFlushAuthCacheResponse(rsp)
+}
+
+// FlushAuthCacheWithResponse Flush the auth cache
+//
+// Drops the cached logins and lookups of one account — every entry
+// whose login name, lookup name or canonical account is the given
+// name, compared without regard to case — or, without an account
+// (or with `*`), every entry. This server's cache is flushed before
+// the answer; the flush is recorded in the cluster's flush log
+// (object `auth-flush` in the admin namespace) and the other servers
+// apply it when they are notified, at the latest after their next
+// poll (60 seconds). The answer does not wait for them. Neither the
+// Director's routing cache nor the Nauthilus cache is flushed.
+// Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/auth/flush (the `FlushAuthCache` operationId).
+func (c *ClientWithResponses) FlushAuthCacheWithResponse(ctx context.Context, body FlushAuthCacheJSONRequestBody, reqEditors ...RequestEditorFn) (*FlushAuthCacheResponse, error) {
+	rsp, err := c.FlushAuthCache(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFlushAuthCacheResponse(rsp)
 }
 
 // DeliverWithBodyWithResponse Local delivery (LDA)
@@ -13826,6 +14110,39 @@ func ParseSetTraceResponse(rsp *http.Response) (*SetTraceResponse, error) {
 	return response, nil
 }
 
+// ParseFlushAuthCacheResponse parses an HTTP response from a FlushAuthCacheWithResponse call
+func ParseFlushAuthCacheResponse(rsp *http.Response) (*FlushAuthCacheResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FlushAuthCacheResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuthFlush
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeliverResponse parses an HTTP response from a DeliverWithResponse call
 func ParseDeliverResponse(rsp *http.Response) (*DeliverResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -14363,6 +14680,9 @@ type ServerInterface interface {
 	// SetTrace Switch the protocol trace on
 	// (PUT /admin/v1/accounts/{account}/trace)
 	SetTrace(w http.ResponseWriter, r *http.Request, account Account)
+	// FlushAuthCache Flush the auth cache
+	// (POST /admin/v1/auth/flush)
+	FlushAuthCache(w http.ResponseWriter, r *http.Request)
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
@@ -16450,6 +16770,20 @@ func (siw *ServerInterfaceWrapper) SetTrace(w http.ResponseWriter, r *http.Reque
 	handler.ServeHTTP(w, r)
 }
 
+// FlushAuthCache operation middleware
+func (siw *ServerInterfaceWrapper) FlushAuthCache(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.FlushAuthCache(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Deliver operation middleware
 func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Request) {
 
@@ -17014,6 +17348,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/version", wrapper.GetVersion)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/server", wrapper.GetServerStatus)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/auth/flush", wrapper.FlushAuthCache)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts", wrapper.ListAccounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}", wrapper.GetAccount)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/mailboxes", wrapper.ListMailboxes)

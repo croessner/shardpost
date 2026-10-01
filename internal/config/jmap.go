@@ -9,7 +9,7 @@ import (
 // address of its own rather than sharing the one that serves metrics and
 // the health probes: that one is cluster-internal, and JMAP is customer
 // traffic with its own certificate and its own network policy.
-type JMAP struct {
+type JMAP struct { //nolint:dupl // a configuration section is a list of tagged fields, like the others
 	// Addr is the listener; empty means JMAP is switched off.
 	Addr string `mapstructure:"addr" env:"JMAP_ADDR"`
 	// TLSCert and TLSKey are the certificate of the JMAP listener. Both
@@ -34,8 +34,27 @@ type JMAP struct {
 	MaxConcurrentUpload   int64 `mapstructure:"max_concurrent_upload" env:"JMAP_MAX_CONCURRENT_UPLOAD" validate:"gte=0"`
 	MaxConcurrentRequests int64 `mapstructure:"max_concurrent_requests" env:"JMAP_MAX_CONCURRENT_REQUESTS" validate:"gte=0"`
 	MaxCallsInRequest     int64 `mapstructure:"max_calls_in_request" env:"JMAP_MAX_CALLS_IN_REQUEST" validate:"gte=0"`
-	MaxObjectsInGet       int64 `mapstructure:"max_objects_in_get" env:"JMAP_MAX_OBJECTS_IN_GET" validate:"gte=0"`
-	MaxObjectsInSet       int64 `mapstructure:"max_objects_in_set" env:"JMAP_MAX_OBJECTS_IN_SET" validate:"gte=0"`
+	// MaxConcurrentDownloads bounds the blob downloads one account has
+	// in flight, MaxEventSources its open event sources; 0 takes the
+	// default (8 and 4).
+	MaxConcurrentDownloads int64 `mapstructure:"max_concurrent_downloads" env:"JMAP_MAX_CONCURRENT_DOWNLOADS" validate:"gte=0"`
+	MaxEventSources        int64 `mapstructure:"max_event_sources" env:"JMAP_MAX_EVENT_SOURCES" validate:"gte=0"`
+	// LimitWait is how long, in seconds, a request waits for a slot when
+	// its account is at a limit (requests, uploads, downloads) before it
+	// is answered 429; 0 answers at once. Event sources never wait. It
+	// stays well below the response timeouts of the proxies in front.
+	LimitWait int64 `mapstructure:"limit_wait" env:"JMAP_LIMIT_WAIT" validate:"gte=0,lte=10"`
+	// RetryAfter is the Retry-After, in seconds, of a 429 and of a 503
+	// from an authentication backend that cannot decide.
+	RetryAfter int64 `mapstructure:"retry_after" env:"JMAP_RETRY_AFTER" validate:"gte=1,lte=3600"`
+	// MaxConcurrentPerIP bounds the requests one client IP address has
+	// in flight, checked before authentication; 0 (the default) is no
+	// bound. Behind a proxy it counts the proxy unless the PROXY
+	// protocol passes the client's address
+	// (server.proxy_protocol_trusted_cidrs).
+	MaxConcurrentPerIP int64 `mapstructure:"max_concurrent_per_ip" env:"JMAP_MAX_CONCURRENT_PER_IP" validate:"gte=0"`
+	MaxObjectsInGet    int64 `mapstructure:"max_objects_in_get" env:"JMAP_MAX_OBJECTS_IN_GET" validate:"gte=0"`
+	MaxObjectsInSet    int64 `mapstructure:"max_objects_in_set" env:"JMAP_MAX_OBJECTS_IN_SET" validate:"gte=0"`
 	// The limits of the blob methods (RFC 9404): the size of a blob
 	// Blob/upload builds (never more than max_size_upload), its data
 	// sources (at least 64), and the blob data one Blob/get returns.

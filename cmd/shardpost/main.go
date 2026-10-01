@@ -442,10 +442,16 @@ type servers struct {
 func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store,
 	programs *extprograms.Runner, quotaSvc *quota.Service,
 ) error {
-	authn, err := buildAuth(log, settings)
+	authn, cache, err := buildAuth(log, settings)
 	if err != nil {
 		return err
 	}
+
+	flushLog, stopFlushLog, err := startFlushLog(ctx, log, store, cache)
+	if err != nil {
+		return err
+	}
+	defer stopFlushLog()
 
 	tlsCfg, err := loadTLS(log, settings)
 	if err != nil {
@@ -470,7 +476,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 
 	defer srv.closeJMAP() // before the caller closes the store, which the fills read
 
-	if err := srv.setupHTTP(log, settings, store, authn); err != nil {
+	if err := srv.setupHTTP(log, settings, store, authn, flushLog); err != nil {
 		return err
 	}
 
@@ -488,11 +494,19 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 		}
 	}
 
+	srv.shutdown(settings, quotaSvc)
+	log.Info("shutdown complete")
+
+	return nil
+}
+
+// shutdown drains the listeners, then the quota programs, then the
+// admin API: quota programs may still deliver warnings through the
+// admin socket, so the admin API stops after them, with its own time
+// for deliveries in progress.
+func (srv *servers) shutdown(settings *config.Config, quotaSvc *quota.Service) {
 	srv.drain(settings)
 
-	// Quota programs may still deliver warnings through the admin
-	// socket, so the admin API stops after them, with its own time for
-	// deliveries in progress.
 	qctx, cancel := context.WithTimeout(context.Background(), quotaDrain)
 	quotaSvc.Close(qctx)
 	cancel()
@@ -500,10 +514,6 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	actx, cancel := context.WithTimeout(context.Background(), adminDrain)
 	srv.admin.shutdown(actx)
 	cancel()
-
-	log.Info("shutdown complete")
-
-	return nil
 }
 
 // newServers builds the protocol servers.

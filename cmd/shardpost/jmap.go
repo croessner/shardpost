@@ -23,14 +23,16 @@ import (
 
 // setupHTTP builds the health and metrics listener, the JMAP front-end
 // and the admin API.
-func (srv *servers) setupHTTP(log *slog.Logger, settings *config.Config, store *cephstore.Store, authn auth.Authenticator) error {
+func (srv *servers) setupHTTP(log *slog.Logger, settings *config.Config, store *cephstore.Store, authn auth.Authenticator,
+	flushLog *auth.FlushLog,
+) error {
 	srv.http = newHTTPServer(settings, store)
 
 	if err := srv.setupJMAP(log, settings, store, authn); err != nil {
 		return err
 	}
 
-	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices)
+	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog)
 	if err != nil {
 		return err
 	}
@@ -88,6 +90,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 		// namespaces of the same name.
 		Sharing:    jmapSharing(settings),
 		Principals: jmapPrincipals(settings.JMAP, srv.notices),
+		Load:       jmapLoad(log, settings),
 	})
 
 	if strings.TrimSpace(settings.JMAP.Shard) == "" {
@@ -99,6 +102,21 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 	srv.jmapFront = front
 
 	return nil
+}
+
+// jmapLoad maps the load settings. A bound per client address behind a
+// proxy that does not pass the client's address (PROXY protocol) counts
+// the proxy, which is warned about.
+func jmapLoad(log *slog.Logger, settings *config.Config) jmap.LoadOptions {
+	c := settings.JMAP
+
+	if c.MaxConcurrentPerIP > 0 && strings.TrimSpace(settings.Server.ProxyProtocolTrustedCidrs) == "" {
+		log.Warn("jmap.max_concurrent_per_ip is set without server.proxy_protocol_trusted_cidrs: "+
+			"behind a proxy every client shares the proxy's address and the bound applies to all of them together",
+			"max_concurrent_per_ip", c.MaxConcurrentPerIP)
+	}
+
+	return jmap.LoadOptions{LimitWait: sec(c.LimitWait), RetryAfter: sec(c.RetryAfter), MaxConcurrentPerIP: int(c.MaxConcurrentPerIP)}
 }
 
 // jmapSharing maps the settings of the shared accounts, which the
@@ -203,6 +221,33 @@ func loadVAPID(c config.JMAPPush) (*webpush.VAPID, error) {
 	return webpush.LoadVAPID(raw, c.VAPIDSubject)
 }
 
+// pushAuth is the authenticator of the push worker: none without
+// jmap.push.check_accounts. Its lookups are cached like the servers' and
+// flushed with them; stop ends following the flush log.
+func pushAuth(ctx context.Context, log *slog.Logger, settings *config.Config, kv *cephstore.AdminKV) (auth.Authenticator, func(), error) {
+	if !settings.JMAP.Push.CheckAccounts {
+		return nil, func() {}, nil
+	}
+
+	if !strings.EqualFold(settings.Server.AuthBackend, "nauthilus") {
+		return nil, nil, fmt.Errorf("jmap.push.check_accounts needs server.auth_backend nauthilus: " +
+			"another backend would deny every account and the worker would destroy every subscription")
+	}
+
+	authn, cache, err := buildAuth(log, settings)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if cache == nil {
+		return authn, func() {}, nil
+	}
+
+	_, stop := runFlushLog(ctx, log, kv.Omap(), cache, func() {})
+
+	return authn, stop, nil
+}
+
 // runPush runs the push worker ("shardpost push") until ctx ends, with the
 // health and metrics listener beside it for the probes.
 func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store) error {
@@ -222,18 +267,11 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 	}
 	defer kv.Close()
 
-	var authn auth.Authenticator
-
-	if c.CheckAccounts && !strings.EqualFold(settings.Server.AuthBackend, "nauthilus") {
-		return fmt.Errorf("jmap.push.check_accounts needs server.auth_backend nauthilus: " +
-			"another backend would deny every account and the worker would destroy every subscription")
+	authn, stopAuth, err := pushAuth(ctx, log, settings, kv)
+	if err != nil {
+		return err
 	}
-
-	if c.CheckAccounts {
-		if authn, err = buildAuth(log, settings); err != nil {
-			return err
-		}
-	}
+	defer stopAuth()
 
 	health := newHTTPServer(settings, store)
 
@@ -295,6 +333,8 @@ func jmapLimits(c config.JMAP) jmap.Limits {
 		MaxSizeRequest:         c.MaxSizeRequest,
 		MaxConcurrentUpload:    int(c.MaxConcurrentUpload),
 		MaxConcurrentRequests:  int(c.MaxConcurrentRequests),
+		MaxConcurrentDownloads: int(c.MaxConcurrentDownloads),
+		MaxEventSources:        int(c.MaxEventSources),
 		MaxCallsInRequest:      int(c.MaxCallsInRequest),
 		MaxObjectsInGet:        int(c.MaxObjectsInGet),
 		MaxObjectsInSet:        int(c.MaxObjectsInSet),

@@ -596,11 +596,8 @@ func TestConcurrencyCountersAreReleased(t *testing.T) {
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(s.inFlong) != 0 || len(s.inFlup) != 0 {
-		t.Errorf("slots left behind: api=%v upload=%v", s.inFlong, s.inFlup)
+	if api, up := s.inAPI.inFlight("test"), s.inUpload.inFlight("test"); api != 0 || up != 0 {
+		t.Errorf("slots left behind: api=%d upload=%d", api, up)
 	}
 }
 

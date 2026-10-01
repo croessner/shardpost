@@ -363,8 +363,10 @@ const (
 
 // conn is one client connection.
 type conn struct {
-	s         *Server
-	nc        net.Conn
+	s  *Server
+	nc net.Conn
+	// attempts counts the refused logins, for the attempt ordinal.
+	attempts  auth.LoginAttempts
 	wmu       sync.Mutex // serialises writes from the command loop and bye()
 	lockProbe model.LockProbe
 	// othersProbe is when the views of other namespaces (see other) are
@@ -1140,7 +1142,7 @@ func (c *conn) authenticate(req auth.Request) (*auth.Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	return c.s.o.Auth.Authenticate(ctx, req)
+	return c.attempts.Authenticate(ctx, c.s.o.Auth, req)
 }
 
 // finishLogin maps the authentication outcome to the tagged response and

@@ -202,13 +202,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.enter(s.inEvents, sess.account, s.o.Limits.MaxConcurrentRequests) {
-		writeProblem(w, http.StatusTooManyRequests, errURNLimit,
-			"too many event sources open for this account", "maxConcurrentRequests")
-
+	// An event source stays open for hours: it never waits for a slot
+	// (jmap.max_event_sources), it is turned away at once.
+	release, ok := s.slot(w, r, s.inEvents, sess.account, false, "too many event sources open for this account", "maxConcurrentRequests")
+	if !ok {
 		return
 	}
-	defer s.leave(s.inEvents, sess.account)
+	defer release()
 
 	last, err := sess.user.AccountState()
 	if err != nil {

@@ -61,7 +61,7 @@ func (s *Server) lookupState(r *http.Request, account string) (state, canonical 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), lookupTimeout)
 	defer cancel()
 
-	res, err := s.o.Auth.Lookup(ctx, account, "lmtp", clientAddr(r))
+	res, err := s.o.Auth.Lookup(auth.AdminLookup(ctx), account, "lmtp", clientAddr(r))
 
 	switch {
 	case errors.Is(err, auth.ErrInvalid):

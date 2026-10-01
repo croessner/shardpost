@@ -367,6 +367,64 @@ cancelled with `shardpostctl job cancel`.
 `scrub.users`, else every account of the directory (once its backfill
 completed), else every namespace of an index pool listing.
 
+## Auth cache
+
+Every server keeps the logins and lookups Nauthilus answered for a
+short time (`auth.cache`, see
+[configuration](../configuration.md#auth-cache-auth)). A change in LDAP
+therefore reaches ShardPost only when the entry ends, unless the cache
+is flushed:
+
+```sh
+shardpostctl auth flush user@example.org   # one account (role repair)
+shardpostctl auth flush                    # everything
+```
+
+The flush drops every entry whose login name, lookup name or canonical
+account is the given name, compared without regard to case, on the
+server that answers at once, and records it in the flush log (the
+object `auth-flush` in the admin namespace). The other servers apply it
+when they are notified and at the latest on their next poll, 60 seconds
+later; the command does not wait for them. It reaches neither the
+Director's routing cache (up to 30 s) nor the cache of Nauthilus itself:
+a change that has to take effect at once also needs Nauthilus' own flush.
+The flush is in the audit log (`flush_account`).
+
+What a change costs until it takes effect:
+
+| Event | Effect in ShardPost | Also |
+|---|---|---|
+| Password change | The old password keeps working until its entry ends (`ttl`, 30 s); the new one works at once (it is a miss). | Nauthilus' own cache |
+| Account locked in LDAP | Takes effect after `ttl`, at once with `auth flush <account>`. | Only after a Nauthilus flush; the Director up to 30 s |
+| Token revoked before `exp` | Accepted until `ttl`. | The Director up to 30 s |
+| Token expired | At once: the entry ends at `exp`. | — |
+| Quota or attribute change (`rnsMSQuota`, display name) | After `ttl` (logins) or `lookup_ttl` (LMTP), at once with `auth flush`. | Nauthilus' own cache |
+| Alias or account removed | LMTP keeps accepting until `lookup_ttl` (a cached positive lookup), at once with `auth flush`. | Nauthilus' own cache |
+| New account, mail over LMTP | Refused as unknown until `lookup_negative_ttl` (at most 5 s by default), accepted after; the admin API (diagnosis, import, deliveries) goes past the cached "unknown" and stores what it finds. | Nauthilus' LDAP negative cache (20 s) |
+| Account moved to another shard | A window of up to `lookup_ttl` plus the Director's 30 s. | Runbook: `auth flush <account>` on the source and the target shard; hold the account before the pin for at least that window. |
+| Brute force | Nauthilus sees every distinct failed attempt; identical failed attempts that arrive together count as one. With `negative_ttl` identical repeats within it do not reach Nauthilus at all. | — |
+
+The secrets are only kept as HMACs under a key that lives in the
+process; a restart drops every entry. A master-user login is never
+cached, only the lookup of its target.
+
+**Emergency switch.** `auth.cache.ttl: 0` (or `AUTH_CACHE_TTL=0`) switches
+the whole cache off — logins and lookups — on the next rollout: every
+login and lookup asks Nauthilus again, as before the cache existed. It is
+the switch for a suspected stale or wrong answer that a flush does not
+explain; Nauthilus then carries the full load again, so watch
+`imapceph_auth_backend_seconds` and Nauthilus' own in-flight limit. The
+cache needs no migration and keeps nothing on disk: a rollback to a
+version without it is possible at any time (the flush log object stays
+behind, unused).
+
+Follow it with `imapceph_auth_cache_total` (hit rate and the load on
+Nauthilus), `imapceph_auth_cache_flushes_total` and, for JMAP clients
+that send many requests at once, `imapceph_jmap_limit_total` (see
+[observability](../observability.md)). `hack/auth-smoke.sh` checks a
+rollout: logins hit the cache, a flush makes the next login a miss,
+and parallel JMAP requests get no 429 or 503.
+
 ## Scrub, backup and observability
 
 Scrub can change data. For an investigation, first define a dry run and the

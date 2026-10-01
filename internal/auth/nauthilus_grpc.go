@@ -53,8 +53,8 @@ type GRPCOptions struct {
 // DialGRPC creates the transport. The connection is lazy; Ping checks it.
 func DialGRPC(o GRPCOptions) (*GRPCTransport, error) {
 	t := &GRPCTransport{Address: o.Address, User: o.User, Password: o.Password, Token: o.Token, TokenSource: o.TokenSource, Timeout: o.Timeout}
-	if t.Timeout == 0 {
-		t.Timeout = 10 * time.Second
+	if t.Timeout <= 0 {
+		t.Timeout = DefaultTimeout
 	}
 
 	var creds credentials.TransportCredentials
@@ -136,15 +136,36 @@ func (t *GRPCTransport) ctx(ctx context.Context) (context.Context, context.Cance
 }
 
 // call performs the request. A refused backchannel token is dropped and
-// the request retried once with a fresh one (token expiry races).
+// the request retried once with a fresh one (token expiry races), but
+// only when the context leaves time for it: at least as long as the
+// first attempt took.
 func (t *GRPCTransport) call(ctx context.Context, mode string, body nauthilusRequest) (*outcome, error) {
+	start := time.Now()
+
 	o, err := t.callOnce(ctx, mode, body)
 	if err == nil && o.temp && o.refused && t.TokenSource != nil {
 		t.TokenSource.Invalidate()
+
+		if !budgetLeft(ctx, time.Since(start)) {
+			return o, nil
+		}
+
 		o, err = t.callOnce(ctx, mode, body)
 	}
 
 	return o, err
+}
+
+// budgetLeft reports whether ctx leaves at least need before its
+// deadline (always, without a deadline) and is not done.
+func budgetLeft(ctx context.Context, need time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+
+	deadline, ok := ctx.Deadline()
+
+	return !ok || time.Until(deadline) >= need
 }
 
 func (t *GRPCTransport) callOnce(parent context.Context, mode string, body nauthilusRequest) (*outcome, error) {

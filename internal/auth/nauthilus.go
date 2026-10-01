@@ -50,9 +50,6 @@ type Nauthilus struct {
 	GRPC *GRPCTransport
 	// MaxWait caps the Auth-Wait delay that is honoured.
 	MaxWait time.Duration
-
-	mu       sync.Mutex
-	attempts map[string]uint // per client address: auth_login_attempt
 }
 
 // Introspection configures RFC 7662 token validation.
@@ -89,12 +86,46 @@ type nauthilusResponse struct {
 	Extra        map[string]any   `json:"-"`
 }
 
+// DefaultTimeout bounds one call to Nauthilus, the introspection
+// endpoint or the token endpoint when nothing else is configured
+// (nauthilus.timeout).
+const DefaultTimeout = 10 * time.Second
+
+// DefaultMaxIdlePerHost is how many idle connections the shared HTTP
+// client keeps per host when nothing else is configured
+// (nauthilus.http_max_idle_per_host).
+const DefaultMaxIdlePerHost = 32
+
+// sharedClient is the client of a Nauthilus without its own: one for
+// the process, so that the connections are reused.
+var sharedClient = sync.OnceValue(func() *http.Client { return NewHTTPClient(DefaultTimeout, DefaultMaxIdlePerHost) })
+
+// NewHTTPClient is the HTTP client the Nauthilus JSON API, the token
+// introspection and the client_credentials token source share: one
+// transport of its own, so the idle connections per host are not the
+// two of http.DefaultTransport, and a timeout per request.
+func NewHTTPClient(timeout time.Duration, maxIdlePerHost int) *http.Client {
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
+	if maxIdlePerHost <= 0 {
+		maxIdlePerHost = DefaultMaxIdlePerHost
+	}
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = maxIdlePerHost
+	tr.MaxIdleConns = max(tr.MaxIdleConns, 4*maxIdlePerHost)
+
+	return &http.Client{Timeout: timeout, Transport: tr}
+}
+
 func (n *Nauthilus) client() *http.Client {
 	if n.HTTP != nil {
 		return n.HTTP
 	}
 
-	return &http.Client{Timeout: 10 * time.Second}
+	return sharedClient()
 }
 
 func hostPort(a net.Addr) (string, string) {
@@ -110,40 +141,12 @@ func hostPort(a net.Addr) (string, string) {
 	return h, p
 }
 
-// attempt returns the 1-based login attempt counter for a client address
-// and increments it; success resets it.
-func (n *Nauthilus) attempt(client net.Addr, reset bool) uint {
-	key := ""
-	if client != nil {
-		key, _ = hostPort(client)
-	}
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	if n.attempts == nil {
-		n.attempts = map[string]uint{}
-	}
-
-	if reset {
-		delete(n.attempts, key)
-		return 0
-	}
-
-	n.attempts[key]++
-	if len(n.attempts) > 10000 { // bounded memory; brute force is Nauthilus' job
-		n.attempts = map[string]uint{}
-	}
-
-	return n.attempts[key]
-}
-
 // Authenticate implements Authenticator.
 func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error) {
 	req := nauthilusRequest{
 		Username: r.Username, Password: r.Password, Protocol: r.Protocol,
 		Method: strings.ToLower(r.Mechanism), SSL: sslFlag(r.TLS),
-		AuthLoginAttempt: n.attempt(r.Client, false),
+		AuthLoginAttempt: r.Attempt,
 	}
 	req.ClientIP, req.ClientPort = hostPort(r.Client)
 
@@ -152,7 +155,7 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 		req.Method = "userpass"
 	}
 
-	mode, introspected := "", false
+	mode, introspected, expiry := "", false, time.Time{}
 
 	if r.Token != "" {
 		bearer, err := n.bearerMode(r)
@@ -164,13 +167,13 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 		case bearerPassword:
 			req.Password = r.Token
 		case bearerIntrospect:
-			account, err := n.introspect(ctx, r.Token)
+			account, exp, err := n.introspect(ctx, r.Token)
 			if err != nil {
 				return nil, err
 			}
 
 			req.Username, req.Password = account, ""
-			mode, introspected = modeNoAuth, true
+			mode, introspected, expiry = modeNoAuth, true, exp
 		}
 	}
 
@@ -183,9 +186,9 @@ func (n *Nauthilus) Authenticate(ctx context.Context, r Request) (*Result, error
 		if err := n.sameAccount(ctx, r, req.Username, res); err != nil {
 			return nil, err
 		}
-	}
 
-	n.attempt(r.Client, true)
+		res.Expiry = expiry
+	}
 
 	return res, nil
 }
@@ -220,13 +223,10 @@ func (n *Nauthilus) sameAccount(ctx context.Context, r Request, claim string, re
 // protocol is the session's protocol (lmtp, imap, pop3, sieve); the
 // method name is the one nauthilus-director uses for recipient lookups.
 func (n *Nauthilus) Lookup(ctx context.Context, address, protocol string, client net.Addr) (*Result, error) {
-	addr := strings.TrimSpace(strings.Trim(address, "<>"))
-	if i := strings.LastIndex(addr, "@"); i >= 0 {
-		addr = addr[:i] + strings.ToLower(addr[i:])
-	}
+	addr := NormalizeAddress(address)
 
 	if protocol == "" {
-		protocol = "lmtp"
+		protocol = defaultLookupProtocol
 	}
 
 	req := nauthilusRequest{Username: addr, Protocol: protocol, Method: "recipient_lookup"}
@@ -269,12 +269,15 @@ func (n *Nauthilus) bearerMode(r Request) (string, error) {
 	}
 }
 
+// sslFlag is the ssl field of a request: "on" with TLS, empty without,
+// as Dovecot and nginx send it. Nauthilus takes every non-empty value
+// for TLS, so "off" would switch its tls_encryption check off.
 func sslFlag(on bool) string {
 	if on {
 		return "on"
 	}
 
-	return "off"
+	return ""
 }
 
 // outcome is the transport-independent result of one Nauthilus call.
@@ -490,25 +493,26 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-// introspect validates a bearer token (RFC 7662) and returns the account.
-func (n *Nauthilus) introspect(ctx context.Context, token string) (string, error) {
+// introspect validates a bearer token (RFC 7662) and returns the account
+// and the token's expiry (zero when the response carries no exp).
+func (n *Nauthilus) introspect(ctx context.Context, token string) (string, time.Time, error) {
 	claims, err := n.introspectClaims(ctx, token)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 
 	if active, _ := claims["active"].(bool); !active {
-		return "", ErrInvalid
+		return "", time.Time{}, ErrInvalid
 	}
 
 	if n.Introspect.Audience != "" && !claimHas(claims["aud"], n.Introspect.Audience) {
-		return "", ErrInvalid
+		return "", time.Time{}, ErrInvalid
 	}
 
 	if n.Introspect.Scope != "" {
 		scope, _ := claims["scope"].(string)
 		if !containsWord(scope, n.Introspect.Scope) {
-			return "", ErrInvalid
+			return "", time.Time{}, ErrInvalid
 		}
 	}
 
@@ -519,11 +523,21 @@ func (n *Nauthilus) introspect(ctx context.Context, token string) (string, error
 
 	for _, c := range names {
 		if v, ok := claims[c].(string); ok && v != "" {
-			return v, nil
+			return v, claimTime(claims["exp"]), nil
 		}
 	}
 
-	return "", ErrInvalid
+	return "", time.Time{}, ErrInvalid
+}
+
+// claimTime reads a NumericDate claim (seconds since the epoch, RFC 7519
+// 2); zero when it is absent or not a positive number.
+func claimTime(v any) time.Time {
+	if x, ok := v.(float64); ok && x > 0 {
+		return time.Unix(int64(x), 0)
+	}
+
+	return time.Time{}
 }
 
 // introspectClaims queries the introspection endpoint and decodes the

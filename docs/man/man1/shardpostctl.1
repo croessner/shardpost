@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL 1 "2026-10-01" "ShardPost 0.41.0" "ShardPost Manual"
 .SH NAME
 shardpostctl \- administrative client for a ShardPost mail server
 .SH SYNOPSIS
@@ -100,6 +100,9 @@ Copy an account from another IMAP server, keeping its identities.
 .TP
 .BR shardpostctl-trace (1)
 Switch on a protocol trace for one account.
+.TP
+.BR shardpostctl-auth (1)
+Flush the auth cache of every server, for one account or for all.
 .SH CONNECTION FLAGS
 These flags come before the command. They select the listener and apply
 to every command.
@@ -170,7 +173,7 @@ Create, rename and subscribe mailboxes; change ACLs.
 .TP
 .B repair
 Maintenance jobs that repair; retry learning jobs; repair an account's
-directory entry.
+directory entry; flush the auth cache.
 .TP
 .B delete
 Delete mailboxes and messages, and purge accounts.
@@ -291,6 +294,7 @@ Default admin socket inside the server pod.
 .SH SEE ALSO
 .BR shardpostctl-account (1),
 .BR shardpostctl-acl (1),
+.BR shardpostctl-auth (1),
 .BR shardpostctl-deliver (1),
 .BR shardpostctl-export (1),
 .BR shardpostctl-job (1),

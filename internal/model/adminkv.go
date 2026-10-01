@@ -41,3 +41,33 @@ func IsPublic(name string) bool { return name == PublicNamespace }
 
 // MaxAdminValue bounds one admin record (a job with its report, a plan).
 const MaxAdminValue = 4 << 20
+
+// ErrOmapConflict is returned by AdminOmap.Write when the object's
+// version is no longer the one the write was guarded with, or when an
+// exclusive create met an existing object.
+var ErrOmapConflict = errors.New("object changed concurrently")
+
+// OmapAnyVersion makes AdminOmap.Write unconditional.
+const OmapAnyVersion = ^uint64(0)
+
+// AdminOmap is plain omap access to single objects of the admin
+// namespace, with watch and notify, for small shared state that is not
+// a record of the admin store: the auth cache flush log, for one. The
+// RADOS implementation follows key rotations, so a holder may keep it
+// for the process lifetime.
+type AdminOmap interface {
+	// ReadKeys returns the values of the keys that exist and the
+	// object's version (0: the object does not exist).
+	ReadKeys(oid string, keys []string) (map[string][]byte, uint64, error)
+	// ReadPage returns up to limit keys after startAfter in key order
+	// and whether more follow; an absent object reads as empty.
+	ReadPage(oid, startAfter string, limit int) ([]KVEntry, bool, error)
+	// Write sets and removes keys. ver 0 creates the object exclusively,
+	// OmapAnyVersion writes unconditionally, any other version asserts
+	// it. A failed guard returns ErrOmapConflict.
+	Write(oid string, ver uint64, set map[string][]byte, rm []string) error
+	// Watch watches oid; it creates the object when it does not exist.
+	Watch(oid string) (Watch, error)
+	// Notify wakes the watchers of oid (best effort).
+	Notify(oid string)
+}

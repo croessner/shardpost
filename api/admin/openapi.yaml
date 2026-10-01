@@ -43,6 +43,36 @@ paths:
                 $ref: "#/components/schemas/ServerStatus"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/auth/flush:
+    post:
+      operationId: flushAuthCache
+      summary: Flush the auth cache
+      description: |
+        Drops the cached logins and lookups of one account — every entry
+        whose login name, lookup name or canonical account is the given
+        name, compared without regard to case — or, without an account
+        (or with `*`), every entry. This server's cache is flushed before
+        the answer; the flush is recorded in the cluster's flush log
+        (object `auth-flush` in the admin namespace) and the other servers
+        apply it when they are notified, at the latest after their next
+        poll (60 seconds). The answer does not wait for them. Neither the
+        Director's routing cache nor the Nauthilus cache is flushed.
+        Requires the role `repair`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthFlushRequest"
+      responses:
+        "200":
+          description: The cache of this server was flushed and the flush recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthFlush"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts:
     get:
       operationId: listAccounts
@@ -1869,6 +1899,26 @@ components:
           type: integer
           minimum: 1
           description: How long the trace lasts (capped at the configured maximum).
+    AuthFlushRequest:
+      type: object
+      properties:
+        account:
+          type: string
+          description: |
+            The account, login name or address whose entries are dropped;
+            empty or `*` drops every entry.
+    AuthFlush:
+      type: object
+      required: [account, cached]
+      properties:
+        account:
+          type: string
+          description: The name that was flushed, in lower case; `*` for every entry.
+        cached:
+          type: boolean
+          description: |
+            Whether this server has an auth cache (false with the static
+            backend or `auth.cache.ttl` 0; nothing was flushed then).
     BatchPlanRequest:
       type: object
       required: [kind]

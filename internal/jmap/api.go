@@ -160,13 +160,11 @@ func coreEcho(_ context.Context, _ *session, args json.RawMessage) (any, *method
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	sess := sessionOf(r)
 
-	if !s.enter(s.inFlong, sess.account, s.o.Limits.MaxConcurrentRequests) {
-		writeProblem(w, http.StatusTooManyRequests, errURNLimit,
-			"too many requests in flight for this account", "maxConcurrentRequests")
-
+	release, ok := s.slot(w, r, s.inAPI, sess.account, true, "too many requests in flight for this account", "maxConcurrentRequests")
+	if !ok {
 		return
 	}
-	defer s.leave(s.inFlong, sess.account)
+	defer release()
 
 	req, ok := s.readRequest(w, r)
 	if !ok {

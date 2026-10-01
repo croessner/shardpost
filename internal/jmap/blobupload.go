@@ -101,10 +101,11 @@ func blobUpload(_ context.Context, sess *session, args json.RawMessage) (any, *m
 	// A Blob/upload writes blobs as the upload endpoint does, so it takes
 	// a slot of the same per-account counter.
 	if srv := sess.srv; srv != nil {
-		if !srv.enter(srv.inFlup, sess.account, srv.o.Limits.MaxConcurrentUpload) {
+		release, ok := srv.inUpload.tryAcquire(sess.account)
+		if !ok {
 			return nil, &methodError{Type: errServerUnavailable, Description: "too many uploads in flight for this account"}
 		}
-		defer srv.leave(srv.inFlup, sess.account)
+		defer release()
 	}
 
 	u, err := newUploader(sess)

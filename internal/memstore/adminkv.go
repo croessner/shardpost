@@ -65,6 +65,10 @@ func (kv *AdminKV) Listings() int64 { return kv.recs.lists.Load() }
 // Raw is the record layer (List lists the records, tests).
 func (kv *AdminKV) Raw() model.AdminKV { return kv.recs }
 
+// Omap is plain omap access to single objects of the namespace, with
+// in-process watch and notify (the counterpart of the RADOS store's).
+func (kv *AdminKV) Omap() model.AdminOmap { return &wakingBackend{MemBackend: kv.mem, w: kv.wake} }
+
 // Objects returns the index and queue objects that exist (tests).
 func (kv *AdminKV) Objects() []string { return kv.mem.Objects() }
 

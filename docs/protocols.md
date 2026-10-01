@@ -533,8 +533,16 @@ set.
 
 Core limits (configurable under `jmap.*`): `maxSizeUpload` 50 MiB,
 `maxSizeRequest` 10 MiB, `maxConcurrentUpload` 4,
-`maxConcurrentRequests` 4, `maxCallsInRequest` 16, `maxObjectsInGet`
-500, `maxObjectsInSet` 500; collations `i;ascii-casemap` and `i;octet`. Blob
+`maxConcurrentRequests` 8, `maxCallsInRequest` 16, `maxObjectsInGet`
+500, `maxObjectsInSet` 500; collations `i;ascii-casemap` and `i;octet`.
+Not advertised: downloads (`jmap.max_concurrent_downloads`, 8) and event
+sources (`jmap.max_event_sources`, 4) per account. A request at a full
+limit queues first come, first served for up to `jmap.limit_wait`
+(2 s, at most twice the limit waiting), then gets 429 with
+`Retry-After` (`jmap.retry_after`, 1 s) and the
+`urn:ietf:params:jmap:error:limit` problem; an event source gets 429 at
+once. An optional bound per client address before the authentication:
+`jmap.max_concurrent_per_ip` (default off). Blob
 limits: `max_size_blob_set`, `max_data_sources`, `max_size_blob_get`
 (10 MiB). Search limits: `jmap.search.snippet_read_bytes` (default 256 KiB),
 `jmap.search.max_attachment_reads` (default 1000).
@@ -644,8 +652,10 @@ directly to the internet.
 | Backchannel credentials | HTTP Basic, static bearer token or OAuth 2.0 client credentials (RFC 6749 §4.4); gRPC with TLS 1.2+ and optional mTLS, or plaintext with `nauthilus.grpc_insecure`. |
 | Master user | Dovecot style `user*master` (separator configurable), password only, compared in constant time. |
 | Proxy authorisation | ✗ PLAIN with an authzid different from the authcid is refused. XOAUTH2 `user=` and OAUTHBEARER `a=` name the login; with token introspection they must resolve to the token's account. |
-| Brute-force data | Client IP/port, local IP/port, protocol, mechanism, TLS state and attempt counter are sent to Nauthilus. |
-| Temporary failure | Reported as unavailable (`[UNAVAILABLE]`, `[SYS/TEMP]`, `451`, HTTP 503), never as a wrong password. |
+| Brute-force data | Client IP/port, local IP/port, protocol, mechanism, TLS state (`ssl` is `on` with TLS and empty without, as Dovecot and nginx send it; Nauthilus takes any value for TLS) and, for IMAP, POP3 and ManageSieve, the attempt ordinal of the connection (`auth_login_attempt` = 1 + the refused logins before it on that connection) are sent to Nauthilus. JMAP and LMTP send no ordinal. |
+| Auth cache | `auth.cache` in front of Nauthilus (never the static backend): a successful login is answered from memory for `ttl` (30 s), a bearer token's entry ends at its `exp` when that comes first; lookups (LMTP recipients, the target of a master-user login, JMAP identities) for `lookup_ttl` (30 s), unknown names for `lookup_negative_ttl` (5 s). Identical concurrent requests share one backend call. Refusals are cached only with `negative_ttl` (default off) and only for identical credentials; temporary failures never. The master password is never cached. `shardpostctl auth flush` drops entries on every server; `ttl: 0` switches the cache off. See [Configuration](configuration.md#auth-cache-auth). |
+| Timeouts | One request to Nauthilus, the introspection or the token endpoint: `nauthilus.timeout` (10 s); a login as a whole: 15 s for IMAP, POP3 and ManageSieve. A refused backchannel token is renewed and the request retried once, only when the time left allows it. |
+| Temporary failure | Reported as unavailable (`[UNAVAILABLE]`, `[SYS/TEMP]`, `TRYLATER`, `451`, HTTP 503 with `Retry-After`), never as a wrong password. |
 | Plaintext authentication | Allowed without TLS only with `server.insecure_auth` for IMAP, POP3, ManageSieve and LMTP (default off), and with `jmap.insecure_auth` for JMAP (default off). |
 
 ## Transport: TLS, PROXY protocol, listeners

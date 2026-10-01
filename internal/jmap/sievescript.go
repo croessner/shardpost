@@ -464,7 +464,7 @@ func scriptIDRecordSize(ids map[string]string) int {
 // another write came first, and returns the ids that were kept. listed
 // are the names of the scripts, as for writeScriptIDs.
 func changeScriptIDs(sess *session, listed map[string]bool, change func(ids map[string]string)) (map[string]string, error) {
-	for range scriptRetries {
+	for range retriesFor(sess, scriptRetries) {
 		raw, ids := readScriptIDs(sess)
 		change(ids)
 

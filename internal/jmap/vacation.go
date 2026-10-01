@@ -51,6 +51,14 @@ const (
 // when another one changed the setting under it.
 const vacationRetries = 5
 
+// retriesFor is how often a write that lost a race starts over: at
+// least base, and enough for every request the account may have in
+// flight to win once before it, so that no request fails merely
+// because the account used its full concurrency.
+func retriesFor(sess *session, base int) int {
+	return max(base, sess.limits.MaxConcurrentRequests+1)
+}
+
 // The properties of a VacationResponse.
 const (
 	propIsEnabled = "isEnabled"
@@ -204,7 +212,7 @@ func vacationSet(_ context.Context, sess *session, args json.RawMessage) (any, *
 		return nil, &methodError{Type: errRequestTooLarge, Description: descTooManyObjects}
 	}
 
-	for range vacationRetries {
+	for range retriesFor(sess, vacationRetries) {
 		out, lost, merr := vacationSetOnce(sess, &req)
 
 		switch {

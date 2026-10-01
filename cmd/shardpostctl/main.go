@@ -10,6 +10,7 @@
 //	shardpostctl [connection flags] plan <kind> <account> | apply <plan> | check <account> | job list|show|wait|cancel
 //	shardpostctl [connection flags] messages | search | message show|export | flags | copy | move | sieve ... | learning ...
 //	shardpostctl [connection flags] export -o file.tar <account> | archive verify <file> | restore [-account A] <file>
+//	shardpostctl [connection flags] auth flush [<account>]
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -94,7 +95,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ...")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ... | auth flush [<account>]")
 		return exUsage
 	}
 
@@ -104,25 +105,34 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exUsage
 	}
 
-	switch fs.Arg(0) {
+	return dispatch(client, fs.Args(), c.timeout, stdin, stdout, stderr)
+}
+
+// dispatch runs the command args[0] with its arguments.
+func dispatch(client *adminapi.ClientWithResponses, args []string, timeout time.Duration, stdin io.Reader, stdout, stderr io.Writer) int {
+	cmd, rest := args[0], args[1:]
+
+	switch cmd {
 	case cmdVersion:
 		return version(client, stdout, stderr)
 	case "deliver":
-		return deliver(client, fs.Args()[1:], stdin, stdout, stderr)
+		return deliver(client, rest, stdin, stdout, stderr)
 	case "migrate":
-		return migrateCmd(client, fs.Args()[1:], stdout, stderr)
+		return migrateCmd(client, rest, stdout, stderr)
 	case cmdTrace:
-		return traceCmd(client, fs.Args()[1:], stdout, stderr)
+		return traceCmd(client, rest, stdout, stderr)
 	case cmdServer, cmdAccount, labelMailbox, "acl", cmdQuota, "shared":
-		return diagCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
+		return diagCmd(client, cmd, rest, stdout, stderr)
 	case cmdPlan, cmdApply, cmdCheck, cmdJob:
-		return jobsCmd(client, fs.Arg(0), fs.Args()[1:], stdout, stderr)
+		return jobsCmd(client, cmd, rest, stdout, stderr)
 	case cmdMessages, cmdSearch, cmdMessage, cmdFlags, cmdCopy, cmdMove, cmdSieve, cmdLearning:
-		return supportCmd(client, fs.Arg(0), fs.Args()[1:], stdin, stdout, stderr)
+		return supportCmd(client, cmd, rest, stdin, stdout, stderr)
 	case cmdExport, cmdArchive, cmdRestore:
-		return archiveCmd(client, fs.Arg(0), fs.Args()[1:], c.timeout, stdout, stderr)
+		return archiveCmd(client, cmd, rest, timeout, stdout, stderr)
+	case cmdAuth:
+		return authCmd(client, rest, stdout, stderr)
 	default:
-		sayln(stderr, "shardpostctl: unknown command", fs.Arg(0))
+		sayln(stderr, "shardpostctl: unknown command", cmd)
 		return exUsage
 	}
 }

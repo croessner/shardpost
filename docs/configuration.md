@@ -37,7 +37,7 @@ is kept as a fallback as long as `SHARDPOST_CONFIG` is not set. An
 explicit `--config` takes precedence over both variables. An explicitly
 empty `SHARDPOST_CONFIG` disables the old fallback. Precedence: built-in defaults, explicit YAML file, explicitly set legacy env variables. There is no implicit file lookup and no automatic reload. Changes in Kubernetes are applied through a controlled deployment rollout. Go runtime settings such as `GOMEMLIMIT` remain environment variables; additional standardized OTEL SDK options are still evaluated by the SDK.
 
-The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin`, `fts`, `limits` (see [account limits](#account-limits-limits)) and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go`, `internal/config/fts.go`, `internal/config/limits.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
+The sections are `server`, `ceph`, `rook`, `tls`, `nauthilus`, `auth` (see [auth cache](#auth-cache-auth)), `smtp`, `sieve`, `scrub`, `logging`, `telemetry`, `imapsieve`, `extprograms`, `quota`, `admin`, `fts`, `limits` (see [account limits](#account-limits-limits)) and `jmap` (see [JMAP](jmap.md); without `jmap.addr` that front-end is not started). The complete field and env mapping is documented in `internal/config/config.go`, `internal/config/imapsieve.go`, `internal/config/extprograms.go`, `internal/config/quota.go`, `internal/config/admin.go`, `internal/config/fts.go`, `internal/config/limits.go`, `internal/config/auth.go` and `internal/config/jmap.go` (including `jmap.push`); `extprograms`, the learning rules, the quota rules and warnings as well as the admin roles and clients are configurable via YAML only (see `docs/imapsieve.md`, `docs/quota.md` and `docs/admin-api.md`).
 
 ```yaml
 server:
@@ -644,3 +644,93 @@ A `SearchSnippet/get` reads at most
 times `jmap.search.snippet_read_bytes`. See [JMAP: Search snippets](jmap.md#search-snippets)
 and [JMAP: hasAttachment](jmap.md#hasattachment). The other `jmap.*` keys
 are described in [JMAP: Configuration](jmap.md#configuration).
+
+### JMAP load (`jmap.*`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `jmap.max_concurrent_requests` | `JMAP_MAX_CONCURRENT_REQUESTS` | 8 | API requests one account runs at once in one server; advertised as `maxConcurrentRequests` |
+| `jmap.max_concurrent_upload` | `JMAP_MAX_CONCURRENT_UPLOAD` | 4 | uploads at once, `Blob/upload` included; advertised as `maxConcurrentUpload` |
+| `jmap.max_concurrent_downloads` | `JMAP_MAX_CONCURRENT_DOWNLOADS` | 8 | blob downloads at once |
+| `jmap.max_event_sources` | `JMAP_MAX_EVENT_SOURCES` | 4 | open event sources |
+| `jmap.limit_wait` | `JMAP_LIMIT_WAIT` | 2 | seconds a request queues for a slot at a full limit (0–10; 0 answers 429 at once); event sources never wait |
+| `jmap.retry_after` | `JMAP_RETRY_AFTER` | 1 | `Retry-After` in seconds of a 429 and of a 503 from an undecided authentication (1–3600) |
+| `jmap.max_concurrent_per_ip` | `JMAP_MAX_CONCURRENT_PER_IP` | 0 | requests one client address has in flight, checked before authentication; 0 is off |
+
+For the four limits `0` takes the default. A queue holds at most twice
+its limit; a request past it is answered 429 at once. `jmap.limit_wait`
+stays well below the response timeouts in front (the Director's
+`backend_response_header`, two minutes by default, and HAProxy's
+`timeout server`). With `jmap.max_concurrent_per_ip` set and
+`server.proxy_protocol_trusted_cidrs` empty the server warns at startup:
+behind a proxy every client then has the proxy's address. See
+[JMAP: Load](jmap.md#load).
+
+### Nauthilus client (`nauthilus.timeout`, `nauthilus.http_max_idle_per_host`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `nauthilus.timeout` | `NAUTHILUS_TIMEOUT` | 10 | seconds one request may take: gRPC and HTTP calls to Nauthilus, the token introspection and the OIDC token endpoint (1–300) |
+| `nauthilus.http_max_idle_per_host` | `NAUTHILUS_HTTP_MAX_IDLE_PER_HOST` | 32 | idle connections per host the one HTTP client keeps that the JSON API, the introspection and the token endpoint share (1–1024) |
+| `nauthilus.max_wait` | `NAUTHILUS_MAX_WAIT` | 5 | the longest `Auth-Wait` (seconds) honoured after a refusal over HTTP |
+
+A backchannel token Nauthilus refuses is renewed and the request sent
+once more, but only when the time left of the login allows a second
+attempt as long as the first. A login as a whole is bounded to 15 s in
+IMAP, POP3 and ManageSieve.
+
+### Auth cache (`auth`)
+
+The cache sits in front of Nauthilus only (`server.auth_backend:
+nauthilus`; the static test backend is never cached) and behind the
+master-user check: `MasterUser{Cache{Nauthilus}}`. The master password is
+never cached, the lookup of the master-user login's target is.
+
+```yaml
+auth:
+  cache:
+    ttl: 30                  # seconds; 0 switches the whole cache off
+    negative_ttl: 0          # refusals of identical credentials; 0 = not cached
+    max_entries: 10000       # per operation (logins, lookups)
+    key_client_ip: true      # the client IP is part of a login's key
+    lookup_ttl: 30
+    lookup_negative_ttl: 5   # at most lookup_ttl
+    leader_budget: 0         # seconds for one shared backend call; 0 = 2 × nauthilus.timeout
+```
+
+| Key | Env | Default | Range | Meaning |
+| --- | --- | --- | --- | --- |
+| `auth.cache.ttl` | `AUTH_CACHE_TTL` | 30 | 0–600 | how long a successful login is answered from memory, from when it was stored; a bearer token introspected with an `exp` ends there when that comes first. `0` switches off the cache altogether, logins and lookups — the emergency switch |
+| `auth.cache.negative_ttl` | `AUTH_CACHE_NEGATIVE_TTL` | 0 | 0–10 | how long a refused login is answered from memory, for exactly the same credentials, protocol, TLS state and address; it stops a client that loops with a stale password. A temporary failure is never cached |
+| `auth.cache.max_entries` | `AUTH_CACHE_MAX_ENTRIES` | 10000 | > 0 | entries of logins and of lookups, each; the least recently used go first |
+| `auth.cache.key_client_ip` | `AUTH_CACHE_KEY_CLIENT_IP` | true | | the client's IP address is part of a login's key, so that address rules in Nauthilus see every address. Off, one entry serves an account from every address |
+| `auth.cache.lookup_ttl` | `AUTH_CACHE_LOOKUP_TTL` | 30 | 0–600 | how long a lookup that found an account (LMTP recipient, master-user target, JMAP identity, admin API, push worker) is answered from memory; `0` caches no lookup |
+| `auth.cache.lookup_negative_ttl` | `AUTH_CACHE_LOOKUP_NEGATIVE_TTL` | 5 | 0–`lookup_ttl` | how long a lookup that found no account is answered from memory; keep it at or below the Nauthilus LDAP negative cache (20 s) |
+| `auth.cache.leader_budget` | `AUTH_CACHE_LEADER_BUDGET` | 0 | 0–600 | seconds one backend call made for every waiting caller may take in all (a bearer login is up to three requests: introspection, identity lookup, user name check); `0` takes twice `nauthilus.timeout` |
+
+What a login's entry is found by: an HMAC-SHA256, under a random key
+that lives in the process only, over the mechanism, the user name, the
+secret (password or token), the protocol, the TLS state and, with
+`key_client_ip`, the client's address. The login attempt ordinal is not
+part of it. Results are copied on the way in and out. A lookup's entry is
+found by the normalised name (without angle brackets, the domain in
+lower case) and the protocol: Nauthilus picks its search per protocol,
+and the `jmap` search returns more attributes.
+
+Identical requests that arrive together share one backend call: the
+first starts it on a context of its own, bounded by `leader_budget`
+and carrying its trace span, and every caller, the first included, stops
+waiting when its own context ends; the call goes on and its answer is
+stored for the next. An `Auth-Wait` Nauthilus asks for over HTTP is
+waited out once, by that call, and every caller waits with it. An answer
+that a flush overtook while it was on its way is not stored.
+
+Lookups of the admin API (diagnosis, imports, deliveries) go past a
+cached "unknown" and store a found account, so an account created a
+moment ago is seen at once.
+
+Entries are flushed with `shardpostctl auth flush [<account>]` on every
+server (see [Operations: Auth cache](operations/README.md#auth-cache),
+with what each change in LDAP costs until it takes effect) and by a
+restart. The metrics are `imapceph_auth_cache_*` and
+`imapceph_auth_backend_seconds` ([Observability](observability.md)).

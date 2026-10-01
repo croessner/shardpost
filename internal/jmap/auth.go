@@ -113,6 +113,12 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 			return
 		}
 
+		release, ok := s.addressSlot(w, r)
+		if !ok {
+			return
+		}
+		defer release()
+
 		req, ok := credentials(r)
 		if !ok {
 			unauthorized(w)
@@ -127,20 +133,7 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 			return
 		}
 
-		if ok, shard := s.o.Shard.serves(res); !ok {
-			if shard == nil {
-				// Once per process: a misspelt attribute would otherwise
-				// log on every request of every account.
-				s.noShardAttr.Do(func() {
-					s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
-						"account", res.Account, "attribute", s.o.Shard.Attribute)
-				})
-			} else {
-				s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", shard)
-			}
-
-			writeProblem(w, http.StatusForbidden, errURNNotRequest, "this account is not served here", "")
-
+		if !s.servedHere(w, res) {
 			return
 		}
 
@@ -168,12 +161,49 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 	}
 }
 
+// servedHere checks the shard gate; an account that lives elsewhere is
+// answered 403.
+func (s *Server) servedHere(w http.ResponseWriter, res *auth.Result) bool {
+	ok, shard := s.o.Shard.serves(res)
+	if ok {
+		return true
+	}
+
+	if shard == nil {
+		// Once per process: a misspelt attribute would otherwise log on
+		// every request of every account.
+		s.noShardAttr.Do(func() {
+			s.o.Log.Warn("jmap: authentication result has no shard attribute; check jmap.shard_attribute",
+				"account", res.Account, "attribute", s.o.Shard.Attribute)
+		})
+	} else {
+		s.o.Log.Info("jmap: account lives on another shard", "account", res.Account, "shard", shard)
+	}
+
+	writeProblem(w, http.StatusForbidden, errURNNotRequest, "this account is not served here", "")
+
+	return false
+}
+
+// addressSlot takes a slot of the bound per client address
+// (jmap.max_concurrent_per_ip) before the authentication, so that a
+// flood of requests does not reach the backend at all. Without the
+// bound it always succeeds.
+func (s *Server) addressSlot(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	if s.perIP == nil {
+		return func() {}, true
+	}
+
+	return s.slot(w, r, s.perIP, clientIP(r), false, "too many requests in flight from this address", "maxConcurrentRequests")
+}
+
 // authFailed answers a rejected or undecidable authentication. A backend
 // that cannot decide right now is a 503, not a 401: telling the client
 // its password is wrong would make it ask the user for a new one.
 func (s *Server) authFailed(w http.ResponseWriter, r *http.Request, user string, err error) {
 	if errors.Is(err, auth.ErrTemporary) {
 		s.o.Log.Warn("jmap: authentication backend unavailable", "err", err)
+		s.retryAfter(w)
 		writeProblem(w, http.StatusServiceUnavailable, errURNNotRequest, "authentication unavailable", "")
 
 		return
