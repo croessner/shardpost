@@ -219,7 +219,6 @@ with no records they complete at once and set the completion markers,
 so `read` mode is reached (without them the servers stay on `write`
 behaviour and log the warning at every start).
 
-
 **Expiry.** With `write` or `read`, one server (the holder of the lock
 `ix.jobs/expiry/lock`) deletes jobs and their idempotency keys
 `jobs.retention_days` after they ended, and plans that long after they

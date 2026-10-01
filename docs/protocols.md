@@ -3,7 +3,7 @@
 This document lists, protocol by protocol, what ShardPost implements:
 the standards it follows, the extensions it advertises, the commands
 and methods it answers, and where it deliberately or knowingly deviates.
-It describes **ShardPost 0.38.0** as of 2026-10-01 and was written from
+It describes **ShardPost 0.39.0** as of 2026-10-01 and was written from
 the code, not from earlier documentation.
 
 How to read the tables:
@@ -749,7 +749,7 @@ one off). What each protocol answers when a change would exceed one:
 |---|---|---|---|---|
 | `limits.mailboxes` (10000) | `CREATE`: `NO [LIMIT]` | `Mailbox/set` create: `overQuota` | 409 `limit_exceeded` | A Sieve `fileinto` that would create the mailbox goes to INBOX. INBOX is never refused. |
 | `limits.mailbox_names` (50000) | `CREATE` under a name never used: `NO [LIMIT]` | `overQuota` | 409 `limit_exceeded` | as above |
-| `limits.keywords_per_mailbox` (1000) | `STORE`, `APPEND`, `COPY`, `MOVE`: `NO [LIMIT]` | `Email/set` (create, update), `Email/import`: `tooManyKeywords` (RFC 8621 §4.6, §4.8) | 409 `limit_exceeded` | The keywords are dropped, the message is stored. |
+| `limits.keywords_per_mailbox` (1000) | `STORE`, `APPEND`, `COPY`, `MOVE`: `NO [LIMIT]` | `Email/set` (create, update), `Email/import`, `Email/copy`: `tooManyKeywords` (RFC 8621 §4.6, §4.8) | 409 `limit_exceeded` | The keywords are dropped, the message is stored. |
 | `limits.metadata_entries` (1000) | `SETMETADATA`: `NO [METADATA TOOMANY]` | — (server-managed entries are never refused) | 409 `limit_exceeded` (metadata import) | — |
 | `limits.shared_pointers` (10000) | `SETACL` granting a new grantee: `NO [LIMIT]` | `Mailbox/set` `shareWith`: `overQuota` | 409 `limit_exceeded` | — |
 

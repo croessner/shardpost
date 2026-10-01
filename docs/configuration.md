@@ -429,7 +429,6 @@ looks for it every 30 seconds), so the gate keeps such a cluster on
 once as well (it finds no records and completes at once). Set the same
 mode on every server (a server in `read` mode does not see what a server
 in `off` mode writes). Back to `write` is always possible. See
-
 [Storage: admin store](architecture/storage.md#admin-store-hint-indexes-and-due-queues)
 and [Operations](operations/README.md#admin-store-backfill).
 
