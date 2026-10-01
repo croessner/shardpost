@@ -352,7 +352,13 @@ only the repairs that were planned and are still needed.
   exit with 0 (success), 1 (partial failure) or 69 (failed, cancelled).
 - **Idempotence:** `apply -idempotency-key K`, or the header
   `Idempotency-Key`, returns the same job on a retry (200). With a
-  different request the key is rejected (409). Keys are per caller.
+  different request the key is rejected (409). Keys are per caller. A
+  key expires together with its job, `jobs.retention_days` after the
+  job ended; after that the same key starts a new job. Earlier versions
+  kept keys forever; keys from before the update expire once
+  `shardpost index backfill kv` ran (see
+  [Operations](operations/README.md#admin-store-backfill)). With
+  `admin.kv_index: off` keys do not expire.
 - **Scope:** plans that change other accounts (share reconcile, purge)
   need those accounts in the client's scope, both when the plan is created
   and again at `apply`. Clients with a scope see jobs only when an account
@@ -382,7 +388,11 @@ only the repairs that were planned and are still needed.
   second purge included: such a job fails at once with "the account was
   left purging by an ended purge job; run shardpostctl account repair".
   Run `shardpostctl account repair` first (below), then plan again.
-- Finished jobs and plans stay retrievable for `jobs.retention_days`.
+- Finished jobs and plans stay retrievable for `jobs.retention_days`
+  (a job from its end, a plan from its expiry), together with the
+  idempotency key of a job. With `admin.kv_index: read` a new job is
+  picked up at once by a server with free capacity (the runners are
+  woken); otherwise, and as the fallback, within `jobs.poll_seconds`.
 
 ### The account directory
 

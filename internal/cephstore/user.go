@@ -3133,11 +3133,12 @@ func (u *User) lockNamed(id, lockName string, ttl time.Duration) (model.Lease, e
 		return nil, err
 	}
 
-	l := &lease{stop: make(chan struct{})}
+	l := &lease{stop: make(chan struct{}), done: make(chan struct{})}
 
 	u.inflight.Add(1)
 	go func() {
 		defer u.inflight.Done()
+		defer close(l.done)
 
 		renew := byte(1) // LIBRADOS_LOCK_FLAG_MAY_RENEW
 
@@ -3165,16 +3166,26 @@ func (u *User) lockNamed(id, lockName string, ttl time.Duration) (model.Lease, e
 }
 
 type lease struct {
-	stop   chan struct{}
+	stop chan struct{}
+	// done is closed when the renewal goroutine ended (nil: none).
+	done   chan struct{}
 	once   sync.Once
 	lost   atomic.Bool
 	unlock func()
 }
 
 func (l *lease) Lost() bool { return l.lost.Load() }
+
+// Release stops the renewal, waits until a renewal in flight is over (it
+// would otherwise take the lock again after the unlock) and unlocks.
 func (l *lease) Release() {
 	l.once.Do(func() {
 		close(l.stop)
+
+		if l.done != nil {
+			<-l.done
+		}
+
 		l.unlock()
 	})
 }

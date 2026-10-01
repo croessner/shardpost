@@ -109,6 +109,14 @@ const (
 	// ("shardpost index backfill accounts [--restart]").
 	commandBackfillAccounts = "index backfill accounts"
 	commandBackfillRestart  = "index backfill accounts --restart"
+	// commandBackfillKV fills the admin store's hint indexes and due
+	// queues ("shardpost index backfill kv [--restart]").
+	commandBackfillKV        = "index backfill kv"
+	commandBackfillKVRestart = "index backfill kv --restart"
+	// commandShowKV prints the state of the admin store indexes and
+	// queues ("shardpost index show kv [<key>...]", read-only); the keys
+	// follow in the command, separated by spaces.
+	commandShowKV = "index show kv"
 )
 
 // capabilityEnabled is the ManageSieve capability value for enabled features.
@@ -168,8 +176,8 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		return scrub(store, log, settings)
 	}
 
-	if command == commandBackfillAccounts || command == commandBackfillRestart {
-		return backfillAccounts(store, log, command == commandBackfillRestart)
+	if backfill, ok := backfillCommand(command); ok {
+		return backfill(store, log, settings)
 	}
 
 	// "shardpost push" runs the JMAP push worker.
@@ -196,6 +204,8 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		ShardSize:   uint32(settings.Server.MboxShardSize),
 
 		AccountLogRetention: int(settings.Server.AccountLogRetention),
+		KVIndex:             model.KVIndexMode(settings.Admin.KVIndex),
+		KVQueueShards:       settings.Admin.KVQueueShards,
 	}
 }
 

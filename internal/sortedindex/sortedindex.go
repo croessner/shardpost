@@ -410,3 +410,7 @@ func ForgetHeads() {
 
 	clear(headCache)
 }
+
+// LockOID names the object that carries the cls_lock of an index's
+// maintenance or worker (it holds no entries).
+func LockOID(name string) string { return "ix." + name + "/lock" }

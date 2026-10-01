@@ -78,7 +78,7 @@ func submitPurge(t *testing.T, m *Manager, account string) *Job {
 func purgeAndDie(t *testing.T, m *Manager, store *memstore.Store, j *Job, phase int) {
 	t.Helper()
 
-	claimed, gen, err := m.claim(j.ID)
+	claimed, gen, err := m.claim(j.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

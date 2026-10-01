@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
+
 	"shardpost/internal/config"
 )
 
@@ -51,16 +53,41 @@ func loadConfig(args []string) (*config.Config, string, error) {
 	return c, command, err
 }
 
-// indexCommand parses what follows "index": "backfill accounts" and an
-// optional "--restart". It returns the number of arguments it used.
+// showCommand builds "index show kv" with the keys that follow it.
+func showCommand(keys []string) (int, string, error) {
+	for _, k := range keys {
+		if k == "" || strings.ContainsAny(k, " \t") || strings.HasPrefix(k, "-") {
+			return 0, "", fmt.Errorf("invalid admin store key %q", k)
+		}
+	}
+
+	return 2 + len(keys), strings.Join(append([]string{commandShowKV}, keys...), " "), nil
+}
+
+// indexCommand parses what follows "index": "backfill accounts" or
+// "backfill kv" and an optional "--restart", or "show kv" and the admin
+// store keys to show (the rest of the line; they become part of the
+// command, separated by spaces). It returns the number of arguments it
+// used.
 func indexCommand(args []string) (int, string, error) {
-	if len(args) < 2 || args[0] != "backfill" || args[1] != "accounts" {
-		return 0, "", fmt.Errorf("expected index backfill accounts")
+	const accounts, kv = "accounts", "kv"
+
+	if len(args) >= 2 && args[0] == "show" && args[1] == kv {
+		return showCommand(args[2:])
+	}
+
+	if len(args) < 2 || args[0] != "backfill" || (args[1] != accounts && args[1] != kv) {
+		return 0, "", fmt.Errorf("expected index backfill accounts, index backfill kv or index show kv")
+	}
+
+	plain, restart := commandBackfillAccounts, commandBackfillRestart
+	if args[1] == kv {
+		plain, restart = commandBackfillKV, commandBackfillKVRestart
 	}
 
 	if len(args) > 2 && args[2] == "--restart" {
-		return 3, commandBackfillRestart, nil
+		return 3, restart, nil
 	}
 
-	return 2, commandBackfillAccounts, nil
+	return 2, plain, nil
 }

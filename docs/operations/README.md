@@ -152,6 +152,74 @@ checks that the entry is gone, runs the backfill and prints its marker.
 **Rollback** is safe: older servers ignore `~accounts`, and an older
 purge does not set `purging`.
 
+## Admin store backfill
+
+Servers with `admin.kv_index` `write` (the default) or `read` keep hint
+indexes and due queues next to the admin records (jobs, plans,
+idempotency keys, JMAP push subscriptions; see
+[storage](../architecture/storage.md#admin-store-hint-indexes-and-due-queues)).
+Records that older servers wrote are not in them. After the rollout of
+the version that writes them, once no older server is left, run the
+backfill:
+
+```sh
+shardpost index backfill kv             # same image and configuration as the server
+shardpost index backfill kv --restart   # ignore the position of an interrupted run
+```
+
+It takes the cls_lock `backfill` on `ix.kv/lock` in `~admin` (a second
+run at the same time fails with "another admin store backfill is
+running"), lists the admin namespace once (it shows as
+`admin_kv_backfill` in `imapceph_rados_listings_total`) and, for every
+record, writes its hint index entry from the record as it is and the
+queue entries the record needs: a job its claimable position (unless it
+ended) and its expiry, an idempotency key the expiry of its job (ten
+minutes from now when the job was never stored), a plan its expiry.
+Every write sets what the record implies, so it may be repeated. Every
+500 records it records its position in the head of `ix.job`
+(`mark:backfill.kv.progress`); an interrupted run continues from there
+and keeps the original start time, unless `--restart` is given. At the
+end it records `mark:backfill.kv` with the start and end times and the
+counts (records handled by this run, indexed, queued). It refuses to
+run with `admin.kv_index: off`. Its lock lives three minutes and is
+renewed every minute, so a renewal that waits out the OSD op timeout
+still lands in time (the account backfill's lock likewise).
+
+`shardpost index show kv [<key>...]` (read-only, same image and
+configuration; `--config` goes before `index`) prints as JSON the index
+mode, the backfill marker, the number of entries of both queues (all
+and due now) and, for each admin store key given (`job/<id>`,
+`plan/<id>`, `idem/<hash>`, `jmap/push/acct/<account>`), whether the
+record exists, its hint index entry and its queue entries; a job brings
+the idempotency key its record names along. It reads every queue entry:
+a diagnosis tool, not a routine.
+
+`hack/kvqueue-smoke.sh <throwaway-account>` checks this on a cluster
+after a rollout: it runs the backfill, shows the marker, runs a
+read-only `shardpostctl check` with an idempotency key twice (one job),
+verifies that the ended job has no claimable entry and that it and its
+idempotency key have their expiry entries at `Finished + retention`,
+and prints the queue metrics.
+
+**When `read` may be switched on.** Only after a backfill completed
+whose start lies after the last server without the indexes (an older
+version, or one with `admin.kv_index: off`) stopped; if in doubt, run it
+again with `--restart` first. Then set `admin.kv_index: read` on every
+server. A server in `read` mode that finds no completion marker warns
+at start ("admin.kv_index=read without a completed …"). Going back to
+`write` is always possible.
+
+**Expiry.** With `write` or `read`, one server (the holder of the lock
+`ix.jobs/expiry/lock`) deletes jobs and their idempotency keys
+`jobs.retention_days` after they ended, and plans that long after they
+expired, every `jobs.expiry_seconds`. The listing cleanup of earlier
+versions keeps running beside it in this version. Idempotency keys used
+to stay forever; records from before the backfill expire once it ran.
+
+**Rollback** is safe: older servers ignore the `ix.*` objects and keep
+reading by listing; the records are unchanged. Queue entries of jobs an
+older server ended are removed by the readers of this version later.
+
 ## Scrub, backup and observability
 
 Scrub can change data. For an investigation, first define a dry run and the
@@ -350,7 +418,14 @@ WantedBy=timers.target
 ### Key rotation
 
 The in-process rotation (`server.key_poll_seconds`) is tied to the Rook
-watcher and does not run with a static key. Changing the key of the
+watcher and does not run with a static key. With Rook, a rotated key
+needs no restart: new sessions use the new connection, and the
+long-lived views (the admin store of the job runner, of JMAP and of the
+push worker) are moved to it; requests that run finish on the old one,
+and the expiry worker's lock is released and taken again; the rotation
+waits for a lock renewal in flight, up to the OSD op timeout (60 s) per
+held lock (see
+[storage](../architecture/storage.md#admin-store-hint-indexes-and-due-queues)). Changing the key of the
 existing identity in place invalidates it for every node at once. The
 interruption-free way is a second identity with the same capabilities:
 create `client.shardpost2`, switch the nodes one by one (`ceph.user` and

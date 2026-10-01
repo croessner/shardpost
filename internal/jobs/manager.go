@@ -59,10 +59,14 @@ type Config struct {
 	// the account before notice it (sessions re-check every
 	// model.LockCheckInterval).
 	Settle time.Duration
+	// ExpiryPoll is how often the expiry worker deletes what is due and
+	// a server without the worker lease tries to take it.
+	ExpiryPoll time.Duration
 }
 
 func (c Config) withDefaults() Config {
 	c.Poll = cmpDur(c.Poll, 5*time.Second)
+	c.ExpiryPoll = cmpDur(c.ExpiryPoll, time.Minute)
 	c.LeaseTTL = cmpDur(c.LeaseTTL, time.Minute)
 	c.Retention = cmpDur(c.Retention, 14*24*time.Hour)
 	c.PlanTTL = cmpDur(c.PlanTTL, time.Hour)
@@ -90,12 +94,17 @@ type Manager struct {
 	cfg      Config
 	instance string
 	now      func() time.Time
+	// q are the due queues (nil: the admin store has none or its index
+	// mode is off).
+	q *queues
 }
 
 // NewManager builds the job system; instance names this server in
-// leases.
+// leases. An admin store with indexes (model.IndexedKV) gets the due
+// queues written in its mode.
 func NewManager(kv model.AdminKV, env *Env, cfg Config, instance string, kinds ...Kind) *Manager {
-	m := &Manager{st: store{kv}, env: env, kinds: map[string]Kind{}, cfg: cfg.withDefaults(), instance: instance, now: time.Now}
+	m := &Manager{st: store{kv}, env: env, kinds: map[string]Kind{}, cfg: cfg.withDefaults(), instance: instance, now: time.Now,
+		q: newQueues(kv)}
 	for _, k := range kinds {
 		m.kinds[k.Name()] = k
 	}
@@ -167,11 +176,32 @@ func (m *Manager) CreatePlan(ctx context.Context, kind Kind, account string, par
 	p := &Plan{ID: newID(now), Kind: kind.Name(), Account: account, Params: params, Summary: b, Fingerprint: fp, Touched: touched,
 		Principal: principal, Created: now, Expires: now.Add(m.cfg.PlanTTL)}
 
-	if err := m.st.create(prefixPlan+p.ID, p); err != nil {
+	if err := m.storePlan(p); err != nil {
 		return nil, err
 	}
 
 	return p, nil
+}
+
+// storePlan stores a new plan: its expiry entry before the record
+// (completeness), removed again when the record could not be stored.
+func (m *Manager) storePlan(p *Plan) error {
+	if m.q == nil {
+		return m.st.create(prefixPlan+p.ID, p)
+	}
+
+	expiry := planExpiryKey(p, m.cfg.Retention)
+
+	if err := m.q.expiry.Move(prefixPlan+p.ID, nil, &expiry); err != nil {
+		return fmt.Errorf("expiry queue: %w", err)
+	}
+
+	if err := m.st.create(prefixPlan+p.ID, p); err != nil {
+		_ = m.q.expiry.Move(prefixPlan+p.ID, []model.DueKey{expiry}, nil)
+		return err
+	}
+
+	return nil
 }
 
 // GetPlan returns a plan.
@@ -194,15 +224,8 @@ func (m *Manager) Submit(kind Kind, account string, params json.RawMessage, plan
 		Principal: principal, Created: now}
 
 	if idemKey != "" {
-		hash := requestHash(kind.Name(), account, params, planID)
-
-		if err := m.st.create(idemKeyOf(principal, idemKey), idempotency{JobID: j.ID, RequestHash: hash}); err != nil {
-			existing, gerr := m.byIdempotency(principal, idemKey, hash)
-			if gerr != nil || existing != nil {
-				return existing, false, gerr
-			}
-
-			return nil, false, err
+		if existing, err := m.claimIdem(j, principal, idemKey); existing != nil || err != nil {
+			return existing, false, err
 		}
 	}
 
@@ -210,7 +233,7 @@ func (m *Manager) Submit(kind Kind, account string, params json.RawMessage, plan
 		m.unclaimPlan(planID, j.ID)
 
 		if idemKey != "" {
-			_ = m.st.kv.Update(idemKeyOf(principal, idemKey), func([]byte) ([]byte, error) { return nil, nil })
+			_ = m.st.kv.Update(j.IdemKey, func([]byte) ([]byte, error) { return nil, nil })
 		}
 
 		return nil, false, err
@@ -219,7 +242,50 @@ func (m *Manager) Submit(kind Kind, account string, params json.RawMessage, plan
 	return j, true, nil
 }
 
-// queue claims the plan (if any) and stores the job.
+// claimIdem claims the idempotency key for j; when the key exists it
+// returns the job of an identical earlier request (or ErrIdempotency).
+func (m *Manager) claimIdem(j *Job, principal, idemKey string) (*Job, error) {
+	hash := requestHash(j.Kind, j.Account, j.Params, j.PlanID)
+	j.IdemKey = idemKeyOf(principal, idemKey)
+
+	// A retry of an existing key writes nothing (a key that vanished in
+	// between is claimed anew below).
+	switch _, err := m.st.kv.Get(j.IdemKey); {
+	case err == nil:
+		if existing, gerr := m.byIdempotency(principal, idemKey, hash); gerr != nil || existing != nil {
+			return existing, gerr
+		}
+	case !errors.Is(err, model.ErrNotFound):
+		return nil, err
+	}
+
+	// The key expires with its job; its placeholder comes before the
+	// record, so a crash before the job is stored cannot block the key
+	// for good.
+	if m.q != nil {
+		if err := m.q.expiry.Move(j.IdemKey, nil, new(expiryKey(j, m.cfg.Retention))); err != nil {
+			return nil, fmt.Errorf("expiry queue: %w", err)
+		}
+	}
+
+	err := m.st.create(j.IdemKey, idempotency{JobID: j.ID, RequestHash: hash})
+	if err == nil {
+		return nil, nil
+	}
+
+	// A concurrent submit created the key meanwhile; the placeholder
+	// left behind is cleaned by the expiry worker.
+	existing, gerr := m.byIdempotency(principal, idemKey, hash)
+	if gerr != nil || existing != nil {
+		return existing, gerr
+	}
+
+	return nil, err
+}
+
+// queue claims the plan (if any) and stores the job: its queue entries
+// first (claimable at its creation time, the expiry placeholder), then
+// the record; the runners are woken.
 func (m *Manager) queue(j *Job, planID string) error {
 	if planID != "" {
 		if err := m.claimPlan(planID, j); err != nil {
@@ -227,7 +293,31 @@ func (m *Manager) queue(j *Job, planID string) error {
 		}
 	}
 
-	return m.st.create(prefixJob+j.ID, j)
+	if m.q == nil {
+		return m.st.create(prefixJob+j.ID, j)
+	}
+
+	claim, _ := claimKey(j)
+	expiry := expiryKey(j, m.cfg.Retention)
+
+	if err := m.q.expiry.Move(prefixJob+j.ID, nil, &expiry); err != nil {
+		return fmt.Errorf("expiry queue: %w", err)
+	}
+
+	if err := m.q.claimable.Move(j.ID, nil, &claim); err != nil {
+		return fmt.Errorf("claimable queue: %w", err)
+	}
+
+	if err := m.st.create(prefixJob+j.ID, j); err != nil {
+		_ = m.q.claimable.Move(j.ID, []model.DueKey{claim}, nil)
+		_ = m.q.expiry.Move(prefixJob+j.ID, []model.DueKey{expiry}, nil)
+
+		return err
+	}
+
+	m.q.claimable.Notify()
+
+	return nil
 }
 
 // unclaimPlan frees a plan claimed by a job that could not be stored.
@@ -329,6 +419,10 @@ func (m *Manager) Get(id string) (*Job, error) { return m.st.getJob(id) }
 // empty on the last page. One match beyond limit is looked up, so an
 // exactly full last page has no next.
 func (m *Manager) List(account, state, after string, limit int) (out []Job, next string, err error) {
+	if m.q.reads() {
+		return m.listIndexed(account, state, after, limit)
+	}
+
 	for len(out) <= limit {
 		page, err := m.st.listJobs(after, limit)
 		if err != nil {
@@ -358,7 +452,7 @@ func (m *Manager) List(account, state, after string, limit int) (out []Job, next
 // Cancel asks a job to stop: a queued job is cancelled at once, a
 // running one stops at its next safe point.
 func (m *Manager) Cancel(id string) (*Job, error) {
-	return m.st.updateJob(id, func(j *Job) error {
+	return m.updateJob(id, nil, func(j *Job) error {
 		switch j.State {
 		case StateQueued:
 			j.State, j.Finished = StateCancelled, m.now()

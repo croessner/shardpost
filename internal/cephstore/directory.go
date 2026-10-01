@@ -22,22 +22,40 @@ import (
 // hook in casOmapOpAs), so the directory costs one read and one write
 // per account lifetime.
 
-// radosOmap is the sortedindex.Backend of one namespace. Its context is
-// private (opened for the index), so the version a read reports is the
-// one of that read.
+// radosOmap is the sortedindex.Backend of one namespace. Without keysVer
+// its context is private (opened for the index), so the version a read
+// reports is the one of that read; a shared context (the admin store's)
+// reads versions through keysVer, which takes a private context of the
+// pool (verpool.go).
 type radosOmap struct {
-	ioctx *rados.IOContext
-	key   string
+	ioctx   *rados.IOContext
+	key     string
+	keysVer func(oid string, keys []string) (map[string][]byte, uint64, error)
 }
 
-var _ sortedindex.Backend = (*radosOmap)(nil)
+var (
+	_ sortedindex.Backend = (*radosOmap)(nil)
+)
 
 // CacheKey implements sortedindex.Backend.
 func (b *radosOmap) CacheKey() string { return b.key }
 
 // ReadKeys implements sortedindex.Backend.
 func (b *radosOmap) ReadKeys(oid string, keys []string) (map[string][]byte, uint64, error) {
+	if b.keysVer != nil {
+		return b.keysVer(oid, keys)
+	}
+
 	return getOmapKeysVer(b.ioctx, oid, keys)
+}
+
+// indexKey identifies namespace ns of the index pool in the process-wide
+// head cache of sorted indexes.
+func (s *Store) indexKey(ns string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.cfg.IndexPool + "/" + ns
 }
 
 // ReadPage implements sortedindex.Backend.
@@ -210,16 +228,35 @@ func (s *Store) RegistryStatter() (func(account string) (time.Time, bool, error)
 // has it. The lock is advisory: the backfill checks Lost before each
 // write, and every write it does is safe to repeat.
 func (s *Store) LockAccountIndex(ttl time.Duration) (model.Lease, error) {
-	u, err := s.User(model.AccountsNamespace)
+	return s.holdLock(model.AccountsNamespace, sortedindex.LockOID(model.AccountIndexName), "backfill", "account directory backfill", ttl, false)
+}
+
+// LockKVBackfill takes the exclusive cls_lock of the admin store backfill
+// ("ix.kv/lock" in "~admin") like LockAccountIndex.
+func (s *Store) LockKVBackfill(ttl time.Duration) (model.Lease, error) {
+	return s.holdLock(adminNamespace, sortedindex.LockOID("kv"), "backfill", "admin store backfill", ttl, false)
+}
+
+// holdLock takes the exclusive cls_lock name on oid in namespace ns and
+// renews it (LIBRADOS_LOCK_FLAG_MAY_RENEW) every ttl/3 until Release;
+// ErrLocked when another holder has it. The lock is advisory: its holder
+// fences every mutation by data and checks Lost before it.
+//
+// A lock taken with onRotate is given up when the store rotates its key
+// (Store.Rotate): it is unlocked through the handle it was taken with,
+// before that connection's key is withdrawn, and reports Lost, so its
+// holder takes it again on the new connection. Without that the lock
+// would stay held until its TTL ran out.
+func (s *Store) holdLock(ns, oid, name, desc string, ttl time.Duration, onRotate bool) (model.Lease, error) {
+	u, err := s.User(ns)
 	if err != nil {
 		return nil, err
 	}
 
-	oid := "ix." + model.AccountIndexName + "/lock"
 	cookie := newGUID()
 
 	take := func(flags *byte) error {
-		ret, err := u.idx.LockExclusive(oid, "backfill", cookie, "account directory backfill", ttl, flags)
+		ret, err := u.idx.LockExclusive(oid, name, cookie, desc, ttl, flags)
 		if err != nil {
 			return err
 		}
@@ -244,11 +281,59 @@ func (s *Store) LockAccountIndex(ttl time.Duration) (model.Lease, error) {
 	u.keepLock(l, ttl/3, take)
 
 	l.unlock = func() {
-		_, _ = u.idx.Unlock(oid, "backfill", cookie)
+		_, _ = u.idx.Unlock(oid, name, cookie)
 		u.Close()
+
+		if onRotate {
+			s.forgetHeld(l)
+		}
+	}
+
+	if onRotate {
+		s.rememberHeld(l)
 	}
 
 	return l, nil
+}
+
+// rememberHeld and forgetHeld track the locks Rotate gives up.
+func (s *Store) rememberHeld(l *lease) {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	if s.held == nil {
+		s.held = map[*lease]struct{}{}
+	}
+
+	s.held[l] = struct{}{}
+}
+
+func (s *Store) forgetHeld(l *lease) {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	delete(s.held, l)
+}
+
+// releaseHeld gives up the tracked locks through their (old) handles and
+// marks them lost.
+func (s *Store) releaseHeld() {
+	s.heldMu.Lock()
+	held := make([]*lease, 0, len(s.held))
+
+	for l := range s.held {
+		held = append(held, l)
+	}
+	s.heldMu.Unlock()
+
+	for _, l := range held {
+		l.lost.Store(true)
+		l.Release()
+	}
+
+	if len(held) > 0 {
+		s.log.Info("worker locks released after key rotation", "locks", len(held))
+	}
 }
 
 // keepLock renews a cls_lock taken with take every interval until the
@@ -256,8 +341,11 @@ func (s *Store) LockAccountIndex(ttl time.Duration) (model.Lease, error) {
 func (u *User) keepLock(l *lease, every time.Duration, take func(flags *byte) error) {
 	u.inflight.Add(1)
 
+	l.done = make(chan struct{})
+
 	go func() {
 		defer u.inflight.Done()
+		defer close(l.done)
 
 		renew := byte(1) // LIBRADOS_LOCK_FLAG_MAY_RENEW
 

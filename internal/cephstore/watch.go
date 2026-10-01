@@ -1,6 +1,7 @@
 package cephstore
 
 import (
+	"sync"
 	"time"
 
 	"github.com/ceph/go-ceph/rados"
@@ -59,6 +60,16 @@ func (u *User) WatchAccount() (model.Watch, error) { return u.watchObject(oidAcc
 
 // watchObject registers a watch on one object of the index pool.
 func (u *User) watchObject(oid string) (model.Watch, error) {
+	w, err := u.watchObj(oid)
+	if err != nil {
+		return nil, err
+	}
+
+	return w, nil
+}
+
+// watchObj is watchObject with the concrete type.
+func (u *User) watchObj(oid string) (*Watch, error) {
 	rw, err := u.idx.Watch(oid)
 	if err != nil {
 		return nil, err
@@ -66,26 +77,44 @@ func (u *User) watchObject(oid string) (model.Watch, error) {
 
 	u.inflight.Add(1)
 
-	w := &Watch{w: rw, events: make(chan struct{}, 1), done: make(chan struct{})}
+	w := &Watch{w: rw, unwatch: rw.Delete, events: make(chan struct{}, 1), errs: make(chan error, 1), done: make(chan struct{})}
 	go w.pump(u)
 
 	return w, nil
 }
 
-// Watch is a live subscription to changes of one mailbox.
+// Watch is a live subscription to changes of one object.
 type Watch struct {
-	w      *rados.Watcher
-	events chan struct{}
-	done   chan struct{}
+	w *rados.Watcher
+	// unwatch removes the watch (w.Delete; tests replace it).
+	unwatch func() error
+	events  chan struct{}
+	// errs carries the watch errors, coalesced into one pending error,
+	// so that the librados callback thread that reports them never
+	// blocks on a reader that does not read.
+	errs chan error
+	done chan struct{}
+	once sync.Once
+	// onClose (if set) runs once when the watch is closed.
+	onClose func()
 }
 
 func (w *Watch) pump(u *User) {
 	defer u.inflight.Done()
 
+	errs := w.w.Errors()
+
 	for {
 		select {
 		case <-w.done:
 			return
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+
+			w.fail(err)
 		case ev, ok := <-w.w.Events():
 			if !ok {
 				return
@@ -101,14 +130,39 @@ func (w *Watch) pump(u *User) {
 	}
 }
 
+// fail reports err on the watch's error channel unless one is pending.
+func (w *Watch) fail(err error) {
+	select {
+	case w.errs <- err:
+	default: // one pending error is enough to re-watch
+	}
+}
+
 // Events yields one value per (coalesced) notify.
 func (w *Watch) Events() <-chan struct{} { return w.events }
 
-// Errors yields watch errors (e.g. the OSD dropped the watch).
-func (w *Watch) Errors() <-chan error { return w.w.Errors() }
+// Errors yields watch errors (the OSD dropped the watch, or the store
+// rotated its connection): the holder closes the watch and watches
+// again.
+func (w *Watch) Errors() <-chan error { return w.errs }
 
 // Close removes the watch.
+//
+// The unwatch comes first, while the pump still runs: the pump holds an
+// inflight reference on the view, and User.Close destroys the view's
+// IOContext only after inflight drained. Ending the pump first would let
+// a closing view (after a key rotation, or a session that closes its
+// account) destroy the IOContext concurrently with rados_unwatch2. The
+// pump ends when the unwatch closes the event channel, or at done when
+// the unwatch failed and left it open.
 func (w *Watch) Close() {
-	close(w.done)
-	_ = w.w.Delete()
+	w.once.Do(func() {
+		_ = w.unwatch()
+
+		close(w.done)
+
+		if w.onClose != nil {
+			w.onClose()
+		}
+	})
 }

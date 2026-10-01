@@ -83,6 +83,9 @@ type Job struct {
 	Errors     []string        `json:"errors,omitempty"`
 	Lease      Lease           `json:"lease"`
 	Attempts   int             `json:"attempts"`
+	// IdemKey is the admin store key of the idempotency key that created
+	// the job ("" for none); it expires with the job.
+	IdemKey string `json:"idem_key,omitempty"`
 }
 
 // Terminal reports whether the job has ended.

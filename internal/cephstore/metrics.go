@@ -24,6 +24,7 @@ const (
 	listScrubUnknown  = "scrub_unknown_index"
 	listPurgeObjects  = "purge_objects"
 	listAdminKV       = "admin_kv"
+	listAdminBackfill = "admin_kv_backfill"
 	listLearningAll   = "learning_all"
 	listLearningPurge = "learning_purge_owner"
 )

@@ -50,3 +50,20 @@ func TestAdminYAML(t *testing.T) {
 		t.Fatal("unknown role accepted")
 	}
 }
+
+func TestAdminKVIndex(t *testing.T) {
+	c, err := Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil || c.Admin.KVIndex != "write" || c.Admin.KVQueueShards != 4 || c.Jobs.ExpirySeconds != 60 {
+		t.Fatalf("defaults: %+v %v", c.Admin, err)
+	}
+
+	if c, err := Load(configFile(t, "admin:\n  kv_index: read\n  kv_queue_shards: 8\n")); err != nil || c.Admin.KVIndex != "read" || c.Admin.KVQueueShards != 8 {
+		t.Fatalf("read mode: %v", err)
+	}
+
+	for _, bad := range []string{"admin:\n  kv_index: on\n", "admin:\n  kv_queue_shards: 9\n", "jobs:\n  expiry_seconds: 1\n"} {
+		if _, err := Load(configFile(t, bad)); err == nil {
+			t.Errorf("accepted: %q", bad)
+		}
+	}
+}

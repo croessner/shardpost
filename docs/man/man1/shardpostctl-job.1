@@ -320,7 +320,14 @@ asks. Default:
 .BI \-idempotency-key " key"
 Repeating a request with the same key returns the job the first request
 created instead of starting a second one. A different request with the
-same key is refused.
+same key is refused. The key expires together with its job,
+.I jobs.retention_days
+after the job ended; then the same key starts a new job. Earlier
+versions kept keys forever; those expire once
+.B shardpost index backfill kv
+has run. With
+.I admin.kv_index: off
+keys do not expire.
 .TP
 .BI \-account " account"
 .TQ
