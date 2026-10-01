@@ -433,7 +433,14 @@ namespace (the cost of one scrub listing per pool, not per account),
 spills the object names into `~accounts` and evaluates them account by
 account; a sweep that stops (a restart of the Job, a lost lease) goes on
 from its checkpoint when it is run again. `imapceph_rados_listings_total{site="sweep"}`
-counts its listings. It needs `mon 'allow r'` (it reads each pool's
+counts its listings. Run it with the servers' configuration: full-text
+shards (`fts/`, `ftsh/`, `ftsd/`) above `server.fts_shards` in an
+account are reported (`fts`) and never deleted, since they may be live
+ones of servers configured with more; after lowering `fts_shards` on
+purpose, run `fts_rebuild` for the account and remove the shards above
+the new count with `rados rm`. A namespace whose account is created
+again while the sweep looks at it is counted as `recreated` and keeps
+everything. It needs `mon 'allow r'` (it reads each pool's
 `pg_num`), which the server's CephClient has. A namespace without
 registry is deleted only when the account directory says it is being
 purged, or a purge of 0.42.0 or later recorded it (`ix.purged`) and the

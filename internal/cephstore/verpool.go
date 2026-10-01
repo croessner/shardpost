@@ -88,6 +88,27 @@ func (u *User) getKeysVer(ioctx *rados.IOContext, oid string, keys []string) (ma
 	return getOmapKeysVer(c, oid, keys)
 }
 
+// statVer stats an object and returns its version, using a private
+// context.
+func (u *User) statVer(ioctx *rados.IOContext, oid string) (rados.ObjectStat, uint64, error) {
+	pool := u.poolFor(ioctx)
+
+	c, err := pool.get()
+	if err != nil {
+		return rados.ObjectStat{}, 0, err
+	}
+	defer pool.put(c)
+
+	st, err := c.Stat(oid)
+	if err != nil {
+		return st, 0, err
+	}
+
+	ver, err := c.GetLastVersion()
+
+	return st, ver, err
+}
+
 // xattrVer reads one xattr and the object version, using a private context.
 func (u *User) xattrVer(ioctx *rados.IOContext, oid, name string) ([]byte, uint64, error) {
 	pool := u.poolFor(ioctx)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -72,7 +73,21 @@ const (
 	remnantMarks     = "marks"
 	remnantOther     = "other"
 	remnantNamespace = "namespace" // an object of a namespace without registry
+	remnantFTS       = "fts"       // a full-text shard above the configured count (kept)
 )
+
+// ftsShardObject reports whether oid is a shard of the full-text index
+// whose number follows the configured shard count (fts/, ftsh/, ftsd/).
+func ftsShardObject(oid string) bool {
+	for _, p := range []string{ftsPrefix, headerPrefix, legacyDictPrefix} {
+		if n, ok := strings.CutPrefix(oid, p); ok {
+			_, err := strconv.Atoi(n)
+			return err == nil
+		}
+	}
+
+	return false
+}
 
 // SweepOptions tunes a sweep.
 type SweepOptions struct {
@@ -115,6 +130,9 @@ type SweepReport struct {
 	ImportLocked    int64 `json:"import_locked,omitempty"`
 	RegistryMissing int64 `json:"registry_missing,omitempty"`
 	Unregistered    int64 `json:"unregistered,omitempty"`
+	// Recreated counts the namespaces whose account was created again
+	// while the sweep looked at them (nothing of them is deleted).
+	Recreated int64 `json:"recreated,omitempty"`
 	// Remnants counts the objects nothing names, by class; Removed
 	// those deleted, Young those left for being younger than the grace.
 	Remnants map[string]int64 `json:"remnants"`
@@ -625,6 +643,9 @@ type sweepNamespace struct {
 	// opened is when load started: nothing written after it is a
 	// remnant.
 	opened time.Time
+	// dropped: the namespace stopped being cleanable while the sweep
+	// looked at it; the rest of it is not looked at.
+	dropped bool
 	named  *namedObjects // nil: no registry, everything is a remnant
 	index map[string]bool
 	live  map[string]bool // public folders, read on demand
@@ -756,22 +777,36 @@ func (ns *sweepNamespace) cleanable() (bool, string, error) {
 // objects, that it still has no registry and may be cleaned: the account
 // may have been created again while the sweep looked at it.
 func (ns *sweepNamespace) stillCleanable() bool {
-	if ns.named != nil || ns.keep || !ns.sw.o.Repair {
+	if ns.named != nil || ns.keep || ns.dropped || !ns.sw.o.Repair {
 		return true
 	}
 
+	rep := &ns.sw.st.Report
+
 	if ns.u.objectExists(oidRegistry) {
-		ns.keep = true
+		rep.Recreated++
+		rep.sample("created again: " + ns.name)
+
 		return false
 	}
 
-	ok, _, err := ns.cleanable()
-	if err != nil || !ok {
-		ns.keep = true
+	ok, reason, err := ns.cleanable()
+
+	switch {
+	case err != nil:
+		rep.fail(fmt.Errorf("namespace %q: %w", ns.name, err))
 		return false
+	case ok:
+		return true
+	case reason == remnantRegistryMissing:
+		rep.RegistryMissing++
+	default:
+		rep.Unregistered++
 	}
 
-	return true
+	rep.sample(reason + ": " + ns.name)
+
+	return false
 }
 
 // directoryState returns the account's state in the account directory
@@ -797,11 +832,21 @@ func (s *Store) directoryState(account string) (string, bool, error) {
 
 // check looks at one object of the namespace.
 func (ns *sweepNamespace) check(oid string) {
-	if ns.skip {
+	if ns.skip || ns.dropped {
 		return
 	}
 
 	if ns.named != nil && ns.named.names(ns.index, ns.data, oid) {
+		return
+	}
+
+	// A full-text shard above the count this process is configured with
+	// may be a live one of servers configured with more: reported, never
+	// deleted (see shardpost-scrub(1)).
+	if !ns.data && ns.named != nil && ftsShardObject(oid) {
+		ns.sw.st.Report.Remnants[remnantFTS]++
+		ns.sw.st.Report.sample(ns.name + ": " + oid + " (kept)")
+
 		return
 	}
 
@@ -868,7 +913,14 @@ func (ns *sweepNamespace) flush(holdLast bool) {
 	}
 
 	if !ns.stillCleanable() {
+		// The account came back (or may no longer be cleaned) while the
+		// sweep looked at it: what was collected is no remnant, and the
+		// rest of the namespace is not looked at.
 		ns.unclean()
+
+		ns.blobs, ns.objects, ns.dropped = map[string]int{}, nil, true
+
+		return
 	}
 
 	held, last := 0, ""
@@ -1001,7 +1053,7 @@ func (ns *sweepNamespace) objectRemnant(oid string) {
 	rep.Remnants[ns.class(oid)]++
 	rep.sample(ns.name + ": " + oid)
 
-	st, err := ioctx.Stat(oid)
+	st, ver, err := u.statVer(ioctx, oid)
 
 	switch {
 	case errCode(err) == syscall.ENOENT:
@@ -1021,12 +1073,26 @@ func (ns *sweepNamespace) objectRemnant(oid string) {
 		return
 	}
 
-	if err := ioctx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
+	// Deleted only at the version that was judged: a write in between
+	// leaves the object for the next run.
+	switch err := removeAt(ioctx, oid, ver); {
+	case err == nil:
+		rep.Removed++
+	case errCode(err) == syscall.ERANGE || errCode(err) == syscall.EOVERFLOW:
+		ns.unclean()
+	case errCode(err) != syscall.ENOENT:
 		rep.fail(fmt.Errorf("%s: delete %s: %w", ns.name, oid, err))
 		ns.unclean()
-
-		return
 	}
+}
 
-	rep.Removed++
+// removeAt deletes an object if it is still at version ver.
+func removeAt(ioctx *rados.IOContext, oid string, ver uint64) error {
+	op := rados.CreateWriteOp()
+	defer op.Release()
+
+	op.AssertVersion(ver)
+	op.Remove()
+
+	return op.Operate(ioctx, oid, rados.OperationNoFlag)
 }

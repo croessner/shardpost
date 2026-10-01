@@ -4,6 +4,7 @@ package cephstore
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,13 +61,29 @@ func TestSweepRecheckBeforeDeleting(t *testing.T) {
 		}
 	}
 
-	if _, err := s.Sweep(context.Background(), SweepOptions{Repair: true, Restart: true, afterLoad: hook}); err != nil {
+	rep, err := s.Sweep(context.Background(), SweepOptions{Repair: true, Restart: true, afterLoad: hook})
+	if err != nil {
 		t.Fatal(err)
+	}
+
+	// Counted as created again, its index objects not as remnants (in the
+	// data pool, looked at after the re-creation, the account's model
+	// applies: its old blob is debris of a live account).
+	if rep.Recreated < 1 || sampled(rep, u.name+": "+mboxPrefix) {
+		t.Fatalf("report: recreated %d, samples %v", rep.Recreated, rep.Samples)
 	}
 
 	if !created {
 		t.Fatal("the hook did not run")
 	}
+
+	checkRecreated(t, u, left)
+}
+
+// checkRecreated checks that the account created again kept its old
+// objects, its registry and its mailbox.
+func checkRecreated(t *testing.T, u *User, left []string) {
+	t.Helper()
 
 	for _, oid := range left {
 		if !u.objectExists(oid) {
@@ -76,5 +93,43 @@ func TestSweepRecheckBeforeDeleting(t *testing.T) {
 
 	if _, err := u.Lookup("INBOX"); err != nil || !u.objectExists(oidRegistry) {
 		t.Fatalf("the new account lost its mailbox or registry: %v", err)
+	}
+}
+
+// sampled reports whether a sample of the report starts with prefix.
+func sampled(rep *SweepReport, prefix string) bool {
+	for _, x := range rep.Samples {
+		if strings.HasPrefix(x, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// TestSweepKeepsFTSShardsAboveCount: a full-text shard above the count of
+// this process may be a live one of servers configured with more; the
+// sweep reports it and leaves it.
+func TestSweepKeepsFTSShardsAboveCount(t *testing.T) {
+	s := testStore(t)
+	u := testUser(t, s)
+	mustMailbox(t, u, "INBOX")
+
+	oid := ftsPrefix + "40"
+	if err := casOmap(u, u.idx, oid, nil, func(map[string][]byte) (map[string][]byte, []string) {
+		return map[string][]byte{"s:term": []byte("x")}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	rep, err := s.Sweep(context.Background(), SweepOptions{Repair: true, Restart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !u.objectExists(oid) || rep.Remnants[remnantFTS] < 1 {
+		t.Fatalf("shard kept %v, reported %d", u.objectExists(oid), rep.Remnants[remnantFTS])
 	}
 }

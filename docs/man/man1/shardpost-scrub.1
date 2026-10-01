@@ -130,9 +130,34 @@ the remnants by class
 .BR marks ,
 .BR other ,
 .B namespace
-for objects of a namespace without registry), how many were removed,
+for objects of a namespace without registry,
+.B fts
+for kept full-text shards above the count), the namespaces whose account
+was created again while the sweep looked at them
+.RB ( recreated ;
+nothing of them is deleted), how many were removed,
 how many were left for being younger than the grace period, the marks
 adopted, a few samples and the first errors.
+.PP
+Run the sweep with the servers' configuration (the same
+.I server.fts_shards
+and pools). A shard of the full-text index
+.RB ( fts/ ,
+.BR ftsh/ ,
+.BR ftsd/ )
+above the configured count in an account is reported as
+.B fts
+and never deleted: it may be a live one of servers configured with
+more. Such shards are left by lowering
+.IR server.fts_shards ;
+to remove them on purpose, rebuild the account's index with
+.B fts_rebuild
+(see
+.BR shardpostctl-job (1))
+and delete the shards above the new count by hand
+.RB ( "rados rm" ).
+Any other remnant is deleted only at the object version that was judged,
+so a write in between leaves it for the next run.
 .PP
 The sweep needs the cluster permission
 .B mon 'allow r'

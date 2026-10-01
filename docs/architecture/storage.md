@@ -362,7 +362,10 @@ runs as a one-off, not as a routine.
   `namespace`) and left alone. An account whose data model cannot be
   read in full (a registry record that does not parse, an unreadable
   header, a registered mailbox without shard 0) and accounts under an
-  import lock are left alone. Private `\Seen` marks of a live public folder
+  import lock are left alone. A full-text shard above the configured
+  count in an account is reported and never deleted (it may belong to
+  servers configured with more shards); any other remnant is deleted
+  only at the object version that was judged. Private `\Seen` marks of a live public folder
   that predate the intents are adopted: their `ps:` key is written.
 
 One sweep runs at a time (a cls_lock on `sweep/lock`); the report is
