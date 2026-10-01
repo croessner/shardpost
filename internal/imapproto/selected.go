@@ -883,7 +883,7 @@ func (c *conn) cmdCopy(tag string, uid bool) error {
 		return err
 	}
 
-	dest, err := c.r.astring()
+	dest, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1056,7 +1056,7 @@ func (c *conn) cmdMove(tag string, uid bool) error {
 		return err
 	}
 
-	dest, err := c.r.astring()
+	dest, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}

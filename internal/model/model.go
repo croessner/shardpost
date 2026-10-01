@@ -120,12 +120,29 @@ type Meta struct {
 	SaveDate     time.Time      `json:"sdate"`
 	ModSeq       uint64         `json:"modseq"`
 	Envelope     *imap.Envelope `json:"env,omitempty"`
-	References   []string       `json:"refs,omitempty"` // Message-IDs from References/In-Reply-To
-	Preview      string         `json:"preview,omitempty"`
+	// Routes are the obsolete source routes of the envelope's addresses
+	// (RFC 5322 4.4), which imap.Address has no field for: by envelope
+	// field (see the Route* keys), parallel to that field's addresses,
+	// "" for an address without one. Nil when no address has a route,
+	// which is nearly always, and in records written before routes were
+	// kept.
+	Routes     map[string][]string `json:"routes,omitempty"`
+	References []string            `json:"refs,omitempty"` // Message-IDs from References/In-Reply-To
+	Preview    string              `json:"preview,omitempty"`
 	// POP3UIDL is the POP3 unique-id kept from an imported source; ""
 	// means the GUID (see UIDL).
 	POP3UIDL string `json:"pop3uidl,omitempty"`
 }
+
+// The envelope fields of Meta.Routes.
+const (
+	RouteFrom    = "from"
+	RouteSender  = "sender"
+	RouteReplyTo = "reply-to"
+	RouteTo      = "to"
+	RouteCc      = "cc"
+	RouteBcc     = "bcc"
+)
 
 // UIDL is the POP3 unique-id of the message: the imported one if any,
 // otherwise the GUID.

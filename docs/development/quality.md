@@ -60,8 +60,13 @@ this suite.
 
 The last documented complete IMAP run, at 0.11.0, had one
 failed group (`fetch-envelope`, historical source routes) and
-11 groups out of 72 skipped for missing capabilities. That limitation
-is not lifted by the later logging rollout.
+11 groups out of 72 skipped for missing capabilities. The source route
+is reported in the ENVELOPE since the release after 0.35.2 (see
+[hack/conformance.md](../../hack/conformance.md)); messages stored
+before it keep their cached envelope without the route. What was added
+in the same release (`SORT=DISPLAY`, `QUOTASET`, `PREVIEW (LAZY)`, the
+`SAVEDATE` search keys, modified UTF-7 mailbox names) is not covered by
+that run and needs a new complete one.
 
 ## Choosing integration scripts deliberately
 

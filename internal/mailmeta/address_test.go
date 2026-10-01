@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/emersion/go-imap/v2"
+
+	"shardpost/internal/model"
 )
 
 func TestParseAddressList(t *testing.T) {
@@ -34,6 +36,38 @@ func TestParseAddressList(t *testing.T) {
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%q: got %+v want %+v", c.in, got, c.want)
 		}
+	}
+}
+
+// TestParseAddressListRoutes: obsolete source routes are kept for the
+// ENVELOPE's at-domain-list, parallel to the addresses.
+func TestParseAddressListRoutes(t *testing.T) {
+	for in, want := range map[string][]string{
+		"<@route:user@domain>":                         {"@route"},
+		"a@b.org, Name <@r1.org, @r2.org:user@domain>": {"", "@r1.org,@r2.org"},
+		"<@a (comment) : x@y>, group: <@g:m@h>;":       {"@a", "", "@g", ""},
+		"user@domain, Real <real@domain>":              nil,
+		"":                                             nil,
+	} {
+		_, got := ParseAddressListRoutes(in)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: routes %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestParseRoutes: the routes reach the parsed metadata, and Sender and
+// Reply-To take From's along with its addresses.
+func TestParseRoutes(t *testing.T) {
+	p := Parse([]byte("From: <@route:user@domain>\r\nTo: a@b.org, <@x:c@d.org>\r\n\r\nbody\r\n"))
+
+	want := map[string][]string{model.RouteFrom: {"@route"}, model.RouteSender: {"@route"}, model.RouteReplyTo: {"@route"}, model.RouteTo: {"", "@x"}}
+	if !reflect.DeepEqual(p.Routes, want) {
+		t.Fatalf("routes %v, want %v", p.Routes, want)
+	}
+
+	if q := Parse([]byte("From: user@domain\r\n\r\nbody\r\n")); q.Routes != nil {
+		t.Fatalf("routes without any: %v", q.Routes)
 	}
 }
 

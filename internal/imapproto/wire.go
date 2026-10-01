@@ -501,8 +501,9 @@ func nstring(s string) string {
 	return quote(s)
 }
 
-// astringOut encodes a mailbox name or similar: atom if possible, else
-// quoted (INBOX stays bare, names with spaces get quotes).
+// astringOut encodes an identifier, an entry name or similar: atom if
+// possible, else quoted. Mailbox names go through conn.mailboxOut, which
+// applies the session's name form first.
 func astringOut(s string) string {
 	if s == "" {
 		return `""`

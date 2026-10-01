@@ -50,52 +50,102 @@ func ThreadID(m *model.Meta) string {
 // PreviewLen is the length of the cached preview in runes.
 const PreviewLen = 200
 
-// Extract returns envelope, referenced Message-IDs (References, then
-// In-Reply-To; used by THREAD and THREADID) and preview of a raw message.
-// Envelope is nil if the message cannot be parsed.
+// Parsed is the metadata of a message that its index record caches.
+type Parsed struct {
+	// Envelope is nil if the header cannot be parsed.
+	Envelope *imap.Envelope
+	// Routes are the source routes of the envelope addresses, nil
+	// without any (see model.Meta.Routes).
+	Routes map[string][]string
+	// Refs are the referenced Message-IDs (References, then In-Reply-To;
+	// used by THREAD and THREADID).
+	Refs    []string
+	Preview string
+}
+
+// Extract returns envelope, referenced Message-IDs and preview of a raw
+// message (Parse without the routes).
 func Extract(raw []byte) (*imap.Envelope, []string, string) {
-	var (
-		env  *imap.Envelope
-		refs []string
-	)
+	p := Parse(raw)
+	return p.Envelope, p.Refs, p.Preview
+}
+
+// Parse derives the cached metadata of a raw message.
+func Parse(raw []byte) Parsed {
+	var p Parsed
 
 	if hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw))); err == nil {
-		env = imapserver.ExtractEnvelope(hdr)
-		if env != nil {
-			// The envelope carries the header values as they are (with
-			// angle brackets); THREAD and OBJECTID use MessageIDs().
-			env.MessageID = strings.TrimSpace(hdr.Get("Message-Id"))
-			env.From = ParseAddressList(hdr.Get("From"))
-			env.Sender = ParseAddressList(hdr.Get("Sender"))
-			env.ReplyTo = ParseAddressList(hdr.Get("Reply-To"))
-			env.To = ParseAddressList(hdr.Get("To"))
-			env.Cc = ParseAddressList(hdr.Get("Cc"))
-			env.Bcc = ParseAddressList(hdr.Get("Bcc"))
-			// RFC 3501 7.4.2: absent (or empty) Sender and Reply-To
-			// default to the From value
-			if len(env.Sender) == 0 {
-				env.Sender = env.From
-			}
+		p.Envelope, p.Routes = envelope(hdr)
 
-			if len(env.ReplyTo) == 0 {
-				env.ReplyTo = env.From
-			}
-
-			env.InReplyTo = nil
-			if v := strings.TrimSpace(hdr.Get("In-Reply-To")); v != "" {
-				env.InReplyTo = []string{v}
-			}
-		}
-
-		refs = MessageIDs(hdr.Get("References"))
+		p.Refs = MessageIDs(hdr.Get("References"))
 		for _, id := range MessageIDs(hdr.Get("In-Reply-To")) {
-			if !contains(refs, id) {
-				refs = append(refs, id)
+			if !contains(p.Refs, id) {
+				p.Refs = append(p.Refs, id)
 			}
 		}
 	}
 
-	return env, refs, Preview(fts.BodyText(raw))
+	p.Preview = Preview(fts.BodyText(raw))
+
+	return p
+}
+
+// envelope builds the ENVELOPE of a header and the source routes of its
+// addresses.
+func envelope(hdr textproto.Header) (*imap.Envelope, map[string][]string) {
+	env := imapserver.ExtractEnvelope(hdr)
+	if env == nil {
+		return nil, nil
+	}
+
+	var routes map[string][]string
+
+	addrs := func(field, key string) []imap.Address {
+		l, r := ParseAddressListRoutes(hdr.Get(field))
+		if r != nil {
+			if routes == nil {
+				routes = map[string][]string{}
+			}
+
+			routes[key] = r
+		}
+
+		return l
+	}
+
+	// The envelope carries the header values as they are (with angle
+	// brackets); THREAD and OBJECTID use MessageIDs().
+	env.MessageID = strings.TrimSpace(hdr.Get("Message-Id"))
+	env.From = addrs("From", model.RouteFrom)
+	env.Sender = addrs("Sender", model.RouteSender)
+	env.ReplyTo = addrs("Reply-To", model.RouteReplyTo)
+	env.To = addrs("To", model.RouteTo)
+	env.Cc = addrs("Cc", model.RouteCc)
+	env.Bcc = addrs("Bcc", model.RouteBcc)
+	// RFC 3501 7.4.2: absent (or empty) Sender and Reply-To default to
+	// the From value, its routes included
+	if len(env.Sender) == 0 {
+		env.Sender = env.From
+
+		if r, ok := routes[model.RouteFrom]; ok {
+			routes[model.RouteSender] = r
+		}
+	}
+
+	if len(env.ReplyTo) == 0 {
+		env.ReplyTo = env.From
+
+		if r, ok := routes[model.RouteFrom]; ok {
+			routes[model.RouteReplyTo] = r
+		}
+	}
+
+	env.InReplyTo = nil
+	if v := strings.TrimSpace(hdr.Get("In-Reply-To")); v != "" {
+		env.InReplyTo = []string{v}
+	}
+
+	return env, routes
 }
 
 // MessageIDs extracts the <...> tokens of a References/In-Reply-To value,

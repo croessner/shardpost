@@ -511,8 +511,9 @@ func TestAutocreateIsConfigurable(t *testing.T) {
 
 	c.ok("LOGIN test test")
 
+	// A client without UTF8=ACCEPT sees the names in modified UTF-7.
 	lines := strings.Join(c.cmd(`LIST "" "*"`), "\n")
-	for _, want := range []string{`"/" INBOX`, `"/" Ablage`, `"/" Entwürfe`} {
+	for _, want := range []string{`"/" INBOX`, `"/" Ablage`, `"/" Entw&APw-rfe`} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("missing %s in:\n%s", want, lines)
 		}
@@ -524,7 +525,7 @@ func TestAutocreateIsConfigurable(t *testing.T) {
 
 	// Subscribed only where the configuration says so.
 	lsub := strings.Join(c.cmd(`LSUB "" "*"`), "\n")
-	if !strings.Contains(lsub, "Entwürfe") || strings.Contains(lsub, "Ablage") {
+	if !strings.Contains(lsub, "Entw&APw-rfe") || strings.Contains(lsub, "Ablage") {
 		t.Errorf("subscriptions do not follow the configuration:\n%s", lsub)
 	}
 
@@ -537,7 +538,7 @@ func TestAutocreateIsConfigurable(t *testing.T) {
 
 	again.ok("LOGIN test test")
 
-	if lsub := strings.Join(again.cmd(`LSUB "" "*"`), "\n"); strings.Contains(lsub, "Entwürfe") {
+	if lsub := strings.Join(again.cmd(`LSUB "" "*"`), "\n"); strings.Contains(lsub, "Entw&APw-rfe") {
 		t.Errorf("the login subscribed a mailbox the account had unsubscribed:\n%s", lsub)
 	}
 
@@ -556,6 +557,7 @@ func TestAutocreateIsConfigurable(t *testing.T) {
 	defer func() { _ = third.conn.Close() }()
 
 	third.ok("LOGIN test test")
+	third.ok("ENABLE UTF8=ACCEPT")
 
 	if lines := strings.Join(third.cmd(`LIST "" "*"`), "\n"); !strings.Contains(lines, "Später") {
 		t.Errorf("a mailbox added to the configuration did not reach an existing account:\n%s", lines)

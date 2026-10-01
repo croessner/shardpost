@@ -239,10 +239,11 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
   principal: the admin client is nobody the account could look up. A
   change of `anyone` leaves none. The notification is best effort and
   never fails the request.
-- **Names** are stored by the server as they arrive (UTF-8). IMAP clients
-  with `UTF8=ACCEPT` see the same names; older clients using modified
-  UTF-7 send `&AOQ-…` forms and do not see admin-created names with
-  umlauts under the same designation.
+- **Names** are UTF-8, here and in the store. IMAP clients that enabled
+  `UTF8=ACCEPT` or `IMAP4rev2` see the same names; older clients see
+  and send them in modified UTF-7 (`Entwürfe` is `Entw&APw-rfe` for
+  them), which the IMAP server converts in both directions. Both kinds
+  of client address the same mailbox.
 - **Idempotence** follows from the semantics: absolute values, mailboxes
   addressed by their stable ID. A repeated request after a lost response
   returns the same state. Send relative ACL changes with `If-Match` for

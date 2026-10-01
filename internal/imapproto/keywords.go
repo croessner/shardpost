@@ -54,6 +54,7 @@ const (
 	kwFrom          = "FROM"
 	kwHeader        = "HEADER"
 	kwInternalDate  = "INTERNALDATE"
+	kwLazy          = "LAZY"
 	kwMailboxes     = "MAILBOXES"
 	kwMessageNew    = "MESSAGENEW"
 	kwMessages      = "MESSAGES"
@@ -79,10 +80,13 @@ const (
 	kwUIDNext       = "UIDNEXT"
 	kwUIDValidity   = "UIDVALIDITY"
 	kwUnseen        = "UNSEEN"
+	kwUTF8          = "UTF8"
 	kwUTF8Accept    = "UTF8=ACCEPT"
 )
 
 const (
+	// cteBinary is the Content-Transfer-Encoding of unencoded binary data.
+	cteBinary = "binary"
 	// respCodeTooBig is the response code for oversized messages (RFC 7889).
 	respCodeTooBig = "TOOBIG"
 	// serverName is the server's name in ID responses.

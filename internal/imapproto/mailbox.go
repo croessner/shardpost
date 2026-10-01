@@ -47,13 +47,7 @@ func (c *conn) cmdList(tag string, lsub bool) error {
 		}
 	}
 
-	if !t.isString() {
-		return fmt.Errorf("%w: expected reference", errSyntax)
-	}
-
-	ref := t.str
-
-	patterns, err := c.readOneOrList("pattern")
+	ref, patterns, err := c.readListNames(t)
 	if err != nil {
 		return err
 	}
@@ -65,6 +59,32 @@ func (c *conn) cmdList(tag string, lsub bool) error {
 	}
 
 	return c.listRun(tag, lsub, opts, ref, patterns)
+}
+
+// readListNames reads the reference (the token t) and the patterns of
+// LIST and LSUB in their stored form. Patterns are names with wildcards;
+// "*" and "%" are printable ASCII and stand for themselves in modified
+// UTF-7.
+func (c *conn) readListNames(t token) (ref string, patterns []string, err error) {
+	if !t.isString() {
+		return "", nil, fmt.Errorf("%w: expected reference", errSyntax)
+	}
+
+	if ref, err = c.fromWire(t.str); err != nil {
+		return "", nil, err
+	}
+
+	if patterns, err = c.readOneOrList("pattern"); err != nil {
+		return "", nil, err
+	}
+
+	for i := range patterns {
+		if patterns[i], err = c.fromWire(patterns[i]); err != nil {
+			return "", nil, err
+		}
+	}
+
+	return ref, patterns, nil
 }
 
 // listRun answers a parsed LIST/LSUB command.
@@ -428,7 +448,7 @@ func (c *conn) listOwnEntry(lt *listTree, name string, lsub bool, opts listOptio
 	}
 
 	attrs := lt.attrs(mb, name, viaChild, lsub, opts)
-	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), astringOut(name), childInfo)
+	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo)
 	c.listOwnExtras(mb, name, opts)
 }
 
@@ -460,7 +480,7 @@ func (lt *listTree) childInfoOf(mb *model.Mailbox, name string, lsub bool, opts 
 // \Noselect when the pattern ends in %.
 func (c *conn) lsubParent(lt *listTree, name string) {
 	if lt.subscribedChild(name) && strings.HasSuffix(lt.patterns[0], "%") {
-		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, astringOut(name))
+		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, c.mailboxOut(name))
 	}
 }
 
@@ -521,7 +541,7 @@ func (c *conn) listOwnExtras(mb *model.Mailbox, name string, opts listOptions) {
 	}
 
 	if opts.returnMyRights && mb != nil {
-		c.w.untagged("MYRIGHTS %s %s", astringOut(name), model.AllRights)
+		c.w.untagged("MYRIGHTS %s %s", c.mailboxOut(name), model.AllRights)
 	}
 }
 
@@ -845,7 +865,7 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 	}
 
 	attrs := st.attrs(e, isBox, name, lsub, opts)
-	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), astringOut(name), childInfo)
+	c.w.untagged(`%s (%s) "/" %s%s`, listVerb(lsub), strings.Join(attrs, " "), c.mailboxOut(name), childInfo)
 	c.listSharedExtras(e, isBox, name, opts)
 }
 
@@ -854,7 +874,7 @@ func (c *conn) listSharedEntry(st *sharedTree, name string, lsub bool, opts list
 // mailboxes (RFC 3501 6.3.9).
 func (c *conn) lsubSharedParent(st *sharedTree, name string) {
 	if st.subChild(name) && len(st.patterns) > 0 && strings.HasSuffix(st.patterns[0], "%") {
-		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, astringOut(name))
+		c.w.untagged(`LSUB (%s) "/" %s`, `\Noselect`, c.mailboxOut(name))
 	}
 }
 
@@ -891,14 +911,14 @@ func (c *conn) listSharedExtras(e sharedEntry, isBox bool, name string, opts lis
 	}
 
 	if opts.returnMyRights && isBox {
-		c.w.untagged("MYRIGHTS %s %s", astringOut(name), e.rights)
+		c.w.untagged("MYRIGHTS %s %s", c.mailboxOut(name), e.rights)
 	}
 }
 
 // --- CREATE / DELETE / RENAME / SUBSCRIBE ----------------------------------
 
 func (c *conn) cmdCreate(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -914,6 +934,11 @@ func (c *conn) cmdCreate(tag string) error {
 		return nil
 	}
 
+	if checkNewName(t.name) != nil {
+		c.no(tag, "CANNOT", "Mailbox name has control characters or is not in Unicode Normalization Form C")
+		return nil
+	}
+
 	if t.shared() && !c.mayCreateShared(tag, t) {
 		return nil
 	}
@@ -923,7 +948,13 @@ func (c *conn) cmdCreate(tag string) error {
 		return nil
 	}
 
-	c.ok(tag, "", "CREATE completed")
+	// RFC 8474 4.1: the id of the new mailbox comes with the OK.
+	code := ""
+	if mb, err := t.u.Lookup(t.name); err == nil {
+		code = "MAILBOXID (" + mb.ID + ")"
+	}
+
+	c.ok(tag, code, "CREATE completed")
 
 	return nil
 }
@@ -977,7 +1008,7 @@ func canonicalAttr(a string) string {
 }
 
 func (c *conn) cmdDelete(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1016,12 +1047,12 @@ func (c *conn) cmdDelete(tag string) error {
 }
 
 func (c *conn) cmdRename(tag string) error {
-	oldName, err := c.r.astring()
+	oldName, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
 
-	newName, err := c.r.astring()
+	newName, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1040,6 +1071,11 @@ func (c *conn) cmdRename(tag string) error {
 
 	if ot.u != nt.u {
 		c.no(tag, "CANNOT", "Cannot rename across users")
+		return nil
+	}
+
+	if checkNewName(nt.name) != nil {
+		c.no(tag, "CANNOT", "Mailbox name has control characters or is not in Unicode Normalization Form C")
 		return nil
 	}
 
@@ -1071,7 +1107,7 @@ func (c *conn) cmdRename(tag string) error {
 }
 
 func (c *conn) cmdSubscribe(tag string, on bool) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1121,7 +1157,7 @@ func (c *conn) cmdSubscribe(tag string, on bool) error {
 // --- STATUS ----------------------------------------------------------------
 
 func (c *conn) cmdStatus(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1181,6 +1217,7 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 
 		if model.HasFlag(m.Flags, flagDeleted) {
 			d.deleted++
+			d.deletedSize += m.Size
 		}
 
 		d.size += m.Size
@@ -1206,7 +1243,7 @@ func (c *conn) statusLine(t *target, items []string) (string, error) {
 		}
 	}
 
-	return fmt.Sprintf("STATUS %s (%s)", astringOut(t.display(info.Name)), strings.Join(out, " ")), nil
+	return fmt.Sprintf("STATUS %s (%s)", c.mailboxOut(t.display(info.Name)), strings.Join(out, " ")), nil
 }
 
 // statusData is what the STATUS items are computed from.
@@ -1215,7 +1252,9 @@ type statusData struct {
 	msgs            []model.Meta
 	unseen, deleted int
 	size            int64
-	maxLiteral      int64
+	// deletedSize is the size of the \Deleted messages in octets.
+	deletedSize int64
+	maxLiteral  int64
 }
 
 // statusItems render the STATUS data items.
@@ -1232,20 +1271,23 @@ var statusItems = map[string]func(d *statusData) string{
 
 		return fmt.Sprintf("RECENT %d", recent)
 	},
-	kwUIDNext:       func(d *statusData) string { return fmt.Sprintf("UIDNEXT %d", d.info.UIDNext) },
-	kwUIDValidity:   func(d *statusData) string { return fmt.Sprintf("UIDVALIDITY %d", d.info.UIDValidity) },
-	kwUnseen:        func(d *statusData) string { return fmt.Sprintf("UNSEEN %d", d.unseen) },
-	kwDeleted:       func(d *statusData) string { return fmt.Sprintf("DELETED %d", d.deleted) },
-	kwSize:          func(d *statusData) string { return fmt.Sprintf("SIZE %d", d.size) },
-	"HIGHESTMODSEQ": func(d *statusData) string { return fmt.Sprintf("HIGHESTMODSEQ %d", d.info.HighestModSeq) },
-	"MAILBOXID":     func(d *statusData) string { return fmt.Sprintf("MAILBOXID (%s)", d.info.ID) },
-	"APPENDLIMIT":   func(d *statusData) string { return fmt.Sprintf("APPENDLIMIT %d", d.maxLiteral) },
+	kwUIDNext:     func(d *statusData) string { return fmt.Sprintf("UIDNEXT %d", d.info.UIDNext) },
+	kwUIDValidity: func(d *statusData) string { return fmt.Sprintf("UIDVALIDITY %d", d.info.UIDValidity) },
+	kwUnseen:      func(d *statusData) string { return fmt.Sprintf("UNSEEN %d", d.unseen) },
+	kwDeleted:     func(d *statusData) string { return fmt.Sprintf("DELETED %d", d.deleted) },
+	kwSize:        func(d *statusData) string { return fmt.Sprintf("SIZE %d", d.size) },
+	// RFC 9208 4.1.4: what an EXPUNGE frees, in the unit of the STORAGE
+	// resource (1024 octets, rounded up like the usage of GETQUOTA).
+	"DELETED-STORAGE": func(d *statusData) string { return fmt.Sprintf("DELETED-STORAGE %d", (d.deletedSize+1023)/1024) },
+	"HIGHESTMODSEQ":   func(d *statusData) string { return fmt.Sprintf("HIGHESTMODSEQ %d", d.info.HighestModSeq) },
+	"MAILBOXID":       func(d *statusData) string { return fmt.Sprintf("MAILBOXID (%s)", d.info.ID) },
+	"APPENDLIMIT":     func(d *statusData) string { return fmt.Sprintf("APPENDLIMIT %d", d.maxLiteral) },
 }
 
 // --- APPEND (with MULTIAPPEND) ---------------------------------------------
 
 func (c *conn) cmdAppend(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1365,6 +1407,14 @@ func (c *conn) readAppendArgs() (*appendArgs, error) {
 			continue
 		}
 
+		if t.kind == tokAtom && strings.EqualFold(t.str, kwUTF8) {
+			if err := c.readUTF8Part(a, pt); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
 		if t.kind != tokString {
 			a.badSyntax = "Expected message literal"
 			continue
@@ -1429,6 +1479,26 @@ func (c *conn) readCatenatePart(a *appendArgs, pt appendPart) error {
 		if code == "" {
 			a.badSyntax = err.Error()
 		}
+	}
+
+	pt.raw = raw
+	a.parts = append(a.parts, pt)
+
+	return nil
+}
+
+// readUTF8Part reads the "(literal8)" of "UTF8 (literal8)" (RFC 6855 4)
+// and adds the message to a.
+func (c *conn) readUTF8Part(a *appendArgs, pt appendPart) error {
+	lt, err := c.r.next()
+	if err != nil {
+		return err
+	}
+
+	raw, err := c.utf8Literal(lt)
+	if err != nil {
+		a.badSyntax = err.Error()
+		return nil
 	}
 
 	pt.raw = raw
@@ -1521,7 +1591,7 @@ func (c *conn) appendStore(tag string, au model.User, name, appendRights string,
 // --- SELECT / EXAMINE with CONDSTORE and QRESYNC ---------------------------
 
 func (c *conn) cmdSelect(tag string, examine bool) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1952,7 +2022,7 @@ func (c *conn) cmdGetQuota(tag string) error {
 }
 
 func (c *conn) cmdGetQuotaRoot(tag string) error {
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -1968,7 +2038,7 @@ func (c *conn) cmdGetQuotaRoot(tag string) error {
 		return nil
 	}
 
-	c.w.untagged(`QUOTAROOT %s ""`, astringOut(name))
+	c.w.untagged(`QUOTAROOT %s ""`, c.mailboxOut(name))
 	c.w.untagged("%s", line)
 	c.ok(tag, "", "GETQUOTAROOT completed")
 
@@ -2087,29 +2157,35 @@ func formatGaps(msgs []model.Meta, uidNext uint32) string {
 	return b.String()
 }
 
-// catenate assembles a message from TEXT parts and IMAP URLs (RFC 4469,
-// RFC 5092 relative URLs: imap:///<mailbox>;UIDVALIDITY=<n>/;UID=<n>
-// [/;SECTION=<section>]). A part the account may not read or that does
-// not exist is a BADURL failure; the total is bounded like a literal.
+// catenate assembles a message from TEXT parts, UTF8 parts (RFC 6855 4)
+// and IMAP URLs (RFC 4469, RFC 5092 relative URLs:
+// imap:///<mailbox>;UIDVALIDITY=<n>/;UID=<n>[/;SECTION=<section>]). A
+// part the account may not read or that does not exist is a BADURL
+// failure, whose code carries that URL; the total is bounded like a
+// literal.
 func (c *conn) catenate(items []token) (string, string, error) {
 	var b strings.Builder
 
 	for i := 0; i < len(items); i++ {
 		kind := strings.ToUpper(items[i].str)
-		if i+1 >= len(items) || !items[i+1].isString() {
+		if i+1 >= len(items) {
 			return "", "", fmt.Errorf("%w: CATENATE part needs a value", errSyntax)
 		}
 
-		val := items[i+1].str
+		val, err := c.catenateValue(kind, items[i+1])
+		if err != nil {
+			return "", "", err
+		}
+
 		i++
 
 		switch kind {
-		case kwText:
+		case kwText, kwUTF8:
 			b.WriteString(val)
 		case "URL":
 			part, err := c.resolveURL(val)
 			if err != nil {
-				return "", "BADURL", err
+				return "", "BADURL " + badURLText(val), err
 			}
 			// Account the part like a literal of this command (memory
 			// budget and APPENDLIMIT), released with the command.
@@ -2136,6 +2212,55 @@ func (c *conn) catenate(items []token) (string, string, error) {
 	}
 
 	return b.String(), "", nil
+}
+
+// catenateValue returns the value of a CATENATE part: a string, or for
+// UTF8 the literal in parentheses.
+func (c *conn) catenateValue(kind string, t token) (string, error) {
+	if kind == kwUTF8 {
+		return c.utf8Literal(t)
+	}
+
+	if !t.isString() {
+		return "", fmt.Errorf("%w: CATENATE part needs a value", errSyntax)
+	}
+
+	return t.str, nil
+}
+
+// utf8Literal returns the message of "UTF8 (literal8)" (RFC 6855 4),
+// whose parenthesised list is t. The form exists for sessions that
+// enabled UTF8=ACCEPT; any other session gets a syntax error.
+func (c *conn) utf8Literal(t token) (string, error) {
+	if !c.utf8 {
+		return "", fmt.Errorf("%w: UTF8 message data needs ENABLE UTF8=ACCEPT", errSyntax)
+	}
+
+	if t.kind != tokList || len(t.list) != 1 || t.list[0].kind != tokString {
+		return "", fmt.Errorf("%w: UTF8 needs a parenthesised literal", errSyntax)
+	}
+
+	return t.list[0].str, nil
+}
+
+// badURLText renders a URL for the BADURL response code, whose text may
+// hold any TEXT-CHAR but "]" and octet 0xFF (RFC 4469 5); those, and
+// control characters, are percent-encoded, which leaves the URL the same
+// URL.
+func badURLText(u string) string {
+	var b strings.Builder
+
+	for i := 0; i < len(u); i++ {
+		ch := u[i]
+		if ch == ']' || ch == 0xff || ch < 0x20 || ch == 0x7f {
+			fmt.Fprintf(&b, "%%%02X", ch)
+			continue
+		}
+
+		b.WriteByte(ch)
+	}
+
+	return b.String()
 }
 
 // imapURL is a parsed IMAP URL of a CATENATE part.
@@ -2344,7 +2469,7 @@ func (c *conn) cmdReplace(tag string, uid bool) error {
 		return err
 	}
 
-	name, err := c.r.astring()
+	name, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}
@@ -2464,6 +2589,17 @@ func (c *conn) readReplaceMessage(tag string, t token) (raw string, ok bool, err
 		return raw, true, nil
 	}
 
+	if t.kind == tokAtom && strings.EqualFold(t.str, kwUTF8) {
+		lt, err := c.r.next()
+		if err != nil {
+			return "", false, err
+		}
+
+		raw, err = c.utf8Literal(lt)
+
+		return raw, err == nil, err
+	}
+
 	if t.kind == tokString {
 		return t.str, true, nil
 	}
@@ -2526,7 +2662,7 @@ func binaryToBase64(raw string) string {
 			return raw
 		}
 
-		if strings.HasPrefix(k, "content-transfer-encoding:") && strings.TrimSpace(k[len("content-transfer-encoding:"):]) == "binary" {
+		if strings.HasPrefix(k, "content-transfer-encoding:") && strings.TrimSpace(k[len("content-transfer-encoding:"):]) == cteBinary {
 			cte = i
 		}
 	}

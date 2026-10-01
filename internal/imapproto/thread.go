@@ -174,14 +174,6 @@ func envAddrs(m *model.Meta, which string) []imap.Address {
 	return nil
 }
 
-func firstMailbox(l []imap.Address) string {
-	if len(l) == 0 {
-		return ""
-	}
-
-	return strings.ToLower(l[0].Mailbox + "@" + l[0].Host)
-}
-
 // firstLocalpart is the RFC 5256 sort key for FROM/TO/CC: the addr-mailbox
 // (local part) of the first address, compared case-insensitively.
 func firstLocalpart(l []imap.Address) string {
@@ -205,16 +197,38 @@ func envMessageID(m *model.Meta) string {
 	return ""
 }
 
+// displayName is the DISPLAY sort value of the first address (RFC 5957
+// 3): its decoded display name, else mailbox@host, else the mailbox
+// alone, else "". The default collation i;ascii-casemap folds ASCII
+// letters only.
 func displayName(l []imap.Address) string {
 	if len(l) == 0 {
 		return ""
 	}
 
-	if l[0].Name != "" {
-		return strings.ToLower(l[0].Name)
+	a := l[0]
+
+	switch {
+	case a.Name != "":
+		return asciiLower(a.Name)
+	case a.Mailbox != "" && a.Host != "":
+		return asciiLower(a.Mailbox + "@" + a.Host)
 	}
 
-	return firstMailbox(l)
+	return asciiLower(a.Mailbox)
+}
+
+// asciiLower maps A-Z to a-z and leaves every other byte alone
+// (i;ascii-casemap, RFC 4790 9.2).
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, ch := range b {
+		if ch >= 'A' && ch <= 'Z' {
+			b[i] = ch + ('a' - 'A')
+		}
+	}
+
+	return string(b)
 }
 
 // baseSubject is the RFC 5256 2.1 base subject; see mailmeta.BaseSubject.

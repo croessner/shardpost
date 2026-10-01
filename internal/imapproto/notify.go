@@ -74,6 +74,16 @@ func (c *conn) cmdNotify(tag string) error {
 		return err
 	}
 
+	// The mailboxes of SUBTREE and MAILBOXES are names in the session's
+	// wire form.
+	for i := range groups {
+		for j := range groups[i].mailboxes {
+			if groups[i].mailboxes[j], err = c.fromWire(groups[i].mailboxes[j]); err != nil {
+				return err
+			}
+		}
+	}
+
 	st, ok := c.buildNotifyState(tag, groups)
 	if !ok {
 		return nil

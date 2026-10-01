@@ -55,7 +55,10 @@ func (c *conn) cmdGetMetadata(tag string) error {
 		return fmt.Errorf("%w: expected mailbox", errSyntax)
 	}
 
-	mailbox := t.str
+	mailbox, err := c.fromWire(t.str)
+	if err != nil {
+		return err
+	}
 
 	wanted, err := c.readOneOrList("entries")
 	if err != nil {
@@ -126,7 +129,7 @@ func (c *conn) validEntries(tag string, wanted []string) bool {
 // and the tagged OK, with LONGENTRIES when entries exceeded MAXSIZE.
 func (c *conn) metadataResponse(tag, mailbox string, parts []string, longest int64) {
 	if len(parts) > 0 {
-		c.w.untagged("METADATA %s (%s)", astringOut(mailbox), strings.Join(parts, " "))
+		c.w.untagged("METADATA %s (%s)", c.mailboxOut(mailbox), strings.Join(parts, " "))
 	}
 
 	if longest > 0 {
@@ -247,7 +250,7 @@ func metadataParts(all map[string]string, keys []string, maxSize int64) ([]strin
 
 // SETMETADATA mailbox (entry value [entry value ...])
 func (c *conn) cmdSetMetadata(tag string) error {
-	mailbox, err := c.r.astring()
+	mailbox, err := c.mailboxArg()
 	if err != nil {
 		return err
 	}

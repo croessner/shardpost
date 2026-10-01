@@ -66,6 +66,8 @@ func TestFetchEnvelopeDefaultsAndGroups(t *testing.T) {
 		`* 2 FETCH (ENVELOPE ("Thu, 15 Feb 2007 01:02:03 +0200" NIL ((NIL NIL "user" "domain")) ((NIL NIL "user" "domain")) ((NIL NIL "user" "domain")) NIL NIL NIL NIL NIL))`,
 		`* 4 FETCH (ENVELOPE ("Thu, 15 Feb 2007 01:02:03 +0200" NIL (("Real Name" NIL "user" "domain")) (("Real Name" NIL "user" "domain")) (("Real Name" NIL "user" "domain")) ((NIL NIL "group" NIL)(NIL NIL "g1" "d1.org")(NIL NIL "g2" "d2.org")(NIL NIL NIL NIL)(NIL NIL "group2" NIL)(NIL NIL "g3" "d3.org")(NIL NIL NIL NIL)) ((NIL NIL "group" NIL)(NIL NIL NIL NIL)(NIL NIL "group2" NIL)(NIL NIL NIL NIL)) NIL NIL NIL))`,
 		`* 5 FETCH (ENVELOPE ("Thu, 15 Feb 2007 01:02:03 +0200" NIL (("Real Name" NIL "user" "domain")) (("Real Name" NIL "user" "domain")) (("Real Name" NIL "user" "domain")) NIL NIL NIL NIL NIL))`,
+		// The obsolete source route is the at-domain-list (adl).
+		`* 6 FETCH (ENVELOPE ("Thu, 15 Feb 2007 01:02:03 +0200" NIL ((NIL "@route" "user" "domain")) ((NIL "@route" "user" "domain")) ((NIL "@route" "user" "domain")) NIL NIL NIL NIL NIL))`,
 	}
 	for _, w := range want {
 		if !has(lines, w) {

@@ -311,9 +311,10 @@ func (u *User) importOne(b *box, m *model.ImportMessage, res *model.ImportResult
 		u.index(guid, m.Raw)
 	}
 
-	env, refs, preview := mailmeta.Extract(m.Raw)
+	p := mailmeta.Parse(m.Raw)
 	b.msgs = append(b.msgs, model.Meta{UID: m.UID, GUID: guid, Size: int64(len(m.Raw)), Chunks: 1, Flags: append([]string(nil), m.Flags...),
-		InternalDate: m.InternalDate, SaveDate: m.SaveDate, ModSeq: m.ModSeq, Envelope: env, References: refs, Preview: preview, POP3UIDL: m.POP3UIDL})
+		InternalDate: m.InternalDate, SaveDate: m.SaveDate, ModSeq: m.ModSeq, Envelope: p.Envelope, Routes: p.Routes, References: p.Refs,
+		Preview: p.Preview, POP3UIDL: m.POP3UIDL})
 	b.addKeywords(m.Flags)
 	u.usage.Bytes += int64(len(m.Raw))
 	u.usage.Msgs++
