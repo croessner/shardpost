@@ -3,7 +3,7 @@
 This document lists, protocol by protocol, what ShardPost implements:
 the standards it follows, the extensions it advertises, the commands
 and methods it answers, and where it deliberately or knowingly deviates.
-It describes **ShardPost 0.35.1** as of 2026-10-01 and was written from
+It describes **ShardPost 0.35.2** as of 2026-10-01 and was written from
 the code, not from earlier documentation.
 
 How to read the tables:
@@ -657,7 +657,7 @@ under `/admin/v1`, and the command-line client `shardpostctl`; see
 | Subcommand | Purpose |
 |---|---|
 | `shardpost serve` | Runs all configured listeners (the default). |
-| `shardpost check` | Validates the configuration and the secret files and compiles the before/after Sieve scripts, then exits; does not connect to Ceph or Nauthilus. |
+| `shardpost config check` | Validates the configuration and the secret files and compiles the before/after Sieve scripts, then exits; does not connect to Ceph or Nauthilus. |
 | `shardpost scrub` | Walks all accounts (or `scrub.users`) and repairs what a crash left behind; `scrub.grace_seconds` (default 3600), `scrub.dry_run` only reports. |
 | `shardpost push` | The JMAP Web Push worker (see [JMAP](#jmap)). |
 
