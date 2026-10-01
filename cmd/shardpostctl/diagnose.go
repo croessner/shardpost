@@ -25,12 +25,14 @@ import (
 //	quota show <account>
 //	shared list <account>
 //	account directory <account>
+//	account list [-limit n] [-after cursor] [-state active|purging] [-all]
 //
 // Every command takes --json.
 
 const diagnoseUsage = `usage: shardpostctl server status | account show <account> | mailbox list [-limit n] [-after name] [-all] <account> |
   mailbox show <account> <mailbox> | acl list <account> <mailbox> | acl explain <account> <mailbox> <principal> |
-  quota show <account> | shared list <account> | account directory <account>   (each with --json) |
+  quota show <account> | shared list <account> | account directory <account> |
+  account list [-limit n] [-after cursor] [-state active|purging] [-all]   (each with --json) |
   mailbox create [-special-use \Archive] <account> <name> | mailbox rename [-if-match E] <account> <mailbox> <new> |
   mailbox subscribe|unsubscribe <account> <mailbox> | acl set [-mode add|remove] [-if-match E] <account> <mailbox> <identifier> <rights> |
   acl delete [-if-match E] <account> <mailbox> <identifier> | account repair <account>`
@@ -45,6 +47,7 @@ type diagArgs struct {
 	limit  int
 	after  string
 	all    bool
+	state  string
 	// provisioning flags
 	specialUse string
 	mode       string
@@ -66,9 +69,10 @@ func diagCmd(client *adminapi.ClientWithResponses, noun string, args []string, s
 	var a diagArgs
 
 	fs.BoolVar(&a.asJSON, "json", false, "print JSON")
-	fs.IntVar(&a.limit, "limit", 100, "mailboxes per page (mailbox list)")
-	fs.StringVar(&a.after, "after", "", "continue after this mailbox name (mailbox list)")
-	fs.BoolVar(&a.all, "all", false, "fetch all pages (mailbox list)")
+	fs.IntVar(&a.limit, "limit", 100, "mailboxes or accounts per page (mailbox list, account list)")
+	fs.StringVar(&a.after, "after", "", "continue after this mailbox name or at this cursor (mailbox list, account list)")
+	fs.BoolVar(&a.all, "all", false, "fetch all pages (mailbox list, account list)")
+	fs.StringVar(&a.state, labelState, "", "account list: only entries in this state (active, purging)")
 	fs.StringVar(&a.specialUse, "special-use", "", `special-use of a new mailbox, comma-separated (e.g. \Archive)`)
 	fs.StringVar(&a.mode, "mode", "replace", "acl set: replace, add or remove")
 	fs.StringVar(&a.ifMatch, "if-match", "", "ETag the change is based on (412 if it changed)")
@@ -137,6 +141,8 @@ func diagCommand(verb string) (diagFunc, int) {
 		return quotaShow, 1
 	case "account directory":
 		return accountDirectory, 1
+	case "account list":
+		return accountList, 0
 	case "shared list":
 		return sharedList, 1
 	default:

@@ -93,7 +93,7 @@ the tagged OK of LOGIN/AUTHENTICATE.
 | `IMAPSIEVE=<url>` | RFC 6785 | ⚙ | Only with `imapsieve.enabled` and `imapsieve.user_scripts`. See [IMAPSieve](#imapsieve). |
 | `NAMESPACE` | RFC 2342 | ✅ | Personal `""`, other users `Shared/`, public `Public/` (prefixes configurable). A namespace with an empty prefix is switched off and shown as `NIL`. Prefixes are sent in modified UTF-7 to sessions without UTF-8 names. No namespace response extensions. |
 | `UNSELECT` | RFC 3691 | ✅ | |
-| `IDLE` | RFC 2177 | ✅ | Also in the authenticated state. Changes come from a RADOS watch plus a 60 s poll. IDLE itself has no timeout. |
+| `IDLE` | RFC 2177 | ✅ | Also in the authenticated state. Changes come from a RADOS watch on the mailbox, shared by every session of the pod that follows it, plus a 60 s poll. IDLE itself has no timeout. |
 | `UIDPLUS` | RFC 4315 | ✅ | `[APPENDUID]`, `[COPYUID]`, `UID EXPUNGE`. |
 | `MOVE` | RFC 6851 | ✅ | Untagged `OK [COPYUID]` before the expunges. |
 | `ESEARCH` | RFC 4731 | ✅ | `RETURN (MIN MAX ALL COUNT SAVE)`; an unknown return option is `BAD`. |
@@ -302,6 +302,7 @@ IMAPSieve script entry.
 | Events | ◐ | `MessageNew` (with fetch attributes), `MessageExpunge`, `FlagChange`. Every other event (`MailboxName`, `SubscriptionChange`, `MailboxMetadataChange`, `ServerMetadataChange`, extension events) gets `NO [BADEVENT (MessageNew MessageExpunge FlagChange)]` (RFC 5465 §3.1). `MessageNew` and `MessageExpunge` must be given together; `FlagChange` needs both. |
 | Other mailboxes | ✅ | Reported as `STATUS` (`MESSAGES UIDNEXT UIDVALIDITY`, plus `HIGHESTMODSEQ` with CONDSTORE or `FlagChange`). |
 | `IDLE` | ✅ | Authenticated and selected state. |
+| Change detection | ✅ | NOTIFY follows the account's change log through one watch on the account object per pod (not one per mailbox and session); a selected shared or public mailbox through its owner's. The mailboxes the new entries name get their `STATUS` or poll; when the log no longer reaches back far enough, every notified mailbox is looked at. Every 60 s the notifier also reads the log without a notify: a change whose log entry is still announced (recorded after its notify, at most 60 s later when its writer died) or that fell into a watch the pod was setting up again is reported then at the latest, where before the mailbox watch reported it at once. After a SELECT under NOTIFY the selected mailbox is polled once. Without an account watch (an account whose change log was never written) NOTIFY falls back to one watch per mailbox. A connection follows at most `server.imap_max_watches` watches (default 8, at least 2), one of them always kept for IDLE; when the fallback watches do not fit, `NOTIFY SET` answers `NO [LIMIT]` and the earlier NOTIFY state stays as it was. The responses a client gets are the same as before. |
 
 ### Connection handling
 

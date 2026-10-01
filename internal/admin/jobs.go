@@ -49,6 +49,8 @@ func (s *Server) jobError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, err.Error())
 	case errors.Is(err, errScope):
 		writeError(w, http.StatusForbidden, adminapi.Forbidden, err.Error())
+	case errors.Is(err, jobs.ErrDirectoryNotReady):
+		writeError(w, http.StatusConflict, adminapi.Conflict, err.Error())
 	default:
 		s.importError(w, r, err)
 	}
@@ -102,6 +104,47 @@ func (s *Server) CreatePlan(w http.ResponseWriter, r *http.Request, account admi
 	p := principalOf(r.Context())
 
 	plan, err := s.o.Jobs.CreatePlan(r.Context(), kind, account, params, p.name, p.allowTouched)
+	if err != nil {
+		s.jobError(w, r, err)
+		return
+	}
+
+	auditf(r, "plan", plan.ID)
+	writeJSON(w, http.StatusCreated, apiPlan(plan))
+}
+
+// CreateBatchPlan plans a batch: a kind over every account of the
+// account directory. It needs the role of that kind and the scope of
+// all accounts.
+func (s *Server) CreateBatchPlan(w http.ResponseWriter, r *http.Request) {
+	if !s.jobsEnabled(w) {
+		return
+	}
+
+	var req adminapi.BatchPlanRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "invalid request")
+		return
+	}
+
+	kind, err := s.o.Jobs.Kind(string(req.Kind))
+	if err != nil {
+		s.jobError(w, r, err)
+		return
+	}
+
+	auditf(r, "kind", jobs.KindBatch, "runs", kind.Name())
+
+	if !requireAllAccounts(w, r, kind.Role()) {
+		return
+	}
+
+	p := jobs.BatchParams{Kind: kind.Name(), SkipIdle: req.SkipIdle != nil && *req.SkipIdle}
+	if req.Params != nil {
+		p.Params, _ = json.Marshal(req.Params)
+	}
+
+	plan, err := s.o.Jobs.CreateBatchPlan(p, principalOf(r.Context()).name)
 	if err != nil {
 		s.jobError(w, r, err)
 		return
@@ -184,7 +227,7 @@ func (s *Server) jobTarget(w http.ResponseWriter, r *http.Request, req adminapi.
 
 		auditf(r, "account", plan.Account)
 
-		if !requireAccount(w, r, kind.Role(), plan.Account) {
+		if !s.requireJobScope(w, r, kind, plan.Params, plan.Account) {
 			return nil, "", "", false
 		}
 
@@ -296,7 +339,24 @@ func (s *Server) scopedJob(w http.ResponseWriter, r *http.Request, id string, ro
 		return nil, false
 	}
 
+	if j.Account == "" && role(j) != RoleDiagnose {
+		// Changing a batch takes the scope of all accounts.
+		return j, requireAllAccounts(w, r, role(j))
+	}
+
 	return j, requireAccount(w, r, role(j), j.Account)
+}
+
+// requireJobScope checks the role a job of the kind needs and the client
+// scope: the account, or for a batch the scope of all accounts.
+func (s *Server) requireJobScope(w http.ResponseWriter, r *http.Request, kind jobs.Kind, params json.RawMessage, account string) bool {
+	role := s.o.Jobs.RoleOf(kind, params)
+
+	if jobs.IsBatch(kind) {
+		return requireAllAccounts(w, r, role)
+	}
+
+	return requireAccount(w, r, role, account)
 }
 
 // GetJob returns a job.
@@ -311,7 +371,7 @@ func (s *Server) GetJob(w http.ResponseWriter, r *http.Request, id adminapi.JobI
 func (s *Server) CancelJob(w http.ResponseWriter, r *http.Request, id adminapi.JobID) {
 	j, ok := s.scopedJob(w, r, id, func(j *jobs.Job) string {
 		if k, err := s.o.Jobs.Kind(j.Kind); err == nil {
-			return k.Role()
+			return s.o.Jobs.RoleOf(k, j.Params)
 		}
 
 		return RoleDelete

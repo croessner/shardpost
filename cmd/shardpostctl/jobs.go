@@ -16,6 +16,7 @@ import (
 // Maintenance jobs (roadmap 8c):
 //
 //	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account>   dry run, prints the plan
+//	plan -all [-classes a,b] [-skip-idle] <kind>        a batch of the kind over every account
 //	plan show <plan-id>
 //	apply [-wait] [-idempotency-key K] <plan-id>        run the plan as a job
 //	check [-wait] <account>                             read-only index check
@@ -25,11 +26,12 @@ import (
 // With -wait (and for job wait) the exit code is the job's outcome: 0
 // succeeded, 1 partially failed, 69 failed or cancelled.
 
-const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account> | plan show <plan-id> |
+const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account> |
+  plan -all [-classes a,b] [-skip-idle] <kind> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
   kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, mailbox_name_convert,
-  attachment_backfill, mailbox_delete, expunge, purge`
+  attachment_backfill, mailbox_delete, expunge, purge; with -all: index_check, scrub, fts_rebuild, attachment_backfill`
 
 // labelKind labels the kind row.
 const labelKind = "kind"
@@ -39,6 +41,7 @@ type jobArgs struct {
 	args             []string
 	asJSON, wait     bool
 	deleted          bool
+	all, skipIdle    bool
 	uids             string
 	classes, mailbox string
 	idemKey, account string
@@ -59,6 +62,8 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 	fs.StringVar(&a.mailbox, labelMailbox, "", "mailbox_delete, expunge: mailbox name or id")
 	fs.StringVar(&a.uids, "uids", "", "expunge: UIDs, comma-separated")
 	fs.BoolVar(&a.deleted, "deleted", false, "expunge: every message flagged \\Deleted")
+	fs.BoolVar(&a.all, "all", false, "plan: a batch of the kind over every account")
+	fs.BoolVar(&a.skipIdle, "skip-idle", false, "plan -all scrub: skip the accounts unchanged since their last clean scrub")
 	fs.StringVar(&a.idemKey, "idempotency-key", "", "reuse the job of an earlier identical request")
 	fs.StringVar(&a.account, "account", "", "job list: only this account")
 	fs.StringVar(&a.state, labelState, "", "job list: only this state")
@@ -92,7 +97,11 @@ func jobsCmd(client *adminapi.ClientWithResponses, cmd string, args []string, st
 	}
 
 	run, n := jobCommand(verb)
-	if run == nil || len(a.args) != n {
+	if verb == cmdPlan && a.all {
+		run, n = planAll, 1
+	}
+
+	if run == nil || len(a.args) != n || (a.all && verb != cmdPlan) {
 		sayln(stderr, jobsUsage)
 		return exUsage
 	}
@@ -173,6 +182,36 @@ func planCreate(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs,
 	return printPlan(stdout, a, resp.JSON201)
 }
 
+// planAll plans a batch of the kind over every account of the account
+// directory (role of the kind, scope of all accounts).
+func planAll(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, stdout, stderr io.Writer) int {
+	if a.mailbox != "" || a.uids != "" || a.deleted {
+		sayln(stderr, "shardpostctl: -mailbox, -uids and -deleted name one account; a batch runs on all")
+		return exUsage
+	}
+
+	req := adminapi.BatchPlanRequest{Kind: a.args[0]}
+
+	if a.classes != "" {
+		req.Params = &map[string]any{"classes": strings.Split(a.classes, ",")}
+	}
+
+	if a.skipIdle {
+		req.SkipIdle = &a.skipIdle
+	}
+
+	resp, err := c.CreateBatchPlanWithResponse(ctx, req)
+	if err != nil {
+		return transportError(stderr, err)
+	}
+
+	if resp.JSON201 == nil {
+		return failure(stderr, resp.JSONDefault, resp.StatusCode())
+	}
+
+	return printPlan(stdout, a, resp.JSON201)
+}
+
 func planShow(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, stdout, stderr io.Writer) int {
 	return request(stderr, func() (*adminapi.Plan, *adminapi.Error, int, error) {
 		resp, err := c.GetPlanWithResponse(ctx, a.args[0])
@@ -206,7 +245,7 @@ func printPlan(stdout io.Writer, a jobArgs, p *adminapi.Plan) int {
 
 	summary, _ := json.MarshalIndent(p.Summary, "", "  ")
 
-	table(stdout, [][2]string{{cmdPlan, p.Id}, {labelKind, p.Kind}, {cmdAccount, p.Account},
+	table(stdout, [][2]string{{cmdPlan, p.Id}, {labelKind, p.Kind}, {cmdAccount, accountOrAll(p.Account)},
 		{"expires", p.Expires.Format(time.RFC3339)}, {"applied", deref(p.AppliedJob)}})
 	sayln(stdout, string(summary))
 	sayf(stdout, "apply with: shardpostctl apply %s\n", p.Id)
@@ -292,6 +331,15 @@ func waitJob(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, id
 	}
 }
 
+// accountOrAll names the account of a plan or job; a batch has none.
+func accountOrAll(account string) string {
+	if account == "" {
+		return "(all accounts)"
+	}
+
+	return account
+}
+
 // jobExit maps the final state to the exit code.
 func jobExit(state adminapi.JobState) int {
 	switch state {
@@ -340,7 +388,7 @@ func jobList(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, st
 
 	rows := [][2]string{}
 	for _, j := range resp.JSON200.Items {
-		rows = append(rows, [2]string{j.Id, fmt.Sprintf("%-16s %-18s %s", j.Kind, j.State, j.Account)})
+		rows = append(rows, [2]string{j.Id, fmt.Sprintf("%-16s %-18s %s", j.Kind, j.State, accountOrAll(j.Account))})
 	}
 
 	table(stdout, rows)
@@ -362,7 +410,7 @@ func printJob(stdout io.Writer, a jobArgs, j *adminapi.Job) int {
 		progress = *j.Progress.Phase + " " + progress
 	}
 
-	table(stdout, [][2]string{{cmdJob, j.Id}, {labelKind, j.Kind}, {cmdAccount, j.Account}, {labelState, string(j.State)},
+	table(stdout, [][2]string{{cmdJob, j.Id}, {labelKind, j.Kind}, {cmdAccount, accountOrAll(j.Account)}, {labelState, string(j.State)},
 		{"progress", progress}, {cmdServer, deref(j.Server)}, {labelAttempts, fmt.Sprint(j.Attempts)}})
 
 	for _, e := range j.Errors {

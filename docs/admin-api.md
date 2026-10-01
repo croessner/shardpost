@@ -64,6 +64,9 @@ admin:
     - identity: support.example.org
       roles: [diagnose, trace]
       accounts: ["*@example.org"]      # optional: account scope
+    - identity: fleet.shardpost.internal
+      roles: [diagnose, repair]
+      all_accounts: true               # optional: scope of all accounts
 ```
 
 `clients[].accounts` limits the accounts an mTLS client may address
@@ -75,6 +78,14 @@ principal being explained. Clients with a scope may address accounts only
 in lowercase (RADOS namespaces are case-sensitive). Outside the scope the
 API answers `403 forbidden`.
 Callers on the Unix socket are not limited.
+
+`clients[].all_accounts` grants the **scope of all accounts**: listing the
+account directory (`GET /admin/v1/accounts`) and planning, applying and
+cancelling batches over every account (`POST /admin/v1/plans`, see
+[Batches over all accounts](#batches-over-all-accounts)). Each operation
+still needs its role. A client without the flag cannot do either, even
+without an account scope; the flag and `accounts` exclude each other.
+Socket callers always have it.
 
 Environment: `ADMIN_SOCKET`, `ADMIN_ADDR`, `ADMIN_TLS_CERT`, `ADMIN_TLS_KEY`,
 `ADMIN_CLIENT_CA`; roles and clients only via YAML.
@@ -295,6 +306,7 @@ shardpostctl plan purge user@example.org
 shardpostctl apply -wait <plan-id>
 shardpostctl job list -account user@example.org
 shardpostctl job show|wait|cancel <job-id>
+shardpostctl plan -all index_check                         # a batch over every account
 ```
 
 **Plan → apply.** `plan` computes a dry run and shows the target set and
@@ -398,18 +410,108 @@ only the repairs that were planned and are still needed.
   `jobs.poll_seconds`. In `read` mode job lists read the hint index of
   the jobs instead of listing the admin namespace.
 
+### Batches over all accounts
+
+```sh
+shardpostctl plan -all index_check                 # role diagnose
+shardpostctl plan -all -skip-idle scrub            # role repair; what the nightly scrub runs
+shardpostctl plan -all -classes refs scrub
+shardpostctl plan -all fts_rebuild                 # locks each account in turn
+shardpostctl plan -all attachment_backfill
+shardpostctl apply -wait <plan-id>
+```
+
+`POST /admin/v1/plans` plans a **batch**: one kind run on every account of
+the account directory. Body: `kind` (`index_check`, `scrub`,
+`fts_rebuild`, `attachment_backfill`), `params` (scrub: `classes`) and
+`skip_idle` (scrub only). The plan and its job have the kind `batch` and
+no account; `summary` names the kind, its role, whether it locks the
+accounts, the parallelism and the directory (shards, backfill marker).
+It is applied like any plan with `POST /admin/v1/jobs`.
+
+- **Role and scope:** a batch needs the role of its kind and the scope of
+  all accounts (socket callers; mTLS clients with `all_accounts`), for
+  planning, applying and cancelling. Reading it needs `diagnose`, like
+  any job; clients with an account scope do not see it.
+- **Precondition:** the account directory must carry a completed
+  backfill marker (`shardpost index backfill accounts`), otherwise the
+  plan is refused with `409 conflict`: accounts from before the directory
+  would be missed.
+- **Walk:** the job reads the directory a page at a time in its order
+  (shard, account) and works on `jobs.batch_parallel` accounts at once
+  (`scrub.parallel` for a scrub). After each page it stores the cursor
+  `<shard>:<account>` and the counters as its checkpoint; a server that
+  takes it over redoes at most one page. An entry `purging` without
+  registry counts as `gone`; with a registry it is handled like an active
+  one. The progress shows the directory shard and the accounts looked at
+  (the total is not known up front).
+- **Account lock:** a kind that locks the account (`fts_rebuild`) takes
+  the lock per account, keeps it renewed while it works and waits
+  `jobs.settle_seconds` before it writes, so a batch of it takes at least
+  accounts × `jobs.settle_seconds` / `jobs.batch_parallel`. While it holds
+  an account, that account is in maintenance as with a single job: its
+  open IMAP and POP3 sessions get `BYE [UNAVAILABLE]` / `-ERR [SYS/TEMP]`
+  at their next command, new logins and LMTP deliveries are deferred. A
+  batch of `fts_rebuild` therefore disconnects every account once, one
+  after another; run it in a quiet window. An account an
+  import or another job holds is put aside and tried again after the walk,
+  up to three times a lease period apart (at most 1000 accounts are put
+  aside, the rest fail at once); still locked, it counts as failed.
+- **Cancel:** `job cancel` stops the batch between two accounts.
+- **Result:** `accounts` (looked at), `done`, `skipped` (idle, scrub with
+  `skip_idle`), `gone`, `failed`, `findings` (accounts whose report had
+  findings: `index_check`, `scrub`), the first 50 failed accounts with
+  their error (`errors`, `errors_dropped` for the rest) and the first 50
+  accounts with findings (`finding_accounts`). A batch with a failed
+  account ends `partially_failed`; the per-account reports are not kept
+  (run the kind for one account to see one).
+- **Skip-if-idle** (`skip_idle`, scrub only): every batch scrub of all
+  repair classes writes the account's scrub record into its directory
+  entry (shown by `account directory` and `account list`). A batch with
+  `skip_idle` leaves an account alone when its last batch scrub was
+  complete and found nothing, is younger than `scrub.interval_days`, the
+  account's change counter and registry version are still the recorded
+  ones, the scrub object holds no orphan candidates and no quota count,
+  and no delivery or MOVE intent is open. A skipped account misses the
+  per-account listings, so unreferenced JMAP upload blobs and the `\Seen`
+  marks of deleted public folders wait for its next full scrub, at most
+  `scrub.interval_days` later (until a later stage records intents for
+  them). See
+  [storage](architecture/storage.md#batches-over-all-accounts-and-the-batch-scrub).
+- **Export** is no batch kind: an export streams one archive per request
+  to the caller, and a batch job has no place to put one archive per
+  account. Export accounts one by one (`shardpostctl export`, listing them
+  with `account list`).
+
+`shardpost scrub --batch` (the nightly CronJob) submits the batch scrub
+with `skip_idle` through the admin store directly, unless a batch scrub
+has not ended yet (see [Operations](operations/README.md#nightly-scrub)).
+
 ### The account directory
 
 ```sh
 shardpostctl account directory user@example.org   # role diagnose
+shardpostctl account list -limit 500              # role diagnose, scope of all accounts
+shardpostctl account list -all -state purging
 shardpostctl account repair user@example.org      # role repair
 shardpostctl account repair --json user@example.org
 ```
 
 `GET /admin/v1/accounts/{account}/directory` (role `diagnose`) shows the
 account's directory entry (state, creation time, the purge's lock
-session), whether its registry exists, and the directory itself: shard
-count, phase and the completion marker of the last backfill.
+session, the last batch scrub), whether its registry exists, and the
+directory itself: shard count, phase and the completion marker of the
+last backfill.
+
+`GET /admin/v1/accounts` (role `diagnose`, scope of all accounts) lists
+the directory a page at a time: `cursor` (`<shard>:<account>`, from
+`next`), `limit` (1 to 1000, default 100) and `state` (`active`,
+`purging`). The order is the directory's (shard, then account), not
+alphabetical; it reads the directory, never a pool listing. With `state`
+a page may hold fewer than `limit` items while `next` is present (a page
+reads at most ten times `limit` entries). `shardpostctl account list`
+pages with `-after`, fetches every page with `-all` and prints JSON lines
+with `-all --json`.
 
 `POST /admin/v1/accounts/{account}/directory/repair` (role `repair`)
 applies the repair rules to one account:

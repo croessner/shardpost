@@ -227,7 +227,8 @@ JSON:
 | `state` | `active` or `purging` |
 | `session` | The purge job's maintenance lock session while `purging` |
 | `cluster` | fsid of the Ceph cluster that holds the account |
-| `shard`, `scrub` | Reserved for later stages, empty |
+| `shard` | Reserved for a later stage (placement), empty |
+| `scrub` | The record of the last batch scrub of the account: `at`, `state` (`seq` and `reg`, see below), `complete`, `findings`; absent before the first. A new registration of the account drops it. |
 
 The store registers an account in the compare-and-swap that creates its
 registry (`casOmapOpAs`, version 0, the account's own index context),
@@ -307,6 +308,84 @@ in the head (`phase: copying:<n>`). Servers of this version refuse every
 directory write in that phase, so creating an account then fails with a
 temporary error (LMTP 451). A reshard therefore requires every server to
 run a version that writes during the copy phase first.
+
+## Batches over all accounts and the batch scrub
+
+A **batch** is a maintenance job without account (`Account ""`, kind
+`batch`) that runs one kind on every account of the directory
+([jobs/batch.go](../../internal/jobs/batch.go)). Only a batch may be
+account-less, and `Store.User("")` stays refused: the runner opens no
+account for it, the batch opens each account in turn. The kinds a
+batch can run are `index_check`, `scrub`, `fts_rebuild` and
+`attachment_backfill`; they do not depend on a plan of the account (a
+batch has one plan for all of them). The role and the exclusivity of a
+batch are those of its kind. A batch is planned only while the
+directory carries a completed backfill marker, since otherwise accounts
+from before the directory would be missed.
+
+The batch walks the directory in its order (shard, account) a page at a
+time; a page holds four accounts per worker (at least 16). The accounts
+of a page run with a bounded parallelism (`jobs.batch_parallel`, for a
+scrub `scrub.parallel`); after each page the directory cursor
+`<shard>:<account>` and the counters go into the job's checkpoint, so a
+server that takes the job over redoes at most one page (all batch
+kinds may run twice on an account). An entry `purging` whose registry
+is gone counts as `gone`; with a registry it counts as active, as the
+directory semantics say. Before each account the batch fences on its
+lease, so a cancel request or a lost lease stops it between two
+accounts. An exclusive kind takes the account's maintenance lock (the
+batch's lock session `job-<id>` for every account), keeps it renewed
+every third of the lease and waits `jobs.settle_seconds` before it
+works; an account that an import or another job holds is put aside and
+tried again after the walk, up to three times a lease period apart,
+and then counted as failed. The result counts the accounts (`done`,
+`skipped`, `gone`, `failed`, `findings`) and names the first 50 that
+failed or had findings, the record stays far below the 4 MiB of an
+admin record however many accounts there are.
+
+**Skip-if-idle.** The nightly scrub is a batch of `scrub` with
+`skip_idle`. After it scrubbed an account with every repair class, the
+batch writes the account's scrub record into its directory entry: the
+account counter (`h:seq` of the account object) and the object version
+of the registry, both read **after** the scrub's own writes (the quota
+fix, the orphan candidates, the quota count), whether the run was
+complete (no import, no error, the index scan complete) and how many
+findings it had. A run that found nothing but saw the state move during
+the scrub (a concurrent change) records itself as incomplete. A later
+batch with `skip_idle` leaves the account alone only when all of this
+holds:
+
+1. the account counter and the registry version are the ones recorded;
+2. the `scrub` object is empty: no orphan candidates and no quota count
+   wait for the second run of the two-run rule (a run that finds the
+   quota counters right removes a count an earlier run left);
+3. the recorded run was complete;
+4. no delivery intent (`d:` in the registry) and no MOVE intent (`i:` on
+   a mailbox object) is open; this costs one read of the registry and
+   one per mailbox, no listing;
+5. the recorded run had no findings;
+6. it is younger than `scrub.interval_days` (7): after that the account
+   is scrubbed again in any case.
+
+The cheap conditions (3, 5, 6) are checked from the directory entry
+before the account is read at all. Accounts that are not skipped are
+scrubbed as before, including the listing of their namespace in the
+data pool (orphan blobs) and the index pool (unknown objects); a scrub
+without those listings needs the intents of a later stage.
+
+**What skipping misses until the intents exist.** A skipped account gets
+none of the per-account listings, so debris that changes neither its
+account counter nor its registry waits for the next scrub of the account,
+at the latest `scrub.interval_days` later: blobs a JMAP upload stored but
+nothing referenced (an upload writes a blob only), the private `\Seen`
+marks (`pubseen/`) of public folders that were deleted in `~public`
+meanwhile, and objects a process left when it died between two writes
+that do not touch the counter or the registry. None of them is visible
+to a client; they only take space until then.
+
+`shardpost scrub` (the run in the process itself) takes its accounts
+from `scrub.users`, else from the directory once it carries a completed
+backfill marker, else from a listing of the index pool.
 
 ## Admin store: hint indexes and due queues
 
@@ -589,6 +668,29 @@ Watch/notify is a wake-up signal. The mailbox header, the
 change journal and the entries remain authoritative. A full snapshot becomes
 necessary when the journal no longer covers the requested time range. Watches
 must be stopped before their store view is closed.
+
+The IMAP sessions of a process share their watches through one watch hub
+([watchhub](../../internal/watchhub/watchhub.go)): one RADOS watch per
+object, on a store view of the hub's own, fanned out to every session
+that follows the object. IDLE follows the mailbox object of the selected
+mailbox. NOTIFY follows the account object (`account`) and reads what
+changed from the account change log: the mailboxes the new entries name
+get their STATUS (one header read each), the selected one its poll; when
+the log no longer covers the position the session read up to, or an
+entry names no mailbox, every notified mailbox is looked at. A selected
+mailbox of another account or of the public namespace is followed
+through the owner's account object. When an account object cannot be
+watched, NOTIFY falls back to the mailbox objects. A watch that reports
+an error (the OSD dropped it, or the store rotated its connection) is set
+up again by the hub on a fresh view, retried with a growing delay (the
+first failure is logged as a warning, the further ones at debug level),
+and its followers are woken to look for what they may have missed. NOTIFY
+also reads the logs it follows every 60 s without a notify, which bounds
+the delay of a change recorded after its notify (an announcement whose
+writer died is resolved after 60 s) or missed while a watch is set up
+again. A connection holds at most `server.imap_max_watches`
+subscriptions, one of them reserved for IDLE; NOTIFY SET is refused with
+`NO [LIMIT]` when its fallback watches do not fit.
 
 The full-text index works per GUID. Field terms and DE/EN stemming are stored
 in posting lists; a trigram dictionary supports substring searches.

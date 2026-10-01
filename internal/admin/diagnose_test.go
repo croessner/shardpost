@@ -67,7 +67,7 @@ func serveDiag(t *testing.T, wrap func(*memstore.Store) delivery.Store, roles ..
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: accounts, Log: log},
+	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: accounts, Directory: store, Log: log},
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := New(Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: diagUsers, Log: log, Version: "test",
 		MaxMessageBytes: 4096, SocketRoles: roles, Accounts: accounts, Instance: "pod-1", StartedAt: time.Unix(1000, 0),
@@ -480,6 +480,8 @@ func TestDiagnoseScopeAndCertificates(t *testing.T) {
 func TestDiagnoseOperationLabels(t *testing.T) {
 	for path, want := range map[string]string{
 		"/admin/v1/server":                                      "server",
+		"/admin/v1/accounts":                                    "accounts",
+		"/admin/v1/plans":                                       "batch_plan",
 		"/admin/v1/accounts/a@b":                                "account",
 		"/admin/v1/accounts/a@b/quota":                          "quota",
 		"/admin/v1/accounts/a@b/shared":                         "shared",

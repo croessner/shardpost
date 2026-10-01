@@ -65,7 +65,7 @@ func accountDirectory(ctx context.Context, c *adminapi.ClientWithResponses, a di
 
 	rows := [][2]string{{cmdAccount, st.Account}, {"entry", entryState(st.Entry)}}
 	if st.Entry != nil {
-		rows = append(rows, [2]string{"entry created", st.Entry.Created.Format(time.RFC3339)})
+		rows = append(rows, [2]string{"entry created", st.Entry.Created.Format(time.RFC3339)}, [2]string{"last scrub", scrubState(st.Entry.Scrub)})
 	}
 
 	backfill := "(none)"

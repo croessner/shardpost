@@ -1,6 +1,6 @@
 .TH SHARDPOSTCTL-ACCOUNT 1 "2026-10-01" "ShardPost 0.36.1" "ShardPost Manual"
 .SH NAME
-shardpostctl-account \- look up an account, its quota and its shares; repair its directory entry
+shardpostctl-account \- look up an account, its quota and its shares; list the account directory; repair a directory entry
 .SH SYNOPSIS
 .B shardpostctl account show
 .RB [ \-\-json ]
@@ -21,6 +21,16 @@ shardpostctl-account \- look up an account, its quota and its shares; repair its
 .B shardpostctl account repair
 .RB [ \-\-json ]
 .I account
+.br
+.B shardpostctl account list
+.RB [ \-limit
+.IR n ]
+.RB [ \-after
+.IR cursor ]
+.RB [ \-state
+.BR active | purging ]
+.RB [ \-all ]
+.RB [ \-\-json ]
 .SH DESCRIPTION
 All but the last command read. They change nothing and are the usual
 first step when someone reports a problem with an account.
@@ -96,6 +106,13 @@ Whether the account's data still exists (its registry object).
 .B directory
 Shard count and phase of the directory.
 .TP
+.B last scrub
+When the last batch scrub of the account ended, whether it was complete
+and how many findings it had; see
+.B "plan \-all \-skip-idle scrub"
+in
+.BR shardpostctl-job (1).
+.TP
 .B backfill
 The completion marker of the last
 .B shardpost index backfill accounts
@@ -104,6 +121,35 @@ The completion marker of the last
 The account is not looked up in the user database. The command requires
 the role
 .BR diagnose .
+.SS account list
+Lists the account directory: every account that has data in the store,
+and the public namespace, with its state, when it was created and its
+last batch scrub. The directory is read page by page in its own order
+(shard, then account), not alphabetically; it is never a listing of the
+storage pool. A page holds
+.B \-limit
+accounts (100 by default, at most 1000); the line
+.I more:
+names the cursor that
+.B \-after
+continues with, and
+.B \-all
+fetches every page, printing each one as it arrives.
+.B \-state
+keeps only the entries in that state; such a page may hold fewer
+accounts while more follow. With
+.B \-\-json
+a page prints as one document; with
+.B \-all
+and
+.B \-\-json
+every entry prints as one JSON line, so a large directory is never held
+in memory. The command requires the role
+.B diagnose
+and the scope of all accounts: socket callers have it, mutual-TLS
+clients only with
+.I all_accounts
+in their configuration.
 .SS account repair
 Repairs the account's entry in the account directory, the store-wide
 list of accounts. The purge job marks an account
@@ -158,6 +204,31 @@ purge included. Such a job fails at once with "run shardpostctl account
 repair"; run the repair first, then plan the job again.
 .SH OPTIONS
 .TP
+.BI \-limit " n"
+.B account list:
+accounts per page.
+.TP
+.BI \-after " cursor"
+.B account list:
+continue at this cursor
+.RI ( shard : account ,
+from the
+.I more:
+line or
+.I next
+of the JSON).
+.TP
+.BI \-state " state"
+.B account list:
+only entries that are
+.B active
+or
+.BR purging .
+.TP
+.B \-all
+.B account list:
+fetch every page.
+.TP
 .B \-\-json
 Print the answer as JSON instead of a table.
 .SH EXAMPLES
@@ -203,13 +274,30 @@ shardpostctl account directory user@example.org
 shardpostctl account repair user@example.org
 .RE
 .fi
+.PP
+How many accounts are being purged right now?
+.PP
+.nf
+.RS
+shardpostctl account list -all -state purging
+.RE
+.fi
+.PP
+Every account of the store, one JSON line each:
+.PP
+.nf
+.RS
+shardpostctl account list -all --json | jq -r .account
+.RE
+.fi
 .SH EXIT STATUS
 .TP
 .B 0
-The account was looked up, or the repair ran (whatever its action).
+The account was looked up, the directory listed, or the repair ran
+(whatever its action).
 .TP
 .B 64
-Wrong usage or an invalid account name.
+Wrong usage, an invalid account name, cursor, limit or state.
 .TP
 .B 67
 No such account.
@@ -224,8 +312,10 @@ The caller lacks the role
 .B repair
 for
 .BR "account repair" ),
-the account is outside its scope, or the server has no account directory
-or job system.
+the account is outside its scope, the client lacks the scope of all
+accounts
+.RB ( "account list" ),
+or the server has no account directory or job system.
 .SH SEE ALSO
 .BR shardpostctl (1),
 .BR shardpostctl-acl (1),

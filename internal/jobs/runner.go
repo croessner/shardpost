@@ -33,6 +33,27 @@ type Run struct {
 	lockDropped atomic.Bool
 	// stopReason explains why the heartbeat stopped the job.
 	stopReason atomic.Value
+	// sub marks the run of one account inside a batch (subRun): the
+	// checkpoint and the progress belong to the batch, the Partial
+	// errors stay with the account.
+	sub bool
+}
+
+// subRun is the run of one account inside a batch: the kind and its
+// parameters, fenced on the batch's lease.
+func (r *Run) subRun(account string, u model.User, kind string, params json.RawMessage) *Run {
+	j := *r.Job
+	j.Account, j.Kind, j.Params, j.Checkpoint, j.PlanID = account, kind, params, nil, ""
+
+	return &Run{Job: &j, User: u, Env: r.Env, m: r.m, gen: r.gen, sub: true}
+}
+
+// partialErrors returns the parts recorded as failed.
+func (r *Run) partialErrors() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.errors...)
 }
 
 // DropLock stops renewing the maintenance lock: the job removes it itself
@@ -76,6 +97,10 @@ func (r *Run) guarded(fn func(j *Job)) error {
 // Checkpoint stores the resume state of the job (read it back from
 // Job.Checkpoint after a takeover).
 func (r *Run) Checkpoint(v any) error {
+	if r.sub {
+		return nil
+	}
+
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -86,6 +111,10 @@ func (r *Run) Checkpoint(v any) error {
 
 // Progress records the visible progress.
 func (r *Run) Progress(phase string, done, total int64) error {
+	if r.sub {
+		return nil
+	}
+
 	return r.guarded(func(j *Job) { j.Progress = Progress{Phase: phase, Done: done, Total: total} })
 }
 
@@ -261,7 +290,10 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 		m.finish(run, j, gen, nil, err, log)
 		return
 	}
-	defer run.User.Close()
+
+	if run.User != nil {
+		defer run.User.Close()
+	}
 
 	kind := m.kinds[j.Kind]
 
@@ -391,6 +423,16 @@ func (m *Manager) prepare(j *Job, gen uint64) (*Run, error) {
 		}
 
 		run.Plan = p
+	}
+
+	// A batch opens its accounts one by one; there is no account to
+	// open for it (and the empty name is no account).
+	if j.Account == "" {
+		if !IsBatch(m.kinds[j.Kind]) {
+			return run, fmt.Errorf("%w: %s needs an account", ErrInvalidParams, j.Kind)
+		}
+
+		return run, nil
 	}
 
 	u, err := m.env.Accounts.User(j.Account)

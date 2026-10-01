@@ -17,6 +17,7 @@ import (
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
 	"shardpost/internal/memstore"
+	"shardpost/internal/model"
 )
 
 // serveFilled is an admin socket over a memstore where alice has INBOX
@@ -37,6 +38,13 @@ func serveFilled(t *testing.T, roles ...string) string {
 
 	_ = u.SetACL("Shared", "bob", "lr")
 
+	// The directory names alice and bob (the grant gave bob a registry)
+	// and has completed its backfill, so batches can run.
+	ix, release, _ := store.AccountIndex()
+	_ = ix.SetMarker(model.AccountBackfillMarker, `{"finished":"2026-10-01T00:00:00Z"}`)
+
+	release()
+
 	dir, err := os.MkdirTemp("", "spctl")
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +53,7 @@ func serveFilled(t *testing.T, roles ...string) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: store, Log: log},
+	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: store, Directory: store, Log: log},
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
 	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw", "carol": "pw"},
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
@@ -135,5 +143,30 @@ func TestDiagnoseJSONAndErrors(t *testing.T) {
 	noRole := serveFilled(t, admin.RoleImport)
 	if code, _, _ := call(noRole, "", "account", "show", "alice"); code != exNoPerm {
 		t.Errorf("without role: exit %d", code)
+	}
+}
+
+func TestAccountList(t *testing.T) {
+	socket := serveFilled(t, admin.RoleDiagnose)
+
+	for _, tc := range []struct {
+		args []string
+		ok   func(out string) bool
+	}{
+		{[]string{"-limit", "1"}, func(out string) bool {
+			return strings.Contains(out, "more: -after") && strings.Count(out, "active") == 1
+		}},
+		{[]string{"-limit", "1", "-all"}, func(out string) bool {
+			return strings.Contains(out, "alice") && strings.Contains(out, "bob") && !strings.Contains(out, "more:")
+		}},
+		{[]string{"-all", "--json", "-limit", "1"}, func(out string) bool {
+			return strings.Count(out, "\n") == 2 && strings.Contains(out, `"account":"bob"`)
+		}},
+		{[]string{"-state", "purging"}, func(out string) bool { return !strings.Contains(out, "alice") }},
+	} {
+		code, out, errOut := call(socket, "", append([]string{"account", "list"}, tc.args...)...)
+		if code != exOK || !tc.ok(out) {
+			t.Errorf("%v: %d %s %s", tc.args, code, out, errOut)
+		}
 	}
 }

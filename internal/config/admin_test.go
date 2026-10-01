@@ -5,10 +5,14 @@ import "testing"
 func TestAdminValidate(t *testing.T) {
 	tlsOK := Admin{Addr: ":9443", TLSCert: "/c", TLSKey: "/k", ClientCA: "/ca", Clients: []AdminClient{{Identity: "ops", Roles: []string{"diagnose"}}}}
 
+	fleet := tlsOK
+	fleet.Clients = []AdminClient{{Identity: "fleet", Roles: []string{"diagnose"}, AllAccounts: true}}
+
 	good := []Admin{
 		{},
 		{Socket: "/run/shardpost/admin.sock", SocketRoles: []string{"deliver"}},
 		tlsOK,
+		fleet,
 	}
 	for i, c := range good {
 		if err := c.Validate(); err != nil {
@@ -22,6 +26,9 @@ func TestAdminValidate(t *testing.T) {
 	noClients := tlsOK
 	noClients.Clients = nil
 
+	both := tlsOK
+	both.Clients = []AdminClient{{Identity: "ops", Roles: []string{"diagnose"}, Accounts: []string{"*@a.org"}, AllAccounts: true}}
+
 	bad := map[string]Admin{
 		"relative socket":      {Socket: "admin.sock", SocketRoles: []string{"deliver"}},
 		"socket without role":  {Socket: "/run/admin.sock"},
@@ -32,6 +39,7 @@ func TestAdminValidate(t *testing.T) {
 		"addr without clients": noClients,
 		"bad port":             {Addr: ":99999", TLSCert: "/c", TLSKey: "/k", ClientCA: "/ca", Clients: tlsOK.Clients},
 		"duplicate identity":   dup,
+		"scoped all accounts":  both,
 	}
 	for name, c := range bad {
 		if err := c.Validate(); err == nil {
@@ -48,6 +56,21 @@ func TestAdminYAML(t *testing.T) {
 
 	if _, err := Load(configFile(t, "admin:\n  socket: /run/a.sock\n  socket_roles: [root]\n")); err == nil {
 		t.Fatal("unknown role accepted")
+	}
+}
+
+func TestScrubAndBatchDefaults(t *testing.T) {
+	c, err := Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if c.Scrub.Parallel != 2 || c.Scrub.IntervalDays != 7 || c.Jobs.BatchParallel != 2 {
+		t.Fatalf("scrub %+v jobs %+v", c.Scrub, c.Jobs)
+	}
+
+	if _, err := Load(configFile(t, "scrub:\n  interval_days: 0\n")); err == nil {
+		t.Fatal("interval_days 0 accepted")
 	}
 }
 

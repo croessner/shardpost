@@ -83,7 +83,10 @@ func (s *Server) UnixServer() *http.Server {
 				return ctx
 			}
 
-			return withPrincipal(ctx, newPrincipal("uid:"+strconv.FormatUint(uint64(uid), 10), "unix", s.o.SocketRoles))
+			p := newPrincipal("uid:"+strconv.FormatUint(uint64(uid), 10), "unix", s.o.SocketRoles)
+			p.allAccounts = true // the socket is the server's own user
+
+			return withPrincipal(ctx, p)
 		}}
 }
 
