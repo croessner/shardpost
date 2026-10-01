@@ -3,7 +3,7 @@
 This document lists, protocol by protocol, what ShardPost implements:
 the standards it follows, the extensions it advertises, the commands
 and methods it answers, and where it deliberately or knowingly deviates.
-It describes **ShardPost 0.35.2** as of 2026-10-01 and was written from
+It describes **ShardPost 0.36.0** as of 2026-10-01 and was written from
 the code, not from earlier documentation.
 
 How to read the tables:
@@ -77,21 +77,21 @@ the tagged OK of LOGIN/AUTHENTICATE.
 
 | Capability | RFC | Status | Notes |
 |---|---|---|---|
-| `IMAP4rev2` | RFC 9051 | ◐ | Advertised together with `IMAP4rev1`. `ENABLE IMAP4rev2` is acknowledged but changes nothing: `\Recent`, `[UNSEEN]`, the classic `SEARCH` response and `LSUB` stay. |
+| `IMAP4rev2` | RFC 9051 | ✅ | Advertised together with `IMAP4rev1`. After `ENABLE IMAP4rev2`: UTF-8 mailbox names; no `\Recent` flag, `RECENT` responses, `STATUS RECENT` or `[UNSEEN]`; `SEARCH` answers with `ESEARCH`; `SELECT`/`EXAMINE` return the mailbox's `LIST` line with its attributes (`\Subscribed`, children, special-use) and `OLDNAME` for a normalized name; `STORE` and NOTIFY `FETCH` responses carry the UID. The IMAP4rev1 commands and items RFC 9051 deprecates — `LSUB`, `CHECK`, the `RFC822*` items and the search keys `NEW`, `OLD`, `RECENT` — stay available. |
 | `IMAP4rev1` | RFC 3501 | ✅ | Base protocol. |
 | `LITERAL+` | RFC 7888 | ✅ | Non-synchronising literals up to the literal limit. `LITERAL-` is not advertised. |
 | `SASL-IR` | RFC 4959 | ✅ | Initial response on `AUTHENTICATE`; `=` is an empty response. |
 | `ID` | RFC 2971 | ◐ | Returns `name`, `vendor` and `support-url`. The client's ID is ignored and not passed to the authentication backend. |
 | `ENABLE` | RFC 5161 | ✅ | `CONDSTORE`, `QRESYNC`, `UTF8=ACCEPT`, `IMAP4rev2`; unknown names are ignored. |
-| `UTF8=ACCEPT` | RFC 6855 | ◐ | Advertised and accepted by `ENABLE`, but has no effect: the `APPEND … UTF8 (…)` form is rejected. Mailbox names are UTF-8 byte strings; modified UTF-7 is not converted. |
+| `UTF8=ACCEPT` | RFC 6855 | ◐ | After `ENABLE UTF8=ACCEPT`: mailbox names in UTF-8 both ways; `APPEND`, `CATENATE` and `REPLACE` take `UTF8 (~{n})` message data; `SEARCH CHARSET` other than UTF-8 or US-ASCII is `BAD`. New names are put into Normalization Form C (announced with `LIST … OLDNAME`); names with control characters are refused. Not done: `APPEND` of a message with 8-bit header text from a session that did not enable UTF-8 is accepted (RFC 6855 §4 asks for `NO`); no downgrade (RFC 6857, RFC 6858); no `UTF8=ONLY`. |
 | `COMPRESS=DEFLATE` | RFC 4978 | ✅ | Any state; a second `COMPRESS` gets `[COMPRESSIONACTIVE]`. A patched inflater (`internal/inflate`) handles `Z_PARTIAL_FLUSH` clients such as iOS Mail. No longer advertised once active. |
 | `STARTTLS` | RFC 9051 §6.2.1 | ⚙ | Only on a plain connection with a TLS certificate configured. |
 | `AUTH=PLAIN` | RFC 4616 | ✅ | authzid different from authcid is refused (no proxy authorisation). |
 | `AUTH=XOAUTH2` | Google XOAUTH2 | ✅ | Bearer token, checked through Nauthilus. Failure uses the same JSON continuation as OAUTHBEARER. |
 | `AUTH=OAUTHBEARER` | RFC 7628 | ✅ | Failure is reported with the RFC 7628 JSON error challenge. |
-| `LOGINDISABLED` | RFC 9051 | ✅ | Instead of the `AUTH=` list when the connection is not encrypted and `server.insecure_auth` is off. That setting defaults to **true**; the operational profile turns it off. |
+| `LOGINDISABLED` | RFC 9051 | ✅ | Instead of the `AUTH=` list when the connection is not encrypted and `server.insecure_auth` is off (the default). |
 | `IMAPSIEVE=<url>` | RFC 6785 | ⚙ | Only with `imapsieve.enabled` and `imapsieve.user_scripts`. See [IMAPSieve](#imapsieve). |
-| `NAMESPACE` | RFC 2342 | ✅ | Personal `""`, other users `Shared/`, public `Public/` (prefixes configurable). A namespace with an empty prefix is switched off and shown as `NIL`. No namespace response extensions. |
+| `NAMESPACE` | RFC 2342 | ✅ | Personal `""`, other users `Shared/`, public `Public/` (prefixes configurable). A namespace with an empty prefix is switched off and shown as `NIL`. Prefixes are sent in modified UTF-7 to sessions without UTF-8 names. No namespace response extensions. |
 | `UNSELECT` | RFC 3691 | ✅ | |
 | `IDLE` | RFC 2177 | ✅ | Also in the authenticated state. Changes come from a RADOS watch plus a 60 s poll. IDLE itself has no timeout. |
 | `UIDPLUS` | RFC 4315 | ✅ | `[APPENDUID]`, `[COPYUID]`, `UID EXPUNGE`. |
@@ -105,23 +105,24 @@ the tagged OK of LOGIN/AUTHENTICATE.
 | `SPECIAL-USE` | RFC 6154, RFC 8457 | ✅ | `\All \Archive \Drafts \Flagged \Important \Junk \Sent \Trash` (`\Important` from RFC 8457). Attributes appear only with `RETURN (SPECIAL-USE)` or the `SPECIAL-USE` selection option, never on shared or public folders. |
 | `CREATE-SPECIAL-USE` | RFC 6154 | ◐ | `CREATE name (USE (…))`. Unknown attributes are stored as given; there is no `USEATTR` error. |
 | `CHILDREN` | RFC 3348 | ✅ | `\HasChildren` / `\HasNoChildren` on every LIST entry. |
-| `BINARY` | RFC 3516 | ◐ | `BINARY[]`, `BINARY.PEEK[]`, `BINARY.SIZE[]`, `~{n}` literals. The `[UNKNOWN-CTE]` response code (RFC 3516 §4.2) is never sent. |
+| `BINARY` | RFC 3516 | ✅ | `BINARY[]`, `BINARY.PEEK[]`, `BINARY.SIZE[]`, `~{n}` literals. A part in an unknown transfer encoding fails `BINARY` and `BINARY.SIZE` with `NO [UNKNOWN-CTE]`; a non-PEEK `BINARY` FETCH is checked before any `\Seen` is set (a single message is read once, several are read twice). |
 | `MULTIAPPEND` | RFC 3502 | ✅ | All-or-nothing: a failed command stores nothing. |
 | `CONDSTORE` | RFC 7162 | ✅ | `HIGHESTMODSEQ`, `MODSEQ` fetch and search, `CHANGEDSINCE`, `UNCHANGEDSINCE` with `[MODIFIED]`. Enabled implicitly by the first CONDSTORE command. No `NOMODSEQ` mailboxes. |
 | `QRESYNC` | RFC 7162 | ◐ | `SELECT (QRESYNC …)` with `VANISHED (EARLIER)`, `VANISHED` instead of `EXPUNGE`, `[CLOSED]`, `UID FETCH … (VANISHED)`. The known-UID set is honoured, the optional sequence-match data is ignored; when the change log is too short and no known UIDs were given, a superset is reported. |
-| `QUOTA` | RFC 9208 | ◐ | One quota root `""`. `GETQUOTA`, `GETQUOTAROOT`; `SETQUOTA` only with `server.quota_self_service` (default off), without `QUOTASET` being advertised. No `STATUS DELETED-STORAGE`. |
+| `QUOTA` | RFC 9208 | ✅ | One quota root `""`. `GETQUOTA`, `GETQUOTAROOT`; `SETQUOTA` only with `server.quota_self_service` (default off), and `QUOTASET` is advertised exactly then. `STATUS` items `DELETED` and `DELETED-STORAGE` (KiB, rounded up). |
 | `QUOTA=RES-STORAGE` | RFC 9208 | ✅ | In KiB. |
 | `QUOTA=RES-MESSAGE` | RFC 9208 | ✅ | |
-| `SORT` | RFC 5256 | ◐ | `ARRIVAL CC DATE FROM REVERSE SIZE SUBJECT TO`, plus `DISPLAYFROM`/`DISPLAYTO` (RFC 5957) without advertising `SORT=DISPLAY`. Unknown sort keys are accepted and compare equal. The charset argument of SORT and THREAD is ignored. No `ESORT`. |
+| `SORT` | RFC 5256 | ✅ | `ARRIVAL CC DATE FROM REVERSE SIZE SUBJECT TO`, plus `DISPLAYFROM`/`DISPLAYTO` with `SORT=DISPLAY`. An unknown sort key is `BAD`. The charset of SORT and THREAD converts the search strings like `SEARCH CHARSET`; an unknown one is `NO [BADCHARSET]`. `ESORT` (RFC 5267) is not offered. |
+| `SORT=DISPLAY` | RFC 5957 | ✅ | `DISPLAYFROM`, `DISPLAYTO`: the decoded display name of the first address, else `mailbox@host`, else the mailbox; ASCII case-folding (`i;ascii-casemap`). |
 | `THREAD=REFERENCES` | RFC 5256 | ✅ | Simplified JWZ algorithm. |
 | `THREAD=ORDEREDSUBJECT` | RFC 5256 | ✅ | |
-| `OBJECTID` | RFC 8474 | ◐ | `EMAILID`, `THREADID` (fetch and search), `MAILBOXID` (SELECT and STATUS). `CREATE` does not return `[MAILBOXID]`. |
-| `PREVIEW` | RFC 8970 | ◐ | Stored preview text; the `(LAZY)` modifier is not handled. |
-| `SAVEDATE` | RFC 8514 | ◐ | `FETCH SAVEDATE` works; the search keys `SAVEDBEFORE`, `SAVEDON`, `SAVEDSINCE`, `SAVEDATESUPPORTED` are missing. |
+| `OBJECTID` | RFC 8474 | ✅ | `EMAILID`, `THREADID` (fetch and search), `MAILBOXID` (SELECT and STATUS); `CREATE` returns `[MAILBOXID]`. |
+| `PREVIEW` | RFC 8970 | ✅ | Stored preview text, computed at delivery, so `PREVIEW (LAZY)` answers like `PREVIEW`; a message without text has `""`, never `NIL`. |
+| `SAVEDATE` | RFC 8514 | ✅ | `FETCH SAVEDATE`; search keys `SAVEDBEFORE`, `SAVEDON`, `SAVEDSINCE` and `SAVEDATESUPPORTED` (matches every message). A message stored without a save date uses its internal date. |
 | `ACL` | RFC 4314 | ✅ | See [ACL](#acl). |
 | `RIGHTS=kxte` | RFC 4314 | ✅ | |
 | `METADATA` | RFC 5464 | ◐ | Mailbox and server entries, `MAXSIZE`, `DEPTH`. No entry-count limit (`TOOMANY`) and no unsolicited `METADATA` responses. |
-| `CATENATE` | RFC 4469 | ◐ | `TEXT` and `URL` parts with local IMAP URLs (RFC 5092). `[BADURL]` carries an error text, not the URL. No URLAUTH. An oversized result is `[TOOBIG]`, in `APPEND` and `REPLACE` alike. |
+| `CATENATE` | RFC 4469 | ✅ | `TEXT`, `URL` and `UTF8` (RFC 6855) parts; URLs are local IMAP URLs (RFC 5092). A failing URL gets `[BADURL <url>]` with that URL (cut after 1024 bytes, `]` percent-encoded). No URLAUTH. An oversized result is `[TOOBIG]`, in `APPEND` and `REPLACE` alike. |
 | `NOTIFY` | RFC 5465 | ◐ | See [NOTIFY](#notify-and-idle). |
 | `WITHIN` | RFC 5032 | ✅ | `YOUNGER`, `OLDER` against the internal date. |
 | `REPLACE` | RFC 8508 | ◐ | Also `UID REPLACE` and with CATENATE. Not atomic (new message first, then the old one is expunged) and fires no IMAPSieve event. |
@@ -152,14 +153,14 @@ in the selected state; `FETCH`, `STORE` and `SEARCH` without
 
 | Item | Status | Notes |
 |---|---|---|
-| `UID`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`, `ENVELOPE` | ✅ | `ENVELOPE` drops obsolete source routes (the one known imaptest difference, `fetch-envelope`). |
+| `UID`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`, `ENVELOPE` | ✅ | `ENVELOPE` reports obsolete source routes as the at-domain-list; messages stored before 0.36.0 keep their cached envelope without routes. |
 | `BODY`, `BODYSTRUCTURE` | ✅ | The MD5 field is always `NIL`. |
 | `RFC822`, `RFC822.HEADER`, `RFC822.TEXT` | ✅ | |
 | `BODY[section]<partial>`, `BODY.PEEK[…]` | ✅ | `HEADER`, `TEXT`, `MIME`, `HEADER.FIELDS`, `HEADER.FIELDS.NOT`, part numbers. |
-| `BINARY[…]`, `BINARY.PEEK[…]`, `BINARY.SIZE[…]` | ✅ | RFC 3516. |
+| `BINARY[…]`, `BINARY.PEEK[…]`, `BINARY.SIZE[…]` | ✅ | RFC 3516; `[UNKNOWN-CTE]` for an undecodable part. |
 | `MODSEQ` | ✅ | RFC 7162. |
 | `EMAILID`, `THREADID` | ✅ | RFC 8474; the email ID is the message GUID, the thread ID comes from the root of the `References` chain. |
-| `PREVIEW` | ◐ | RFC 8970; no `(LAZY)`. |
+| `PREVIEW` | ✅ | RFC 8970; also `PREVIEW (LAZY)`. |
 | `SAVEDATE` | ✅ | RFC 8514; always a date, never `NIL`. |
 | Macros `ALL`, `FAST`, `FULL` | ✅ | |
 | Modifiers `CHANGEDSINCE`, `VANISHED` | ✅ | `VANISHED` needs `UID FETCH` and QRESYNC enabled. |
@@ -173,31 +174,45 @@ A non-PEEK body fetch sets `\Seen` if the mailbox was opened read-write
 | Area | Supported |
 |---|---|
 | Flag keys | `ALL ANSWERED DELETED DRAFT FLAGGED SEEN` and their `UN…` forms, `NEW RECENT OLD`, `KEYWORD`, `UNKEYWORD` |
-| Date keys | `BEFORE ON SINCE` (internal date), `SENTBEFORE SENTON SENTSINCE`, `YOUNGER OLDER` (RFC 5032) |
+| Date keys | `BEFORE ON SINCE` (internal date), `SENTBEFORE SENTON SENTSINCE`, `SAVEDBEFORE SAVEDON SAVEDSINCE SAVEDATESUPPORTED` (RFC 8514), `YOUNGER OLDER` (RFC 5032) |
 | Size keys | `LARGER SMALLER` |
 | Set keys | sequence sets, `UID <set>`, `$` (RFC 5182) |
 | Object keys | `MODSEQ` (RFC 7162), `EMAILID`, `THREADID` (RFC 8474) |
 | Text keys | `FROM TO CC BCC SUBJECT BODY TEXT HEADER` |
 | Logic | `NOT`, `OR`, parentheses |
-| Charset | UTF-8, US-ASCII and every charset in the WHATWG list; unknown charsets get `[BADCHARSET (UTF-8)]` |
-| Result forms | classic `SEARCH`, `ESEARCH` with `RETURN (MIN MAX ALL COUNT SAVE)` |
+| Charset | UTF-8, US-ASCII and every charset in the WHATWG list; unknown charsets get `[BADCHARSET (UTF-8)]`. After `ENABLE UTF8=ACCEPT` only UTF-8 and US-ASCII (anything else is `BAD`). |
+| Result forms | classic `SEARCH`, `ESEARCH` with `RETURN (MIN MAX ALL COUNT SAVE)`; always `ESEARCH` after `ENABLE IMAP4rev2` |
 | SORT keys | `ARRIVAL CC DATE FROM REVERSE SIZE SUBJECT TO DISPLAYFROM DISPLAYTO` |
 | THREAD | `REFERENCES`, `ORDEREDSUBJECT` |
 
-Text search is answered by the full-text index
-([FTS](#full-text-search)). Matching is per word (letters and digits),
-all words must match, with stemming and substring matching through a
-trigram dictionary. This is not the byte-substring semantics of
-RFC 3501: `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` are answered
-from the index alone; address and other header keys use the index as a
-pre-filter and are then checked against the message. Keys nested inside
-`NOT`, `OR` or a parenthesised group, and values without any indexable
-word, are matched against the message directly. If a message has to be
-read for that and cannot be, the whole command fails with
-`NO [SERVERBUG]` instead of returning a partial result.
+Text keys match substrings, without regard to case, as RFC 3501 and
+RFC 9051 specify, against the decoded message: header names and values
+(encoded words decoded, raw 8-bit text in `fts.fallback_charset`) and
+the body as the text of its `text/*` parts converted to UTF-8 (HTML
+reduced to its visible text), the file names of all parts and the
+header and text of attached messages. `TEXT` matches the header or the
+body, `HEADER <name> <value>` the field value. The full-text index
+([FTS](#full-text-search)) supplies candidates — never fewer than the
+messages that match — for the header and the body of every key,
+wherever it is in the tree (`AND` intersects, `OR` unites, `NOT` does
+not narrow). Each candidate is checked: headers against the decoded
+header the index keeps per message, the body by reading the message
+only where the body candidates include it, `fts.verify_parallel`
+(default 8) messages at a time under the memory budget. A value that
+may begin inside a header word (`TEXT`, `HEADER` with names other than
+Subject and the address fields) checks the stored header of every
+message of the mailbox; a key with no word the index can narrow by (one
+or two letters inside a word) reads every message. A message expunged
+during the search is no match; if a message cannot be read for another
+reason, the command fails with `NO [SERVERBUG]` instead of returning a
+partial result. With `fts.imap_search: word` (default `substring`) the
+index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by
+word (all words in any order, stem, part of a word), without reading
+messages. An account whose index lacks the version marker (indexed
+before this release, or a rebuild that has not completed) does not use
+the index and checks every message until `fts_rebuild` has run.
 
-Not supported: `SAVEDBEFORE`/`SAVEDON`/`SAVEDSINCE`/`SAVEDATESUPPORTED`,
-`FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267), `ESORT`,
+Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267), `ESORT`,
 `PARTIAL` (RFC 9394), `MULTISEARCH` (RFC 7377).
 
 ### STORE, flags and keywords
@@ -208,7 +223,7 @@ Not supported: `SAVEDBEFORE`/`SAVEDON`/`SAVEDSINCE`/`SAVEDATESUPPORTED`,
 | `UNCHANGEDSINCE` | ✅ | Failed messages are listed in `[MODIFIED]`. |
 | Arbitrary keywords | ◐ | Accepted without a count limit, but stored lower-case. System flags and `$Forwarded $MDNSent $Junk $NotJunk $Phishing` are returned in their canonical spelling, other keywords lower-case. |
 | `PERMANENTFLAGS` | ✅ | Follows the session's rights; includes `\*` with the `w` right. |
-| `\Recent` | ✅ | Session-scoped; `SELECT` claims it, `EXAMINE` does not. |
+| `\Recent` | ✅ | Session-scoped; `SELECT` claims it, `EXAMINE` does not. Not shown after `ENABLE IMAP4rev2`. |
 | Rights per flag | ✅ | `\Seen` needs `s`, `\Deleted` needs `t`, everything else `w` (RFC 4314). |
 | Private `\Seen` in public folders | ✅ | Each reader has their own `\Seen`; other flags are shared. |
 
@@ -218,11 +233,11 @@ Not supported: `SAVEDBEFORE`/`SAVEDON`/`SAVEDSINCE`/`SAVEDATESUPPORTED`,
 |---|---|---|
 | Hierarchy delimiter | ✅ | `/` |
 | `INBOX` | ✅ | Case-insensitive, also as `INBOX/…` prefix; cannot be deleted. `RENAME INBOX` moves its messages into the new mailbox (RFC 9051). |
-| Mailbox names | ◐ | UTF-8 byte strings; modified UTF-7 (RFC 3501 §5.1.3) is neither produced nor decoded. Non-ASCII names are sent as literals. |
+| Mailbox names | ✅ | Stored in UTF-8. Sessions that enabled `UTF8=ACCEPT` or `IMAP4rev2` use UTF-8 both ways; all others use modified UTF-7 (RFC 3501 §5.1.3) both ways, in its canonical form only (anything else is `NO [CANNOT]`); raw UTF-8 from such a session is understood, octets that are not UTF-8 are `BAD`. CATENATE URLs carry UTF-8 names. New names are put into Normalization Form C: `CREATE` and `RENAME` answer with `LIST … ("OLDNAME" …)`, to IMAP4rev1 sessions as LIST-EXTENDED data as well. `LIST`/`LSUB` references and patterns and NOTIFY mailbox names in another normalization form also match. |
 | `LIST` attributes | ◐ | `\HasChildren`, `\HasNoChildren`, `\Noselect`, `\NonExistent`, `\Subscribed`, `CHILDINFO`, and the special-use attributes when asked for. Not `\Marked`, `\Unmarked`, `\NoInferiors`, `\Remote`. |
 | `LSUB` | ✅ | Still served. |
-| `STATUS` items | ◐ | `MESSAGES RECENT UIDNEXT UIDVALIDITY UNSEEN DELETED SIZE HIGHESTMODSEQ MAILBOXID APPENDLIMIT`; not `DELETED-STORAGE`. |
-| `SELECT` responses | ✅ | `EXISTS`, `RECENT`, `[UNSEEN]`, `[UIDVALIDITY]`, `[UIDNEXT]`, `FLAGS`, `[PERMANENTFLAGS]`, `[HIGHESTMODSEQ]`, `[MAILBOXID]`, `[READ-WRITE]`/`[READ-ONLY]`. |
+| `STATUS` items | ✅ | `MESSAGES RECENT UIDNEXT UIDVALIDITY UNSEEN DELETED DELETED-STORAGE SIZE HIGHESTMODSEQ MAILBOXID APPENDLIMIT`; no `RECENT` after `ENABLE IMAP4rev2`. |
+| `SELECT` responses | ✅ | `EXISTS`, `RECENT`, `[UNSEEN]`, `[UIDVALIDITY]`, `[UIDNEXT]`, `FLAGS`, `[PERMANENTFLAGS]`, `[HIGHESTMODSEQ]`, `[MAILBOXID]`, `[READ-WRITE]`/`[READ-ONLY]`. After `ENABLE IMAP4rev2` a `LIST` response replaces `RECENT` and `[UNSEEN]`. |
 | `COPY`/`MOVE` to a missing mailbox | ✅ | `[TRYCREATE]` in the own namespace, `[NONEXISTENT]` in shared ones. |
 | Auto-created folders | ✅ | `Drafts`, `Sent`, `Trash`, `Junk`, `Archive` with special-use, created (and subscribed) at IMAP login and on the first JMAP session when missing; the list is configurable with `server.autocreate` (`name`, `special_use`, `subscribe`). |
 | Other users' folders | ✅ | `Shared/<account>/<mailbox>` per ACL; the account part is case-insensitive. |
@@ -234,9 +249,10 @@ Not supported: `SAVEDBEFORE`/`SAVEDON`/`SAVEDSINCE`/`SAVEDATESUPPORTED`,
 |---|---|---|
 | `APPEND` with flags and date | ✅ | Flags the session has no right for are dropped. |
 | `MULTIAPPEND` | ✅ | RFC 3502, atomic. |
-| `CATENATE` | ◐ | RFC 4469; see the capability table. |
+| `CATENATE` | ✅ | RFC 4469; see the capability table. |
 | `REPLACE` | ◐ | RFC 8508; see the capability table. |
 | `literal8` / binary content | ✅ | A single-part binary message is re-encoded to base64. |
+| `UTF8 (literal8)` | ✅ | RFC 6855 §4, after `ENABLE UTF8=ACCEPT`; also as a `CATENATE` part and in `REPLACE`. |
 | Message size limit | ✅ | 256 MiB for all literals of one command together (`APPENDLIMIT`, not configurable), at most 256 literals per command, bounded by the process memory budget; oversized literals or an exhausted budget get `[TOOBIG]`. |
 | Command line limit | ✅ | 64 KiB, lists nested at most 16 deep. |
 
@@ -301,8 +317,8 @@ IMAPSieve script entry.
 
 The last full imaptest run (0.11.0; later releases are covered by the
 per-feature tests listed in [Quality](development/quality.md)) covered 72 test groups: one failure
-(`fetch-envelope`, source routes, kept on purpose) and 11 groups skipped
-for capabilities the server does not offer. Details:
+(`fetch-envelope`, source routes) and 11 groups skipped for
+capabilities the server does not offer. Results for 0.36.0: see
 [conformance results](../hack/conformance.md).
 
 ## POP3
@@ -359,8 +375,8 @@ Delivery:
 | Recipient lookup | Each `RCPT` is resolved through Nauthilus (`recipient_lookup`); unknown: `550 5.1.1`, backend failure: `451 4.3.0`. Alias and `+detail` mapping is up to Nauthilus. |
 | Sieve | Before scripts, the user's active script, after scripts, then the JMAP vacation response. See [Sieve language](#sieve-language). |
 | Quota | Checked when the message is stored, not at `RCPT`. Over quota: `552 5.2.2`. |
-| Per-recipient replies | Sieve reject `550 5.7.1`, too large `552 5.3.4`, memory budget `452 4.3.1`, redirect failed `451 4.4.0`, account locked `451 4.2.1`, other `451 4.3.0`. |
-| Headers added | `Received: from … by <server.lmtp_hostname> with LMTP for <rcpt>`. No `Delivered-To` and no `Return-Path`. |
+| Per-recipient replies | Sieve `ereject` `550 5.7.1`; Sieve `reject` `250` and a rejection MDN to the sender, falling back to `550 5.7.1` without a relay, when the relay refuses the MDN, with `sieve_reject_mode=protocol`, or for automatic and list mail (see [Sieve language](#sieve-language)); too large `552 5.3.4`, memory budget `452 4.3.1`, redirect failed `451 4.4.0`, account locked `451 4.2.1`, other `451 4.3.0`. |
+| Headers added | `Return-Path: <sender>` (`<>` for the null sender), `Delivered-To: <rcpt>`, then `Received: from … by <server.lmtp_hostname> with LMTP for <rcpt>`. `Return-Path` fields the message brought along are removed. `server.lmtp_return_path` (default on) and `server.lmtp_delivered_to` (`final`, the default, or `none`) switch the first two. |
 | Atomicity | `fileinto` to several mailboxes is all-or-nothing; redirect, vacation and notify run only after the message is durable. |
 
 ## Local delivery (LDA)
@@ -376,7 +392,8 @@ same delivery pipeline as LMTP.
 | Target mailbox | `-m` skips Sieve and the INBOX fallback; public folders need the `p` right; another account's mailbox is refused. The public namespace itself is not a recipient. |
 | Sieve | `--no-sieve` skips it |
 | Quota | `--no-enforce-quota`, needs the `deliver:noenforce` role |
-| Header | `Received: from … by <server.lmtp_hostname> with LDA` |
+| Header | `Return-Path`, `Delivered-To` (same settings as LMTP), `Received: from … by <server.lmtp_hostname> with LDA` |
+| Result | `disposition`: `stored`, `discarded` or `rejected` (a Sieve reject that sent a rejection MDN); a protocol-level Sieve rejection is HTTP 422 |
 | Exit codes | sysexits: 0, 64, 67, 69, 70, 73, 75, 77 |
 
 ## ManageSieve
@@ -392,7 +409,7 @@ same delivery pipeline as LMTP.
 | `SETACTIVE` | ✅ | `SETACTIVE ""` deactivates. Scripts that need `imapsieve` cannot be activated for delivery. |
 | `DELETESCRIPT`, `RENAMESCRIPT` | ✅ | `DELETESCRIPT` answers `(ACTIVE)` for the active script; `RENAMESCRIPT` answers `(ALREADYEXISTS)` and `(NONEXISTENT)`; `GETSCRIPT` answers `(NONEXISTENT)`. |
 | `HAVESPACE` | ◐ | Checks the size only (`(QUOTA/MAXSIZE)`), not a script count. |
-| `UNAUTHENTICATE` | ✗ | |
+| `UNAUTHENTICATE` | ✅ | RFC 5804 §2.14.1; advertised in the capability list. Returns to the non-authenticated state, TLS stays; with arguments, or when not authenticated, `NO`. |
 
 | Capability | Value |
 |---|---|
@@ -403,6 +420,7 @@ same delivery pipeline as LMTP.
 | `MAXREDIRECTS` | 4 |
 | `VERSION` | `1.0` |
 | `NOTIFY` | `mailto` (the one `enotify` method) |
+| `UNAUTHENTICATE` | advertised |
 | `OWNER`, `LANGUAGE` | not advertised |
 
 Limits: script 256 KiB, script name 512 bytes without control
@@ -426,7 +444,7 @@ configured.
 | `comparator-i;octet`, `comparator-i;ascii-casemap` | RFC 4790 | ✅ | Built in. |
 | `comparator-i;ascii-numeric` | RFC 4790 | ✅ | |
 | `comparator-i;unicode-casemap` | RFC 5051 | ✅ | |
-| `reject`, `ereject` | RFC 5429 | ◐ | Both become an LMTP `550 5.7.1`; no MDN-style rejection message is generated. |
+| `reject`, `ereject` | RFC 5429 | ✅ | `ereject` refuses the message in the protocol (LMTP `550 5.7.1`, local delivery API 422). `reject` sends a rejection message — an MDN (RFC 8098) from the null sender, a global MDN (RFC 6533) for non-ASCII recipients or headers — and the message counts as delivered. Mail from the null sender is discarded silently; for automatic and list mail (RFC 3834 rules) the rejection is made in the protocol (`550`), as it is without a relay or when the relay refuses the MDN; an MDN whose acceptance the relay only failed to confirm in time counts as sent. Settings `sieve_reject_mode` (`mdn`, the default, or `protocol`), `rejection_subject`, `rejection_reason`, `postmaster_address`. |
 | `imap4flags` | RFC 5232 | ✅ | |
 | `variables` | RFC 5229 | ✅ | Including `:encodeurl` (RFC 5435). |
 | `relational` | RFC 5231 | ✅ | |
@@ -434,8 +452,8 @@ configured.
 | `subaddress` | RFC 5233 | ✅ | |
 | `environment` | RFC 5183 | ◐ | During delivery only empty `imap.*` items exist; `domain`, `host`, `name`, `version`, `location`, `phase` are unknown. In IMAPSieve: `location`, `phase` and the `imap.*` items. |
 | `body` | RFC 5173 | ✅ | |
-| `vacation` | RFC 5230 | ◐ | `:days`, `:subject`, `:from`, `:addresses`, `:mime`, `:handle`. Default period 7 days; `:days 0` also means 7 days. |
-| `vacation-seconds` | RFC 6131 | ◐ | `:seconds 0` also means 7 days. |
+| `vacation` | RFC 5230 | ✅ | `:days`, `:subject`, `:from`, `:addresses`, `:mime`, `:handle`, `:fcc` (RFC 8580). The period is clamped to `sieve_vacation_min_period` (default 1 day) … `sieve_vacation_max_period` (default 60 days, 0 = no maximum); without `:days` it is `sieve_vacation_default_period` (default 7 days). |
+| `vacation-seconds` | RFC 6131 | ✅ | Clamped like `:days`; `:seconds 0` replies to every message when `sieve_vacation_min_period` is 0. |
 | `date`, `index` | RFC 5260 | ✅ | `date`, `currentdate`, `:index`, `:last`. |
 | `duplicate` | RFC 7352 | ✅ | `:handle`, `:header`, `:uniqueid`, `:seconds`, `:last`; default 7 days. |
 | `editheader` | RFC 5293 | ✅ | Protected headers configurable (default `Received`, `Auto-Submitted`, `Return-Path`, `Delivered-To`); edits of a protected header are silently ignored. |
@@ -446,23 +464,25 @@ configured.
 | `regex` | draft-ietf-sieve-regex | ✅ | |
 | `spamtest`, `spamtestplus`, `virustest` | RFC 5235 | ✅ | Values taken from configurable headers. |
 | `special-use` | RFC 8579 | ✅ | `specialuse_exists`, `fileinto :specialuse`. |
-| `enotify` | RFC 5435 | ◐ | Only the `mailto` method (RFC 5436); by default at most 10 notifications per script (`sieve_notify_max_notifications`, 0 forbids `notify`). |
+| `enotify` | RFC 5435 | ◐ | Only the `mailto` method (RFC 5436); `:fcc` (RFC 8580); by default at most 10 notifications per script (`sieve_notify_max_notifications`, 0 forbids `notify`). |
 | `mime`, `foreverypart`, `extracttext` | RFC 5703 | ◐ | `replace` and `enclose` are not implemented. |
+| `fcc` | RFC 8580 | ✅ | `:fcc` with `:create`, `:flags`, `:specialuse` on `vacation` and `notify`. The copy is stored after the message was sent, under the user's quota; in IMAPSieve only into existing mailboxes. |
 | `imapsieve` | RFC 6785 | ⚙ | Only for IMAPSieve scripts. |
 | `vnd.dovecot.pipe`, `vnd.dovecot.filter`, `vnd.dovecot.execute` | Pigeonhole extprograms | ⚙ | Advertised when external programs are configured; only allowlisted programs, no shell. |
 | `vnd.dovecot.debug` | Pigeonhole | ✅ | Accepted, not advertised. |
-| `fcc`, `redirect-dsn`, `redirect-deliverby`, `convert`, `extlists`, `vnd.dovecot.environment`, `vnd.dovecot.report` | RFC 8580, 6009, 6558, 6134 | ✗ | |
+| `redirect-dsn`, `redirect-deliverby`, `convert`, `extlists`, `vnd.dovecot.environment`, `vnd.dovecot.report` | RFC 6009, 6558, 6134 | ✗ | |
 
 Execution:
 
 | Feature | Notes |
 |---|---|
-| Script sequence | `sieve.before_dir` scripts, the user's active script, `sieve.after_dir` scripts (Pigeonhole `sieve_before`/`sieve_after` semantics), then the JMAP VacationResponse when no script replied and the message is kept. The next script runs only while the message is still kept. |
+| Script sequence | `sieve.before_dir` scripts, the user's active script, `sieve.after_dir` scripts (Pigeonhole `sieve_before`/`sieve_after` semantics), then the JMAP VacationResponse when no script replied and the message is kept. The next script runs only while the message is still kept. An explicit `keep` is sticky across scripts: a later `fileinto` or `discard` cancels only the implicit keep. A `reject` after an earlier script's explicit `keep`, `fileinto :copy`, `redirect`, pipe or `vacation` fails with an action conflict and the message stays kept; policy rejects belong in `sieve.before_dir`. |
 | Global includes | `sieve.global_dir` serves `include :global`. |
 | Runtime limits | 5 s wall-clock per script (`sieve_max_cpu_time`), 32 actions (`sieve_max_actions`; 8 in IMAPSieve), MIME tree at most 1000 parts and depth 20, `foreverypart` nesting 4, 5000 tokens, block nesting 15, 128 variables of at most 4000 bytes. |
 | Redirect | At most 4, duplicates collapsed, a redirect to the recipient itself is dropped; envelope sender kept; loop protection by `X-Sieve-Redirected-From`, `Auto-Submitted` and more than 25 `Received` headers. Without an SMTP relay the message is kept instead. In IMAPSieve the redirect is sent from the mailbox owner. |
-| Vacation | Reply tracking per sender and handle in the user's store; RFC 5230 §4.6 rules (no reply to the null sender, to automatic mail, to lists, or when the user is not a recipient). Envelope sender null by default. |
-| Notify | `mailto` over the relay with `Auto-Submitted: auto-notified`; never for automatic mail; envelope sender chosen by `sieve_notify_mailto_envelope_from`, null for null-sender mail. |
+| Vacation | Reply tracking per sender and handle in the user's store; RFC 5230 §4.6 rules (no reply to the null sender, to automatic mail, to lists, or when the user is not a recipient). Envelope sender null by default. Period from the `sieve_vacation_*_period` settings; a `:fcc` copy of the reply is stored after it was sent. |
+| Notify | `mailto` over the relay with `Auto-Submitted: auto-notified`; never for automatic mail; the sender without `:from` is `postmaster_address`; envelope sender chosen by `sieve_notify_mailto_envelope_from`, null for null-sender mail. |
+| Settings | `sieve.settings` holds `key=value` pairs separated by `;`; `\;` is a literal semicolon and `\\` a backslash inside a value. |
 | Failure | A failing script is skipped as if it had kept the message; no active script means INBOX. |
 
 The Pigeonhole test suite runs 139 of 148 files successfully with 9
@@ -479,7 +499,7 @@ RFC 6785; see also [Sieve and learning](imapsieve.md).
 | Script selection | ⚙ | With `imapsieve.user_scripts` (default on): mailbox entry `/shared/imapsieve/script`, otherwise the server entry; empty or missing script means no run. |
 | `/private/imapsieve/script` | ✗ | |
 | Environment | ✅ | `location`, `phase`, `imap.cause`, `imap.mailbox`, `imap.user`, `imap.email`, `imap.changedflags`. |
-| Actions | ◐ | `keep`, flags, `fileinto` (existing mailboxes only; the original is marked `\Deleted` without keep), `redirect`, `notify` and external programs for the mailbox owner. `reject`, `vacation` and `envelope` are not available. |
+| Actions | ◐ | `keep`, flags, `fileinto` (existing mailboxes only; the original is marked `\Deleted` without keep), `redirect`, `notify` (with `:fcc` into existing mailboxes) and external programs for the mailbox owner. `reject`, `vacation` and `envelope` are not available. |
 | Limits | ✅ | `imapsieve.timeout_ms` (default 500 ms), `imapsieve.max_parallel` (default 4); one follow-up FLAG run after APPEND/COPY. |
 | Learning queue | ⚙ | Operator rules for COPY/MOVE between special-use folders feed a durable queue with retries; the classifier (Rspamd, spamc, …) is an external program. |
 
@@ -494,7 +514,7 @@ set.
 | Capability URN | RFC | Status | Notes |
 |---|---|---|---|
 | `urn:ietf:params:jmap:core` | RFC 8620 | ✅ | See the limits below. |
-| `urn:ietf:params:jmap:mail` | RFC 8621 | ◐ | `maxSizeMailboxName` 255, `maxSizeAttachmentsPerEmail` = upload limit, no mailbox-per-email or depth limit. `SearchSnippet/get`, the `hasAttachment` filter and mailbox tree queries are missing (see [Methods](#methods)). |
+| `urn:ietf:params:jmap:mail` | RFC 8621 | ✅ | `maxSizeMailboxName` 255, `maxSizeAttachmentsPerEmail` = upload limit, no mailbox-per-email or depth limit. |
 | `urn:ietf:params:jmap:submission` | RFC 8621 | ⚙ | With `jmap.submission.relay_addr`. `maxDelayedSend` 0, no submission extensions. |
 | `urn:ietf:params:jmap:vacationresponse` | RFC 8621 | ⚙ | With an SMTP relay (`smtp.addr`). |
 | `urn:ietf:params:jmap:quota` | RFC 9425 | ✅ | |
@@ -513,17 +533,18 @@ Core limits (configurable under `jmap.*`): `maxSizeUpload` 50 MiB,
 `maxConcurrentRequests` 4, `maxCallsInRequest` 16, `maxObjectsInGet`
 500, `maxObjectsInSet` 500; collations `i;ascii-casemap` and `i;octet`. Blob
 limits: `max_size_blob_set`, `max_data_sources`, `max_size_blob_get`
-(10 MiB).
+(10 MiB). Search limits: `jmap.search.snippet_read_bytes` (default 256 KiB),
+`jmap.search.max_attachment_reads` (default 1000).
 
 ### Methods
 
 | Data type | Methods | Notes |
 |---|---|---|
 | Core | `Core/echo` | |
-| Mailbox | `get`, `changes`, `query`, `queryChanges`, `set` | `queryChanges` always `cannotCalculateChanges`; `sortAsTree`/`filterAsTree` are ignored (flat results). |
+| Mailbox | `get`, `changes`, `query`, `queryChanges`, `set` | `queryChanges` always `cannotCalculateChanges`; `query` supports `sortAsTree` and `filterAsTree`. |
 | Thread | `get`, `changes` | |
 | Email | `get`, `changes`, `query`, `queryChanges`, `set`, `copy`, `import`, `parse` | `queryChanges` only for the default sort, without `collapseThreads` and without thread-keyword conditions. |
-| SearchSnippet | — | ✗ `SearchSnippet/get` is not implemented. |
+| SearchSnippet | `get` | Subject and a body preview (at most 255 octets) with the matched words in `<mark>`; the body is read up to `jmap.search.snippet_read_bytes` (default 256 KiB), a match beyond that gives no preview. Also on shared accounts. |
 | Identity | `get`, `changes`, `set` | `changes` only from the current state. |
 | EmailSubmission | `get`, `changes`, `query`, `queryChanges`, `set` | `onSuccessUpdateEmail`, `onSuccessDestroyEmail`; sent through the relay (see [Outbound SMTP](#outbound-smtp)). `query` filters by `identityIds`, `emailIds`, `threadIds`, `undoStatus`, `before`, `after` with `AND`/`OR`/`NOT`; anything else is `unsupportedFilter`. `queryChanges` always `cannotCalculateChanges`. |
 | VacationResponse | `get`, `set` | Stored as metadata and turned into a Sieve vacation at delivery; the user's own vacation wins. |
@@ -534,7 +555,7 @@ limits: `max_size_blob_set`, `max_data_sources`, `max_size_blob_get`
 | ShareNotification | `get`, `changes`, `set`, `query`, `queryChanges` | `set` can only destroy. |
 | PushSubscription | `get`, `set` | ⚙ With `jmap.push.vapid_key_file` (subscriptions are kept in the admin store); `unknownMethod` otherwise. |
 
-Only Mailbox, Email and Thread methods work on shared accounts.
+Only Mailbox, Email, Thread and SearchSnippet methods work on shared accounts.
 
 All `*/changes` methods are answered from the account change log,
 which keeps `server.account_log_retention` entries (default 10000). A
@@ -545,7 +566,7 @@ the client resynchronises. The same log serves IMAP QRESYNC.
 
 | Feature | Supported |
 |---|---|
-| `Email/query` filters | `inMailbox`, `inMailboxOtherThan`, `before`, `after`, `minSize`, `maxSize`, `allInThreadHaveKeyword`, `someInThreadHaveKeyword`, `noneInThreadHaveKeyword`, `hasKeyword`, `notKeyword`, `text`, `from`, `to`, `cc`, `bcc`, `subject`, `body`, `header`; `AND`, `OR`, `NOT`. Not `hasAttachment`. |
+| `Email/query` filters | `inMailbox`, `inMailboxOtherThan`, `before`, `after`, `minSize`, `maxSize`, `allInThreadHaveKeyword`, `someInThreadHaveKeyword`, `noneInThreadHaveKeyword`, `hasKeyword`, `notKeyword`, `hasAttachment`, `text`, `from`, `to`, `cc`, `bcc`, `subject`, `body`, `header`; `AND`, `OR`, `NOT`. `hasAttachment` comes from the index record; a message stored by an earlier version is read once, at most `jmap.search.max_attachment_reads` (default 1000) per query, after which a background fill starts and the query answers `serverUnavailable` until it is done (job `attachment_backfill` fills an account ahead of time). |
 | `Email/query` sort | `receivedAt`, `size`, `from`, `to`, `subject`, `sentAt`, `hasKeyword`, `allInThreadHaveKeyword`, `someInThreadHaveKeyword`; `collapseThreads`; `anchor`, `position`, `limit`, `calculateTotal`. |
 | `Email/get` properties | All RFC 8621 properties, `headers`, `bodyStructure`, `header:<name>` with the forms `asRaw`, `asText`, `asAddresses`, `asGroupedAddresses`, `asMessageIds`, `asDate`, `asURLs` and `:all`. |
 | Body values | `fetchTextBodyValues`, `fetchHTMLBodyValues`, `fetchAllBodyValues`, `maxBodyValueBytes`, `bodyProperties`. |
@@ -595,7 +616,7 @@ directly to the internet.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Sieve `redirect`, `vacation`, `enotify` mailto | ⚙ | `smtp.addr`. Without it, redirects keep the message and vacation and notify are skipped. |
+| Sieve `redirect`, `vacation`, `enotify` mailto, `reject` MDN | ⚙ | `smtp.addr`. Without it, redirects keep the message, vacation and notify are skipped, and `reject` becomes a protocol-level rejection. |
 | IMAPSieve `redirect` and `notify` | ⚙ | Same relay. |
 | JMAP EmailSubmission | ⚙ | Separate `jmap.submission.*` relay. By default it names the user with Postfix `XCLIENT LOGIN=…` (`jmap.submission.xclient`; `xclient_addr` adds `ADDR=`) instead of `AUTH`. With `xclient: false` it logs in with `jmap.submission.user`/`password`, and the sender check (`check_sender`) is mandatory. |
 | STARTTLS (RFC 3207) / implicit TLS | ✅ | STARTTLS is used whenever the relay offers it; `smtp.starttls` (default on) makes it mandatory. `smtp.tls` for implicit TLS (port 465). TLS 1.2 minimum. |
@@ -622,7 +643,7 @@ directly to the internet.
 | Proxy authorisation | ✗ PLAIN with an authzid different from the authcid is refused. XOAUTH2 `user=` and OAUTHBEARER `a=` name the login; with token introspection they must resolve to the token's account. |
 | Brute-force data | Client IP/port, local IP/port, protocol, mechanism, TLS state and attempt counter are sent to Nauthilus. |
 | Temporary failure | Reported as unavailable (`[UNAVAILABLE]`, `[SYS/TEMP]`, `451`, HTTP 503), never as a wrong password. |
-| Plaintext authentication | Allowed without TLS only with `server.insecure_auth` for IMAP, POP3, ManageSieve and LMTP (code default **true**; the operational profile sets it off), and with `jmap.insecure_auth` for JMAP (default off). |
+| Plaintext authentication | Allowed without TLS only with `server.insecure_auth` for IMAP, POP3, ManageSieve and LMTP (default off), and with `jmap.insecure_auth` for JMAP (default off). |
 
 ## Transport: TLS, PROXY protocol, listeners
 
@@ -648,8 +669,8 @@ under `/admin/v1`, and the command-line client `shardpostctl`; see
 | Roles | `diagnose`, `deliver`, `deliver:noenforce`, `import`, `trace`, `provision`, `repair`, `delete`, `content`, `support`, `export`; optional account patterns per client. |
 | Concurrency | ETags with `If-Match` on mailbox, ACL and Sieve writes; `Idempotency-Key` on `POST /jobs`. |
 | Audit | One audit log line per request; request metrics. |
-| Endpoint groups | Server version and status; accounts, mailboxes, ACL (including `explain`), quota, shared folders; messages (list, show, export, flags, copy, move, and search bounded by `admin.search_scan_limit`, default 50000, continued with a cursor); Sieve (including a check dry run); learning queue; deliveries; plans and jobs (including cancel); export; import (session lock, mailboxes, messages, changes, ACL, public-folder readers, metadata, Sieve, finalize); protocol trace. |
-| Jobs | `index_check` (role `diagnose`, runs directly); `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`, `fts_dict_convert` (role `repair`) and `mailbox_delete`, `expunge`, `purge` (role `delete`): plan, then apply. Any server with `jobs.enabled` (default on) claims queued jobs; a plan can be applied for `jobs.plan_ttl_seconds` (default 3600); finished jobs are kept `jobs.retention_days` (default 14). |
+| Endpoint groups | Server version and status; accounts, mailboxes, ACL (including `explain`), quota, shared folders; messages (list, show, export, flags, copy, move, and search bounded by `admin.search_scan_limit`, default 50000, continued with a cursor); Sieve (including a check dry run that sees the `Return-Path` and `Delivered-To` a delivery adds and reports the vacation period in days and seconds); learning queue; deliveries; plans and jobs (including cancel); export; import (session lock, mailboxes, messages, changes, ACL, public-folder readers, metadata, Sieve, finalize); protocol trace. |
+| Jobs | `index_check` (role `diagnose`, runs directly); `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`, `fts_dict_convert`, `mailbox_name_convert` (renames mailboxes stored under modified UTF-7 names, after an upgrade from 0.35.2 or earlier), `attachment_backfill` (fills in `hasAttachment` for messages stored by earlier versions) (role `repair`) and `mailbox_delete`, `expunge`, `purge` (role `delete`): plan, then apply. Any server with `jobs.enabled` (default on) claims queued jobs; a plan can be applied for `jobs.plan_ttl_seconds` (default 3600); finished jobs are kept `jobs.retention_days` (default 14). |
 | shardpostctl groups | version, server, account (including quota and shared), mailbox, acl, message, sieve, job (plan, apply, check), learning, export (archive verify, restore), deliver, migrate, trace. |
 
 ### Server process
@@ -667,7 +688,7 @@ under `/admin/v1`, and the command-line client `shardpostctl`; see
 |---|---|---|
 | Metrics | Prometheus exposition | `GET /metrics` on `server.http_addr`. |
 | Health | — | `/healthz` (process), `/readyz` (store reachable, not draining; 503 otherwise); JMAP also serves `/jmap/healthz`. |
-| Tracing | OpenTelemetry OTLP (gRPC or HTTP/protobuf), W3C Trace Context and Baggage | Spans per IMAP/POP3 command, LMTP delivery, admin operation and job, with store operations below them; JMAP and ManageSieve are not traced; off without an endpoint; sampled with `telemetry.sample_ratio` (default 1.0). |
+| Tracing | OpenTelemetry OTLP (gRPC or HTTP/protobuf), W3C Trace Context and Baggage | Spans per IMAP, POP3 and ManageSieve command, JMAP request and method call (not the event source), LMTP delivery, admin operation and job, with store operations below them; personal attributes (account and mailbox names, client addresses) only with `telemetry.user_attributes` (default off); off without an endpoint; sampled with `telemetry.sample_ratio` (default 1.0). |
 | Logs | JSON (`slog`) | Session ID and the client address from the PROXY header. |
 | Protocol trace | — | IMAP only, per account and time-limited; literals by size, never credentials. |
 
@@ -689,11 +710,13 @@ See [Observability](observability.md).
 
 | Feature | Notes |
 |---|---|
-| Fields | Subject, From/Sender/Reply-To, To/Cc/Bcc, all headers, decoded `text/*` parts (up to 4 MiB). |
-| Words | Unicode letters and digits, 2–40 characters, lower-cased. |
+| Fields | Subject, From/Sender/Reply-To, To/Cc/Bcc (every value), all header names and values (RFC 2047 in any WHATWG charset, raw 8-bit text in `fts.fallback_charset`), `text/*` parts converted to UTF-8 (the `<meta>` charset for HTML; UTF-8 under a single-byte label is kept as UTF-8), the visible text of HTML parts (`fts.html`: `text`, the default, `raw` or `skip`), the file names of all parts (RFC 2231, RFC 2047), header and text of attached messages; up to 4 MiB of text per message. |
+| Words | Unicode letters and digits, 2–40 characters, lower-cased; longer words as their first 40 characters and overlapping 40-character windows (with marker terms beyond). |
 | Stemming | Snowball English and German, always both. |
 | Substrings | Trigram dictionary. |
-| Not supported | HTML stripping, attachment extraction, CJK segmentation, other languages, `SEARCH=FUZZY`, charset conversion of non-UTF-8 body text. |
+| Header store | The decoded header text of every message (DEFLATE, up to 64 KiB), so that header keys are checked without reading messages. |
+| IMAP matching | Substrings (RFC 9051); the index is a candidate pre-filter per key and part, candidates are verified in parallel (`fts.verify_parallel`); `fts.imap_search: word` for word semantics. The index version marker is set by `fts_rebuild` (and on a fresh index); without it the index is not used. See [SEARCH](#search-sort-and-thread). |
+| Not supported | Attachment content, CJK segmentation, other languages, `SEARCH=FUZZY`, MIME part header fields other than file names. |
 
 ### Quota
 
@@ -728,6 +751,7 @@ See [Quota](quota.md).
 |---|---|
 | Message format | RFC 5322, MIME RFC 2045–2049 |
 | Encoded words | RFC 2047, WHATWG charset list |
+| Parameter value encoding (file names) | RFC 2231 |
 | Preview text | RFC 8970 |
 | Base subject for SORT/THREAD | RFC 5256 |
 | List header forms in JMAP | RFC 2369 |
@@ -740,14 +764,14 @@ See [Quota](quota.md).
 
 | Area | Not supported |
 |---|---|
-| IMAP | `CONTEXT=SEARCH`/`SORT`, `ESORT`, `PARTIAL`, `SEARCH=FUZZY`, `MULTISEARCH`, `URLAUTH`, `LANGUAGE`, `I18NLEVEL`, `LIST-METADATA`, `UTF8=ONLY`, `LITERAL-`, `QUOTASET`, `SORT=DISPLAY` (keys work), `INPROGRESS`, `UIDONLY`, `JMAPACCESS`, `ANNOTATE`, `CONVERT`, `X-GM-EXT`, `XLIST`, modified UTF-7 names, `SAVEDATE` search keys, `STATUS DELETED-STORAGE`, `PREVIEW (LAZY)`, `[UNKNOWN-CTE]`, `[MAILBOXID]` on `CREATE`, `APPEND … UTF8`, ACL identifiers `authenticated`/`anonymous` and negative rights, `METADATA` `TOOMANY` and unsolicited `METADATA` responses, NOTIFY `MailboxName`/`SubscriptionChange`/metadata events, LIST attributes `\Marked`/`\Unmarked`/`\NoInferiors`/`\Remote` |
+| IMAP | `CONTEXT=SEARCH`/`SORT`, `ESORT`, `PARTIAL`, `SEARCH=FUZZY`, `MULTISEARCH`, `URLAUTH`, `LANGUAGE`, `I18NLEVEL`, `LIST-METADATA`, `UTF8=ONLY`, UTF-8 downgrade (RFC 6857, RFC 6858), `LITERAL-`, `INPROGRESS`, `UIDONLY`, `JMAPACCESS`, `ANNOTATE`, `CONVERT`, `X-GM-EXT`, `XLIST`, ACL identifiers `authenticated`/`anonymous` and negative rights, `METADATA` `TOOMANY` and unsolicited `METADATA` responses, NOTIFY `MailboxName`/`SubscriptionChange`/metadata events, LIST attributes `\Marked`/`\Unmarked`/`\NoInferiors`/`\Remote` |
 | POP3 | `APOP`, `LAST`, `LANG`, `EXPIRE`, `LOGIN-DELAY`, `AUTH` without argument |
-| LMTP | `DSN`, `BINARYMIME`, `REQUIRETLS`, `DELIVERBY`, `XCLIENT`, implicit TLS, quota check at `RCPT`, `Delivered-To`/`Return-Path` |
-| ManageSieve | `UNAUTHENTICATE`, `OWNER`/`LANGUAGE` capabilities, script-count limit, implicit TLS |
-| Sieve | `fcc`, `redirect-dsn`, `redirect-deliverby`, `convert`, `extlists`, `vnd.dovecot.environment`, `vnd.dovecot.report`, `mime` `replace`/`enclose`, notification methods other than `mailto` |
-| JMAP | WebSocket, MDN, contacts, calendars, `SearchSnippet/get`, `Blob/copy`, `hasAttachment` filter, mailbox tree query options |
+| LMTP | `DSN`, `BINARYMIME`, `REQUIRETLS`, `DELIVERBY`, `XCLIENT`, implicit TLS, quota check at `RCPT` |
+| ManageSieve | `OWNER`/`LANGUAGE` capabilities, script-count limit, implicit TLS |
+| Sieve | `redirect-dsn`, `redirect-deliverby`, `convert`, `extlists`, `vnd.dovecot.environment`, `vnd.dovecot.report`, `mime` `replace`/`enclose`, notification methods other than `mailto` |
+| JMAP | WebSocket, MDN, contacts, calendars, `Blob/copy` |
 | SASL | `LOGIN`, `CRAM-MD5`, `SCRAM`, `EXTERNAL`, proxy authorisation, OAuth mechanisms on LMTP |
-| Other | Internet SMTP and a submission listener, DSN on outbound mail, encryption at rest, full-text search over HTML text, attachments and CJK text |
+| Other | Internet SMTP and a submission listener, DSN on outbound mail, encryption at rest, full-text search over attachment content and CJK text |
 
 ## RFC index
 
@@ -763,7 +787,8 @@ implemented.
 | RFC 2033 | LMTP | LMTP |
 | RFC 2034 | SMTP enhanced status codes | LMTP |
 | RFC 2045–2049 | MIME | message parsing |
-| RFC 2047 | Encoded words | message parsing |
+| RFC 2047 | Encoded words | message parsing, FTS |
+| RFC 2231 | MIME parameter value encoding | FTS (file names) |
 | RFC 2177 | IMAP IDLE | IMAP |
 | RFC 2342 | IMAP NAMESPACE | IMAP |
 | RFC 2369 | List header fields | JMAP |
@@ -779,12 +804,13 @@ implemented.
 | RFC 3463 | Enhanced status codes | LMTP |
 | RFC 3501 | IMAP4rev1 | IMAP |
 | RFC 3502 | IMAP MULTIAPPEND | IMAP |
-| RFC 3516 | IMAP BINARY | IMAP ◐ |
+| RFC 3516 | IMAP BINARY | IMAP |
 | RFC 3691 | IMAP UNSELECT | IMAP |
+| RFC 3834 | Automatic responses | Sieve vacation, reject |
 | RFC 3894 | Sieve copy | Sieve |
 | RFC 4314 | IMAP ACL | IMAP |
 | RFC 4315 | IMAP UIDPLUS | IMAP |
-| RFC 4469 | IMAP CATENATE | IMAP ◐ |
+| RFC 4469 | IMAP CATENATE | IMAP |
 | RFC 4616 | SASL PLAIN | IMAP, POP3, ManageSieve, LMTP |
 | RFC 4731 | IMAP ESEARCH | IMAP |
 | RFC 4790 | Collation registry (comparators) | Sieve |
@@ -801,18 +827,18 @@ implemented.
 | RFC 5183 | Sieve environment | Sieve ◐ |
 | RFC 5228 | Sieve | Sieve |
 | RFC 5229 | Sieve variables | Sieve |
-| RFC 5230 | Sieve vacation | Sieve ◐ |
+| RFC 5230 | Sieve vacation | Sieve |
 | RFC 5231 | Sieve relational | Sieve |
 | RFC 5232 | Sieve imap4flags | Sieve |
 | RFC 5233 | Sieve subaddress | Sieve |
 | RFC 5235 | Sieve spamtest, virustest | Sieve |
-| RFC 5256 | IMAP SORT and THREAD | IMAP ◐ |
+| RFC 5256 | IMAP SORT and THREAD | IMAP |
 | RFC 5258 | IMAP LIST-EXTENDED | IMAP |
 | RFC 5260 | Sieve date and index | Sieve |
 | RFC 5267 | IMAP CONTEXT=SEARCH/SORT, ESORT | IMAP ✗ |
 | RFC 5293 | Sieve editheader | Sieve |
 | RFC 5322 | Internet message format | message parsing |
-| RFC 5429 | Sieve reject, ereject | Sieve ◐ |
+| RFC 5429 | Sieve reject, ereject | Sieve |
 | RFC 5435 | Sieve enotify | Sieve ◐ |
 | RFC 5436 | Sieve mailto notifications | Sieve |
 | RFC 5463 | Sieve ihave | Sieve |
@@ -823,17 +849,18 @@ implemented.
 | RFC 5703 | Sieve MIME parts | Sieve ◐ |
 | RFC 5804 | ManageSieve | ManageSieve ◐ |
 | RFC 5819 | IMAP LIST-STATUS | IMAP |
-| RFC 5957 | IMAP DISPLAYFROM/DISPLAYTO sort keys | IMAP (not advertised) |
+| RFC 5957 | IMAP SORT=DISPLAY | IMAP |
 | RFC 5987 | Header parameter encoding | JMAP downloads |
 | RFC 6009 | Sieve redirect-dsn, redirect-deliverby | Sieve ✗ |
 | RFC 6068 | mailto URI | Sieve enotify |
-| RFC 6131 | Sieve vacation-seconds | Sieve ◐ |
+| RFC 6131 | Sieve vacation-seconds | Sieve |
 | RFC 6134 | Sieve extlists | Sieve ✗ |
 | RFC 6152 | SMTP 8BITMIME | LMTP |
 | RFC 6154 | IMAP SPECIAL-USE, CREATE-SPECIAL-USE | IMAP ◐ |
 | RFC 6203 | IMAP SEARCH=FUZZY | IMAP ✗ |
 | RFC 6266 | Content-Disposition | JMAP downloads |
 | RFC 6531 | SMTPUTF8 | LMTP |
+| RFC 6533 | Internationalized delivery reports | Sieve reject MDN |
 | RFC 6558 | Sieve convert | Sieve ✗ |
 | RFC 6609 | Sieve include | Sieve |
 | RFC 6749 | OAuth 2.0 client credentials | authentication backchannel |
@@ -842,6 +869,8 @@ implemented.
 | RFC 6851 | IMAP MOVE | IMAP |
 | RFC 6855 | IMAP UTF-8 | IMAP ◐ |
 | RFC 6856 | POP3 UTF-8 | POP3 ◐ |
+| RFC 6857 | IMAP UTF-8 downgrade | IMAP ✗ |
+| RFC 6858 | Simplified IMAP UTF-8 downgrade | IMAP ✗ |
 | RFC 6901 | JSON Pointer | JMAP |
 | RFC 7162 | IMAP CONDSTORE and QRESYNC | IMAP ◐ |
 | RFC 7352 | Sieve duplicate | Sieve |
@@ -853,6 +882,7 @@ implemented.
 | RFC 7888 | IMAP LITERAL+ | IMAP |
 | RFC 7889 | IMAP APPENDLIMIT | IMAP |
 | RFC 8030 | Web Push | JMAP push |
+| RFC 8098 | Message disposition notification | Sieve reject |
 | RFC 8188 | aes128gcm content encoding | JMAP push |
 | RFC 8291 | Web Push message encryption | JMAP push |
 | RFC 8292 | VAPID | JMAP push |
@@ -861,18 +891,18 @@ implemented.
 | RFC 8438 | IMAP STATUS=SIZE | IMAP |
 | RFC 8440 | IMAP LIST-MYRIGHTS | IMAP |
 | RFC 8457 | IMAP \Important special-use | IMAP |
-| RFC 8474 | IMAP OBJECTID | IMAP ◐ |
+| RFC 8474 | IMAP OBJECTID | IMAP |
 | RFC 8508 | IMAP REPLACE | IMAP ◐ |
-| RFC 8514 | IMAP SAVEDATE | IMAP ◐ |
+| RFC 8514 | IMAP SAVEDATE | IMAP |
 | RFC 8579 | Sieve special-use | Sieve |
-| RFC 8580 | Sieve fcc | Sieve ✗ |
+| RFC 8580 | Sieve fcc | Sieve, IMAPSieve |
 | RFC 8620 | JMAP core | JMAP |
-| RFC 8621 | JMAP mail | JMAP ◐ |
+| RFC 8621 | JMAP mail | JMAP |
 | RFC 8887 | JMAP WebSocket | JMAP ✗ |
-| RFC 8970 | IMAP PREVIEW | IMAP ◐ |
+| RFC 8970 | IMAP PREVIEW | IMAP |
 | RFC 9007 | JMAP MDN | JMAP ✗ |
-| RFC 9051 | IMAP4rev2 | IMAP ◐ |
-| RFC 9208 | IMAP QUOTA | IMAP ◐ |
+| RFC 9051 | IMAP4rev2 | IMAP |
+| RFC 9208 | IMAP QUOTA | IMAP |
 | RFC 9394 | IMAP PARTIAL | IMAP ✗ |
 | RFC 9404 | JMAP blob | JMAP |
 | RFC 9422 | SMTP LIMITS | LMTP |

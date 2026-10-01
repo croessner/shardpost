@@ -1,6 +1,7 @@
 package imapproto
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,16 +28,18 @@ func (c *conn) cmdSort(tag string, uid bool) error {
 	}
 
 	var keys []string
+
 	for _, k := range t.list {
-		keys = append(keys, strings.ToUpper(k.str))
+		key := strings.ToUpper(k.str)
+		if !sortKeys[key] {
+			return fmt.Errorf("%w: unknown sort key %s", errSyntax, k.str)
+		}
+
+		keys = append(keys, key)
 	}
 
-	if _, err := c.r.astring(); err != nil { // charset
-		return err
-	}
-
-	cr, err := c.parseSearchKeys(c.r, 0)
-	if err != nil {
+	cr, ok, err := c.parseCharsetSearch(tag)
+	if err != nil || !ok {
 		return err
 	}
 
@@ -67,6 +70,45 @@ func (c *conn) cmdSort(tag string, uid bool) error {
 	c.ok(tag, "", "SORT completed")
 
 	return nil
+}
+
+// sortKeys are the SORT criteria (RFC 5256, RFC 5957); any other is BAD.
+var sortKeys = map[string]bool{
+	"ARRIVAL": true, kwCc: true, "DATE": true, kwFrom: true, "REVERSE": true, kwSize: true,
+	kwSubject: true, kwTo: true, "DISPLAYFROM": true, "DISPLAYTO": true,
+}
+
+// parseCharsetSearch reads the charset and the search keys of SORT and
+// THREAD. The charset is applied to the search strings as SEARCH CHARSET
+// is (RFC 5256 3); an unknown one is answered NO [BADCHARSET] here, and
+// ok is false then. After ENABLE UTF8=ACCEPT only UTF-8 and US-ASCII are
+// taken (RFC 6855 3).
+func (c *conn) parseCharsetSearch(tag string) (*criteria, bool, error) {
+	dec, err := c.readSearchCharset()
+	if err != nil {
+		var bc *badCharset
+		if errors.As(err, &bc) {
+			c.no(tag, "BADCHARSET (UTF-8)", err.Error())
+			return nil, false, nil
+		}
+
+		return nil, false, err
+	}
+
+	if c.utf8 && dec != nil {
+		return nil, false, fmt.Errorf("%w: only UTF-8 is allowed after ENABLE UTF8=ACCEPT", errSyntax)
+	}
+
+	cr, err := c.parseSearchKeys(c.r, 0)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if dec != nil {
+		convertCriteria(cr, dec)
+	}
+
+	return cr, true, nil
 }
 
 func sortLess(keys []string, a, b *model.Meta) bool {
@@ -249,12 +291,8 @@ func (c *conn) cmdThread(tag string, uid bool) error {
 		return err
 	}
 
-	if _, err := c.r.astring(); err != nil { // charset
-		return err
-	}
-
-	cr, err := c.parseSearchKeys(c.r, 0)
-	if err != nil {
+	cr, ok, err := c.parseCharsetSearch(tag)
+	if err != nil || !ok {
 		return err
 	}
 

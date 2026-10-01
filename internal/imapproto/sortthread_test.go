@@ -70,6 +70,13 @@ func TestSortSubjectImaptest(t *testing.T) {
 			t.Errorf("%s: got %v want %q", cmd, lines, want)
 		}
 	}
+
+	// An unknown sort key is BAD, an unknown charset NO [BADCHARSET]; a
+	// known one converts the search strings as SEARCH CHARSET does.
+	mustHave(t, c.cmd("SORT (SUBJEKT) US-ASCII ALL"), " BAD ")
+	mustHave(t, c.cmd("SORT (SUBJECT) X-NO-SUCH ALL"), "NO [BADCHARSET")
+	mustHave(t, c.cmd("THREAD REFERENCES X-NO-SUCH ALL"), "NO [BADCHARSET")
+	mustHave(t, c.ok("SORT (ARRIVAL) ISO-8859-1 ALL"), "* SORT 1 2 3")
 }
 
 func TestThreadReferencesImaptest(t *testing.T) {
