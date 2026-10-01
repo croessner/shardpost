@@ -110,7 +110,10 @@ The message is checked the way a delivery sees it: with the
 .B Return-Path
 and
 .B Delivered-To
-fields a delivery adds on top. A vacation reply is reported with its
+fields a delivery adds on top. Without
+.B \-from
+the envelope sender is the null sender, so the script sees
+.BR "Return-Path: <>" . A vacation reply is reported with its
 effective period, after the vacation period settings
 .RI ( sieve_vacation_min_period ", " sieve_vacation_max_period ", " sieve_vacation_default_period
 in

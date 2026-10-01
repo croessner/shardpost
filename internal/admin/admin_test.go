@@ -241,7 +241,7 @@ func TestDeliverRejectOfNullSender(t *testing.T) {
 	}
 
 	resp := deliver(t, ts, adminapi.DeliverParams{Recipient: "user@example.org"}, "message/rfc822", message)
-	if resp.StatusCode() != http.StatusOK || len(resp.JSON200.Stored) != 0 {
+	if resp.StatusCode() != http.StatusOK || len(resp.JSON200.Stored) != 0 || resp.JSON200.Disposition != adminapi.DispositionDiscarded {
 		t.Fatalf("sieve reject of the null sender: %d %s", resp.StatusCode(), resp.Body)
 	}
 }

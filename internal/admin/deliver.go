@@ -79,7 +79,8 @@ func (s *Server) Deliver(w http.ResponseWriter, r *http.Request, p adminapi.Deli
 		return
 	}
 
-	result := adminapi.DeliveryResult{Account: res.Account, Stored: []adminapi.StoredMessage{}}
+	result := adminapi.DeliveryResult{Account: res.Account, Stored: []adminapi.StoredMessage{},
+		Disposition: adminapi.DeliveryResultDisposition(out.Disposition)}
 	for _, st := range out.Stored {
 		result.Stored = append(result.Stored, adminapi.StoredMessage{Mailbox: st.Mailbox, Uid: int64(st.UID), Guid: st.GUID, Size: st.Size})
 	}

@@ -41,7 +41,12 @@ func TestGlobalScriptsAroundThePersonalOne(t *testing.T) {
 	}{
 		{"no personal script: the after script files", "", "", listMessage, 0, 1, 0},
 		{"after script does not match: the keep is carried out once", "", "", message, 1, 0, 0},
-		{"a personal keep is handed on", `keep;`, "", listMessage, 0, 1, 0},
+		// An explicit keep is an action: the after script's fileinto
+		// does not take it away.
+		{"a personal explicit keep stays, the after script files too", `keep;`, "", listMessage, 1, 1, 0},
+		{"a personal implicit keep is handed on", `if false { discard; }`, "", listMessage, 0, 1, 0},
+		{"a before explicit keep survives a personal discard", `discard;`, `keep;`, message, 1, 0, 0},
+		{"a before explicit keep survives a personal fileinto", `require "fileinto"; fileinto "X";`, `keep;`, message, 1, 0, 1},
 		{"a personal fileinto ends the sequence", `require "fileinto"; fileinto "X";`, "", listMessage, 0, 0, 1},
 		{"a personal copy and the after script add up", `require ["fileinto", "copy"]; fileinto :copy "X";`, "", listMessage, 0, 1, 1},
 		{"a personal discard ends the sequence", `discard;`, "", listMessage, 0, 0, 0},

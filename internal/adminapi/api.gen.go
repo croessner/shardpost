@@ -93,6 +93,27 @@ func (e AccountStatusLookup) Valid() bool {
 	}
 }
 
+// Defines values for DeliveryResultDisposition.
+const (
+	DispositionDiscarded DeliveryResultDisposition = "discarded"
+	DispositionRejected  DeliveryResultDisposition = "rejected"
+	DispositionStored    DeliveryResultDisposition = "stored"
+)
+
+// Valid indicates whether the value is a known member of the DeliveryResultDisposition enum.
+func (e DeliveryResultDisposition) Valid() bool {
+	switch e {
+	case DispositionDiscarded:
+		return true
+	case DispositionRejected:
+		return true
+	case DispositionStored:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ErrorCode.
 const (
 	BadRequest         ErrorCode = "bad_request"
@@ -367,9 +388,21 @@ type DeliveryResult struct {
 	// Account Canonical account the recipient resolved to.
 	Account string `json:"account"`
 
-	// Stored Stored copies; empty when Sieve discarded the message.
+	// Disposition What became of the message: `stored` (see `stored`),
+	// `discarded` by Sieve (also a Sieve reject of mail from the null
+	// sender, which gets no rejection message), or `rejected` by a
+	// Sieve reject that sent a rejection message to the sender.
+	Disposition DeliveryResultDisposition `json:"disposition"`
+
+	// Stored Stored copies; empty when Sieve discarded or rejected the message.
 	Stored []StoredMessage `json:"stored"`
 }
+
+// DeliveryResultDisposition What became of the message: `stored` (see `stored`),
+// `discarded` by Sieve (also a Sieve reject of mail from the null
+// sender, which gets no rejection message), or `rejected` by a
+// Sieve reject that sent a rejection message to the sender.
+type DeliveryResultDisposition string
 
 // Error defines model for Error.
 type Error struct {

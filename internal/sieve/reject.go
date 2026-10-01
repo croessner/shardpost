@@ -60,6 +60,33 @@ func PostmasterAddress(cfg map[string]string, rcpt string) string {
 	return strings.ReplaceAll(a, "%d", domainOf(strings.Trim(rcpt, "<> ")))
 }
 
+// fallbackDomain names the domain of generated messages when nothing
+// better is known; .invalid (RFC 2606) says so honestly.
+const fallbackDomain = "shardpost.invalid"
+
+// reportDomain is the domain of the Message-ID, the Reporting-UA (when
+// no host is set) and the postmaster address of a rejection: the
+// recipient's domain; for a recipient without one (a bare account name)
+// the configured host (server.lmtp_hostname), else the domain of a
+// literal postmaster_address, else fallbackDomain — never "localhost".
+func reportDomain(rcpt, host string, cfg map[string]string) string {
+	if i := strings.LastIndex(rcpt, "@"); i >= 0 && i+1 < len(rcpt) {
+		return rcpt[i+1:]
+	}
+
+	if host != "" {
+		return host
+	}
+
+	if pm := strings.TrimSpace(cfg["postmaster_address"]); !strings.Contains(pm, "%d") {
+		if i := strings.LastIndex(pm, "@"); i >= 0 && i+1 < len(pm) {
+			return pm[i+1:]
+		}
+	}
+
+	return fallbackDomain
+}
+
 // CheckSettings reports Sieve settings that cannot work: vacation
 // periods that do not parse or contradict each other, an unknown reject
 // mode, a postmaster address that is no address.
@@ -122,7 +149,7 @@ func ComposeRejection(rej Rejection, cfg map[string]string, now time.Time) (to s
 
 	subject := cfgOr(cfg, "rejection_subject", DefaultRejectionSubject)
 	reason := cfgOr(cfg, "rejection_reason", DefaultRejectionReason)
-	domain := domainOf(rcpt)
+	domain := reportDomain(rcpt, rej.Host, cfg)
 	id := model.NewGUID()
 
 	// Without a configured name the recipient's domain stands in: the
@@ -132,45 +159,66 @@ func ComposeRejection(rej Rejection, cfg map[string]string, now time.Time) (to s
 		host = domain
 	}
 
-	boundary := "=_" + id + "_rejection"
-
-	text := crlf(expand(reason))
-	report := mdnFields(oneLine(host), rcpt, oneLine(hdr.Get("Message-Id")))
-	headers := crlf(string(head))
+	parts := reportParts{
+		boundary: "=_" + id + "_rejection",
+		text:     wrapLongLines(crlf(expand(reason))),
+		report:   mdnFields(oneLine(host), rcpt, oneLine(hdr.Get("Message-Id"))),
+		headers:  crlf(string(head)),
+	}
+	parts.global = !isASCII(rcpt) || !isASCII(parts.headers)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "From: Mail Delivery Subsystem <%s>\r\n", PostmasterAddress(cfg, rcpt))
+	fmt.Fprintf(&b, "From: Mail Delivery Subsystem <%s>\r\n", PostmasterAddress(cfg, "@"+domain))
 	fmt.Fprintf(&b, "To: <%s>\r\n", to)
 	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", interp.LimitSubject(oneLine(expand(subject)))))
 	fmt.Fprintf(&b, "Date: %s\r\n", now.UTC().Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "Message-ID: <%s.reject@%s>\r\n", id, domain)
 
 	if msgID := oneLine(hdr.Get("Message-Id")); msgID != "" {
-		fmt.Fprintf(&b, "In-Reply-To: %s\r\nReferences: %s\r\n", msgID, oneLine(interp.VacationReferences(hdr)))
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", msgID)
+		b.WriteString(foldField("References", oneLine(interp.VacationReferences(hdr))))
 	}
 
 	b.WriteString("Auto-Submitted: auto-replied (rejected)\r\nPrecedence: bulk\r\nMIME-Version: 1.0\r\n")
-	fmt.Fprintf(&b, "Content-Type: multipart/report; report-type=disposition-notification;\r\n\tboundary=\"%s\"\r\n", boundary)
+	parts.write(&b)
+
+	return to, []byte(b.String())
+}
+
+// reportParts are the three parts of a rejection MDN.
+type reportParts struct {
+	boundary, text, report, headers string
+	// global marks an MDN about a recipient or a header that is not
+	// ASCII (RFC 6533 6): its report and header parts carry UTF-8.
+	global bool
+}
+
+// write writes the Content-Type of the report and its three parts.
+func (p reportParts) write(b *strings.Builder) {
+	reportType, headersType := "disposition-notification", "text/rfc822-headers"
+	if p.global {
+		reportType, headersType = "global-disposition-notification", "message/global-headers"
+	}
+
+	fmt.Fprintf(b, "Content-Type: multipart/report; report-type=%s;\r\n\tboundary=\"%s\"\r\n", reportType, p.boundary)
 	// 8-bit content is declared, on the parts and on the whole (RFC 2045
 	// 6.4); the relay client asks for BODY=8BITMIME and SMTPUTF8 when the
 	// relay offers them (net/smtp does).
-	b.WriteString(transferEncoding(text + report + headers))
+	b.WriteString(transferEncoding(p.text + p.report + p.headers))
 	b.WriteString("\r\nThis is a MIME-encapsulated message.\r\n\r\n")
 
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: inline\r\n%s\r\n", boundary, transferEncoding(text))
-	b.WriteString(text)
+	fmt.Fprintf(b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: inline\r\n%s\r\n", p.boundary, transferEncoding(p.text))
+	b.WriteString(p.text)
 	b.WriteString("\r\n\r\n")
 
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: message/disposition-notification\r\n%s\r\n", boundary, transferEncoding(report))
-	b.WriteString(report)
+	fmt.Fprintf(b, "--%s\r\nContent-Type: message/%s\r\n%s\r\n", p.boundary, reportType, transferEncoding(p.report))
+	b.WriteString(p.report)
 	b.WriteString("\r\n")
 
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/rfc822-headers\r\n%s\r\n", boundary, transferEncoding(headers))
-	b.WriteString(headers)
+	fmt.Fprintf(b, "--%s\r\nContent-Type: %s\r\n%s\r\n", p.boundary, headersType, transferEncoding(p.headers))
+	b.WriteString(p.headers)
 	b.WriteString("\r\n")
-	fmt.Fprintf(&b, "--%s--\r\n", boundary)
-
-	return to, []byte(b.String())
+	fmt.Fprintf(b, "--%s--\r\n", p.boundary)
 }
 
 // mdnFields is the message/disposition-notification part (RFC 8098 3).

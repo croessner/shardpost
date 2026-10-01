@@ -64,6 +64,10 @@ func TestDeliverCommand(t *testing.T) {
 		t.Fatalf("deliver: %d %q %q", code, out, errOut)
 	}
 
+	if code, out, errOut := call(socket, msg, "deliver", "-d", "user@example.org", "--json"); code != exOK || !strings.Contains(out, `"disposition":"stored"`) {
+		t.Fatalf("deliver --json: %d %q %q", code, out, errOut)
+	}
+
 	cases := []struct {
 		args []string
 		code int

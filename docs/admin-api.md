@@ -100,9 +100,12 @@ the message, and above it `Return-Path: <from>` and
 along; `server.lmtp_return_path`, `server.lmtp_delivered_to`, see
 [Sieve during delivery](imapsieve.md#delivery-headers)). A Sieve
 `ereject` answers `422` (`rejected`); a `reject` sends a rejection
-message to the sender and answers `200` with nothing stored, unless no
-relay is configured or `sieve_reject_mode=protocol` is set (then `422`
-as well). Recipient and sender must not contain control characters or
+message to the sender and answers `200` with nothing stored and
+`disposition: rejected`, unless the sender is the null sender (then the
+message is discarded, `disposition: discarded`), the mail is automatic or
+list mail, no relay is configured, the relay refuses the rejection
+message or `sieve_reject_mode=protocol` is set (then `422` as well; see
+[Sieve during delivery](imapsieve.md#reject-and-ereject)). Recipient and sender must not contain control characters or
 spaces and no further angle brackets. Resolution (10 s) and delivery
 (5 min) run decoupled from the HTTP request: if the client aborts, the
 delivery still runs to completion.
@@ -115,9 +118,15 @@ delivery still runs to completion.
 | `sieve=false` | without the user script, into INBOX |
 | `enforce_quota=false` | store even above the limit (usage is still counted); role `deliver:noenforce` |
 
+The result names the account, the stored copies (`stored`: mailbox,
+UID, GUID, size) and the `disposition`: `stored`, `discarded` (Sieve
+discarded the message, or rejected mail from the null sender) or
+`rejected` (Sieve rejected it and a rejection message went to the
+sender); in the last two cases `stored` is empty.
+
 Error codes: `bad_request` 400, `unauthenticated` 401, `forbidden` 403,
 `no_such_user`/`no_such_mailbox` 404, `too_large` 413, `rejected` 422
-(Sieve reject), `over_quota` 507, `temporary` 503, `internal` 500.
+(Sieve ereject, or a reject that sends no rejection message), `over_quota` 507, `temporary` 503, `internal` 500.
 
 ## shardpostctl
 
@@ -406,7 +415,8 @@ shardpostctl learning retry -confirm-repeat <id>                   # (repair)
   response lists what would happen and, under `suppressed`, every
   suppressed side effect. The message carries the `Return-Path` and
   `Delivered-To` fields a delivery adds, so the script sees what it sees
-  in a delivery. A vacation reply reports its effective period, after the
+  in a delivery; without `envelope_from` that is the null sender,
+  `Return-Path: <>`, and without `envelope_to` the account. A vacation reply reports its effective period, after the
   vacation period settings, as `days` and `seconds` (`seconds: 0` is a
   reply to every message). With a script and a text supplied in the request
   (role `diagnose`), the store tests (`mailboxexists`, `mboxmetadata`,

@@ -36,10 +36,23 @@ and
 switch the first two off.
 .PP
 The command prints where the message was stored, with mailbox and UID.
-If Sieve discarded the message, nothing is stored and the result says so.
-The same holds when a Sieve
+If Sieve discarded the message, nothing is stored and the output says
+"discarded by sieve". When a Sieve
 .B reject
-sent a rejection message to the sender: the message counts as delivered.
+sent a rejection message to the sender, nothing is stored either, the
+message counts as delivered, and the output says "rejected by sieve,
+rejection message sent to the sender". A
+.B reject
+of mail from the null sender sends no rejection message and counts as a
+discard. With
+.B \-\-json
+the result carries
+.I disposition
+with the value
+.BR stored ,
+.B discarded
+or
+.BR rejected .
 .PP
 Role:
 .B deliver
@@ -77,7 +90,8 @@ Store even if the account is over its limit. The usage is still counted.
 This is what a local delivery must do when a bounce is not acceptable.
 .TP
 .B \-\-json
-Print the result as JSON.
+Print the result as JSON: the account, the stored copies and the
+disposition.
 .SH EXAMPLES
 Deliver a file as if it had arrived by mail:
 .PP
@@ -142,8 +156,8 @@ The message was rejected by a Sieve
 .BR ereject ,
 by a
 .B reject
-that could not send a rejection message (no relay, a relay that refused
-it, or
+that sends no rejection message (automatic or list mail, no relay, a
+relay that refused it, or
 .I sieve_reject_mode=protocol
 in
 .IR sieve.settings ),

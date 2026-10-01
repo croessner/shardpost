@@ -131,7 +131,11 @@ func CompileDir(dir, label string, h Hooks) error {
 // is not carried out but handed on, and the actions of all scripts add
 // up. So a script that files the message somewhere or discards it ends
 // the sequence, and the keep of the last script that ran is the one
-// that stores the message in INBOX. A header edit of one script is what
+// that stores the message in INBOX. An explicit keep is an action of
+// its own, as within one script: once a script asked for it, no later
+// script takes it away — a later fileinto, discard or reject cancels
+// only the implicit keep (a reject fails with an action conflict, see
+// rejectConflict). A header edit of one script is what
 // the next one sees, and so are the flags of the keep handed on: they
 // are what the next script's flag variable (imap4flags) starts with, so
 // a mark survives a later script that just keeps the message, and a
@@ -172,13 +176,21 @@ func RunSequence(ctx context.Context, scripts []Script, from, to, user string, r
 
 		out.Scripts = append(out.Scripts, sc.Name)
 
-		explicit := keep.explicit
+		prev := keep
 		if keep = out.merge(d); keep == nil {
+			// An explicit keep is an action of its own: a later script
+			// that files the message elsewhere or discards it cancels
+			// only the implicit keep, not what an earlier script asked
+			// for.
+			if prev.explicit {
+				keep = prev
+			}
+
 			break
 		}
 
 		// An explicit keep stays one for the scripts after it.
-		keep.explicit = keep.explicit || explicit
+		keep.explicit = keep.explicit || prev.explicit
 	}
 
 	if keep != nil {

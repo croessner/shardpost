@@ -198,8 +198,9 @@ func DefaultConfig() map[string]string {
 
 // ParseSettings reads "key=value;key=value" (an environment variable)
 // on top of DefaultConfig. A backslash before a semicolon stands for a
-// ";" inside a value (a rejection_reason, for instance); every other
-// backslash stays as it is.
+// ";" inside a value (a rejection_reason, for instance), two backslashes
+// for one (so a value can end in a backslash); every other backslash
+// stays as it is, so a regular expression such as "\." needs no change.
 func ParseSettings(s string) map[string]string {
 	cfg := DefaultConfig()
 
@@ -215,7 +216,8 @@ func ParseSettings(s string) map[string]string {
 	return cfg
 }
 
-// splitSettings splits at ";" except after a backslash, which it drops.
+// splitSettings splits at ";"; a backslash before ";" or another
+// backslash escapes it.
 func splitSettings(s string) []string {
 	var (
 		out []string
@@ -224,8 +226,8 @@ func splitSettings(s string) []string {
 
 	for i := 0; i < len(s); i++ {
 		switch {
-		case s[i] == '\\' && i+1 < len(s) && s[i+1] == ';':
-			cur.WriteByte(';')
+		case s[i] == '\\' && i+1 < len(s) && (s[i+1] == ';' || s[i+1] == '\\'):
+			cur.WriteByte(s[i+1])
 
 			i++
 		case s[i] == ';':

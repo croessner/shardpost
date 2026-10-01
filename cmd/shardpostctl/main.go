@@ -214,7 +214,10 @@ func deliver(client *adminapi.ClientWithResponses, args []string, stdin io.Reade
 		sayf(stdout, "%s: stored in %s uid %d\n", resp.JSON200.Account, st.Mailbox, st.Uid)
 	}
 
-	if len(resp.JSON200.Stored) == 0 {
+	switch resp.JSON200.Disposition {
+	case adminapi.DispositionRejected:
+		sayf(stdout, "%s: rejected by sieve, rejection message sent to the sender\n", resp.JSON200.Account)
+	case adminapi.DispositionDiscarded:
 		sayf(stdout, "%s: discarded by sieve\n", resp.JSON200.Account)
 	}
 

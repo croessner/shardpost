@@ -144,10 +144,23 @@ type Stored struct {
 	Size    int64
 }
 
+// Dispositions of a successful delivery.
+const (
+	// DispositionStored: the message was stored (Result.Stored).
+	DispositionStored = "stored"
+	// DispositionDiscarded: Sieve discarded the message (also a reject
+	// of mail from the null sender, which gets no rejection message).
+	DispositionDiscarded = "discarded"
+	// DispositionRejected: Sieve rejected the message and a rejection
+	// message went to the sender; nothing was stored.
+	DispositionRejected = "rejected"
+)
+
 // Result is a successful delivery; Stored is empty when Sieve discarded
-// the message.
+// or rejected the message, which Disposition tells apart.
 type Result struct {
-	Stored []Stored
+	Stored      []Stored
+	Disposition string
 }
 
 // run is the state of one delivery.
@@ -245,7 +258,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 		r.track(d)
 		r.notify(ctx, raw, d)
 
-		return &Result{}, nil
+		return &Result{Disposition: DispositionDiscarded}, nil
 	}
 
 	stored, err := r.store(raw, d)
@@ -258,7 +271,7 @@ func (r *run) deliver(ctx context.Context) (*Result, error) {
 	// Side effects only after the message is durably stored.
 	r.afterStore(ctx, raw, d, redirectLater)
 
-	return &Result{Stored: stored}, nil
+	return &Result{Stored: stored, Disposition: DispositionStored}, nil
 }
 
 // checkExplicit verifies a mailbox the caller named itself. Unlike a

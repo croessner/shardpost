@@ -185,7 +185,12 @@ sieve:
 ```
 
 A value that needs a `;` (a `rejection_reason` with a semicolon, say)
-writes it as `\;`; every other backslash is taken as it is. A setting
+writes it as `\;`, a backslash before such a semicolon or at the end of a
+value as `\\`; every other backslash is taken as it is, so a regular
+expression such as `[0-9]+\.[0-9]*` needs no change. In YAML, write the
+settings in single quotes (`settings: 'rejection_reason=No\; sorry'`),
+where a backslash is an ordinary character; in double quotes every
+backslash has to be doubled (`"rejection_reason=No\\; sorry"`). A setting
 that cannot work — a period that does not parse, periods that contradict
 each other, an unknown `sieve_reject_mode`, a `postmaster_address` that
 is no address — is a startup error and fails `config check`.
@@ -248,26 +253,38 @@ MDN (RFC 8098) with the null sender, `Auto-Submitted: auto-replied
 (rejected)`, `multipart/report; report-type=disposition-notification`
 with three parts — the reason as text, the disposition
 `automatic-action/MDN-sent-automatically; deleted` with `Final-Recipient`
-(of type `utf-8`, RFC 6533, for a recipient that is not ASCII) and
-`Original-Message-ID`, and the header of the original message (not its
-body, as `text/rfc822-headers`). 8-bit content is declared
-(`Content-Transfer-Encoding: 8bit`), and the relay client asks for
-`BODY=8BITMIME` and `SMTPUTF8` when the relay offers them. The
-`Reporting-UA` names `server.lmtp_hostname`, or the recipient's domain
-when that is unset. The message then counts as delivered (LMTP `250`,
-the API `200` with nothing stored).
+and `Original-Message-ID`, and the header of the original message (not
+its body, as `text/rfc822-headers`). When the recipient or the original
+header is not ASCII, the MDN is a global one (RFC 6533 6):
+`report-type=global-disposition-notification`, the report as
+`message/global-disposition-notification` with a `Final-Recipient` of
+type `utf-8`, and the header as `message/global-headers`. 8-bit content
+is declared (`Content-Transfer-Encoding: 8bit`), and the relay client
+asks for `BODY=8BITMIME` and `SMTPUTF8` when the relay offers them. Lines
+longer than 998 octets in the reason are wrapped, a long `References`
+field is folded. The `Reporting-UA` names `server.lmtp_hostname`, or the
+recipient's domain when that is unset. For a recipient without a domain
+(a bare account name), the Message-ID, the Reporting-UA and the
+postmaster address use `server.lmtp_hostname`, else the domain of a
+literal `postmaster_address`, else `shardpost.invalid` — set one of the
+two where accounts have no domain. The message then counts as delivered
+(LMTP `250`, the API `200` with `disposition: rejected` and nothing
+stored).
 
-No rejection message goes where a vacation reply would not go either
-(RFC 3834): to the null sender, for automatic mail (`Auto-Submitted`
+Mail from the null sender gets no rejection message and is discarded
+silently (RFC 5429 2.1). No rejection message goes where a vacation reply
+would not go either (RFC 3834): for automatic mail (`Auto-Submitted`
 other than `no`), for list mail (`List-*` fields, `Precedence: bulk`,
 `list` or `junk`), to list and system senders (`owner-*`, `*-request`,
 `mailer-daemon`, `no-reply`) and when `X-Auto-Response-Suppress` asks for
-none; the message is then discarded silently. Without an SMTP relay
-(`smtp.addr`), or when the relay refuses the rejection message,
-`reject` falls back to the protocol-level rejection, so the sender still
-learns of it. When the whole rejection message went out and only the
-relay's answer is missing (a timeout after the end of DATA), it counts as
-sent: a protocol rejection on top would tell the sender twice.
+none. Such mail is rejected in the protocol instead, so the sending MTA
+or the list deals with it as with any rejection. Without an SMTP relay
+(`smtp.addr`), or when the relay refuses the rejection message or closes
+the connection, `reject` falls back to the protocol-level rejection too,
+so the sender still learns of it. Only when the whole rejection message
+went out and the relay's answer does not come in time (a timeout after
+the end of DATA) does it count as sent: the relay has probably taken it,
+and a protocol rejection on top would tell the sender twice.
 
 **Backscatter.** A rejection message goes to the envelope sender, and
 the envelope sender of spam is usually forged: `reject` then mails an
@@ -281,11 +298,16 @@ In a script sequence (`sieve.before_dir`, the personal script,
 (RFC 5429 2.1): a script that rejects after an earlier script's explicit
 `keep`, `fileinto :copy`, `redirect`, `pipe` or `vacation` fails with an
 action conflict, like a conflict within one script, and the message stays
-kept. Pigeonhole, which carries out each script's actions before the
-next one runs, lets such a reject through (and turns it into a discard
-after a vacation reply); here nothing is carried out before the sequence
-ends, so the later script gives way. A reject in an earlier script ends
-the sequence.
+kept with what the earlier scripts did. Pigeonhole behaves differently
+here: its test `tests/multiscript/conflicts.svtest` ("Graceful
+Conflicts") keeps both the earlier `fileinto "INBOX"` and the later
+`reject`, because Pigeonhole carries out each script's actions before
+the next one runs; here nothing is carried out before the sequence ends,
+so the later script gives way. A reject in an earlier script ends the
+sequence. Policy rejects that must apply whatever the user's script
+does therefore belong in `sieve.before_dir`: an after script that
+rejects fails as soon as the user's script kept the message explicitly
+(see [global Sieve scripts](configuration.md#global-sieve-scripts)).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

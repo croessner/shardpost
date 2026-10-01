@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/textproto"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -136,6 +138,72 @@ func TestComposeRejection(t *testing.T) {
 	}
 }
 
+// TestLongLinesFolded: a long References field is folded, a long reason
+// line wrapped, in rejections and vacation replies alike; no line of the
+// generated messages exceeds 998 octets.
+func TestLongLinesFolded(t *testing.T) {
+	var refs []string
+	for i := range 60 {
+		refs = append(refs, fmt.Sprintf("<%d.reference@example.org>", i))
+	}
+
+	// The sender folded its References, as a conforming one does.
+	original := "From: s@example.net\r\nMessage-ID: <m@example.net>\r\nReferences: " + strings.Join(refs, "\r\n ") + "\r\nTo: u@example.org\r\nSubject: x\r\n\r\nbody\r\n"
+	reason := strings.Repeat("word ", 400) + strings.Repeat("ü", 600)
+
+	_, mdn := ComposeRejection(Rejection{Reason: reason, Original: []byte(original), EnvelopeFrom: "s@example.net", Rcpt: "u@example.org"}, nil, time.Now())
+
+	hdr := textproto.MIMEHeader{"Message-Id": {"<m@example.net>"}, "References": {strings.Join(refs, " ")}, "To": {"u@example.org"}}
+	_, reply := (&Vacation{Reason: reason}).Compose(hdr, "s@example.net", "u@example.org", time.Now())
+
+	for name, msg := range map[string]string{"rejection": string(mdn), "vacation": string(reply)} {
+		for _, l := range strings.Split(msg, "\r\n") {
+			if len(l) > maxLine {
+				t.Errorf("%s: a line of %d octets", name, len(l))
+			}
+
+			if !utf8.ValidString(l) {
+				t.Errorf("%s: a line cut inside a character", name)
+			}
+		}
+
+		if !strings.Contains(msg, "<59.reference@example.org> <m@example.net>") {
+			t.Errorf("%s: references lost", name)
+		}
+	}
+
+	if got := foldField("References", "<a> <b>"); got != "References: <a> <b>\r\n" {
+		t.Errorf("short field folded: %q", got)
+	}
+}
+
+// TestReportDomain: a rejection for a recipient without a domain names
+// the configured host, then a literal postmaster address, never
+// localhost.
+func TestReportDomain(t *testing.T) {
+	cases := []struct {
+		rcpt, host string
+		cfg        map[string]string
+		want       string
+	}{
+		{"u@example.org", "mx.example.net", nil, "example.org"},
+		{"alice", "mx.example.net", nil, "mx.example.net"},
+		{"alice", "", map[string]string{"postmaster_address": "pm@example.com"}, "example.com"},
+		{"alice", "", nil, fallbackDomain},
+	}
+
+	for _, c := range cases {
+		if got := reportDomain(c.rcpt, c.host, c.cfg); got != c.want {
+			t.Errorf("%q %q: %q, want %q", c.rcpt, c.host, got, c.want)
+		}
+	}
+
+	_, mdn := ComposeRejection(Rejection{Reason: "no", Original: []byte("From: s@example.net\r\n\r\nx\r\n"), EnvelopeFrom: "s@example.net", Rcpt: "alice"}, nil, time.Now())
+	if strings.Contains(string(mdn), "localhost") || !strings.Contains(string(mdn), "Reporting-UA: "+fallbackDomain+"; ShardPost") {
+		t.Errorf("bare recipient:\n%s", mdn)
+	}
+}
+
 // TestShouldReject: no rejection message for the null sender or
 // automatic mail.
 func TestShouldReject(t *testing.T) {
@@ -186,10 +254,16 @@ func TestShouldReject(t *testing.T) {
 // TestParseSettingsEscape: a backslash before a semicolon keeps it in the
 // value; other backslashes stay as they are.
 func TestParseSettingsEscape(t *testing.T) {
-	cfg := ParseSettings(`rejection_reason=No\; really not.%n%r;sieve_reject_mode=mdn;x=a\.b`)
+	cfg := ParseSettings(`rejection_reason=No\; really not.%n%r;sieve_reject_mode=mdn;x=a\.b;y=ends in\\;z=a\\\;b`)
 
 	if cfg["rejection_reason"] != "No; really not.%n%r" || cfg["sieve_reject_mode"] != RejectMDN || cfg["x"] != `a\.b` {
 		t.Fatalf("%q %q %q", cfg["rejection_reason"], cfg["sieve_reject_mode"], cfg["x"])
+	}
+
+	// Two backslashes are one: a value can end in a backslash, and one
+	// can stand before a literal semicolon.
+	if cfg["y"] != `ends in\` || cfg["z"] != `a\;b` {
+		t.Fatalf("%q %q", cfg["y"], cfg["z"])
 	}
 
 	if cfg["sieve_spamtest_status_header"] != DefaultConfig()["sieve_spamtest_status_header"] {

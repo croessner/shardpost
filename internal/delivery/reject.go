@@ -16,12 +16,13 @@ import (
 // reject under sieve_reject_mode=protocol, refuse the message in the
 // protocol. Otherwise reject accepts the message and sends a rejection
 // message (an MDN) to the envelope sender through the relay; the
-// message then counts as delivered, nothing is stored. Where no
-// automatic answer may go (the null sender, automatic or list mail, see
-// sieve.ShouldReject) the message is discarded silently. Without a
-// relay, or when the relay refuses the rejection message, the
-// protocol-level rejection is the fallback, so the sender still learns
-// of it. raw is the message as the script left it (editheader), which
+// message then counts as delivered, nothing is stored. Mail from the
+// null sender is discarded silently (RFC 5429 2.1). Where no other
+// automatic answer may go (automatic or list mail, list and system
+// senders, see sieve.ShouldReject), the rejection is left to the
+// sending MTA or list: the protocol-level rejection. Without a relay, or
+// when the relay refuses the rejection message, the protocol-level
+// rejection is the fallback as well, so the sender still learns of it. raw is the message as the script left it (editheader), which
 // the notifications get; the rejection reports the header the sender
 // sent.
 func (r *run) reject(ctx context.Context, raw []byte, d *sieve.Delivery) (*Result, error) {
@@ -35,11 +36,17 @@ func (r *run) reject(ctx context.Context, raw []byte, d *sieve.Delivery) (*Resul
 	original := r.req.Raw
 	hdr, _ := textproto.NewReader(bufio.NewReader(bytes.NewReader(original))).ReadMIMEHeader()
 
-	if ok, why := sieve.ShouldReject(hdr, r.req.From); !ok {
-		r.log.Info("rejected by sieve, no rejection message sent, message discarded", "user", user, "reason", why)
+	if envelopePath(r.req.From) == "" {
+		r.log.Info("rejected by sieve, null sender: no rejection message, message discarded", "user", user)
 		r.finishDiscard(ctx, raw, d)
 
-		return &Result{}, nil
+		return &Result{Disposition: DispositionDiscarded}, nil
+	}
+
+	if ok, why := sieve.ShouldReject(hdr, r.req.From); !ok {
+		r.log.Info("rejected by sieve, no rejection message for this mail, rejecting in the protocol", "user", user, "reason", why)
+
+		return nil, refuse
 	}
 
 	if !r.relayEnabled() {
@@ -55,8 +62,9 @@ func (r *run) reject(ctx context.Context, raw []byte, d *sieve.Delivery) (*Resul
 
 	switch {
 	case errors.Is(err, outbound.ErrMaybeSent):
-		// The whole MDN went out and only the relay's answer is missing:
-		// it has probably taken it. Counting the message as delivered
+		// The whole MDN went out and the relay's answer did not come in
+		// time (a timeout, not a closed connection): it has probably
+		// taken it. Counting the message as delivered
 		// risks a lost rejection message; a protocol rejection on top
 		// would tell the sender twice (MDN and the MTA's bounce).
 		r.log.Warn("rejection message not confirmed by the relay, counted as sent", "user", user, "to", to, "err", err)
@@ -70,7 +78,7 @@ func (r *run) reject(ctx context.Context, raw []byte, d *sieve.Delivery) (*Resul
 
 	r.finishDiscard(ctx, raw, d)
 
-	return &Result{}, nil
+	return &Result{Disposition: DispositionRejected}, nil
 }
 
 // finishDiscard ends a delivery that stores nothing: the duplicate keys

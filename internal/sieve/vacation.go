@@ -105,7 +105,8 @@ func (v *Vacation) Compose(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, 
 	fmt.Fprintf(&b, "Message-ID: <%s.vacation@%s>\r\n", v.VacationKey(to)[:16], domainOf(rcpt))
 
 	if id := hdr.Get("Message-ID"); id != "" {
-		fmt.Fprintf(&b, "In-Reply-To: %s\r\nReferences: %s\r\n", id, interp.VacationReferences(hdr))
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", id)
+		b.WriteString(foldField("References", interp.VacationReferences(hdr)))
 	}
 
 	b.WriteString("Auto-Submitted: auto-replied\r\nPrecedence: bulk\r\nX-Auto-Response-Suppress: All\r\n")
@@ -119,7 +120,7 @@ func (v *Vacation) Compose(hdr textproto.MIMEHeader, envelopeFrom, rcpt string, 
 		}
 	} else {
 		b.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
-		b.WriteString(strings.ReplaceAll(strings.ReplaceAll(v.Reason, "\r\n", "\n"), "\n", "\r\n"))
+		b.WriteString(wrapLongLines(crlf(v.Reason)))
 		b.WriteString("\r\n")
 	}
 

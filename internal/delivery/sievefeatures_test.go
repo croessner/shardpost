@@ -201,7 +201,7 @@ func TestRejectSendsMDN(t *testing.T) {
 	raw := "From: sender@example.org\r\nTo: user@example.org\r\nSubject: buy now\r\nMessage-ID: <42@example.org>\r\n\r\nbody text\r\n"
 
 	res, err := svc.Deliver(context.Background(), request(raw))
-	if err != nil || len(res.Stored) != 0 || count(t, store, "INBOX") != 0 {
+	if err != nil || len(res.Stored) != 0 || res.Disposition != DispositionRejected || count(t, store, "INBOX") != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
 
@@ -267,13 +267,25 @@ func TestRejectSettings(t *testing.T) {
 }
 
 // TestRejectSuppressed: no rejection message for the null sender or
-// automatic mail; the message is discarded silently.
+// automatic and list mail. Mail from the null sender is discarded
+// silently; the rest is rejected in the protocol, so the sending MTA or
+// list deals with it.
 func TestRejectSuppressed(t *testing.T) {
+	for _, from := range []string{"", "<>"} {
+		svc, store, rec := rejectService(t, `require "reject"; reject "no";`, false)
+
+		req := request(message)
+		req.From = from
+
+		res, err := svc.Deliver(context.Background(), req)
+		if err != nil || res.Disposition != DispositionDiscarded || count(t, store, "INBOX") != 0 || len(rec.Messages()) != 0 {
+			t.Errorf("null sender %q: %+v %v sent %q", from, res, err, rec.Messages())
+		}
+	}
+
 	cases := []struct {
 		name, from, raw string
 	}{
-		{"null sender", "", message},
-		{"null sender in brackets", "<>", message},
 		{"auto-submitted", "sender@example.org", "Auto-Submitted: auto-replied\r\n" + message},
 		{"auto-submitted with a comment", "sender@example.org", "Auto-Submitted: auto-generated (bounce)\r\n" + message},
 		{"precedence bulk", "sender@example.org", "Precedence: bulk\r\n" + message},
@@ -291,9 +303,9 @@ func TestRejectSuppressed(t *testing.T) {
 		req := request(c.raw)
 		req.From = c.from
 
-		res, err := svc.Deliver(context.Background(), req)
-		if err != nil || len(res.Stored) != 0 || count(t, store, "INBOX") != 0 || len(rec.Messages()) != 0 {
-			t.Errorf("%s: %+v %v sent %q", c.name, res, err, rec.Messages())
+		var rej *RejectedError
+		if _, err := svc.Deliver(context.Background(), req); !errors.As(err, &rej) || count(t, store, "INBOX") != 0 || len(rec.Messages()) != 0 {
+			t.Errorf("%s: %v sent %q", c.name, err, rec.Messages())
 		}
 	}
 
@@ -425,6 +437,9 @@ func TestRejectMDNEightBit(t *testing.T) {
 
 	for _, want := range []string{
 		"Final-Recipient: utf-8; jürgen@example.org\r\n",
+		"report-type=global-disposition-notification;",
+		"Content-Type: message/global-disposition-notification\r\nContent-Transfer-Encoding: 8bit\r\n",
+		"Content-Type: message/global-headers\r\n",
 		"Content-Transfer-Encoding: 8bit\r\n\r\nThis is a MIME-encapsulated message.",
 		"References: <0@example.org> <1@example.org>\r\n",
 		"nicht erwünscht",

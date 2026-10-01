@@ -76,6 +76,14 @@ the account's active script, the way Pigeonhole runs `sieve_before` and
   after script only sees what the user's script left in INBOX, and a
   `fileinto "INBOX"` in a user script — unlike `keep` — ends the
   sequence too.
+- An explicit `keep` is an action of its own, as within one script: once
+  a script asked for it, no later script takes it away. A later
+  `fileinto` or `discard` cancels only the implicit keep, so the message
+  still lands in INBOX (and, with a `fileinto`, in the other mailbox as
+  well); a later `reject` fails with an action conflict and the message
+  stays kept. Policy decisions that must hold whatever the user's script
+  does — a reject, a discard of known spam — therefore belong in
+  `sieve.before_dir`, not in `sieve.after_dir`.
 - A header edit (`editheader`) of one script is what the next one sees.
 - A script that fails at runtime is skipped as if it had kept the message
   and logged; the others still run, and so do the other scripts of a
@@ -131,7 +139,10 @@ Pigeonhole has the setting. Among them, with their defaults:
 | `rejection_reason` | `Your message to <%t> was automatically rejected:%n%r` | Text of the rejection message. |
 | `postmaster_address` | `postmaster@%d` | Sender of rejection messages and of notifications without `:from`; `%d` is the recipient's domain. |
 
-A `;` inside a value is written `\;`. The startup and `config check`
+A `;` inside a value is written `\;`, a backslash before it or at the
+end of a value `\\`; in YAML, put the whole value in single quotes (in
+double quotes every backslash has to be doubled). The startup and
+`config check`
 refuse periods that do not parse or
 contradict each other, an unknown `sieve_reject_mode` and a
 `postmaster_address` that is no address. What these settings do is

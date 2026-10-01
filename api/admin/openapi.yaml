@@ -1461,14 +1461,23 @@ components:
           type: string
     DeliveryResult:
       type: object
-      required: [account, stored]
+      required: [account, stored, disposition]
       properties:
         account:
           type: string
           description: Canonical account the recipient resolved to.
+        disposition:
+          type: string
+          enum: [stored, discarded, rejected]
+          x-enum-varnames: [DispositionStored, DispositionDiscarded, DispositionRejected]
+          description: |
+            What became of the message: `stored` (see `stored`),
+            `discarded` by Sieve (also a Sieve reject of mail from the null
+            sender, which gets no rejection message), or `rejected` by a
+            Sieve reject that sent a rejection message to the sender.
         stored:
           type: array
-          description: Stored copies; empty when Sieve discarded the message.
+          description: Stored copies; empty when Sieve discarded or rejected the message.
           items:
             $ref: "#/components/schemas/StoredMessage"
     StoredMessage:
