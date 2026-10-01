@@ -73,6 +73,8 @@ imapsieve:
   max_parallel: 4
   learning:
     enabled: true
+    # Learning queue read from its index (backfill ran 2026-10-01 with 0.39.0).
+    index: read
     max_attempts: 5
     max_message_bytes: 4194304
     rules:

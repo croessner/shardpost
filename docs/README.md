@@ -43,6 +43,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [ShardPost 0.39.0](reports/2026-10-01-shardpost-0.39.0.md): no pool listing in running paths, per-account limits (scaling stage R2a).
 - [ShardPost 0.38.0](reports/2026-10-01-shardpost-0.38.0.md): job queue and expiry without listing, key rotation of the admin store (scaling stage R1b).
 - [ShardPost 0.37.0](reports/2026-10-01-shardpost-0.37.0.md): account directory (scaling stage R1a), ESORT.
 - [ShardPost 0.36.0/0.36.1](reports/2026-10-01-shardpost-0.36.1.md): the gaps of the protocol reference closed, imaptest without failures.
