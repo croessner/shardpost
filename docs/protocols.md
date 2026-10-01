@@ -205,8 +205,9 @@ message of the mailbox; a key with no word the index can narrow by (one
 or two letters inside a word) reads every message. A message expunged
 during the search is no match; if a message cannot be read for another
 reason, the command fails with `NO [SERVERBUG]` instead of returning a
-partial result. With `fts.imap_search: word` (default `substring`) the
-index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by
+partial result. A search whose client closes the connection stops
+checking messages, and the session ends without an answer. With
+`fts.imap_search: word` (default `substring`) the index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by
 word (all words in any order, stem, part of a word), without reading
 messages. An account whose index lacks the version marker (indexed
 before this release, or a rebuild that has not completed) does not use
