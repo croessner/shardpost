@@ -93,11 +93,9 @@ func (u *User) PutBlob(raw []byte) (string, error) {
 		return "", err
 	}
 
-	// writeBlob removes what it created when it fails; only the intent
-	// is left to go.
+	// writeBlob removes what it created when it fails; the intent stays
+	// and expires like any upload, which removes anything left.
 	if _, err := u.writeBlob(guid, raw); err != nil {
-		_ = rmKeys(u.idx, oidRegistry, []string{uploadKey(guid)})
-
 		return "", err
 	}
 

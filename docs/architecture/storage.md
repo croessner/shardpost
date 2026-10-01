@@ -319,11 +319,18 @@ a namespace from an account that only kept Sieve scripts before 0.42.0,
 every purge first records the account in the hint index `ix.purged`
 (`~accounts`); the sweep deletes what is left in a recorded namespace
 without registry and without an active directory entry (an active entry
-always wins: a lost registry is no debris), and a repairing sweep
-removes, when it ends, the records of the namespaces it cleaned
-completely whose purge is older than its start less its grace period.
-An account registered again under the name, or set active again by a
-directory repair, loses its record at once.
+always wins: a lost registry is no debris). Before it deletes anything
+in such a namespace it checks again that there is still no registry and
+that the namespace may still be cleaned, and it takes no object written
+after it read the namespace for a remnant: an account created again
+while the sweep looks at it keeps everything. When a repairing sweep
+ends, it removes every record of a purge older than its start less its
+grace period, except those of namespaces in which it left something
+(an object younger than the grace period, a failed delete, a namespace
+it skipped); a purged namespace with no object left at all loses its
+record as well. An account registered again under the name, set active
+again by a directory repair, or whose stale entry a repair removed,
+loses its record at once.
 
 ## The sweep
 

@@ -57,10 +57,13 @@ func RepairAccountEntry(kv model.AdminKV, dir model.AccountDirectory, account st
 }
 
 // ForgetActivated drops the purge record of an account a repair activated
-// again (best effort: a stale record only matters once the registry is
-// lost and the entry gone too).
+// again or whose stale entry it removed: such an account is no purged
+// one, and without an entry a left-over record would let the sweep take
+// its namespace for debris (best effort; the sweep still requires the
+// registry to be missing).
 func ForgetActivated(dir any, res model.DirectoryRepair) {
-	if f, ok := dir.(model.PurgedForgetter); ok && res.Action == model.RepairActivated {
+	f, ok := dir.(model.PurgedForgetter)
+	if ok && (res.Action == model.RepairActivated || res.Action == model.RepairStale) {
 		_ = f.ForgetPurged(res.Account)
 	}
 }

@@ -88,6 +88,8 @@ type SweepOptions struct {
 	// Batch overrides sweepBatch (tests).
 	Batch int
 	Log   *slog.Logger
+	// afterLoad runs after a namespace's data model was read (tests).
+	afterLoad func(namespace string)
 }
 
 // SweepReport is what a sweep found and did.
@@ -620,10 +622,10 @@ type sweepNamespace struct {
 	u     *User
 	skip  bool          // left alone (import lock, error)
 	keep  bool          // reported only (no registry, not being purged)
-	// purgedNS: cleaned as a purged account's namespace (ix.purged); its
-	// record is forgotten at the end unless something was left.
-	purgedNS bool
-	named *namedObjects // nil: no registry, everything is a remnant
+	// opened is when load started: nothing written after it is a
+	// remnant.
+	opened time.Time
+	named  *namedObjects // nil: no registry, everything is a remnant
 	index map[string]bool
 	live  map[string]bool // public folders, read on demand
 	// remnants found and not yet handled: index objects, and blobs by
@@ -663,43 +665,35 @@ func (sw *sweeper) openNamespace(name, pool string) *sweepNamespace {
 		ns.unclean()
 	}
 
+	if sw.o.afterLoad != nil {
+		sw.o.afterLoad(name)
+	}
+
 	return ns
 }
 
 // load reads the data model of the namespace's account. A namespace
-// without registry has none; its objects are remnants only when the
-// account directory says the account is being purged (a purge that
-// stopped after the registry went). Any other one is reported and left
-// alone: accounts that only ever kept Sieve scripts had no registry
-// before 0.42.0, and a lost registry is no debris.
+// without registry has none; whether its objects are remnants is
+// cleanable's to say. opened is taken first: nothing written after it is
+// taken for a remnant.
 func (ns *sweepNamespace) load() error {
 	u, rep := ns.u, &ns.sw.st.Report
+	ns.opened = time.Now()
 
 	if !u.objectExists(oidRegistry) {
-		state, ok, err := ns.sw.s.directoryState(ns.name)
+		ok, reason, err := ns.cleanable()
 		if err != nil {
 			return err
 		}
 
-		purged, err := ns.sw.s.purged(ns.name)
-		if err != nil {
-			return err
-		}
+		if !ok {
+			if reason == remnantRegistryMissing {
+				rep.RegistryMissing++
+			} else {
+				rep.Unregistered++
+			}
 
-		// An active entry always wins: a lost registry is no debris,
-		// whatever an earlier purge of the name recorded.
-		switch {
-		case ok && state == model.AccountPurging:
-		case !ok && purged:
-			ns.purgedNS = true
-		case ok:
-			rep.RegistryMissing++
-			rep.sample("registry missing: " + ns.name)
-
-			ns.keep = true
-		default:
-			rep.Unregistered++
-			rep.sample("no registry: " + ns.name)
+			rep.sample(reason + ": " + ns.name)
 
 			ns.keep = true
 		}
@@ -711,7 +705,6 @@ func (ns *sweepNamespace) load() error {
 		rep.ImportLocked++
 
 		ns.skip = true
-		ns.unclean()
 
 		return err
 	}
@@ -724,6 +717,61 @@ func (ns *sweepNamespace) load() error {
 	ns.named, ns.index = named, named.indexSet()
 
 	return nil
+}
+
+// Why a namespace without registry is left alone.
+const (
+	remnantRegistryMissing = "registry missing" // the directory holds it as active
+	remnantUnregistered    = "no registry"      // neither purging nor recorded as purged
+)
+
+// cleanable reports whether the objects of a namespace without registry
+// are remnants: the account directory says the account is being purged,
+// or a purge recorded it and the directory holds no entry. An active
+// entry always wins (a lost registry is no debris, whatever an earlier
+// purge of the name recorded); a namespace neither purging nor recorded
+// (an account that only kept Sieve scripts before 0.42.0) is left alone.
+func (ns *sweepNamespace) cleanable() (bool, string, error) {
+	state, ok, err := ns.sw.s.directoryState(ns.name)
+	if err != nil {
+		return false, "", err
+	}
+
+	purged, err := ns.sw.s.purged(ns.name)
+	if err != nil {
+		return false, "", err
+	}
+
+	switch {
+	case ok && state == model.AccountPurging, !ok && purged:
+		return true, "", nil
+	case ok:
+		return false, remnantRegistryMissing, nil
+	default:
+		return false, remnantUnregistered, nil
+	}
+}
+
+// stillCleanable checks again, before a namespace without registry loses
+// objects, that it still has no registry and may be cleaned: the account
+// may have been created again while the sweep looked at it.
+func (ns *sweepNamespace) stillCleanable() bool {
+	if ns.named != nil || ns.keep || !ns.sw.o.Repair {
+		return true
+	}
+
+	if ns.u.objectExists(oidRegistry) {
+		ns.keep = true
+		return false
+	}
+
+	ok, _, err := ns.cleanable()
+	if err != nil || !ok {
+		ns.keep = true
+		return false
+	}
+
+	return true
 }
 
 // directoryState returns the account's state in the account directory
@@ -819,6 +867,10 @@ func (ns *sweepNamespace) flush(holdLast bool) {
 		return
 	}
 
+	if !ns.stillCleanable() {
+		ns.unclean()
+	}
+
 	held, last := 0, ""
 	if holdLast {
 		last = ns.lastGUID
@@ -877,7 +929,18 @@ func (ns *sweepNamespace) class(oid string) string {
 }
 
 // cutoff is the time before which a remnant may go.
-func (ns *sweepNamespace) cutoff() time.Time { return time.Now().Add(-ns.sw.o.Grace) }
+//
+// It is the earlier of now less the grace period and when the namespace
+// was opened: an object written after the data model was read is no
+// remnant, however long the namespace takes.
+func (ns *sweepNamespace) cutoff() time.Time {
+	c := time.Now().Add(-ns.sw.o.Grace)
+	if !ns.opened.IsZero() && ns.opened.Before(c) {
+		return ns.opened
+	}
+
+	return c
+}
 
 // blobRemnant handles a blob nothing names.
 func (ns *sweepNamespace) blobRemnant(guid string, chunks int) {
