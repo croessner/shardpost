@@ -43,6 +43,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [ShardPost 0.36.0/0.36.1](reports/2026-10-01-shardpost-0.36.1.md): the gaps of the protocol reference closed, imaptest without failures.
 - [ShardPost 0.35.2](reports/2026-10-01-shardpost-0.35.2.md): protocol fixes from the documentation audit.
 - [JMAP Core 0.27.0](reports/2026-09-21-jmap-core-0.27.0.md): account-wide state, JMAP Core, release evidence.
 - [ShardPost 0.13.0](reports/2026-09-18-shardpost-0.13.0.md): lint cleanup, namespace/pool/identity move, current rollout.

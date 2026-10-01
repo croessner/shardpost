@@ -58,15 +58,13 @@ involved, the adapter compares absence of errors against presence of errors,
 not the exact number of Dovecot diagnostics. Linux/TZ=UTC is the reference for
 this suite.
 
-The last documented complete IMAP run, at 0.11.0, had one
-failed group (`fetch-envelope`, historical source routes) and
-11 groups out of 72 skipped for missing capabilities. The source route
-is reported in the ENVELOPE since the release after 0.35.2 (see
-[hack/conformance.md](../../hack/conformance.md)); messages stored
-before it keep their cached envelope without the route. What was added
-in the same release (`SORT=DISPLAY`, `QUOTASET`, `PREVIEW (LAZY)`, the
-`SAVEDATE` search keys, modified UTF-7 mailbox names) is not covered by
-that run and needs a new complete one.
+The last complete IMAP run, against 0.36.1 on 2026-10-01, had no
+failed group: 72 groups, 0 of 460 base protocol and 0 of 267 extension
+commands failed, 9 groups skipped for capabilities the server does not
+offer (see [hack/conformance.md](../../hack/conformance.md)). The run
+against 0.35.2 the same day had three failures (`fetch-envelope`,
+`search-body`, `search-header`), all fixed in 0.36.0; messages stored
+before 0.36.0 keep their cached envelope without the source route.
 
 ## Choosing integration scripts deliberately
 

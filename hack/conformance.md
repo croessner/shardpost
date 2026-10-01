@@ -46,6 +46,29 @@ The planned run, once stage 4 is in: the `jmap-samples`/`jmap-client`
 corpus, the Stalwart JMAP test set, and Thunderbird against the
 Director, with its results recorded here like the IMAP ones.
 
+## Results 0.36.1 (2026-10-01)
+
+imaptest against `shardpost:993`, image 0.36.1, after `fts_rebuild` of
+every account:
+
+```
+72 test groups: 0 failed, 9 skipped due to missing capabilities
+base protocol: 0/460 individual commands failed
+extensions: 0/267 individual commands failed
+```
+
+The baseline the same day against 0.35.2 failed three groups:
+`fetch-envelope` (source routes were dropped from the ENVELOPE),
+`search-body` (`search text wertyuio` missed a match inside a header
+word) and `search-header` (`search header x-extra "eautiful head"` missed
+a phrase starting inside a word), the last two since IMAP SEARCH was
+answered from the full-text index by word. 0.36.0 reports routes and
+matches substrings as RFC 3501/9051 require; its run failed only the
+`atoms` group (`LIST` with a pattern that is not modified UTF-7 was
+refused), fixed in 0.36.1. Compared with the 0.11.0 run, two groups fewer are skipped and the
+extension commands grew from 261 to 267, through the capabilities added
+since.
+
 ## Results 0.11.2 (2026-09-16)
 
 The server binary in 0.11.2 is identical to the fully verified 0.11.1.
