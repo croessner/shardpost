@@ -1,6 +1,7 @@
 package imapproto
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -26,7 +27,12 @@ import (
 // at. A selected mailbox of another namespace (shared or public) is
 // followed through its owner's account object the same way. Where an
 // account object cannot be watched, the notifier falls back to watching
-// the mailbox objects, as it did before.
+// the mailbox objects, as it did before; those watches count against the
+// connection's bound, and NOTIFY SET is refused with NO [LIMIT] when they
+// do not fit. Every Options.NotifyPoll the notifier also reads the logs (and
+// polls what no watch covers): a change recorded later than its notify
+// (an announcement still in flight) or missed while the hub sets a
+// broken watch up again is reported then at the latest.
 //
 // Supported events: MessageNew, MessageExpunge, FlagChange. MailboxName,
 // SubscriptionChange and AnnotationChange are refused with BADEVENT.
@@ -58,16 +64,31 @@ type notifyState struct {
 	wg               sync.WaitGroup
 	mu               sync.Mutex
 	// watches (per notified mailbox) and selectedWatch are the mailbox
-	// watches of the fallback without account watch.
+	// watches of the fallback without account watch; selectedStop ends
+	// the forwarder of selectedWatch.
 	watches       map[string]model.Watch
 	selectedWatch model.Watch
+	selectedStop  chan struct{}
 	last          map[string]string // last STATUS line per mailbox
 }
 
-// acctFollow is a notifier's position in an account change log.
+// defaultNotifyPoll is how often the notifier reads the change logs and
+// polls what no watch covers, whatever the watches say
+// (Options.NotifyPoll).
+const defaultNotifyPoll = 60 * time.Second
+
+// acctFollow is a notifier's position in an account change log; stop
+// ends the goroutine that forwards its watch.
 type acctFollow struct {
-	w   model.Watch
-	seq uint64
+	w    model.Watch
+	seq  uint64
+	stop chan struct{}
+}
+
+// close ends the follow and its forwarder.
+func (f *acctFollow) close() {
+	f.w.Close()
+	close(f.stop)
 }
 
 // notifyChangePage is how many account log entries one read takes.
@@ -154,7 +175,19 @@ func (c *conn) cmdNotify(tag string) error {
 	c.notifyStop()
 
 	c.notify = st
-	c.startNotifyWatches(st, sendStatus)
+
+	if err := c.startNotifyWatches(st); err != nil {
+		// The earlier state is gone already: NOTIFY is off now.
+		c.notifyStop()
+		c.no(tag, "LIMIT", fmt.Sprintf("The mailboxes need more than the %d watches of a connection; NOTIFY is off", c.notifyWatchLimit()))
+
+		return nil
+	}
+
+	if sendStatus {
+		c.notifyInitialStatus(st)
+	}
+
 	c.notifyReselect()
 
 	st.wg.Add(1)
@@ -298,34 +331,47 @@ func (c *conn) checkNotifyGroup(tag string, g notifyGroup) bool {
 	return true
 }
 
-// startNotifyWatches follows the account (or, without an account watch,
-// the notified mailboxes) and, with sendStatus, reports the initial
-// STATUS of the notified mailboxes (except the selected one).
-func (c *conn) startNotifyWatches(st *notifyState, sendStatus bool) {
+// startNotifyWatches follows the account or, without an account watch,
+// the notified mailboxes; errWatchLimit when those do not fit into the
+// connection's bound.
+func (c *conn) startNotifyWatches(st *notifyState) error {
 	for name := range st.boxes {
 		if mb, err := c.user.Lookup(name); err == nil {
 			st.ids[mb.ID] = name
 		}
 	}
 
-	if st.selected || len(st.ids) > 0 {
-		if f := c.followAccount(c.name, c.user); f != nil {
-			st.own = f
-			st.wake(f.w, st.ownWake)
-		} else {
-			for id, name := range st.ids {
-				if w := c.watchMailbox(c.name, id); w != nil {
-					st.watches[name] = w
-					st.forward(w, name)
-				}
-			}
+	if !st.selected && len(st.ids) == 0 {
+		return nil
+	}
+
+	if f := c.followAccount(c.name, c.user); f != nil {
+		st.own = f
+		st.wake(f, st.ownWake)
+
+		return nil
+	}
+
+	for id, name := range st.ids {
+		w, err := c.watchMailbox(c.name, id, true)
+
+		var limit errWatchLimit
+
+		switch {
+		case errors.As(err, &limit):
+			return err
+		case err == nil:
+			st.watches[name] = w
+			st.forward(w, name, st.stop)
 		}
 	}
 
-	if !sendStatus {
-		return
-	}
+	return nil
+}
 
+// notifyInitialStatus reports the STATUS of the notified mailboxes
+// (except the selected one) for NOTIFY SET STATUS.
+func (c *conn) notifyInitialStatus(st *notifyState) {
 	for name := range st.boxes {
 		if c.isSelectedOwn(name) {
 			continue
@@ -354,7 +400,7 @@ func (c *conn) followAccount(ns string, u model.User) *acctFollow {
 		return nil
 	}
 
-	return &acctFollow{w: w, seq: seq}
+	return &acctFollow{w: w, seq: seq, stop: make(chan struct{})}
 }
 
 // isSelectedOwn reports whether name is the selected mailbox of the
@@ -589,8 +635,9 @@ func unquote(s string) string {
 	return s
 }
 
-// forward pumps a watch into the notifier channel until stop.
-func (st *notifyState) forward(w model.Watch, name string) {
+// forward pumps a watch into the notifier channel until the notifier or
+// the watch (stop) ends.
+func (st *notifyState) forward(w model.Watch, name string, stop <-chan struct{}) {
 	st.wg.Add(1)
 	go func() {
 		defer st.wg.Done()
@@ -598,6 +645,8 @@ func (st *notifyState) forward(w model.Watch, name string) {
 		for {
 			select {
 			case <-st.stop:
+				return
+			case <-stop:
 				return
 			case <-w.Events():
 				select {
@@ -612,8 +661,10 @@ func (st *notifyState) forward(w model.Watch, name string) {
 }
 
 // wake pumps the events of an account watch into wake (coalesced) until
-// stop.
-func (st *notifyState) wake(w model.Watch, wake chan<- struct{}) {
+// the notifier or the follow ends.
+func (st *notifyState) wake(f *acctFollow, wake chan<- struct{}) {
+	w := f.w
+
 	st.wg.Add(1)
 	go func() {
 		defer st.wg.Done()
@@ -621,6 +672,8 @@ func (st *notifyState) wake(w model.Watch, wake chan<- struct{}) {
 		for {
 			select {
 			case <-st.stop:
+				return
+			case <-f.stop:
 				return
 			case <-w.Events():
 				select {
@@ -649,11 +702,12 @@ func (c *conn) notifyReselect() {
 
 	if st.selectedWatch != nil {
 		st.selectedWatch.Close()
-		st.selectedWatch = nil
+		close(st.selectedStop)
+		st.selectedWatch, st.selectedStop = nil, nil
 	}
 
 	if st.sel != nil {
-		st.sel.w.Close()
+		st.sel.close()
 		st.sel = nil
 	}
 
@@ -661,18 +715,30 @@ func (c *conn) notifyReselect() {
 		return
 	}
 
+	defer st.pollSelected()
+
 	if c.mu != c.user {
 		if f := c.followAccount(c.selectedNS(), c.mu); f != nil {
 			st.sel = f
-			st.wake(f.w, st.selWake)
+			st.wake(f, st.selWake)
 
 			return
 		}
 	}
 
-	if w := c.watchMailbox(c.selectedNS(), c.mbox.ID); w != nil {
-		st.selectedWatch = w
-		st.forward(w, "")
+	if w, err := c.watchMailbox(c.selectedNS(), c.mbox.ID, true); err == nil {
+		st.selectedWatch, st.selectedStop = w, make(chan struct{})
+		st.forward(w, "", st.selectedStop)
+	}
+}
+
+// pollSelected has the notifier poll the selected mailbox once: a change
+// between the snapshot of SELECT and the new follow is neither in the
+// snapshot nor after the follow's position.
+func (st *notifyState) pollSelected() {
+	select {
+	case st.events <- "":
+	default: // an event is pending already
 	}
 }
 
@@ -692,12 +758,13 @@ func (c *conn) notifyStop() {
 
 	for _, f := range []*acctFollow{st.own, st.sel} {
 		if f != nil {
-			f.w.Close()
+			f.close()
 		}
 	}
 
 	if st.selectedWatch != nil {
 		st.selectedWatch.Close()
+		close(st.selectedStop)
 	}
 	st.mu.Unlock()
 }
@@ -708,10 +775,17 @@ func (c *conn) notifyStop() {
 func (c *conn) notifyLoop(st *notifyState) {
 	defer st.wg.Done()
 
+	tick := time.NewTicker(c.s.o.NotifyPoll)
+	defer tick.Stop()
+
 	for {
 		select {
 		case <-st.stop:
 			return
+		case <-tick.C:
+			if !c.notifyLocked(st, func() { c.notifyPollAll(st) }) {
+				return
+			}
 		case name := <-st.events:
 			if !c.notifyLocked(st, func() { c.notifyName(st, name) }) {
 				return
@@ -741,6 +815,26 @@ func (c *conn) notifyLocked(st *notifyState, fn func()) bool {
 	fn()
 
 	return c.w.flush() == nil
+}
+
+// notifyPollAll is the periodic look of the notifier: the change logs it
+// follows are read, the fallback mailbox watches' mailboxes get their
+// STATUS, and a selected mailbox no watch covers is polled.
+func (c *conn) notifyPollAll(st *notifyState) {
+	c.notifyOwnChanges(st)
+	c.notifySelectedChanges(st)
+
+	for name := range st.watches {
+		c.notifyStatus(st, name)
+	}
+
+	st.mu.Lock()
+	covered := st.sel != nil || st.selectedWatch != nil || (c.mu == c.user && st.own != nil)
+	st.mu.Unlock()
+
+	if st.selected && !st.selectedNone && c.mbox != nil && !covered {
+		c.notifySelected(st)
+	}
 }
 
 // notifyName reports a change of a mailbox watched by its object.

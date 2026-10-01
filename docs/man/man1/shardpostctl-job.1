@@ -120,9 +120,23 @@ for a scrub). The result counts the accounts done, skipped, gone (purged
 meanwhile), failed and with findings, and names the first 50 that failed
 or had findings; a batch with a failed account ends
 .IR partially_failed .
-A kind that locks the account takes the lock per account; an account an
-import or another job holds is tried again at the end, up to three
-times a lease period apart, and then counted as failed. A cancel stops
+A kind that locks the account
+.RB ( fts_rebuild )
+takes the lock per account and waits
+.I jobs.settle_seconds
+before it writes, as a single job does: while it holds an account, the
+open IMAP and POP3 sessions of that account are disconnected at their
+next command and deliveries wait, so such a batch disconnects every
+account once, one after another. An account an import or another job
+holds is tried again at the end, up to three times a lease period
+apart, and then counted as failed. A scrub with
+.B \-skip-idle
+does not look at the leftovers only the per-account listings find
+(unreferenced JMAP upload blobs, marks of deleted public folders) for
+the accounts it skips; they wait until the account is scrubbed again, at
+most
+.I scrub.interval_days
+later. A cancel stops
 the batch between two accounts. A server that takes the batch over
 continues after the last page done.
 .PP

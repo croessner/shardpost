@@ -71,7 +71,7 @@ type Config struct {
 	ScrubParallel int
 	// ScrubInterval is how long a batch scrub with skip_idle may leave an
 	// idle account alone: after it, the account is scrubbed again in any
-	// case (7 days when 0; negative: no bound).
+	// case (7 days when 0 or less; scrub.interval_days is at least 1).
 	ScrubInterval time.Duration
 }
 
@@ -88,12 +88,7 @@ func (c Config) withDefaults() Config {
 
 	c.BatchParallel, c.ScrubParallel = max(c.BatchParallel, 1), max(c.ScrubParallel, 1)
 
-	switch {
-	case c.ScrubInterval == 0:
-		c.ScrubInterval = 7 * 24 * time.Hour
-	case c.ScrubInterval < 0:
-		c.ScrubInterval = 0
-	}
+	c.ScrubInterval = cmpDur(c.ScrubInterval, 7*24*time.Hour)
 
 	return c
 }

@@ -485,3 +485,29 @@ func TestSubmitBatchOnce(t *testing.T) {
 		t.Fatalf("after the end: %v %v", created, err)
 	}
 }
+
+// TestSubmitBatchOnceRace: of two batches submitted at the same time the
+// newer one is cancelled.
+func TestSubmitBatchOnceRace(t *testing.T) {
+	m, _ := batchSetup(t, Config{}, false)
+	p := BatchParams{Kind: KindScrub, SkipIdle: true}
+
+	// The other submitter got its batch in first, after this one looked.
+	older, created, err := m.SubmitBatchOnce(p, "cron-a")
+	if err != nil || !created {
+		t.Fatal(err)
+	}
+
+	plan, _ := m.CreateBatchPlan(p, "cron-b")
+	k, _ := m.Kind(KindBatch)
+
+	newer, _, err := m.Submit(k, "", nil, plan.ID, "cron-b", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	js, err := m.unfinishedBatches(KindScrub)
+	if err != nil || len(js) != 2 || js[0].ID != older.ID || js[1].ID != newer.ID {
+		t.Fatalf("unfinished %v %v", js, err)
+	}
+}

@@ -95,8 +95,12 @@ type Options struct {
 	// reads.
 	WatchStore watchhub.Opener
 	// MaxWatches bounds the hub subscriptions of one connection (IDLE,
-	// NOTIFY); beyond it the connection polls (0 = 8).
+	// NOTIFY); beyond it the connection polls (0 = 8). One stays free for
+	// IDLE.
 	MaxWatches int
+	// NotifyPoll is how often NOTIFY reads the change logs it follows
+	// even without a notify (0 = 60 s).
+	NotifyPoll time.Duration
 }
 
 // TraceOptions configure the protocol trace of accounts whose trace
@@ -150,6 +154,10 @@ func New(o Options) *Server {
 
 	if o.MaxWatches <= 0 {
 		o.MaxWatches = defaultMaxWatches
+	}
+
+	if o.NotifyPoll <= 0 {
+		o.NotifyPoll = defaultNotifyPoll
 	}
 
 	if o.WatchStore == nil {
@@ -1465,7 +1473,12 @@ func (c *conn) idleWatch() model.Watch {
 		return nil
 	}
 
-	return c.watchMailbox(c.selectedNS(), c.mbox.ID)
+	w, err := c.watchMailbox(c.selectedNS(), c.mbox.ID, false)
+	if err != nil {
+		return nil
+	}
+
+	return w
 }
 
 // rearmWatch replaces a watch that reported werr; nil if re-arming fails.

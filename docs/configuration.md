@@ -429,7 +429,7 @@ that run the batch, not in the pod that submits it.
 
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `server.imap_max_watches` | `IMAP_MAX_WATCHES` | 8 | change watches one IMAP connection follows (1–1024): IDLE takes one, NOTIFY one, or two with a selected mailbox of another account; beyond it the connection polls |
+| `server.imap_max_watches` | `IMAP_MAX_WATCHES` | 8 | change watches one IMAP connection follows (2–1024): IDLE takes one, which is always kept free for it; NOTIFY one, two with a selected mailbox of another account, or one per notified mailbox when the account object cannot be watched (`NOTIFY SET` then answers `NO [LIMIT]` if they do not fit); beyond it IDLE polls |
 
 The sessions of a process share their watches: one RADOS watch per
 mailbox or account object however many sessions follow it (see

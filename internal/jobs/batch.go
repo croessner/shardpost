@@ -200,10 +200,15 @@ func (m *Manager) CreateBatchPlan(p BatchParams, principal string) (*Plan, error
 // SubmitBatchOnce plans and submits a batch unless a batch of the same
 // kind has not ended yet; then it returns that one and created false.
 // The nightly scrub uses it, so a scrub that runs longer than a day is
-// not started twice.
+// not started twice. Two submitters racing both look again after their
+// submit: the older unfinished batch stays, a newer one is cancelled.
 func (m *Manager) SubmitBatchOnce(p BatchParams, principal string) (*Job, bool, error) {
-	if j, err := m.unfinishedBatch(p.Kind); err != nil || j != nil {
-		return j, false, err
+	if js, err := m.unfinishedBatches(p.Kind); err != nil || len(js) > 0 {
+		if err != nil {
+			return nil, false, err
+		}
+
+		return &js[0], false, nil
 	}
 
 	plan, err := m.CreateBatchPlan(p, principal)
@@ -216,12 +221,26 @@ func (m *Manager) SubmitBatchOnce(p BatchParams, principal string) (*Job, bool, 
 		return nil, false, err
 	}
 
-	return m.Submit(k, "", nil, plan.ID, principal, "")
+	j, _, err := m.Submit(k, "", nil, plan.ID, principal, "")
+	if err != nil {
+		return nil, false, err
+	}
+
+	js, err := m.unfinishedBatches(p.Kind)
+	if err != nil || len(js) == 0 || js[0].ID == j.ID {
+		return j, true, nil
+	}
+
+	_, _ = m.Cancel(j.ID)
+
+	return &js[0], false, nil
 }
 
-// unfinishedBatch returns a batch of the kind that has not ended (nil for
-// none).
-func (m *Manager) unfinishedBatch(kind string) (*Job, error) {
+// unfinishedBatches returns the batches of the kind that have not ended,
+// oldest first.
+func (m *Manager) unfinishedBatches(kind string) ([]Job, error) {
+	var out []Job
+
 	for _, state := range []string{StateQueued, StateRunning, StateCancelRequested} {
 		after := ""
 
@@ -234,7 +253,7 @@ func (m *Manager) unfinishedBatch(kind string) (*Job, error) {
 			for i := range page {
 				var p BatchParams
 				if page[i].Kind == KindBatch && json.Unmarshal(page[i].Params, &p) == nil && p.Kind == kind {
-					return &page[i], nil
+					out = append(out, page[i])
 				}
 			}
 
@@ -246,7 +265,17 @@ func (m *Manager) unfinishedBatch(kind string) (*Job, error) {
 		}
 	}
 
-	return nil, nil
+	// The id orders by the second only; the creation time decides, the id
+	// breaks a tie, so every submitter picks the same oldest one.
+	slices.SortFunc(out, func(a, b Job) int {
+		if c := a.Created.Compare(b.Created); c != 0 {
+			return c
+		}
+
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	return out, nil
 }
 
 // directoryHead returns the head of the account directory, refusing a

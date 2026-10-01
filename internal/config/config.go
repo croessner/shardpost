@@ -115,9 +115,10 @@ type Server struct {
 	MaxConnsPerIP     int64 `mapstructure:"max_conns_per_ip" env:"MAX_CONNS_PER_IP" validate:"gte=0"`
 	MaxConnsPerUser   int64 `mapstructure:"max_conns_per_user" env:"MAX_CONNS_PER_USER" validate:"gte=0"`
 	// ImapMaxWatches bounds the change watches one IMAP connection
-	// follows through the process-wide watch hub (IDLE one, NOTIFY one or
-	// two); beyond it the connection polls.
-	ImapMaxWatches   int64  `mapstructure:"imap_max_watches" env:"IMAP_MAX_WATCHES" validate:"gte=1,lte=1024"`
+	// follows through the process-wide watch hub (IDLE one, always kept
+	// free for it; NOTIFY one or two, or one per mailbox without an
+	// account watch); beyond it the connection polls.
+	ImapMaxWatches   int64  `mapstructure:"imap_max_watches" env:"IMAP_MAX_WATCHES" validate:"gte=2,lte=1024"`
 	QuotaSelfService bool   `mapstructure:"quota_self_service" env:"QUOTA_SELF_SERVICE"`
 	QuotaAttribute   string `mapstructure:"quota_attribute" env:"QUOTA_ATTRIBUTE"`
 	LmtpAddr         string `mapstructure:"lmtp_addr" env:"LMTP_ADDR"`

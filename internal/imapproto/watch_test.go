@@ -187,10 +187,10 @@ func TestNotifySharedSelectedThroughOwnerLog(t *testing.T) {
 	waitHub(t, srv, 1)
 }
 
-// TestWatchLimitPerConnection: beyond its bound a connection polls
-// instead of taking another watch.
+// TestWatchLimitPerConnection: NOTIFY leaves one watch of the bound for
+// IDLE, so IDLE beside NOTIFY always gets its watch.
 func TestWatchLimitPerConnection(t *testing.T) {
-	srv, store, dial := hubServer(t, func(o *Options) { o.MaxWatches = 1 })
+	srv, store, dial := hubServer(t, func(o *Options) { o.MaxWatches = 2 })
 	a := dial("alice")
 
 	a.ok("SELECT INBOX")
@@ -198,12 +198,7 @@ func TestWatchLimitPerConnection(t *testing.T) {
 	waitHub(t, srv, 1)
 
 	a.idle("i1")
-
-	time.Sleep(50 * time.Millisecond)
-
-	if srv.hub.Size() != 1 {
-		t.Fatalf("IDLE took a watch beyond the limit: %d", srv.hub.Size())
-	}
+	waitHub(t, srv, 2)
 
 	// NOTIFY still reports through its watch.
 	u, _ := store.User("alice")
@@ -213,6 +208,76 @@ func TestWatchLimitPerConnection(t *testing.T) {
 
 	mustHave(t, a.unsolicited(300*time.Millisecond), "* STATUS Drafts (MESSAGES 1")
 	a.done("i1")
+}
+
+// watchStore wraps the memstore for the hub: without account watches
+// (noAccount), or with account watches that never fire.
+type watchStore struct {
+	s         *memstore.Store
+	noAccount bool
+}
+
+type plainUser struct{ model.User }
+
+type silentUser struct{ model.User }
+
+type silentWatch struct{}
+
+func (silentWatch) Events() <-chan struct{} { return nil }
+func (silentWatch) Errors() <-chan error    { return nil }
+func (silentWatch) Close()                  {}
+
+func (silentUser) WatchAccount() (model.Watch, error) { return silentWatch{}, nil }
+
+func (w watchStore) User(ns string) (model.User, error) {
+	u, err := w.s.User(ns)
+	if err != nil || w.noAccount {
+		return plainUser{u}, err
+	}
+
+	return silentUser{u}, nil
+}
+
+// TestNotifyFallbackCountsAgainstTheLimit: without an account watch NOTIFY
+// takes one watch per mailbox; when they do not fit, NOTIFY SET is
+// refused with NO [LIMIT] and NOTIFY is off.
+func TestNotifyFallbackCountsAgainstTheLimit(t *testing.T) {
+	for _, tc := range []struct {
+		max  int
+		want string
+	}{{4, "NO [LIMIT]"}, {16, "OK"}} {
+		srv, _, dial := hubServer(t, func(o *Options) {
+			o.MaxWatches, o.WatchStore = tc.max, watchStore{s: o.Store.(*memstore.Store), noAccount: true}
+		})
+		a := dial("alice")
+
+		mustHave(t, a.cmd(`NOTIFY SET (PERSONAL (MessageNew MessageExpunge))`), tc.want)
+
+		boxes := len(DefaultSpecialFolders) + 1
+		if tc.want != "OK" {
+			boxes = 0
+		}
+
+		waitHub(t, srv, boxes)
+	}
+}
+
+// TestNotifyPollsPeriodically: a change whose notify never arrives is
+// reported at the next periodic look of the notifier.
+func TestNotifyPollsPeriodically(t *testing.T) {
+	_, store, dial := hubServer(t, func(o *Options) {
+		o.NotifyPoll, o.WatchStore = 100*time.Millisecond, watchStore{s: o.Store.(*memstore.Store)}
+	})
+	a := dial("alice")
+
+	a.ok(`NOTIFY SET (PERSONAL (MessageNew MessageExpunge))`)
+
+	u, _ := store.User("alice")
+	if _, err := u.Deliver("Drafts", []byte("Subject: x\r\n\r\nbody\r\n"), nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	mustHave(t, a.unsolicited(time.Second), "* STATUS Drafts (MESSAGES 1")
 }
 
 // logUser is a user view whose account change log no longer covers the

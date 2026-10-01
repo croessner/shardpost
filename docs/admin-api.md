@@ -448,7 +448,12 @@ It is applied like any plan with `POST /admin/v1/jobs`.
 - **Account lock:** a kind that locks the account (`fts_rebuild`) takes
   the lock per account, keeps it renewed while it works and waits
   `jobs.settle_seconds` before it writes, so a batch of it takes at least
-  accounts × `jobs.settle_seconds` / `jobs.batch_parallel`. An account an
+  accounts × `jobs.settle_seconds` / `jobs.batch_parallel`. While it holds
+  an account, that account is in maintenance as with a single job: its
+  open IMAP and POP3 sessions get `BYE [UNAVAILABLE]` / `-ERR [SYS/TEMP]`
+  at their next command, new logins and LMTP deliveries are deferred. A
+  batch of `fts_rebuild` therefore disconnects every account once, one
+  after another; run it in a quiet window. An account an
   import or another job holds is put aside and tried again after the walk,
   up to three times a lease period apart (at most 1000 accounts are put
   aside, the rest fail at once); still locked, it counts as failed.
@@ -467,7 +472,11 @@ It is applied like any plan with `POST /admin/v1/jobs`.
   complete and found nothing, is younger than `scrub.interval_days`, the
   account's change counter and registry version are still the recorded
   ones, the scrub object holds no orphan candidates and no quota count,
-  and no delivery or MOVE intent is open. See
+  and no delivery or MOVE intent is open. A skipped account misses the
+  per-account listings, so unreferenced JMAP upload blobs and the `\Seen`
+  marks of deleted public folders wait for its next full scrub, at most
+  `scrub.interval_days` later (until a later stage records intents for
+  them). See
   [storage](architecture/storage.md#batches-over-all-accounts-and-the-batch-scrub).
 - **Export** is no batch kind: an export streams one archive per request
   to the caller, and a batch job has no place to put one archive per

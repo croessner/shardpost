@@ -373,6 +373,16 @@ scrubbed as before, including the listing of their namespace in the
 data pool (orphan blobs) and the index pool (unknown objects); a scrub
 without those listings needs the intents of a later stage.
 
+**What skipping misses until the intents exist.** A skipped account gets
+none of the per-account listings, so debris that changes neither its
+account counter nor its registry waits for the next scrub of the account,
+at the latest `scrub.interval_days` later: blobs a JMAP upload stored but
+nothing referenced (an upload writes a blob only), the private `\Seen`
+marks (`pubseen/`) of public folders that were deleted in `~public`
+meanwhile, and objects a process left when it died between two writes
+that do not touch the counter or the registry. None of them is visible
+to a client; they only take space until then.
+
 `shardpost scrub` (the run in the process itself) takes its accounts
 from `scrub.users`, else from the directory once it carries a completed
 backfill marker, else from a listing of the index pool.
@@ -672,10 +682,15 @@ mailbox of another account or of the public namespace is followed
 through the owner's account object. When an account object cannot be
 watched, NOTIFY falls back to the mailbox objects. A watch that reports
 an error (the OSD dropped it, or the store rotated its connection) is set
-up again by the hub on a fresh view, retried with a growing delay, and
-its followers are woken to look for what they may have missed. A
-connection holds at most `server.imap_max_watches` subscriptions and
-polls beyond them.
+up again by the hub on a fresh view, retried with a growing delay (the
+first failure is logged as a warning, the further ones at debug level),
+and its followers are woken to look for what they may have missed. NOTIFY
+also reads the logs it follows every 60 s without a notify, which bounds
+the delay of a change recorded after its notify (an announcement whose
+writer died is resolved after 60 s) or missed while a watch is set up
+again. A connection holds at most `server.imap_max_watches`
+subscriptions, one of them reserved for IDLE; NOTIFY SET is refused with
+`NO [LIMIT]` when its fallback watches do not fit.
 
 The full-text index works per GUID. Field terms and DE/EN stemming are stored
 in posting lists; a trigram dictionary supports substring searches.

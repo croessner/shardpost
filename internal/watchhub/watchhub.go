@@ -208,8 +208,12 @@ func (e *entry) run() {
 }
 
 // rearm watches again until it succeeds or the entry is stopped (nil).
+// The first failure is a warning, the ones after it (an object that is
+// gone for good fails at every attempt) only debug lines; the delay
+// grows up to maxRetry.
 func (e *entry) rearm() (model.User, model.Watch) {
 	delay := time.Duration(0)
+	failures := 0
 
 	for {
 		select {
@@ -227,7 +231,13 @@ func (e *entry) rearm() (model.User, model.Watch) {
 			return u, w
 		}
 
-		e.h.log.Warn("watch hub: watching again failed", "object", e.k.object(), "err", err)
+		failures++
+
+		if failures == 1 {
+			e.h.log.Warn("watch hub: watching again failed, retrying", "object", e.k.object(), "err", err)
+		} else {
+			e.h.log.Debug("watch hub: watching again failed", "object", e.k.object(), "attempt", failures, "err", err)
+		}
 
 		delay = min(max(2*delay, e.h.minRetry), e.h.maxRetry)
 	}

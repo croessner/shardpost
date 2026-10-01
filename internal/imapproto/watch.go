@@ -17,7 +17,8 @@ import (
 // set a watch up, it polls as it did without a watch.
 
 // defaultMaxWatches is the subscription bound of a connection: IDLE
-// takes one, NOTIFY one or two.
+// takes one (always kept free for it), NOTIFY one or two, or one per
+// notified mailbox without an account watch.
 const defaultMaxWatches = 8
 
 // selectedNS is the namespace of the selected mailbox.
@@ -32,28 +33,37 @@ func (c *conn) selectedNS() string {
 	}
 }
 
-// watchMailbox follows the mailbox object of a mailbox in namespace ns;
-// nil means polling only.
-func (c *conn) watchMailbox(ns, id string) model.Watch {
-	w, _ := c.subscribe(func() (model.Watch, error) { return c.s.hub.Mailbox(ns, id) })
-
-	return w
+// watchMailbox follows the mailbox object of a mailbox in namespace ns
+// for NOTIFY (notify) or IDLE; an error means polling only
+// (errWatchLimit: the connection is at its bound).
+func (c *conn) watchMailbox(ns, id string, notify bool) (model.Watch, error) {
+	return c.subscribe(notify, func() (model.Watch, error) { return c.s.hub.Mailbox(ns, id) })
 }
 
-// watchAccount follows the account object of namespace ns; nil means the
-// caller has to do without (an error says why).
+// watchAccount follows the account object of namespace ns for NOTIFY;
+// an error means the caller has to do without.
 func (c *conn) watchAccount(ns string) (model.Watch, error) {
-	return c.subscribe(func() (model.Watch, error) { return c.s.hub.Account(ns) })
+	return c.subscribe(true, func() (model.Watch, error) { return c.s.hub.Account(ns) })
 }
+
+// notifyWatchLimit is how many watches NOTIFY may take: one of the
+// connection's bound stays reserved for IDLE.
+func (c *conn) notifyWatchLimit() int { return max(c.s.o.MaxWatches-1, 0) }
 
 // errWatchLimit refuses a subscription beyond Options.MaxWatches.
 type errWatchLimit struct{}
 
 func (errWatchLimit) Error() string { return "the connection holds as many watches as it may" }
 
-// subscribe takes one of the connection's subscriptions.
-func (c *conn) subscribe(sub func() (model.Watch, error)) (model.Watch, error) {
-	if int(c.watches.Add(1)) > c.s.o.MaxWatches {
+// subscribe takes one of the connection's subscriptions; NOTIFY leaves
+// one for IDLE.
+func (c *conn) subscribe(notify bool, sub func() (model.Watch, error)) (model.Watch, error) {
+	limit := c.s.o.MaxWatches
+	if notify {
+		limit = c.notifyWatchLimit()
+	}
+
+	if int(c.watches.Add(1)) > limit {
 		c.watches.Add(-1)
 		metrics.IMAPWatchRefused.Inc()
 		c.log.Warn("watch limit of the connection reached, polling only", "limit", c.s.o.MaxWatches)
