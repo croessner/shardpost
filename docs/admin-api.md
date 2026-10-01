@@ -332,7 +332,7 @@ only the repairs that were planned and are still needed.
 | `attachment_backfill` | `repair` | no | read every message whose index record does not carry `hasAttachment` (stored before the record had the field) and remember the answer in the JMAP locator (`a:<guid>`, see [JMAP: hasAttachment](jmap.md#hasattachment)); changes no message and no index record, may be repeated and then reads only what is left, stops when an import or another job locks the account; a mailbox that cannot be listed and a message that cannot be read are skipped and counted (`skipped_mailboxes`, `failed`, the first errors in `errors`); the plan counts such messages and the ones already remembered |
 | `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
 | `expunge` | `delete` | no | permanently remove messages of a mailbox: `uids` or `deleted: true` (all with `\Deleted`) |
-| `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account |
+| `purge` | `delete` | yes | withdraw shares in both directions, delete learning jobs and all objects of the account (listed with `purge.listing: true`, the default; named by the data model with `false`, see [storage](architecture/storage.md#purge-without-listing)), remove the directory entry, delete the account's JMAP push and submission records |
 
 - **Account lock** (maintenance mode, decision of 2026-09-19): the job
   holds the lock the import uses as well. While it is held, IMAP and POP3

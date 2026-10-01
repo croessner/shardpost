@@ -51,7 +51,7 @@ func TestListingsAreCounted(t *testing.T) {
 	}
 
 	// "site": the learning queue's sites come from learnindex.
-	for _, want := range []string{"listUsers", "listScrubOrphans", "listScrubUnknown", "listPurgeObjects", "listAdminKV", "listAdminBackfill",
+	for _, want := range []string{"listUsers", "listScrubOrphans", "listScrubUnknown", "listPurgeObjects", "listAdminKV", "listAdminBackfill", "listSweep",
 		"site"} {
 		if !sites[want] {
 			t.Errorf("listing site %s is not used", want)

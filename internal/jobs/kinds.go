@@ -1095,7 +1095,11 @@ func (k *purge) Run(_ context.Context, run *Run) (any, error) {
 
 	_ = json.Unmarshal(run.Plan.Summary, &plan)
 
-	steps := []func(*Run, purgeSummary, *purgeCheckpoint) error{revokeGrantsOut, revokeGrantsIn, purgeLearning, purgeObjects, purgeDirectory}
+	// The phases are checkpointed by number: a new phase goes at the end,
+	// so that a purge a server of another version took over goes on with
+	// the phase it means.
+	steps := []func(*Run, purgeSummary, *purgeCheckpoint) error{revokeGrantsOut, revokeGrantsIn, purgeLearning, purgeObjects, purgeDirectory,
+		purgeAdminRecords}
 
 	for cp.Phase < len(steps) {
 		if err := run.Fence(); err != nil {
@@ -1228,7 +1232,36 @@ func purgeObjects(run *Run, _ purgeSummary, cp *purgeCheckpoint) error {
 	return err
 }
 
-// purgeDirectory is the last phase: a restart after the registry was
+// purgeAdminRecords deletes the admin store records of the account (its
+// JMAP push subscriptions and submissions, model.AccountRecordKeys); the
+// store keeps their hint indexes in step.
+func purgeAdminRecords(run *Run, _ purgeSummary, cp *purgeCheckpoint) error {
+	for _, key := range model.AccountRecordKeys(run.Job.Account) {
+		if err := run.Fence(); err != nil {
+			return err
+		}
+
+		deleted := false
+
+		err := run.m.st.kv.Update(key, func(cur []byte) ([]byte, error) {
+			deleted = cur != nil
+			return nil, nil
+		})
+		if err != nil {
+			run.Partial("admin record %s: %v", key, err)
+			continue
+		}
+
+		if deleted {
+			cp.Removed++
+		}
+	}
+
+	return nil
+}
+
+// purgeDirectory is the last phase on the account's namespaces (only the
+// admin store records follow): a restart after the registry was
 // deleted took the maintenance lock again and so created an empty
 // registry (only the lock key); it goes once more, then the directory
 // entry. A name used again after this is a new account.

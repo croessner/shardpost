@@ -423,6 +423,8 @@ and [batches over all accounts](admin-api.md#batches-over-all-accounts).
 | `scrub.interval_days` | `SCRUB_INTERVAL_DAYS` | 7 | a batch scrub with `skip_idle` scrubs an idle account again at the latest after this many days (1–365) |
 | `scrub.orphan_source` | `SCRUB_ORPHAN_SOURCE` | `shadow` | where a scrub finds what a crash left behind: `listing` lists the account's namespace in both pools (before 0.42.0), `shadow` lists and repairs from the listing and reports where the intents differ, `intents` reads the intents only and lists nothing |
 | `scrub.intent_grace_seconds` | `SCRUB_INTENT_GRACE_SECONDS` | 3600 | how old an intent must be before a scrub takes it for the leftover of a crash (600–604800) |
+| `scrub.sweep_spill_shards` | `SCRUB_SWEEP_SPILL_SHARDS` | 256 | spill objects per pool of a new `shardpost scrub --sweep` (1–4096); more keep each smaller for a cluster with many objects |
+| `purge.listing` | `PURGE_LISTING` | true | a purge lists the account's namespaces and deletes what it finds, as before 0.42.0, and reports what the data model does not name; `false` deletes what the data model names and lists nothing (see [operations](operations/README.md#scrub-without-listings)) |
 
 `scrub.parallel`, `scrub.interval_days`, `scrub.orphan_source` and
 `scrub.intent_grace_seconds` take effect in the servers that run the

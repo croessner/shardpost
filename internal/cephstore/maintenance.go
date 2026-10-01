@@ -5,8 +5,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ceph/go-ceph/rados"
-
 	"shardpost/internal/model"
 )
 
@@ -343,68 +341,4 @@ func (u *User) convertShard(oid string, rep *model.FTSDictReport, flush func([]s
 			return nil
 		}
 	}
-}
-
-// PurgeNamespace implements model.NamespacePurger: every object of the
-// account's namespaces in the data and index pools is deleted, the
-// registry (which holds the maintenance lock) last, so protocols keep
-// refusing the account until the very end.
-func (u *User) PurgeNamespace(fence func() error) (int, error) {
-	removed := 0
-
-	for _, ioctx := range []*rados.IOContext{u.data, u.idx} {
-		n, err := purgeObjects(ioctx, fence, oidRegistry)
-		removed += n
-
-		if err != nil {
-			return removed, err
-		}
-	}
-
-	if err := fence(); err != nil {
-		return removed, err
-	}
-
-	if err := u.idx.Delete(oidRegistry); err != nil && errCode(err) != syscall.ENOENT {
-		return removed, fmt.Errorf("delete registry: %w", err)
-	}
-
-	u.invalidate()
-
-	return removed + 1, nil
-}
-
-// purgeObjects deletes every object of the IO context's namespace except
-// keep, in one listing, fencing before each batch.
-func purgeObjects(ioctx *rados.IOContext, fence func() error, keep string) (int, error) {
-	const batch = 100
-
-	it, err := listObjects(ioctx, listPurgeObjects)
-	if err != nil {
-		return 0, err
-	}
-	defer it.Close()
-
-	removed := 0
-
-	for it.Next() {
-		oid := it.Value()
-		if oid == keep {
-			continue
-		}
-
-		if removed%batch == 0 {
-			if err := fence(); err != nil {
-				return removed, err
-			}
-		}
-
-		if err := ioctx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
-			return removed, fmt.Errorf("delete %s: %w", oid, err)
-		}
-
-		removed++
-	}
-
-	return removed, it.Err()
 }

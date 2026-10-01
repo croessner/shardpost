@@ -1,0 +1,199 @@
+.TH SHARDPOST-SCRUB 1 "2026-10-01" "ShardPost 0.42.0" "ShardPost Manual"
+.SH NAME
+shardpost-scrub \- scrub accounts, submit the nightly batch scrub, sweep the pools for debris
+.SH SYNOPSIS
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B scrub
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B scrub \-\-batch
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B scrub \-\-sweep
+.RB [ \-\-repair ]
+.RB [ \-\-restart ]
+.SH DESCRIPTION
+These are commands of the server binary, not of
+.BR shardpostctl (1):
+they talk to the Ceph cluster directly, with the server's configuration
+and Ceph credentials, and need neither a running server nor the admin
+socket. They run in the scrub CronJob or in a Kubernetes Job of their
+own, with the server's image.
+.SS scrub
+Scrubs accounts in this process and exits: the accounts of
+.IR scrub.users ,
+else every account of the account directory (once its backfill has
+completed), else every namespace of a listing of the index pool. The
+scrub checks and repairs what a crash can leave behind: reference counts,
+index entries without blob, unfinished MOVEs and deliveries, quota
+counters, and objects nothing points at. Where it looks for the last is
+.IR scrub.orphan_source :
+.B listing
+lists each account's namespace in both pools,
+.B shadow
+(the default) does that and also works out what the intents name and
+reports where the two differ,
+.B intents
+reads the intents only and lists nothing.
+With
+.I scrub.dry_run
+it only reports.
+.SS scrub \-\-batch
+Plans the scrub of every account as one batch job with
+.B skip_idle
+and submits it; the servers' job runners carry it out. This is what the
+nightly CronJob runs. See
+.BR shardpostctl-job (1).
+.SS scrub \-\-sweep
+Finds what no account's data model names: debris that servers before
+0.42.0 left without an intent, the objects of accounts purged before the
+purge named its objects, full-text shards above a lowered
+.IR server.fts_shards .
+It is a tool for a one-off cleanup, not a routine: it lists both pools
+in every namespace, which costs a walk over every placement group of
+each pool.
+.PP
+Pass 1 lists the index pool, then the data pool, and spills the object
+names into spill objects in the namespace
+.B ~accounts
+of the index pool
+.RI ( scrub.sweep_spill_shards
+per pool). Pass 2 reads them one namespace at a time and compares the
+names with the account's data model. What the model does not name is a
+remnant. Without
+.B \-\-repair
+the sweep only reports; with it, a remnant older than
+.I scrub.grace_seconds
+is deleted (a blob through its reference count, so that a copy taken
+meanwhile keeps it).
+.PP
+A namespace without registry is a remnant as a whole, unless the account
+directory still holds the account as active: that is a lost registry,
+which the sweep reports
+.RB ( registry_missing )
+and leaves alone. An account under an import lock is left alone. The
+private \eSeen marks of a live public folder that were written before
+0.42.0 are adopted (their registry key
+.B ps:
+is written) rather than deleted.
+.PP
+The sweep checkpoints in the cluster
+.RB ( sweep/state
+in
+.BR ~accounts ):
+run it again after it stopped and it goes on where it was; in pass 1 it
+seeks to the listing position it reached, and lists a pool again when
+the pool's
+.B pg_num
+changed meanwhile. A run that goes on works with the flags it is given
+now: the namespaces it evaluated before keep what an earlier run without
+.B \-\-repair
+only reported (use
+.B \-\-restart
+to evaluate everything again). A sweep that ended has removed its spill
+objects and state; the next one lists the pools anew. One sweep runs at a
+time (a lock on
+.B sweep/lock
+in
+.BR ~accounts ).
+.PP
+The report goes to standard output as one line of JSON after the log
+lines: the run, the objects listed per pool, the namespaces looked at,
+the remnants by class
+.RB ( blob ,
+.BR mailbox ,
+.BR marks ,
+.BR other ,
+.B namespace
+for objects of a namespace without registry), how many were removed,
+how many were left for being younger than the grace period, the marks
+adopted, a few samples and the first errors.
+.SH OPTIONS
+.TP
+.BI \-\-config " file"
+The server configuration (default: the environment variable
+.BR SHARDPOST_CONFIG ).
+.TP
+.B \-\-batch
+Submit the batch scrub instead of scrubbing in this process.
+.TP
+.B \-\-sweep
+Sweep the pools (see above).
+.TP
+.B \-\-repair
+With
+.BR \-\-sweep :
+delete the remnants older than
+.IR scrub.grace_seconds .
+Ignored with
+.IR scrub.dry_run .
+.TP
+.B \-\-restart
+With
+.BR \-\-sweep :
+drop a sweep that stopped (its spill objects included) and start over.
+.SH CONFIGURATION
+.TP
+.I scrub.orphan_source
+.BR listing ,
+.B shadow
+(default) or
+.BR intents .
+.TP
+.I scrub.grace_seconds
+Objects younger than this are left alone (3600).
+.TP
+.I scrub.intent_grace_seconds
+How old an intent must be before the scrub takes it for the leftover of
+a crash (3600).
+.TP
+.I scrub.sweep_spill_shards
+Spill objects per pool of a new sweep (256).
+.TP
+.I scrub.dry_run
+Report only.
+.SH EXAMPLES
+What the sweep would remove, then remove it:
+.PP
+.nf
+.RS
+shardpost scrub \-\-sweep | tail \-1 | jq '{listed, remnants, registry_missing}'
+shardpost scrub \-\-sweep \-\-repair | tail \-1 | jq '{removed, young, errors}'
+.RE
+.fi
+.PP
+Start a sweep over after a long pause (the old spill objects go):
+.PP
+.nf
+.RS
+shardpost scrub \-\-sweep \-\-restart
+.RE
+.fi
+.PP
+Scrub two accounts in this process, reporting only:
+.PP
+.nf
+.RS
+SCRUB_USERS=alice@example.org,bob@example.org SCRUB_DRY_RUN=true shardpost scrub
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+The scrub, the submission or the sweep ended without an error (a sweep
+may still have reported remnants or errors of single objects in its
+report).
+.TP
+.B 1
+Something failed: the configuration, the cluster, a scrub of an account,
+another sweep holding the lock, or the sweep stopped (run it again to
+continue).
+.SH SEE ALSO
+.BR shardpostctl-job (1),
+.BR shardpostctl-account (1)

@@ -26,7 +26,9 @@
 # Purge is not tested: a purge needs an account that exists only for the
 # test, and the admin API creates data only for accounts Nauthilus knows
 # (deliver and import resolve the account first). The purge without a
-# listing is covered by the store tests (make test-docker) instead.
+# listing is covered by the store tests (make test-docker) instead. The
+# sweep (shardpost scrub --sweep) is not run either: it lists both pools
+# in every namespace and is a one-off tool (see shardpost-scrub(1)).
 set -euo pipefail
 
 CONTEXT=${CONTEXT:-croessner}

@@ -341,9 +341,24 @@ from the plan are removed, at most 40000 per plan.
 Role
 .BR delete ,
 locks the account. Withdraws shares in both directions, deletes the
-learning jobs and every object of the account, and finally removes it
-from the account directory. Until that last step nothing can create the
-account again. The identity itself (LDAP) is not touched: if the account
+learning jobs and every object of the account, removes it from the
+account directory and finally deletes its JMAP push subscriptions and
+submissions from the admin store. Until the directory step nothing can
+create the account again. Which objects go is
+.I purge.listing
+in the servers' configuration:
+.B true
+(the default) lists the account's namespaces in both pools and deletes
+what it finds, and reports in the log what the account's data model does
+not name;
+.B false
+deletes what the data model names (mailboxes with their shards, blobs,
+intents, the full-text index, METADATA, Sieve, the marks of public
+folders) and lists nothing; debris of servers before 0.42.0 then stays
+for
+.BR shardpost-scrub (1)
+.BR \-\-sweep .
+The identity itself (LDAP) is not touched: if the account
 logs in again afterwards, it gets an empty INBOX. A purge that fails or
 is cancelled after it deleted the data leaves the account
 .B purging
@@ -615,6 +630,7 @@ not of the submission.
 .B 77
 The caller lacks the role of this kind.
 .SH SEE ALSO
+.BR shardpost-scrub (1),
 .BR shardpostctl (1),
 .BR shardpostctl-account (1),
 .BR shardpostctl-export (1),

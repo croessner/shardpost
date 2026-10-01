@@ -387,9 +387,9 @@ writes leave none, which the listing still covers).
    `orphan_extra` (blobs the intents take for orphans that the listing
    does not) must stay 0; `orphan_missed`, `unknown_missed` and
    `marks_missed` count debris without an intent — debris from before
-   0.42.0, which the listing removes in the same runs. They must fall to
-   0 once that is gone. The scrub report of an account names samples
-   (`Shadow.Samples`).
+   0.42.0, which the listing removes in the same runs (or the sweep, see
+   below). They must fall to 0 once that is gone. The scrub report of an
+   account names samples (`Shadow.Samples`).
 2. `hack/r3-smoke.sh` checks a cluster: it creates and deletes a
    mailbox with messages on the throwaway account and scrubs it in shadow
    mode; the report must show no difference.
@@ -405,6 +405,44 @@ flat for `scrub_orphans` and `scrub_unknown_index`. Rollback: back to
 the scrub takes it for the leftover of a crash; it must exceed the
 longest write (a large delivery, an import step), which is far below
 the default.
+
+**Debris from before 0.42.0.** With `intents` the scrub no longer finds
+what older servers left without an intent (blobs of crashed deliveries
+and of JMAP uploads, mailbox objects of crashed creations, the private
+`\Seen` marks of deleted public folders). The listing removes it while
+the scrub runs in `shadow`; what remains, and the objects of accounts
+purged by older versions, is the sweep's work:
+
+```sh
+shardpost scrub --sweep             # report only (JSON on stdout)
+shardpost scrub --sweep --repair    # delete what is older than scrub.grace_seconds
+shardpost scrub --sweep --restart   # drop a sweep that stopped and start over
+```
+
+Run it once after every server runs 0.42.0, as a Kubernetes Job with the
+scrub CronJob's image, configuration and Ceph credentials, first without
+`--repair` (the report names the remnants by class: `blob`, `mailbox`,
+`marks`, `other`, `namespace` for objects of a namespace without
+registry, with samples), then with it. It lists both pools in every
+namespace (the cost of one scrub listing per pool, not per account),
+spills the object names into `~accounts` and evaluates them account by
+account; a sweep that stops (a restart of the Job, a lost lease) goes on
+from its checkpoint when it is run again. `imapceph_rados_listings_total{site="sweep"}`
+counts its listings. A namespace without registry that the account
+directory still holds as `active` is reported (`registry_missing`) and
+left alone: that is a lost registry, not debris. See the
+[manual page](../man/man1/shardpost-scrub.1).
+
+**The purge without listing.** `purge.listing` (default `true`) keeps the
+purge of earlier versions, which lists the account's namespaces; it also
+counts the objects the data model does not name
+(`imapceph_scrub_purge_unnamed_objects_total`). Once that stays at 0 for
+the purges of accounts the sweep has been through, set
+`purge.listing: false` (`PURGE_LISTING=false`) in the servers'
+configuration: the purge then deletes what the data model names and
+lists nothing (`purge_objects` stays flat). Debris of an account that
+was never swept stays behind; a later sweep removes it. Rollback: back
+to `true`.
 
 ## Auth cache
 

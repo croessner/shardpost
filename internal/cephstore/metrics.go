@@ -25,6 +25,7 @@ const (
 	listPurgeObjects  = "purge_objects"
 	listAdminKV       = "admin_kv"
 	listAdminBackfill = "admin_kv_backfill"
+	listSweep         = "sweep"
 )
 
 // The learning queue's listing sites come from learnindex (SiteAll,

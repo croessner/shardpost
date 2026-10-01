@@ -25,6 +25,7 @@ user namespaces.
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `pubseen/<id>` | Private `\Seen` marks of the public folder `<id>` (registry key `ps:<id>`) | [acl.go](../../internal/cephstore/acl.go) |
 | `~accounts` / `ix.uploads/…` in the index pool | Due queue of the JMAP uploads, by expiry | [uploads.go](../../internal/cephstore/uploads.go) |
+| `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`) | [sweep.go](../../internal/cephstore/sweep.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
 | `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
 | `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
@@ -221,6 +222,74 @@ removes them with its next registry write that can carry them (a
 reservation, the end of a delivery), after 30 seconds at the latest,
 and when it is closed; LMTP, which opens a view per delivery, pays one
 write per delivery, an IMAP session that appends many messages none.
+
+## Purge without listing
+
+With the intents, everything an account holds is named by its data
+model, so a purge deletes it object by object instead of listing the
+account's namespace in both pools
+([purge.go](../../internal/cephstore/purge.go)):
+
+- the mailboxes of the registry, of creation intents (`ci:`) and of
+  deletion tombstones (`dm:`), each with its shards from the header of
+  shard 0 (retired or not) or the tombstone, and the shards above that
+  range that exist (entries of an import step that stopped);
+- the blobs of their entries, of the removal and MOVE intents on shard
+  0, of `bi:`, `bimp:`, `up:` and `d:` in the registry and of the orphan
+  candidates in the `scrub` object; a blob whose chunk count is not
+  recorded is sized from its length attribute;
+- the fixed objects: the full-text index (`fts/`, `ftst/`, `ftsh/`,
+  `ftsd/`, `ftsmap`; the configured shard count, at least 16), the
+  front-end indexes (`ix/<space>/<nn>` of every known space), `account`,
+  `metadata`, `sieve` (with the vacation records), `scrub`;
+- `pubseen/<id>` for every `ps:<id>`;
+- the registry, last (it holds the maintenance lock).
+
+Blobs go first, while the entries still name them, then the index
+objects (the shards of a mailbox highest first), the registry last; a
+purge that starts again finds what is left. The admin store records of
+the account (`jmap/push/acct/`, `jmap/push/seen/`, `jmap/submission/`)
+are removed in a phase of their own after the directory entry, through
+the admin store, which keeps their hint indexes in step.
+
+`purge.listing` (default `true` in 0.42.0) keeps the purge of earlier
+versions: it lists both namespaces and deletes what it finds, and it
+also reads the data model first and counts the listed objects the model
+does not name (`imapceph_scrub_purge_unnamed_objects_total`, with a
+warning naming a few). What the model cannot name: debris that servers
+before 0.42.0 left without an intent, objects of an account that was
+never scrubbed since, full-text shards above a lowered `fts_shards`.
+A purge without listing leaves those behind; the sweep finds them.
+
+## The sweep
+
+`shardpost scrub --sweep` ([sweep.go](../../internal/cephstore/sweep.go))
+is the tool for what no intent names: it lists both pools in all
+namespaces, so it costs a walk over every placement group of each, and
+runs as a one-off, not as a routine.
+
+- **Pass 1** lists a pool and spills the object names into spill objects
+  in `~accounts` (`sweep/<run>/<pool>/<nnn>`, one omap key
+  `<namespace>␟<object>` per object, the spill object chosen by the
+  namespace, `scrub.sweep_spill_shards` of them). The iterator's position
+  (the PG hash position of go-ceph's `Iter.Token`) is checkpointed in
+  `sweep/state` every 10 000 objects; a sweep that stopped seeks there.
+  When the pool's `pg_num` changed meanwhile, the position means nothing
+  any more and that pool's listing starts over (a name spilled twice
+  changes nothing).
+- **Pass 2** reads each spill object in key order, so the names of one
+  namespace come together, and compares them with what the account's data
+  model names (the purge's enumeration). What it does not name is a
+  remnant; with `--repair`, a remnant older than `scrub.grace_seconds`
+  is deleted (a blob through its reference count, under the version of
+  its chunk 0). A namespace without registry is a remnant as a whole,
+  unless the account directory still holds the account as `active`: a
+  lost registry is reported, never cleaned up. Accounts under an import
+  lock are left alone. Private `\Seen` marks of a live public folder
+  that predate the intents are adopted: their `ps:` key is written.
+
+One sweep runs at a time (a cls_lock on `sweep/lock`); the report is
+printed as JSON and logged.
 
 ## The account change log
 
