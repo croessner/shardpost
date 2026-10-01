@@ -1,7 +1,6 @@
 package webpush
 
 import (
-	"errors"
 	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -11,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"

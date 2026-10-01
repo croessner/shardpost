@@ -154,7 +154,6 @@ func TestChangesAndDestroy(t *testing.T) {
 
 	checkDestroy(t, u, lim, now, state, first)
 
-
 	// Enough churn to push the oldest destructions out of the record.
 	for _, b := range []string{"c", "d", "e", "f", "g", "h", "i", "j", "k", "l"} {
 		record(b)

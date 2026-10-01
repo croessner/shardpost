@@ -113,7 +113,26 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 		return err
 	}
 
-	// Indexed in batches, as an import does: see ftsIndexDocs.
+	// The version marker goes on only when every message is indexed: a
+	// rebuild that stops midway leaves an index that substring search
+	// must not trust beyond whole words.
+	u.ftsRebuilding, u.ftsCurrent = true, ftsCurrentUnknown
+	defer func() { u.ftsRebuilding = false }()
+
+	if err := u.reindex(metas, fence, progress); err != nil {
+		return err
+	}
+
+	if err := u.setFTSVersion(); err != nil {
+		return fmt.Errorf("index version: %w", err)
+	}
+
+	return nil
+}
+
+// reindex indexes the messages in batches, as an import does: see
+// ftsIndexDocs.
+func (u *User) reindex(metas []Meta, fence func() error, progress func(done, total int)) error {
 	var (
 		docs []ftsDoc
 		size int

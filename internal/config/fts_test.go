@@ -46,4 +46,14 @@ func TestFTSIMAPSearch(t *testing.T) {
 	if _, err := Load(configFile(t, "fts:\n  imap_search: exact\n")); err == nil {
 		t.Error("accepted an unknown search mode")
 	}
+
+	if c.FTS.VerifyParallel != 8 {
+		t.Errorf("verify_parallel default %d", c.FTS.VerifyParallel)
+	}
+
+	for _, bad := range []string{"0", "65"} {
+		if _, err := Load(configFile(t, "fts:\n  verify_parallel: "+bad+"\n")); err == nil {
+			t.Errorf("accepted verify_parallel %s", bad)
+		}
+	}
 }

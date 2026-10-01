@@ -550,7 +550,12 @@ func (u *User) Read(m *model.Meta) ([]byte, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	return u.blobs[m.GUID], nil
+	raw, ok := u.blobs[m.GUID]
+	if !ok {
+		return nil, fmt.Errorf("read %s: %w", m.GUID, model.ErrNoBlob)
+	}
+
+	return raw, nil
 }
 
 // SetFlags replaces the flags of the given UIDs (apply decides the new
@@ -928,8 +933,10 @@ func (u *User) spanHits(fields []string, sp fts.Span) (map[string]bool, bool) {
 			return nil, false
 		}
 
+		markers := fts.Markers(sp)
+
 		for term, guids := range u.terms {
-			if fld, t, _ := strings.Cut(term, ":"); fld == f && fts.SpanTerm(sp, t) {
+			if fld, t, _ := strings.Cut(term, ":"); fld == f && (fts.SpanTerm(sp, t) || slices.Contains(markers, t)) {
 				for g := range guids {
 					hits[g] = true
 				}
@@ -938,6 +945,24 @@ func (u *User) spanHits(fields []string, sp fts.Span) (map[string]bool, bool) {
 	}
 
 	return hits, true
+}
+
+// HeaderTexts implements model.HeaderTexts from the stored messages.
+func (u *User) HeaderTexts(guids []string) (map[string]string, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	out := map[string]string{}
+
+	for _, g := range guids {
+		if raw, ok := u.blobs[g]; ok {
+			if h := fts.HeaderText(raw); len(h) <= fts.MaxHeaderTextBytes {
+				out[g] = h
+			}
+		}
+	}
+
+	return out, nil
 }
 
 // SearchField is SearchFields for one field.

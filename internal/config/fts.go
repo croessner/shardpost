@@ -24,6 +24,9 @@ type FTS struct {
 	// BODY, TEXT and HEADER Subject alone, by word, stem and in-word
 	// substring, without reading messages.
 	IMAPSearch string `mapstructure:"imap_search" validate:"oneof=substring word"`
+	// VerifyParallel bounds the messages one IMAP SEARCH checks against
+	// its text keys at the same time.
+	VerifyParallel int `mapstructure:"verify_parallel" validate:"gte=1,lte=64"`
 }
 
 // IMAPWordSearch reports whether IMAP SEARCH uses word semantics.

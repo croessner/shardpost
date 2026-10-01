@@ -299,6 +299,7 @@ var defaults = []struct {
 	{"fts.fallback_charset", charset.DefaultFallback},
 	{"fts.html", "text"},
 	{"fts.imap_search", "substring"},
+	{"fts.verify_parallel", 8},
 	{"quota.over_flag.enabled", false},
 	{"quota.over_flag.attribute", ""},
 	{"quota.over_flag.over_value", "TRUE"},

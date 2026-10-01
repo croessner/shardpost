@@ -95,8 +95,8 @@ func Tokenize(text string) []string {
 }
 
 // Terms extracts all index terms of a raw message: every token and its
-// stems, qualified by field, and the LongWord marker of every field
-// with a word too long to be a term. Header values are taken as
+// stems, qualified by field, and the window terms and markers of words
+// too long to be a term (see LongWord). Header values are taken as
 // HeaderValue returns them, every value of a field; the body text is
 // what BodyText returns.
 func Terms(raw []byte) []Term {
@@ -108,9 +108,11 @@ func Terms(raw []byte) []Term {
 			}
 		}
 
-		if hasLongWord(text) {
-			set[field+":"+LongWord] = struct{}{}
-		}
+		longWords(text, func(w []rune) {
+			for _, t := range longWordTerms(field, w) {
+				set[field+":"+t] = struct{}{}
+			}
+		})
 	}
 
 	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
@@ -143,6 +145,39 @@ func Terms(raw []byte) []Term {
 
 	return out
 }
+
+// MaxHeaderTextBytes bounds the HeaderText the store keeps per message;
+// a longer one is not kept, and its header is read from the message.
+const MaxHeaderTextBytes = 64 << 10
+
+// HeaderText returns the header of a raw message as IMAP SEARCH matches
+// it: lower-cased "name: value" lines, each preceded by CRLF, with the
+// value as HeaderValue returns it (line breaks that decoding put into a
+// value become spaces). The field FieldHeader of the index has the
+// words of this text, and the stores keep it per message so that a
+// search can check headers without reading messages.
+func HeaderText(raw []byte) string {
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	fields := hdr.Fields()
+	for fields.Next() {
+		b.WriteString("\r\n")
+		b.WriteString(strings.ToLower(fields.Key()))
+		b.WriteString(": ")
+		b.WriteString(strings.ToLower(unbreak.Replace(HeaderValue(fields.Value()))))
+	}
+
+	return b.String()
+}
+
+// unbreak turns line breaks that decoding put into a value into spaces,
+// so that a value stays on its line.
+var unbreak = strings.NewReplacer("\r", " ", "\n", " ")
 
 // unfoldHeader removes the line breaks of a folded header value
 // (RFC 5322 2.2.3); the white space after them stays.

@@ -6,7 +6,9 @@ order, from `SETQUOTA` or from the userdb attribute
 (`server.quota_attribute`, default `rnsMSQuota`, a value with an optional
 K/M/G/T suffix), or from `server.quota_bytes`/`server.quota_msgs`
 (0 = unlimited). The attribute sets the storage limit only; the message
-limit still follows `SETQUOTA` or `server.quota_msgs`.
+limit still follows `SETQUOTA` or `server.quota_msgs`. The bytes are
+those of the messages; the full-text index, including the decoded
+headers it keeps per message, does not count.
 
 On top of that sits the `quota` section, modeled on Dovecot's
 `quota_grace`, `quota_rule`, `quota_warning` and `quota_over_flag`:

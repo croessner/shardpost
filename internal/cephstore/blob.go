@@ -121,7 +121,7 @@ func (u *User) readBlob(m *Meta) (raw []byte, err error) {
 
 			got, err := u.data.Read(chunkOID(m.GUID, n), part, 0)
 			if err != nil {
-				errs <- fmt.Errorf("read chunk %d of %s: %w", n, m.GUID, err)
+				errs <- fmt.Errorf("read chunk %d of %s: %w", n, m.GUID, chunkErr(err))
 			} else if got != len(part) {
 				errs <- fmt.Errorf("short read chunk %d of %s: %d/%d", n, m.GUID, got, len(part))
 			}
@@ -308,7 +308,7 @@ func (u *User) ReadBlob(guid string, size, offset, length int64) ([]byte, error)
 
 		got, err := u.data.Read(chunkOID(guid, n), buf[pos-lo:pos-lo+want], uint64(within))
 		if err != nil {
-			return nil, fmt.Errorf("read chunk %d of %s: %w", n, guid, err)
+			return nil, fmt.Errorf("read chunk %d of %s: %w", n, guid, chunkErr(err))
 		}
 
 		if got == 0 {
@@ -319,6 +319,17 @@ func (u *User) ReadBlob(guid string, size, offset, length int64) ([]byte, error)
 	}
 
 	return buf, nil
+}
+
+// chunkErr makes a missing chunk model.ErrNoBlob, so that the protocol
+// layers can tell a message that went away (expunged and collected by
+// another session) from a failing read.
+func chunkErr(err error) error {
+	if errCode(err) == syscall.ENOENT {
+		return fmt.Errorf("%w: %w", model.ErrNoBlob, err)
+	}
+
+	return err
 }
 
 // clampRange turns a requested range into the part of size it covers; a

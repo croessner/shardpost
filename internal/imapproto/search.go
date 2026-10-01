@@ -1,8 +1,6 @@
 package imapproto
 
 import (
-	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"strconv"
@@ -10,13 +8,11 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-message/textproto"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/htmlindex"
 
 	"shardpost/internal/fts"
 	"shardpost/internal/mailmeta"
-	"shardpost/internal/membudget"
 	"shardpost/internal/model"
 )
 
@@ -39,15 +35,22 @@ type criteria struct {
 	modseq                uint64
 	emailIDs              []string
 	threadIDs             []string
-	text                  []textCrit // resolved via FTS at top level, brute force nested
+	text                  []textCrit // narrowed by the index, checked per message (searchtext.go)
 	not                   []*criteria
 	or                    [][2]*criteria
 }
 
 type textCrit struct {
-	fields []string // fts fields, nil = brute force header key
+	fields []string // fts fields
 	key    string   // header key for HEADER <key> <value>
 	value  string
+
+	// Set by prepareText. hdrCand and bodyCand are supersets of the
+	// messages whose header or body can match (nil: not narrowed);
+	// exact is the index's own answer in word search (Options.WordSearch).
+	hdrCand, bodyCand map[string]bool
+	exact             map[string]bool
+	byIndex           bool
 }
 
 // parseSearchKeys parses keys until end of line or closing paren.
@@ -684,106 +687,6 @@ func convertCriteria(cr *criteria, dec *encoding.Decoder) {
 	}
 }
 
-// runSearch evaluates criteria against the snapshot. Top-level text keys
-// are answered by the full-text index, which yields GUID candidates.
-func (c *conn) runSearch(cr *criteria) ([]int, []model.Meta, error) {
-	candidates, err := c.ftsCandidates(cr)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	c.searchErr = nil
-
-	var (
-		seqs  []int
-		metas []model.Meta
-	)
-
-	for i, m := range c.msgs {
-		if candidates != nil && !candidates[m.GUID] {
-			continue
-		}
-
-		if c.match(i+1, &m, cr) {
-			seqs = append(seqs, i+1)
-			metas = append(metas, m)
-		}
-
-		if c.searchErr != nil {
-			return nil, nil, c.searchErr // a message could not be read: no partial result
-		}
-	}
-
-	return seqs, metas, nil
-}
-
-// ftsCandidates resolves the top-level text criteria against the index.
-// By default the index only narrows the candidates: it returns a
-// superset of the messages that contain the value as a substring (see
-// model.User.SearchCandidates), and every criterion stays in cr to be
-// checked against each candidate. With Options.WordSearch the index
-// answers SUBJECT, BODY, TEXT and HEADER Subject alone, by its word
-// semantics, and those criteria are removed from cr. It returns nil
-// when nothing narrows the candidates.
-func (c *conn) ftsCandidates(cr *criteria) (map[string]bool, error) {
-	var (
-		result map[string]bool
-		rest   []textCrit
-	)
-
-	for _, t := range cr.text {
-		if len(fts.Tokenize(t.value)) == 0 {
-			rest = append(rest, t) // "header exists" stays brute force
-			continue
-		}
-
-		var (
-			hits map[string]bool
-			err  error
-		)
-
-		if c.s.o.WordSearch && indexAnswers(t) {
-			hits, err = c.mu.SearchFields(t.fields, t.value)
-		} else {
-			hits, err = c.mu.SearchCandidates(t.fields, t.value)
-			rest = append(rest, t)
-		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		if hits == nil {
-			continue
-		}
-
-		if result == nil {
-			result = hits
-			continue
-		}
-
-		for g := range result {
-			if !hits[g] {
-				delete(result, g)
-			}
-		}
-	}
-
-	cr.text = rest
-
-	return result, nil
-}
-
-// indexAnswers reports whether the index answers a criterion by itself
-// in word search: SUBJECT, BODY, TEXT and HEADER Subject. HEADER <other>
-// shares the "all headers" field, and FROM and TO/CC/BCC share fields:
-// for those the index only narrows the candidates.
-func indexAnswers(t textCrit) bool {
-	otherHeader := t.key != "" && headerFields(t.key)[0] == fts.FieldHeader
-
-	return !otherHeader && t.fields[0] != fts.FieldTo && t.fields[0] != fts.FieldFrom
-}
-
 // headerFieldContains checks the header lines that belong to an fts field
 // (subject, from-like, to-like, or any) for a substring.
 func headerFieldContains(hdr, field, v string) bool {
@@ -813,30 +716,6 @@ func headerFieldContains(hdr, field, v string) bool {
 
 func dateOnly(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-}
-
-func (c *conn) match(seq int, m *model.Meta, cr *criteria) bool {
-	if !c.matchPlain(seq, m, cr) {
-		return false
-	}
-
-	if len(cr.text) > 0 && !c.textMatch(m, cr.text) {
-		return false
-	}
-
-	for _, n := range cr.not {
-		if c.match(seq, m, n) {
-			return false
-		}
-	}
-
-	for _, or := range cr.or {
-		if !c.match(seq, m, or[0]) && !c.match(seq, m, or[1]) {
-			return false
-		}
-	}
-
-	return true
 }
 
 // matchPlain checks the criteria that need no message content, in order:
@@ -969,126 +848,6 @@ func matchIDs(m *model.Meta, cr *criteria) bool {
 	}
 
 	return true
-}
-
-// textMatch is the brute-force path for text keys nested in NOT/OR and for
-// "header exists" checks: it reads the message and does RFC 3501
-// substring matching.
-func (c *conn) textMatch(m *model.Meta, crits []textCrit) bool {
-	ok, err := c.textMatchErr(m, crits)
-	if err != nil {
-		c.searchErr = err
-		return false
-	}
-
-	return ok
-}
-
-func (c *conn) textMatchErr(m *model.Meta, crits []textCrit) (bool, error) {
-	rel, err := membudget.Acquire(m.Size)
-	if err != nil {
-		return false, err
-	}
-	defer rel()
-
-	raw, err := c.mu.Read(m)
-	if err != nil {
-		return false, err
-	}
-
-	tm := &textMessage{m: m, raw: raw}
-
-	for _, t := range crits {
-		if !tm.matches(t) {
-			return false, nil
-		}
-	}
-
-	return true, nil
-}
-
-// decodedHeader returns the header fields of a raw message as
-// lower-cased "name: value" lines, each preceded by CRLF, with the value
-// as the full-text index takes it (fts.HeaderValue: unfolded, encoded
-// words decoded, raw 8-bit text in the fallback charset). Searches match
-// against these lines only, not the raw header, so that what the index
-// can find and what is checked here are the same text.
-func decodedHeader(raw []byte) string {
-	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
-	if err != nil {
-		return ""
-	}
-
-	var b strings.Builder
-
-	fields := hdr.Fields()
-	for fields.Next() {
-		b.WriteString("\r\n")
-		b.WriteString(strings.ToLower(fields.Key()))
-		b.WriteString(": ")
-		b.WriteString(strings.ToLower(unbreak.Replace(fts.HeaderValue(fields.Value()))))
-	}
-
-	return b.String()
-}
-
-// unbreak turns line breaks that decoding put into a value into spaces,
-// so that a value stays on its line.
-var unbreak = strings.NewReplacer("\r", " ", "\n", " ")
-
-// textMessage is a message prepared for brute-force text matching. Its
-// header and body text are computed on first use.
-type textMessage struct {
-	m       *model.Meta
-	raw     []byte
-	hdr     string // decodedHeader
-	body    string // lower-cased fts.BodyText
-	hdrRead bool
-	read    bool
-}
-
-// header returns the decoded header lines.
-func (tm *textMessage) header() string {
-	if !tm.hdrRead {
-		tm.hdr, tm.hdrRead = decodedHeader(tm.raw), true
-	}
-
-	return tm.hdr
-}
-
-// bodyText returns the lower-cased body text as the index sees it.
-func (tm *textMessage) bodyText() string {
-	if !tm.read {
-		tm.body, tm.read = strings.ToLower(fts.BodyText(tm.raw)), true
-	}
-
-	return tm.body
-}
-
-// matches checks one text criterion (RFC 3501 substring matching).
-func (tm *textMessage) matches(t textCrit) bool {
-	v := strings.ToLower(t.value)
-
-	switch {
-	case t.key != "":
-		key := strings.ToLower(t.key) + ":"
-		found := false
-
-		for _, line := range strings.Split(tm.header(), "\r\n") {
-			if strings.HasPrefix(line, key) && strings.Contains(line[len(key):], v) {
-				found = true
-				break
-			}
-		}
-
-		return found || envAddrContains(tm.m, strings.ToLower(t.key), v)
-	case len(t.fields) == 2: // TEXT: the header and the body text
-		return strings.Contains(tm.header(), v) || strings.Contains(tm.bodyText(), v)
-	case t.fields[0] == fts.FieldBody:
-		return strings.Contains(tm.bodyText(), v)
-	}
-
-	return headerFieldContains(tm.header(), t.fields[0], v) || envAddrContains(tm.m, t.fields[0], v)
 }
 
 // envAddrContains matches an address search key against the parsed

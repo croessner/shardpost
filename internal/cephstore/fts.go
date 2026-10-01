@@ -214,6 +214,10 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		return err
 	}
 
+	if err := u.putHeaderTexts(docs); err != nil {
+		return err
+	}
+
 	return u.dictUpdate(newTerms, true)
 }
 
@@ -404,6 +408,12 @@ func legacyConverter(known map[string]uint64) func([]byte) ([]byte, bool) {
 // document id. It re-tokenises the blob, which is cheaper than storing a
 // per-message term list.
 func (u *User) ftsRemove(m *Meta) error {
+	// first: it needs no blob, and a stale header text would be checked
+	// for a GUID that a later message cannot have
+	if err := u.dropHeaderText(m.GUID); err != nil {
+		u.log.Warn("fts header text removal failed", "guid", m.GUID, "err", err)
+	}
+
 	raw, err := u.readBlob(m)
 	if err != nil {
 		return err
@@ -548,6 +558,7 @@ func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 		}
 
 		set["n"] = []byte(strconv.FormatUint(next, 10))
+		u.markFreshIndex(cur, set)
 
 		return set, nil
 	})
@@ -773,158 +784,6 @@ func (u *User) SearchFields(fields []string, query string) (hits map[string]bool
 	return result, nil
 }
 
-// SearchCandidates returns a superset of the messages whose text in one
-// of fields contains query as a substring (IMAP SEARCH semantics), or
-// nil when the index cannot narrow them. Every word of the query that
-// the index can look up completely narrows the set (fts.Spans): a whole
-// word by its term, a word's start by a bounded key scan, an inner part
-// through the substring dictionary, each with the messages that have a
-// word too long for a term. A word it cannot look up completely — an
-// inner part of a word in a field without the dictionary or of fewer
-// than three characters, a scan that reaches its bound, a dictionary
-// answer that reaches maxCandidates, an account still on the dictionary
-// layout before 0.35.0 — leaves the set as it is. The caller checks
-// every candidate against the message.
-func (u *User) SearchCandidates(fields []string, query string) (hits map[string]bool, err error) {
-	end := u.trace(spanFTSSearch, attribute.StringSlice("store.fields", fields))
-	defer func() { end(err) }()
-
-	var result map[string]bool
-
-	for _, sp := range fts.Spans(query) {
-		terms, ok, err := u.spanTerms(fields, sp)
-		if err != nil {
-			return nil, err
-		}
-
-		if !ok {
-			continue
-		}
-
-		hits, err := u.postingsUnion(terms)
-		if err != nil {
-			return nil, err
-		}
-
-		if result == nil {
-			result = hits
-		} else {
-			for g := range result {
-				if !hits[g] {
-					delete(result, g)
-				}
-			}
-		}
-
-		if len(result) == 0 {
-			break
-		}
-	}
-
-	return result, nil
-}
-
-// spanTerms returns every term of fields that can hold the span; false
-// when the index cannot list them all.
-func (u *User) spanTerms(fields []string, sp fts.Span) ([]string, bool, error) {
-	var terms []string
-
-	for _, f := range fields {
-		if !fts.SpanIndexed(f, sp) {
-			return nil, false, nil
-		}
-
-		if sp.Match == fts.MatchWord {
-			terms = append(terms, f+":"+sp.Token)
-
-			continue
-		}
-
-		var (
-			found    []string
-			complete bool
-			err      error
-		)
-
-		if tris := fts.Trigrams(sp.Token); fts.Substring(f) && len(tris) > 0 {
-			legacy, lerr := u.hasLegacyDict()
-			if lerr != nil || legacy {
-				return nil, false, lerr
-			}
-
-			found, complete, err = u.dictMatches(f, sp.Token, tris)
-		} else {
-			found, complete, err = u.prefixKeys(f + ":" + sp.Token)
-		}
-
-		if err != nil || !complete {
-			return nil, false, err
-		}
-
-		for _, t := range found {
-			if _, tok, _ := strings.Cut(t, ":"); fts.SpanTerm(sp, tok) {
-				terms = append(terms, t)
-			}
-		}
-
-		terms = append(terms, f+":"+fts.LongWord)
-	}
-
-	return terms, true, nil
-}
-
-// prefixKeys lists the terms that start with prefix across the posting
-// shards, keys only, at most maxCandidates of them, and whether they
-// are all of them.
-func (u *User) prefixKeys(prefix string) ([]string, bool, error) {
-	var (
-		mu       sync.Mutex
-		out      []string
-		complete = true
-	)
-
-	shards := map[string][]string{}
-	for i := 0; i < u.ftsShards; i++ {
-		shards[fmt.Sprintf("%s%02d", ftsPrefix, i)] = nil
-	}
-
-	err := parallel(shards, func(oid string, _ []string) error {
-		var (
-			after string
-			found []string
-		)
-
-		for more := true; more; {
-			var err error
-
-			more, err = listOmapKeys(u.idx, oid, after, prefix, omapPageSize, func(key string) {
-				after = key
-				found = append(found, key)
-			})
-			if err != nil {
-				return err
-			}
-
-			if more && len(found) >= maxCandidates {
-				mu.Lock()
-				complete = false
-				mu.Unlock()
-
-				break
-			}
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		out = append(out, found...)
-
-		return nil
-	})
-
-	return out, complete && len(out) <= maxCandidates, err
-}
-
 // candidateTerms returns the index terms of field that a query token
 // matches: exact, stemmed, and substring via the trigram dictionary.
 func (u *User) candidateTerms(field, tok string) ([]string, error) {
@@ -965,7 +824,7 @@ func (u *User) candidateTerms(field, tok string) ([]string, error) {
 
 // substringTerms adds the terms of field that contain tok to set.
 func (u *User) substringTerms(set map[string]struct{}, field, tok string, tris []string) error {
-	terms, _, err := u.dictMatches(field, tok, tris)
+	terms, _, err := dictMatches(u.lister(), field, tok, tris)
 	if err != nil {
 		return err
 	}
@@ -1002,8 +861,8 @@ func (s *dictScan) take(key, tok string) {
 }
 
 // page reads the next page of the range.
-func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
-	more, err := listOmapKeys(ioctx, s.oid, s.after, s.prefix, omapPageSize, func(key string) { s.take(key, tok) })
+func (s *dictScan) page(list omapLister, tok string) error {
+	more, err := list(s.oid, s.after, s.prefix, omapPageSize, func(key string) { s.take(key, tok) })
 	if err != nil {
 		return fmt.Errorf("fts dictionary shard %s: %w", s.oid, err)
 	}
@@ -1023,7 +882,7 @@ func (s *dictScan) page(ioctx *rados.IOContext, tok string) error {
 // most the shortest range times the number of trigrams. That is one
 // round for a token with any trigram that is not among the most common
 // ones.
-func (u *User) dictMatches(field, tok string, tris []string) ([]string, bool, error) {
+func dictMatches(list omapLister, field, tok string, tris []string) ([]string, bool, error) {
 	scans := make([]*dictScan, len(tris))
 	for i, tri := range tris {
 		scans[i] = newDictScan(tri, field)
@@ -1040,7 +899,7 @@ func (u *User) dictMatches(field, tok string, tris []string) ([]string, bool, er
 			go func() {
 				defer wg.Done()
 
-				errs[i] = s.page(u.idx, tok)
+				errs[i] = s.page(list, tok)
 			}()
 		}
 
@@ -1336,9 +1195,10 @@ func keys(set map[string]struct{}) []string {
 }
 
 // DeleteFTS removes all index and dictionary shard objects (of both
-// dictionary layouts) and the id map.
+// dictionary layouts), the header store and the id map (with the
+// version marker).
 func (u *User) DeleteFTS() error {
-	oids := u.legacyDictOIDs()
+	oids := append(u.legacyDictOIDs(), u.headerOIDs()...)
 
 	for i := 0; i < u.ftsShards; i++ {
 		oids = append(oids, fmt.Sprintf("%s%02d", ftsPrefix, i))

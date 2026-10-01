@@ -468,6 +468,7 @@ func newServers(log *slog.Logger, settings *config.Config, store *cephstore.Stor
 		MaxConnsPerUser:  int(settings.Server.MaxConnsPerUser),
 		QuotaSelfService: settings.Server.QuotaSelfService,
 		WordSearch:       settings.FTS.IMAPWordSearch(),
+		VerifyParallel:   settings.FTS.VerifyParallel,
 		Trace: imapproto.TraceOptions{MaxLine: settings.Trace.MaxLineBytes,
 			Recheck: time.Duration(settings.Trace.RecheckSeconds) * time.Second},
 		ShareNotices: srv.notices,

@@ -240,6 +240,11 @@ type User interface {
 	// one of the fields contains query as a case-insensitive substring,
 	// or nil when the index cannot narrow them; see fts.Spans.
 	SearchCandidates(fields []string, query string) (map[string]bool, error)
+	// HeaderTexts returns fts.HeaderText of the messages it keeps one
+	// for, by GUID; a GUID without one (indexed before the store kept
+	// them, or a header longer than fts.MaxHeaderTextBytes) is absent and
+	// its header has to be read from the message.
+	HeaderTexts(guids []string) (map[string]string, error)
 
 	QuotaUsage() (Quota, error)
 	QuotaLimit() (Quota, error)

@@ -76,6 +76,9 @@ type Options struct {
 	// narrowing the candidates of the substring matching RFC 9051
 	// specifies (fts.imap_search: word).
 	WordSearch bool
+	// VerifyParallel bounds the messages one SEARCH checks against its
+	// text keys at the same time (0 = 8; fts.verify_parallel).
+	VerifyParallel int
 	// Limits (0 = unlimited).
 	MaxConnsPerIP   int
 	MaxConnsPerUser int
@@ -394,7 +397,6 @@ type conn struct {
 	readOnly   bool
 	examine    bool     // selected with EXAMINE
 	searchRes  []uint32 // saved SEARCH result (UIDs)
-	searchErr  error    // read failure during brute-force matching
 }
 
 // maxLiteralsPerCommand bounds the number of literals in one command

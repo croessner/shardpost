@@ -1,6 +1,7 @@
 package fts
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -146,7 +147,7 @@ func TestBodyTextBounded(t *testing.T) {
 	// two parts: the second gets only the room the first left
 	half := strings.Repeat("a", MaxBodyBytes/2+10)
 
-	raw ="Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\n" + half + "\r\n--b\r\n\r\n" + half + "\r\n--b--\r\n"
+	raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\n" + half + "\r\n--b\r\n\r\n" + half + "\r\n--b--\r\n"
 	if got := BodyText([]byte(raw)); len(got) > MaxBodyBytes+1 {
 		t.Errorf("two parts: %d bytes", len(got))
 	}
@@ -261,10 +262,93 @@ func TestSpans(t *testing.T) {
 }
 
 func TestLongWordMarker(t *testing.T) {
-	terms := termSet("Subject: s\r\n\r\nshort " + strings.Repeat("a", maxToken+1) + "\r\n")
-	if !terms["b:"+LongWord] || terms["s:"+LongWord] {
+	long := strings.Repeat("a", maxToken+1)
+
+	terms := termSet("Subject: s\r\nX-Id: " + long + "\r\n\r\nshort " + long + "\r\n")
+	if !terms["b:"+LongWord] || terms["s:"+LongWord] || terms["b:"+HugeWord] {
 		t.Errorf("terms %v", terms)
 	}
+
+	// the header field has the first window only, and no markers
+	if !terms["h:"+long[:maxToken]] || terms["h:"+LongWord] {
+		t.Errorf("header terms %v", terms)
+	}
+}
+
+// TestLongWordWindows proves what Spans relies on, for every length of
+// a long word up to well past maxWindows windows: every prefix is a
+// prefix of a term, every inner part of up to coveredInfix runes is in
+// a term unless the field has HugeWord, every longer one has LongWord.
+func TestLongWordWindows(t *testing.T) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+	for n := maxToken + 1; n <= maxToken+windowStep*(maxWindows+2); n++ {
+		w := make([]rune, n)
+		for i := range w {
+			w[i] = rune(alphabet[(i*7+i/len(alphabet))%len(alphabet)])
+		}
+
+		checkWindows(t, w)
+	}
+
+	if got := Markers(Span{"abc", MatchInfix}); !slices.Equal(got, []string{HugeWord}) {
+		t.Errorf("short infix markers %v", got)
+	}
+
+	if got := Markers(Span{strings.Repeat("a", coveredInfix+1), MatchInfix}); !slices.Equal(got, []string{LongWord}) {
+		t.Errorf("long infix markers %v", got)
+	}
+
+	if Markers(Span{"abc", MatchPrefix}) != nil || Markers(Span{"abc", MatchWord}) != nil {
+		t.Error("prefix and word need no markers")
+	}
+}
+
+// checkWindows checks the window terms of one long word.
+func checkWindows(t *testing.T, w []rune) {
+	t.Helper()
+
+	n := len(w)
+	terms := longWordTerms(FieldBody, w)
+	huge := slices.Contains(terms, HugeWord)
+
+	if !slices.Contains(terms, LongWord) || len(terms) > maxWindows+2 {
+		t.Fatalf("n=%d: terms %v", n, terms)
+	}
+
+	if want := n > maxToken+windowStep*(maxWindows-1); huge != want {
+		t.Fatalf("n=%d: huge %v", n, huge)
+	}
+
+	if !strings.HasPrefix(string(w), terms[0]) || len([]rune(terms[0])) != maxToken {
+		t.Fatalf("n=%d: window 0 %q", n, terms[0])
+	}
+
+	if !huge {
+		checkInfixes(t, w, terms)
+	}
+
+	if h := longWordTerms(FieldHeader, w); len(h) != 1 || h[0] != string(w[:maxToken]) {
+		t.Fatalf("n=%d: header terms %v", n, h)
+	}
+}
+
+// checkInfixes checks that every inner part of up to coveredInfix runes
+// of w is in a term.
+func checkInfixes(t *testing.T, w []rune, terms []string) {
+	t.Helper()
+
+	for p := range w {
+		for l := minToken; l <= coveredInfix && p+l <= len(w); l++ {
+			if !inSomeTerm(terms, string(w[p:p+l])) {
+				t.Fatalf("n=%d: %q at %d in no window", len(w), string(w[p:p+l]), p)
+			}
+		}
+	}
+}
+
+func inSomeTerm(terms []string, sub string) bool {
+	return slices.ContainsFunc(terms, func(term string) bool { return strings.Contains(term, sub) })
 }
 
 func TestHeaderNamesAndValues(t *testing.T) {

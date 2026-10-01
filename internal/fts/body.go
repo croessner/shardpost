@@ -31,7 +31,8 @@ const (
 )
 
 const (
-	mediaHTML = "text/html"
+	mediaHTML  = "text/html"
+	mediaPlain = "text/plain"
 	// MaxPartBytes bounds what is read of one part: its decoded bytes
 	// before charset conversion.
 	MaxPartBytes = MaxBodyBytes
@@ -141,6 +142,12 @@ func (w *walker) walk(e *message.Entity, depth int) {
 	}
 
 	if mr := e.MultipartReader(); mr != nil {
+		if mt, _, _ := e.Header.ContentType(); w.readable && mt == "multipart/alternative" {
+			w.alternative(mr, depth)
+
+			return
+		}
+
 		for !w.full() {
 			p, err := mr.NextPart()
 			if p == nil || (err != nil && !message.IsUnknownCharset(err) && !message.IsUnknownEncoding(err)) {
@@ -156,12 +163,48 @@ func (w *walker) walk(e *message.Entity, depth int) {
 	w.leaf(e, depth)
 }
 
+// alternative appends one part of a multipart/alternative, the way a
+// reader sees one (RFC 2046 5.1.4, for the preview of RFC 8970): the
+// first text/plain part with text, else the first part with text — the
+// HTML one, as fts.html makes it. The search text has every part.
+func (w *walker) alternative(mr message.MultipartReader, depth int) {
+	var chosen string
+
+	for !w.full() {
+		p, err := mr.NextPart()
+		if p == nil || (err != nil && !message.IsUnknownCharset(err) && !message.IsUnknownEncoding(err)) {
+			break
+		}
+
+		sub := &walker{read: w.read, readable: true}
+		sub.walk(p, depth+1)
+		w.read = sub.read
+
+		text := sub.out.String()
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+
+		if mt, _, _ := p.Header.ContentType(); mt == mediaPlain {
+			chosen = text
+
+			break
+		}
+
+		if chosen == "" {
+			chosen = text
+		}
+	}
+
+	w.out.WriteString(bound(chosen, MaxBodyBytes-w.out.Len()))
+}
+
 // leaf appends the file name and the text of a part that is not a
 // multipart.
 func (w *walker) leaf(e *message.Entity, depth int) {
 	ct, params := mediaParams(e.Header.Get("Content-Type"))
 	if ct == "" {
-		ct = "text/plain"
+		ct = mediaPlain
 	}
 
 	if !w.readable {

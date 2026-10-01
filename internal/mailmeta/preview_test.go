@@ -33,3 +33,23 @@ func TestPreviewHTMLModes(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviewAlternative: of a multipart/alternative the preview shows
+// one part, the plain text where there is one, else the HTML text — also
+// when the HTML part comes first or sits in a multipart/related.
+func TestPreviewAlternative(t *testing.T) {
+	plainHTML := "Content-Type: multipart/alternative; boundary=a\r\n\r\n" +
+		"--a\r\nContent-Type: text/html\r\n\r\n<p>Hello from HTML</p>\r\n" +
+		"--a\r\nContent-Type: text/plain\r\n\r\nHello from plain\r\n--a--\r\n"
+	htmlOnly := "Content-Type: multipart/alternative; boundary=a\r\n\r\n" +
+		"--a\r\nContent-Type: text/plain\r\n\r\n\r\n" +
+		"--a\r\nContent-Type: multipart/related; boundary=r\r\n\r\n" +
+		"--r\r\nContent-Type: text/html\r\n\r\n<p>Only HTML</p>\r\n" +
+		"--r\r\nContent-Type: image/png; name=logo.png\r\n\r\nx\r\n--r--\r\n--a--\r\n"
+
+	for raw, want := range map[string]string{plainHTML: "Hello from plain", htmlOnly: "Only HTML"} {
+		if _, _, got := Extract([]byte(raw)); got != want {
+			t.Errorf("preview %q, want %q", got, want)
+		}
+	}
+}

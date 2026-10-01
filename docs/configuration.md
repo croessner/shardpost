@@ -341,7 +341,8 @@ YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
 | --- | --- | --- |
 | `fts.fallback_charset` | `windows-1252` | charset of text that is not valid UTF-8 and has no charset label, is labelled US-ASCII or names a charset that is not known (body parts, file names, raw 8-bit header values); any ASCII-compatible charset of the WHATWG list, e.g. `iso-8859-15`, `iso-8859-2`, `koi8-r`; UTF-8, UTF-16 and `replacement` are refused |
 | `fts.html` | `text` | what is made of a `text/html` part: `text` its visible text (tags, comments, `script`, `style`, `template` and `title` dropped, character references decoded, a line break at every block element), `raw` the markup as it is (what earlier versions indexed), `skip` nothing |
-| `fts.imap_search` | `substring` | how IMAP `SEARCH` matches text: `substring` as RFC 3501 and RFC 9051 specify (the index narrows the candidates, every candidate is checked against the message); `word` lets the index answer `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by word, stem and part of a word, without reading messages |
+| `fts.imap_search` | `substring` | how IMAP `SEARCH` matches text: `substring` as RFC 3501 and RFC 9051 specify (the index narrows the candidates, every candidate is checked); `word` lets the index answer `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by word, stem and part of a word |
+| `fts.verify_parallel` | 8 | how many messages one IMAP `SEARCH` checks against its text keys at the same time (1–64), each read under `server.memory_budget_bytes` |
 
 YAML only.
 
@@ -366,43 +367,63 @@ preview, so they agree:
   `Content-Disposition` `filename`, RFC 2231 in any charset, RFC 2047
   words) and an attached message (`message/rfc822`,
   `message/global`) — its header as `Name: value` lines and its body
-  text — belong to the body text.
+  text — belong to the body text. Other MIME part header fields do not.
 - Bounds: at most 4 MiB of text per message; a part is read up to
   4 MiB, a part other than HTML only as far as there is room left for
   its text, and all parts of a message together up to 8 MiB, before
-  conversion.
+  conversion. Words of more than 40 characters are indexed as
+  overlapping pieces (see [storage](architecture/storage.md)).
 
 **The preview** is cut from the text parts alone (no file names, no
-attached messages). It follows `fts.html`: with `text` an HTML part
-gives its visible text (without its title), with `raw` its markup, with
-`skip` nothing, so an HTML-only message has an empty preview.
+attached messages), and of a `multipart/alternative` from one part: the
+plain text where it has text, else the HTML text (RFC 8970). It follows
+`fts.html`: with `text` an HTML part gives its visible text (without its
+title), with `raw` its markup, with `skip` nothing, so an HTML-only
+message has an empty preview.
 
-**IMAP SEARCH.** With `substring`, a text key matches when its value is
-a substring of the decoded text, without regard to case. The index
-supplies candidates that may contain more messages, never fewer, and
-each candidate is read and checked. A word of the value that the index
-cannot look up completely does not narrow the candidates; if no word
-does, every message of the mailbox is read (within
-`server.memory_budget_bytes`). That is the case for a value whose first
-word may be the end of a longer word in a field without the substring
-dictionary (`TEXT`, `HEADER` with a name other than Subject, From,
-Sender, Reply-To, To, Cc and Bcc), for a word of two letters that is
-not whole, for a word that more than 4096 index terms could hold, and
-for an account whose dictionary is still in the layout before 0.35.0
-(`fts_dict_convert`). `word` is faster on large mailboxes
-and answers what earlier versions answered: all words of the value in
-any order, by stem and by part of a word.
+**IMAP SEARCH and what it costs.** With `substring`, a text key matches
+when its value is a substring of the decoded text, without regard to
+case. The index supplies candidates — never fewer than the messages
+that match — separately for the header and the body of a key, and
+combines them over `AND`, `OR` and `NOT`. Each candidate is checked:
+
+- the header against the decoded header the index keeps per message
+  (read for 256 messages at a time, no message is read);
+- the body by reading the message, only where the body candidates
+  include it.
+
+A word of the value narrows the candidates when the index can look it
+up completely: a whole word always, the start of a word always, the
+inside of a word in the subject, the addresses and the body when it
+has three or more characters. The inside of a word of another header
+field cannot be looked up, so a `TEXT` or `HEADER <name>` value that
+may begin inside a header word (any value not starting with a space or
+punctuation) checks the stored header of every message of the mailbox —
+a few omap reads per 256 messages, cheap next to reading them — and
+reads only the messages the body index allows. A key with no word the
+index can narrow by (`BODY ab`, a single letter) reads every message of
+the mailbox. `fts.verify_parallel` messages are checked at once, each
+under the memory budget; a message that is expunged meanwhile is no
+match, and a read the budget refuses is retried before the command
+fails. `word` costs index lookups only and answers what earlier versions
+answered: all words of the value in any order, by stem and by part of
+a word.
 
 **Existing messages.** The index keeps what a message was indexed
-with. A changed `fts.fallback_charset` or `fts.html`, and for messages
-indexed by earlier versions the whole preparation above (charset
-conversion, HTML text, file names, attached messages, header names and
-the marker of words longer than 40 characters), reach messages stored
-before only when the job `fts_rebuild` has indexed them again. Until
-then substring search can miss such a message where the index lacks
-the converted words, and removing a message leaves the terms it was
-indexed with under the old rules behind (harmless; the rebuild drops
-them). See [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c):
+with. An account indexed entirely by this version carries a version
+marker in its index (set for a new account with its first message and
+by `fts_rebuild` when it completes). Without the marker, substring
+search narrows only by whole ASCII words outside the header field,
+which every version indexed alike, and checks the rest, reading the
+headers of messages without a stored header from the messages
+themselves: correct, but slower. Even so, a message indexed by an
+earlier version can be missed where the old index lacks a whole word
+the new preparation finds (a file name, an attached message). A changed
+`fts.fallback_charset` or `fts.html` likewise reaches messages stored
+before only when they are indexed again. Removing a message indexed
+under other rules leaves terms it was indexed with behind (harmless;
+the rebuild drops them). Run the rebuild for every account after the
+upgrade, see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c):
 
 ```sh
 shardpostctl plan fts_rebuild user@example.org
@@ -410,4 +431,5 @@ shardpostctl apply -wait <plan-id>
 ```
 
 The rebuild does not recompute the cached preview of an existing
-message.
+message. The index, including the stored headers, is in the index pool
+and does not count against the quota.

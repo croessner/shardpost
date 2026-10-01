@@ -235,39 +235,84 @@ messages. A server older than 0.35.0 does not read `ftst/`: after a
 downgrade, substring search needs an `fts_rebuild`.
 
 What is indexed is UTF-8 text, prepared by the `fts` package
-([body.go](../../internal/fts/body.go), `HeaderValue`) for the index, for IMAP
-`SEARCH` keys checked against the message and for the cached preview,
-so they agree: header names and values (unfolded, RFC 2047 words in any
-charset of the WHATWG list, raw 8-bit text in `fts.fallback_charset`),
-every `text/*` part converted from its charset (`text/html` reduced to
-its visible text, `fts.html`), the file names of all parts and the
-header and text of attached messages, at most 4 MiB of text per
-message. A field with a word longer than 40 characters, which has no
-term, gets the marker term `<field>:~~` instead. Details are in the
-[configuration](../configuration.md#full-text-index-fts). A message is
-indexed once, when it is stored: messages indexed by an earlier version
-or before a change of `fts.fallback_charset` or `fts.html` are found by
-their new text only after an `fts_rebuild`.
+([body.go](../../internal/fts/body.go), `HeaderValue`, `HeaderText`)
+for the index, for IMAP `SEARCH` keys checked against the message and
+for the cached preview, so they agree: header names and values
+(unfolded, RFC 2047 words in any charset of the WHATWG list, raw 8-bit
+text in `fts.fallback_charset`), every `text/*` part converted from its
+charset (`text/html` reduced to its visible text, `fts.html`), the file
+names of all parts and the header and text of attached messages, at
+most 4 MiB of text per message. Details are in the
+[configuration](../configuration.md#full-text-index-fts).
+
+A word of more than 40 characters has no term of its own
+([query.go](../../internal/fts/query.go) states and proves the rules,
+`TestLongWordWindows` checks them). Its first 40 characters are a term
+in every field, so every word start stays findable. In the fields with
+the dictionary it also gets the 40-character windows that start at
+every multiple of 20 and the window that ends with the word, at most
+eight: every inner part of up to 21 characters lies in one of them.
+Two marker terms stand for what the windows do not cover: `<field>:~~`
+(a word of more than 40 characters, for inner parts of 22–40
+characters) and `<field>:~+` (a word longer than its eight windows,
+180 characters). Neither can be a query token, and neither has
+dictionary keys.
+
+The header store `ftsh/<nn>` keeps `HeaderText` per message — the
+decoded header lines that IMAP `SEARCH` checks header keys against —
+compressed with DEFLATE, at most 64 KiB of text (a longer header is not
+kept). It is written with the posting lists (delivery, `APPEND`, JMAP,
+import, `fts_rebuild`) and removed with them (expunge, purge, mailbox
+deletion, the scrubber's orphans, `DeleteFTS`); keyed by GUID, it is not
+touched by `COPY` or `MOVE`. Like the rest of the index it does not
+count against the quota.
+
+| Object | omap key | Value |
+|---|---|---|
+| `ftsh/<nn>`, `server.fts_shards` of them, shard = fnv1a(GUID) | GUID | format byte 1, DEFLATE of the header text |
+| `ftsmap` | `v` | index version marker `2` |
 
 IMAP `SEARCH` matches substrings (RFC 9051 6.4.4). The index cannot
 answer that alone — stems, words in any order and the missing
 dictionary of `h` make it find too much or too little — so by default
-(`fts.imap_search: substring`) it only supplies candidates and every
-candidate is checked against the message. The candidates must include
-every message that contains the value. Each word of the value is looked
-up by how it can occur ([query.go](../../internal/fts/query.go)): a word
-between two separators of the value as that term, the last word as the
-start of a term (a key scan of the posting shards), the first word —
-which may be the end of a longer word — through the dictionary; the
-last two add the messages with the `~~` marker. A word that cannot be
-looked up completely (the first word in `h` or of two letters, a
-lookup that would list more than 4096 terms, an account still on the
-dictionary layout before 0.35.0) narrows nothing; when no word narrows,
-every message of the mailbox is read. With `fts.imap_search: word` the
+(`fts.imap_search: substring`) it supplies candidates and every
+candidate is checked. `SearchCandidates`
+([ftssearch.go](../../internal/cephstore/ftssearch.go)) returns a
+superset of the messages that contain the value, or nothing when it
+cannot narrow. Each word of the value is looked up by how it can occur:
+a word between two separators of the value as that term; the last word
+as the start of a term, by a scan of the posting shards for keys with
+that prefix (keys only, a page of 1024 per round trip, complete because
+every term has its key in exactly one posting shard); the first word,
+which may be the end of a longer word, through the dictionary. The last
+two add the messages with the marker the word needs. A word does not
+narrow when it cannot be looked up completely: an inner part in `h`, of
+fewer than three characters, a lookup of more than 4096 terms, an
+account still on the dictionary layout before 0.35.0.
+
+The version marker `v` in `ftsmap` says that every message of the
+account was indexed by this version: a fresh index gets it with its
+first document ID, `fts_rebuild` when it has indexed every message.
+Without it only whole ASCII words outside `h`, which every version
+indexed alike, narrow.
+
+The protocol layer ([searchtext.go](../../internal/imapproto/searchtext.go))
+asks for candidates separately for the header and the body of every
+text key, wherever it is in the tree, and combines them: `AND`
+intersects, `OR` unites, `NOT` does not narrow. It checks the
+candidates `fts.verify_parallel` at a time: header keys against the
+header store (one omap read per shard for 256 messages; a message
+without a stored header has the first 16 KiB to 1 MiB of its blob
+read), the body by reading the message under the memory budget, only
+where the body candidates include it. The cost of a search is
+therefore index lookups, header-store reads for the messages a header
+key cannot narrow — at worst every message of the mailbox, as for a
+`TEXT` value that may begin inside a header word — and message reads
+for the messages whose body may match. A key the index cannot narrow at
+all (`BODY ab`) reads every message. With `fts.imap_search: word` the
 index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, as
 earlier versions did. JMAP and the admin `text` search always use the
-index alone. See [search.go](../../internal/imapproto/search.go) and
-`SearchCandidates` in [fts.go](../../internal/cephstore/fts.go).
+index alone.
 
 ## Repair and its limits
 
