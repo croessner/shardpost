@@ -77,8 +77,10 @@ type emailGetRequest struct {
 	FetchHTMLBodyValues bool      `json:"fetchHTMLBodyValues"`
 	FetchAllBodyValues  bool      `json:"fetchAllBodyValues"`
 	// attach is hasAttachment the locator remembers for messages whose
-	// index record does not carry it (see attachment.go).
-	attach map[string]attcache.Value
+	// index record does not carry it (see attachment.go), and learned
+	// what this call parsed of such messages, to be remembered.
+	attach  map[string]attcache.Value
+	learned map[string]attcache.Value
 }
 
 // emailGet implements Email/get (RFC 8621 4.2).
@@ -136,6 +138,8 @@ func emailGet(_ context.Context, sess *session, args json.RawMessage) (any, *met
 
 		out.List = append(out.List, obj)
 	}
+
+	rememberLearned(sess, req.learned)
 
 	return out, nil
 }

@@ -332,8 +332,10 @@ a convenience. Instead such a message is read and parsed once, and the
 answer is remembered in the JMAP locator under `a:<guid>` — the locator
 is the derived index of the JMAP front-end anyway, a message's content
 never changes under its GUID, and a locator that is dropped only costs
-reading again. `Email/get` answers from there as well, and parses only
-a message nobody has asked about yet.
+reading again. `Email/get` answers from there as well; a message it has
+no answer for it parses, as it parses a message for its body
+properties, and remembers the answer, so the next call does not parse
+it again.
 
 The filter is evaluated in three-valued logic: first with what the
 records say, so that only the messages whose match still depends on an
@@ -345,9 +347,12 @@ namespace in the background and answers `serverUnavailable`; once the
 fill is through, the query succeeds. A fill reads every old message of
 the namespace once; one runs per namespace at a time, at most
 `jmap.search.attachment_backfills` (2) at once in a process, each for at most
-`jmap.search.attachment_backfill_seconds` (600 s), and shutdown stops them.
+`jmap.search.attachment_backfill_seconds` (600 s). Shutdown stops them
+and waits up to ten seconds for them to end before the store is closed.
 What a fill wrote stays when it is stopped, so the next one starts
-where it ended. The maintenance job `attachment_backfill` (see
+where it ended. A mailbox that cannot be listed is skipped and logged,
+and a message that cannot be read — or that the parser fails on, even
+with a panic — is counted as failed and logged; neither ends the fill. The maintenance job `attachment_backfill` (see
 [Admin API](admin-api.md#maintenance-jobs-stage-8c)) does the same ahead
 of time, for an account whose users are about to search.
 

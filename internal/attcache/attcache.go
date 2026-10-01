@@ -13,6 +13,7 @@ package attcache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 
 	"shardpost/internal/mimepart"
@@ -110,8 +111,15 @@ func Remember(ix model.Index, vals map[string]Value) error {
 
 // Compute reads a message and answers hasAttachment for it. A message
 // without data is Unreadable; any other failure is returned, since it
-// may pass.
-func Compute(u model.User, m *model.Meta) (Value, error) {
+// may pass. A message that makes the parser panic is a failure too, not
+// the end of the process.
+func Compute(u model.User, m *model.Meta) (v Value, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			v, err = 0, fmt.Errorf("message %s: panic: %v", m.GUID, r)
+		}
+	}()
+
 	raw, err := u.Read(m)
 
 	switch {
@@ -126,6 +134,9 @@ func Compute(u model.User, m *model.Meta) (Value, error) {
 	return No, nil
 }
 
+// maxReportErrors bounds the errors a Report keeps.
+const maxReportErrors = 10
+
 // Report is what a Backfill did.
 type Report struct {
 	// Messages are the distinct messages without the field in their
@@ -137,17 +148,42 @@ type Report struct {
 	Computed   int `json:"computed"`
 	Unreadable int `json:"unreadable"`
 	Failed     int `json:"failed"`
+	// SkippedMailboxes could not be listed; their messages are left for
+	// another run.
+	SkippedMailboxes int `json:"skipped_mailboxes,omitempty"`
+	// Errors are the first failures, for the log.
+	Errors []string `json:"errors,omitempty"`
 }
 
+// fail counts a failure and keeps its error while there is room.
+func (r *Report) fail(err error) {
+	if len(r.Errors) < maxReportErrors {
+		r.Errors = append(r.Errors, err.Error())
+	}
+}
+
+// Message is what reading a message for its hasAttachment needs of its
+// index record.
+type Message struct {
+	GUID   string
+	Size   int64
+	Chunks int
+}
+
+// meta is the index record Read is called with.
+func (m Message) meta() *model.Meta { return &model.Meta{GUID: m.GUID, Size: m.Size, Chunks: m.Chunks} }
+
 // Legacy lists the distinct messages of a namespace whose index record
-// does not carry hasAttachment, one record per GUID, in GUID order.
-func Legacy(u model.User) ([]model.Meta, error) {
+// does not carry hasAttachment, in GUID order. A mailbox that cannot be
+// listed is skipped and counted in the report: one broken mailbox must
+// not keep the others from being filled.
+func Legacy(u model.User, rep *Report) ([]Message, error) {
 	boxes, err := u.ListMailboxes()
 	if err != nil {
 		return nil, err
 	}
 
-	byGUID := map[string]model.Meta{}
+	byGUID := map[string]Message{}
 
 	for _, mb := range boxes {
 		metas, err := u.ListMessages(mb.ID)
@@ -156,17 +192,20 @@ func Legacy(u model.User) ([]model.Meta, error) {
 		}
 
 		if err != nil {
-			return nil, err
+			rep.SkippedMailboxes++
+			rep.fail(fmt.Errorf("mailbox %s: %w", mb.ID, err))
+
+			continue
 		}
 
 		for i := range metas {
-			if metas[i].HasAttachment == nil {
-				byGUID[metas[i].GUID] = metas[i]
+			if m := &metas[i]; m.HasAttachment == nil {
+				byGUID[m.GUID] = Message{GUID: m.GUID, Size: m.Size, Chunks: m.Chunks}
 			}
 		}
 	}
 
-	out := make([]model.Meta, 0, len(byGUID))
+	out := make([]Message, 0, len(byGUID))
 	for _, m := range byGUID {
 		out = append(out, m)
 	}
@@ -179,9 +218,9 @@ func Legacy(u model.User) ([]model.Meta, error) {
 // Backfill remembers hasAttachment for every message of a namespace whose
 // index record does not carry it. It works in batches and writes each
 // one before the next, so what it did survives when it is stopped:
-// check is called before every batch and ends the run with its error
-// (a cancelled context, a lost job lease); progress, when set, gets the
-// messages done and their total.
+// check is called before the work and before every batch and ends the
+// run with its error (a cancelled context, a lost job lease); progress,
+// when set, gets the messages done and their total.
 func Backfill(ctx context.Context, u model.User, check func() error, progress func(done, total int)) (Report, error) {
 	var rep Report
 
@@ -190,7 +229,11 @@ func Backfill(ctx context.Context, u model.User, check func() error, progress fu
 		return rep, errors.New("the store keeps no index for JMAP")
 	}
 
-	legacy, err := Legacy(u)
+	if err := stopped(ctx, check); err != nil {
+		return rep, err
+	}
+
+	legacy, err := Legacy(u, &rep)
 	if err != nil {
 		return rep, err
 	}
@@ -228,7 +271,7 @@ func stopped(ctx context.Context, check func() error) error {
 }
 
 // fillBatch computes and remembers the answers one batch lacks.
-func fillBatch(ctx context.Context, u model.User, ix model.Index, batch []model.Meta, rep *Report) error {
+func fillBatch(ctx context.Context, u model.User, ix model.Index, batch []Message, rep *Report) error {
 	guids := make([]string, len(batch))
 	for i := range batch {
 		guids[i] = batch[i].GUID
@@ -252,9 +295,10 @@ func fillBatch(ctx context.Context, u model.User, ix model.Index, batch []model.
 			break
 		}
 
-		v, err := Compute(u, &batch[i])
+		v, err := Compute(u, batch[i].meta())
 		if err != nil {
 			rep.Failed++
+			rep.fail(err)
 
 			continue
 		}

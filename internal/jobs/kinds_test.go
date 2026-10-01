@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -263,6 +265,76 @@ func TestAttachmentBackfill(t *testing.T) {
 
 	if k, _ := m.Kind(KindAttachments); k.Role() != RoleRepair || k.Exclusive() {
 		t.Error("attachment_backfill is not a repair that leaves the account unlocked")
+	}
+}
+
+// oldStore opens views whose index records lack hasAttachment, as
+// records written before the field existed do.
+type oldStore struct{ inner *memstore.Store }
+
+type oldView struct {
+	model.User
+	model.Index
+	model.Importer
+}
+
+func (s oldStore) User(name string) (model.User, error) {
+	u, err := s.inner.User(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return &oldView{User: u, Index: u.(model.Index), Importer: u.(model.Importer)}, nil
+}
+
+func (v *oldView) ListMessages(id string) ([]model.Meta, error) {
+	metas, err := v.User.ListMessages(id)
+	for i := range metas {
+		metas[i].HasAttachment = nil
+	}
+
+	return metas, err
+}
+
+// TestAttachmentBackfillFills: over older records the plan counts the
+// messages, the run reads each once and a second plan finds them
+// remembered; under an import lock the run is refused.
+func TestAttachmentBackfillFills(t *testing.T) {
+	store := memstore.New()
+	alice, _ := store.User("alice")
+
+	if err := alice.EnsureMailbox("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := alice.Deliver("INBOX", []byte(testMessage), nil, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := NewManager(memstore.NewAdminKV(), &Env{Accounts: oldStore{store}, Log: log},
+		Config{Poll: 10 * time.Millisecond, LeaseTTL: 300 * time.Millisecond}, "pod-a", Kinds(time.Hour)...)
+	runManager(t, m)
+
+	p, j := planAndApply(t, m, KindAttachments, "alice", nil)
+	if string(p.Summary) != `{"messages":3,"known":0}` || !strings.Contains(string(j.Result), `"computed":3`) {
+		t.Fatalf("fill: %s %s", p.Summary, j.Result)
+	}
+
+	if p, _ := planAndApply(t, m, KindAttachments, "alice", nil); string(p.Summary) != `{"messages":3,"known":3}` {
+		t.Errorf("after the fill the plan is %s", p.Summary)
+	}
+
+	imp := alice.(model.Importer)
+	if _, err := imp.ImportLock("import-1", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	_, j = planAndApply(t, m, KindAttachments, "alice", nil, StateFailed)
+	if !strings.Contains(strings.Join(j.Errors, " "), "locked by an import") {
+		t.Errorf("under an import lock: %s %v", j.State, j.Errors)
 	}
 }
 

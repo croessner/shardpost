@@ -87,26 +87,13 @@ type rendering struct {
 // The message is read and parsed only when one of them was asked for,
 // because that is the one expensive step of an Email/get.
 func bodyProperties(sess *session, m *model.Meta, raw []byte, props []string, req *emailGetRequest, out map[string]any) *methodError {
-	need := false
-
-	for _, p := range props {
-		// hasAttachment is kept in the index record of every message
-		// stored since the record has the field, and remembered in the
-		// locator for many older ones; only the rest need the message.
-		if p == propHasAttachment {
-			if has, ok := knownHasAttachment(m, req); ok {
-				out[p] = has
-
-				continue
-			}
-		}
-
-		need = need || contentProperties[p]
-	}
-
-	if !need {
+	if !needsMessage(m, props, req, out) {
 		return nil
 	}
+
+	// A message given as raw bytes is one Email/parse describes, not a
+	// stored one: what is learned of it is not remembered.
+	stored := raw == nil
 
 	raw, err := messageBytes(sess, m, raw)
 	if err != nil {
@@ -138,7 +125,51 @@ func bodyProperties(sess *session, m *model.Meta, raw []byte, props []string, re
 		}
 	}
 
+	if has, ok := out[propHasAttachment].(bool); ok && m.HasAttachment == nil && stored {
+		req.learn(m.GUID, has)
+	}
+
 	return nil
+}
+
+// learn notes the hasAttachment of an older record that this call parsed.
+func (req *emailGetRequest) learn(guid string, has bool) {
+	if _, known := req.attach[guid]; known {
+		return
+	}
+
+	if req.learned == nil {
+		req.learned = map[string]attcache.Value{}
+	}
+
+	v := attcache.No
+	if has {
+		v = attcache.Yes
+	}
+
+	req.learned[guid] = v
+}
+
+// needsMessage reports whether a property asked for needs the message
+// itself. hasAttachment is kept in the index record of every message
+// stored since the record has the field, and remembered in the locator
+// for many older ones: it is filled in here when it is known.
+func needsMessage(m *model.Meta, props []string, req *emailGetRequest, out map[string]any) bool {
+	need := false
+
+	for _, p := range props {
+		if p == propHasAttachment {
+			if has, ok := knownHasAttachment(m, req); ok {
+				out[p] = has
+
+				continue
+			}
+		}
+
+		need = need || contentProperties[p]
+	}
+
+	return need
 }
 
 // knownHasAttachment answers hasAttachment without the message: from the

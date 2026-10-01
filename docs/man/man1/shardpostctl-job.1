@@ -186,8 +186,10 @@ and the property of
 It changes no message and no index record and does not lock the account;
 it stops when an import or another job locks the account. The plan shows
 how many such messages there are and how many are already remembered;
-the result counts the messages read, the ones without data and the ones
-that could not be read. What a stopped run wrote stays, and running it
+the result counts the messages read, the ones without data, the ones
+that could not be read and the mailboxes that could not be listed, with
+the first errors; neither a broken message nor a broken mailbox ends the
+run. What a stopped run wrote stays, and running it
 again reads only what is left. A JMAP query starts the same fill on its
 own when it needs it; the job does it ahead of time.
 .TP

@@ -22,8 +22,11 @@ const (
 type oldUser struct {
 	model.User
 	model.Index
-	gone  map[string]bool
-	reads int
+	gone   map[string]bool
+	broken map[string]bool // reads fail with another error
+	panics map[string]bool // reads panic
+	badBox string          // ListMessages of this mailbox fails
+	reads  int
 }
 
 func strip(metas []model.Meta) []model.Meta {
@@ -35,6 +38,10 @@ func strip(metas []model.Meta) []model.Meta {
 }
 
 func (u *oldUser) ListMessages(id string) ([]model.Meta, error) {
+	if id == u.badBox {
+		return nil, errors.New("omap read failed")
+	}
+
 	metas, err := u.User.ListMessages(id)
 
 	return strip(metas), err
@@ -43,8 +50,13 @@ func (u *oldUser) ListMessages(id string) ([]model.Meta, error) {
 func (u *oldUser) Read(m *model.Meta) ([]byte, error) {
 	u.reads++
 
-	if u.gone[m.GUID] {
+	switch {
+	case u.gone[m.GUID]:
 		return nil, model.ErrNoBlob
+	case u.broken[m.GUID]:
+		return nil, errors.New("rados: timeout")
+	case u.panics[m.GUID]:
+		panic("bad message")
 	}
 
 	return u.User.Read(m)
@@ -69,7 +81,8 @@ func oldAccount(t *testing.T, msgs ...string) (*oldUser, []*model.Meta) {
 		metas = append(metas, m)
 	}
 
-	return &oldUser{User: u, Index: u.(model.Index), gone: map[string]bool{}}, metas
+	return &oldUser{User: u, Index: u.(model.Index), gone: map[string]bool{}, broken: map[string]bool{},
+		panics: map[string]bool{}}, metas
 }
 
 // TestBackfill: every old message is read once and remembered; a second
@@ -81,7 +94,7 @@ func TestBackfill(t *testing.T) {
 	var last [2]int
 
 	rep, err := Backfill(context.Background(), u, nil, func(done, total int) { last = [2]int{done, total} })
-	if err != nil || rep != (Report{Messages: 3, Computed: 3, Unreadable: 1}) || last != [2]int{3, 3} {
+	if err != nil || fmt.Sprint(rep) != fmt.Sprint(Report{Messages: 3, Computed: 3, Unreadable: 1}) || last != [2]int{3, 3} {
 		t.Fatalf("first run: %+v %v, progress %v", rep, err, last)
 	}
 
@@ -105,6 +118,42 @@ func checkRemembered(t *testing.T, u *oldUser, metas []*model.Meta) {
 	want := map[string]Value{metas[0].GUID: Yes, metas[1].GUID: No, metas[2].GUID: Unreadable}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("remembered %v, want %v", got, want)
+	}
+}
+
+// TestBackfillFailures: a message that fails to read, or makes the
+// parser panic, is counted and left for the next run, which reads it
+// again; a mailbox that cannot be listed is skipped and counted.
+func TestBackfillFailures(t *testing.T) {
+	u, metas := oldAccount(t, rawFile, rawPlain, rawPlain)
+	u.broken[metas[0].GUID] = true
+	u.panics[metas[1].GUID] = true
+
+	rep, err := Backfill(context.Background(), u, nil, nil)
+	if err != nil || rep.Failed != 2 || rep.Computed != 1 || len(rep.Errors) != 2 {
+		t.Fatalf("first run: %+v %v", rep, err)
+	}
+
+	delete(u.broken, metas[0].GUID)
+	delete(u.panics, metas[1].GUID)
+
+	rep, err = Backfill(context.Background(), u, nil, nil)
+	if err != nil || rep.Failed != 0 || rep.Computed != 2 || rep.Known != 1 {
+		t.Errorf("second run: %+v %v", rep, err)
+	}
+}
+
+// TestBackfillSkipsMailbox: a mailbox that cannot be listed is skipped
+// and counted, not the end of the run.
+func TestBackfillSkipsMailbox(t *testing.T) {
+	u, _ := oldAccount(t, rawFile)
+
+	boxes, _ := u.ListMailboxes()
+	u.badBox = boxes[0].ID
+
+	rep, err := Backfill(context.Background(), u, nil, nil)
+	if err != nil || rep.SkippedMailboxes != 1 || rep.Messages != 0 || len(rep.Errors) != 1 {
+		t.Errorf("a broken mailbox: %+v %v", rep, err)
 	}
 }
 

@@ -540,8 +540,9 @@ func (k *ftsDictConvert) Run(_ context.Context, run *Run) (any, error) {
 type attachmentBackfill struct{ kindBase }
 
 type attachmentSummary struct {
-	Messages int `json:"messages"`
-	Known    int `json:"known"`
+	Messages         int `json:"messages"`
+	Known            int `json:"known"`
+	SkippedMailboxes int `json:"skipped_mailboxes,omitempty"`
 }
 
 func (k *attachmentBackfill) Plan(_ context.Context, _ *Env, u model.User, _ string, _ json.RawMessage) (any, string, error) {
@@ -550,7 +551,9 @@ func (k *attachmentBackfill) Plan(_ context.Context, _ *Env, u model.User, _ str
 		return nil, "", err
 	}
 
-	legacy, err := attcache.Legacy(u)
+	var rep attcache.Report
+
+	legacy, err := attcache.Legacy(u, &rep)
 	if err != nil {
 		return nil, "", err
 	}
@@ -562,7 +565,7 @@ func (k *attachmentBackfill) Plan(_ context.Context, _ *Env, u model.User, _ str
 
 	known, err := attcache.Lookup(ix, guids)
 
-	return attachmentSummary{Messages: len(legacy), Known: len(known)}, "", err
+	return attachmentSummary{Messages: len(legacy), Known: len(known), SkippedMailboxes: rep.SkippedMailboxes}, "", err
 }
 
 func (k *attachmentBackfill) Run(ctx context.Context, run *Run) (any, error) {
@@ -571,15 +574,12 @@ func (k *attachmentBackfill) Run(ctx context.Context, run *Run) (any, error) {
 			return err
 		}
 
-		if errors.Is(model.RefuseDuringImport(run.User), model.ErrImportLocked) {
+		err := model.RefuseDuringImport(run.User)
+		if errors.Is(err, model.ErrImportLocked) {
 			return errors.New("the account is locked by an import or another job; run the backfill again afterwards")
 		}
 
-		return nil
-	}
-
-	if err := fence(); err != nil {
-		return nil, err
+		return err
 	}
 
 	return attcache.Backfill(ctx, run.User, fence, func(done, total int) {

@@ -96,6 +96,7 @@ func (srv *servers) setupJMAP(log *slog.Logger, settings *config.Config, store *
 	}
 
 	srv.jmap = front.HTTPServer(settings.JMAP.Addr)
+	srv.jmapFront = front
 
 	return nil
 }

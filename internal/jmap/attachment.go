@@ -212,6 +212,16 @@ type unreadableSet struct {
 	mu   sync.Mutex
 	seen map[string]time.Time // guid -> when it failed
 	once map[string]bool      // logged at warning level already
+	now  func() time.Time     // the clock; nil is time.Now
+}
+
+// clock is the time now.
+func (u *unreadableSet) clock() time.Time {
+	if u.now != nil {
+		return u.now()
+	}
+
+	return time.Now()
 }
 
 // recent reports whether the message failed within the TTL.
@@ -221,7 +231,7 @@ func (u *unreadableSet) recent(guid string) bool {
 
 	at, ok := u.seen[guid]
 
-	return ok && time.Since(at) < unreadableTTL
+	return ok && u.clock().Sub(at) < unreadableTTL
 }
 
 // note records a failure; the first one of a message is a warning, the
@@ -233,7 +243,7 @@ func (u *unreadableSet) note(log *slog.Logger, guid string, err error) {
 		u.seen, u.once = map[string]time.Time{}, map[string]bool{}
 	}
 
-	u.seen[guid] = time.Now()
+	u.seen[guid] = u.clock()
 	first := !u.once[guid]
 	u.once[guid] = true
 
@@ -265,12 +275,27 @@ func (s *Server) backfill(namespace string) {
 		return
 	}
 
+	s.fillMu.Lock()
+	defer s.fillMu.Unlock()
+
+	if s.fillCtx.Err() != nil { // shutting down
+		<-s.fillSlots
+		s.fills.Delete(namespace)
+
+		return
+	}
+
 	s.fillWG.Add(1)
 
 	go func() {
 		defer s.fillWG.Done()
 		defer s.fills.Delete(namespace)
 		defer func() { <-s.fillSlots }()
+		defer func() {
+			if r := recover(); r != nil {
+				s.o.Log.Error("jmap: hasAttachment fill failed", "namespace", namespace, "panic", r)
+			}
+		}()
 
 		s.runBackfill(namespace)
 	}()
@@ -294,7 +319,26 @@ func (s *Server) runBackfill(namespace string) {
 
 	s.o.Log.Info("jmap: hasAttachment filled", "namespace", namespace, "messages", rep.Messages,
 		"known", rep.Known, "computed", rep.Computed, "unreadable", rep.Unreadable, "failed", rep.Failed,
+		"skipped_mailboxes", rep.SkippedMailboxes, "errors", rep.Errors,
 		"duration_ms", time.Since(start).Milliseconds(), "err", err)
+}
+
+// rememberLearned writes what an Email/get parsed of older records to the
+// locator, so that the next call does not parse them again.
+func rememberLearned(sess *session, learned map[string]attcache.Value) {
+	if len(learned) == 0 {
+		return
+	}
+
+	ix, ok := sess.user.(model.Index)
+	if !ok {
+		return
+	}
+
+	if err := attcache.Remember(ix, learned); err != nil {
+		// Only a cache: the next call parses the messages again.
+		sess.log.Warn("jmap: hasAttachment not remembered", "err", err)
+	}
 }
 
 // attachmentsOf looks up the remembered hasAttachment of the messages of

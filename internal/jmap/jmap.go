@@ -289,6 +289,9 @@ type Server struct {
 	fillWG     sync.WaitGroup
 	fillCtx    context.Context
 	fillCancel context.CancelFunc
+	// fillMu orders starting a fill against Close: no fill is added to
+	// fillWG once Close waits for it.
+	fillMu sync.Mutex
 	// unreadable are the messages a query could not read lately.
 	unreadable unreadableSet
 }
@@ -431,11 +434,32 @@ func (s *Server) HTTPServer(addr string) *http.Server {
 	return srv
 }
 
-// Close ends the open event sources and the background fills.
+// fillStopWait is how long Close waits for the background fills to end.
+const fillStopWait = 10 * time.Second
+
+// Close ends the open event sources and the background fills, and waits
+// for the fills: the store may be closed after Close returns. A second
+// call waits for the first.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closing)
+
+		s.fillMu.Lock()
 		s.fillCancel()
+		s.fillMu.Unlock()
+
+		done := make(chan struct{})
+
+		go func() {
+			s.fillWG.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(fillStopWait):
+			s.o.Log.Warn("jmap: background fills still running at shutdown")
+		}
 	})
 }
 

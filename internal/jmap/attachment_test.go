@@ -2,8 +2,12 @@ package jmap
 
 import (
 	"errors"
+	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
@@ -29,6 +33,10 @@ type legacyStore struct {
 	mu       sync.Mutex
 	reads    int
 	failRead bool
+	// gate, when set, holds every read until it is closed; entered gets
+	// a value when a read starts waiting, if anyone listens.
+	gate    chan struct{}
+	entered chan struct{}
 }
 
 func (s *legacyStore) User(name string) (model.User, error) {
@@ -77,8 +85,17 @@ func (u *legacyUser) GetMessages(id string, uids []uint32) ([]model.Meta, error)
 func (u *legacyUser) Read(m *model.Meta) ([]byte, error) {
 	u.s.mu.Lock()
 	u.s.reads++
-	fail := u.s.failRead
+	fail, gate, entered := u.s.failRead, u.s.gate, u.s.entered
 	u.s.mu.Unlock()
+
+	if gate != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+
+		<-gate
+	}
 
 	if fail {
 		return nil, errors.New("no blob")
@@ -284,5 +301,141 @@ func TestEmailGetHasAttachmentRemembered(t *testing.T) {
 
 	if got := getEmail(t, s, pdf.GUID, `["hasAttachment"]`)[propHasAttachment]; got != true {
 		t.Errorf("hasAttachment is %v with the message unreadable, want true from the locator", got)
+	}
+}
+
+// TestEmailGetRemembersParsed: Email/get remembers what it parsed of an
+// older record, and the next call answers without the message.
+func TestEmailGetRemembersParsed(t *testing.T) {
+	s, store, pdf := legacyServer(t, 1000)
+
+	if got := getEmail(t, s, pdf.GUID, `["hasAttachment"]`)[propHasAttachment]; got != true {
+		t.Fatalf("hasAttachment is %v", got)
+	}
+
+	store.mu.Lock()
+	store.failRead = true
+	store.mu.Unlock()
+
+	if got := getEmail(t, s, pdf.GUID, `["hasAttachment"]`)[propHasAttachment]; got != true {
+		t.Errorf("the second Email/get gave %v with the message unreadable", got)
+	}
+
+	if store.readCount() != 1 {
+		t.Errorf("Email/get read the message %d times, want once", store.readCount())
+	}
+}
+
+// gatedServer is a legacy server whose reads wait at a gate.
+func gatedServer(t *testing.T, slots int) (*Server, *legacyStore) {
+	t.Helper()
+
+	inner := memstore.New()
+	store := &legacyStore{inner: inner, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	s := newTestServer(t, func(o *Options) {
+		o.Store = store
+		o.Limits.AttachmentBackfills = slots
+	})
+
+	for _, name := range []string{"test", "other"} {
+		u, _ := inner.User(name)
+		if err := u.CreateMailbox(inboxName, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		for h := 1; h <= 3; h++ {
+			deliverAt(t, u, inboxName, rawPlain, h)
+		}
+	}
+
+	return s, store
+}
+
+// fillRunning reports whether a fill of the namespace is running.
+func fillRunning(s *Server, namespace string) bool {
+	_, ok := s.fills.Load(namespace)
+
+	return ok
+}
+
+// TestBackfillSingleFlightAndSlots: a second request for a namespace
+// being filled starts nothing, a namespace that finds no free slot is not
+// filled, and Close stops a running fill and waits for it.
+func TestBackfillSingleFlightAndSlots(t *testing.T) {
+	s, store := gatedServer(t, 1)
+
+	s.backfill("test")
+	<-store.entered
+
+	s.backfill("test")  // the same namespace: already running
+	s.backfill("other") // no free slot
+
+	if !fillRunning(s, "test") || fillRunning(s, "other") {
+		t.Fatal("the fills running are not the one that was started")
+	}
+
+	closed := make(chan struct{})
+
+	go func() {
+		s.Close()
+		close(closed)
+	}()
+
+	for s.fillCtx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a fill was still reading")
+	default:
+	}
+
+	close(store.gate)
+	<-closed
+
+	if fillRunning(s, "test") || store.readCount() != 1 {
+		t.Errorf("after Close: running %v, %d reads (want the fill stopped after one)", fillRunning(s, "test"), store.readCount())
+	}
+
+	s.backfill("other") // after Close nothing starts
+
+	if fillRunning(s, "other") {
+		t.Error("a fill started after Close")
+	}
+}
+
+// TestUnreadableSet: a failure is remembered for the TTL, logged once at
+// warning level, and the set starts over when it is full.
+func TestUnreadableSet(t *testing.T) {
+	var buf strings.Builder
+
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	u := &unreadableSet{now: func() time.Time { return now }}
+
+	u.note(log, "g1", errors.New("boom"))
+	u.note(log, "g1", errors.New("boom"))
+
+	if strings.Count(buf.String(), "level=WARN") != 1 || strings.Count(buf.String(), "level=DEBUG") != 1 {
+		t.Errorf("logged:\n%s", buf.String())
+	}
+
+	if !u.recent("g1") || u.recent("g2") {
+		t.Error("recent does not name the failed message alone")
+	}
+
+	now = now.Add(unreadableTTL)
+
+	if u.recent("g1") {
+		t.Error("a failure is remembered past the TTL")
+	}
+
+	for i := 0; i < maxUnreadable; i++ {
+		u.note(slog.New(slog.DiscardHandler), strconv.Itoa(i), errors.New("x"))
+	}
+
+	if len(u.seen) != 1 {
+		t.Errorf("a full set kept %d entries, want a fresh start", len(u.seen))
 	}
 }
