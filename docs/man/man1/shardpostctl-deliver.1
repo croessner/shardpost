@@ -110,11 +110,17 @@ so an MTA can act on them:
 .B 0
 Delivered (or deliberately discarded by Sieve).
 .TP
+.B 64
+Usage error, or the server refused the request as malformed.
+.TP
 .B 67
 No such recipient or mailbox.
 .TP
 .B 69
 The message was rejected by Sieve or is too large.
+.TP
+.B 70
+The server sent an answer the client did not understand.
 .TP
 .B 73
 Over quota.

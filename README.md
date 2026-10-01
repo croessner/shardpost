@@ -18,6 +18,7 @@ deliberately stable metric families.
 | You want to … | Document |
 |---|---|
 | understand the system as a whole | [Architecture with system and component sketches](ARCHITECTURE.md) |
+| see which protocols, extensions and RFCs are supported | [Protocols, features and RFCs](docs/protocols.md) |
 | change and test the code | [Developer guide](docs/development/README.md) |
 | trace interfaces and flows | [UML, states and sequences](docs/architecture/runtime.md) |
 | understand storage, concurrency and error handling | [RADOS data model and consistency](docs/architecture/storage.md) |

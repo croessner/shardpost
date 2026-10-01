@@ -22,6 +22,7 @@ are documented as [manual pages](man/README.md).
 | Document | Contents |
 |---|---|
 | [Architecture](../ARCHITECTURE.md) | System boundaries, components, deployment, impact of outages |
+| [Protocols, features and RFCs](protocols.md) | Per-protocol reference: capabilities, commands, methods, limits, deviations, RFC index |
 | [Runtime and UML](architecture/runtime.md) | Go interfaces, login, delivery, IMAP states |
 | [RADOS storage](architecture/storage.md) | Object layout, CAS, shards, intents, references, repair |
 | [Developer guide](development/README.md) | Code map, build, tests, change paths, vendor fork |
