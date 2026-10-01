@@ -380,7 +380,7 @@ var defaults = []struct {
 	{"tls.cert", ""},
 	{"tls.key", ""},
 	{"tls.reload_seconds", 60},
-	{"server.insecure_auth", true},
+	{"server.insecure_auth", false},
 	{"server.max_conns_per_ip", 0},
 	{"server.max_conns_per_user", 0},
 	{"server.quota_self_service", false},

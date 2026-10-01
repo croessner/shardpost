@@ -50,6 +50,11 @@ telemetry:
   sample_ratio: 0.1
 ```
 
+`server.insecure_auth` (default `false`) decides whether IMAP, POP3,
+ManageSieve and LMTP accept authentication on a connection without TLS.
+Turn it on only for an isolated test profile; JMAP has its own switch,
+`jmap.insecure_auth` (default `false`).
+
 The `rook` section applies only while `ceph.key` is empty: the server then
 reads the key and, if `ceph.mon_host` is empty, the monitor list from the
 Rook-managed secret and ConfigMap through the Kubernetes API and follows key
