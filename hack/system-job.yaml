@@ -1,0 +1,94 @@
+# One run of a system tool (shardpost-system(1); docs/operations/README.md,
+# "Moving the store-wide state"): "shardpost system init|migrate|verify|
+# abort|revert|cleanup|status" with the server's image, ServiceAccount and
+# Ceph credentials. Edit "args" to the command of the step at hand; the
+# tools never register in the admin store and need no running server.
+#
+# CEPH_SYSTEM_POOL stays empty here, also after the migration: the tools
+# take the system pool from --pool/--to or from the fence in the index
+# pool, and refuse a ceph.system_pool that names another pool than the
+# command. CEPH_INDEX_POOL and CEPH_DATA_POOL are the production pools.
+#
+#   kubectl --context croessner -n shardpost delete job shardpost-system --ignore-not-found
+#   kubectl --context croessner -n shardpost apply -f hack/system-job.yaml
+#   kubectl --context croessner -n shardpost wait --for=condition=complete --timeout=30m job/shardpost-system \
+#     || kubectl --context croessner -n shardpost wait --for=condition=failed --timeout=1s job/shardpost-system
+#   kubectl --context croessner -n shardpost logs job/shardpost-system | sed -n '/^{$/,/^}$/p' > system-report.json
+#   kubectl --context croessner -n shardpost get pod -l job-name=shardpost-system \
+#     -o jsonpath='{.items[0].status.containerStatuses[0].state.terminated.exitCode}'
+#
+# The exit code tells the outcome: 0 done, 1 an error (run it again to
+# continue), 2 a precondition does not hold (the report names it; nothing
+# was changed that the next run cannot take up), 3 a check found the
+# pools different from what they must be. The report is the JSON object
+# on standard output; the log lines are on standard error.
+#
+# Never suspend or pause this Job while it runs: a tool that is stopped
+# can still send operations it prepared once it wakes up. Delete it
+# (SIGTERM: the tool stops writing and gives its lease up) and apply it
+# again to continue. Use --wait only when the Job or pod of the tool that
+# holds the lease is gone (kubectl get pod -l job-name=shardpost-system).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shardpost-system
+  namespace: shardpost
+  labels:
+    app.kubernetes.io/name: shardpost-system
+spec:
+  backoffLimit: 0 # every run is started by hand, after reading the last report
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shardpost-system
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 120 # time to stop writing and give the lease up
+      serviceAccountName: shardpost-server # reads the Rook secret of client.shardpost
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 167
+        runAsGroup: 167
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: system
+          # The release with the system tools (0.48.0 or later); pin it by
+          # digest like the overlays.
+          image: docker.io/chrroessner/shardpost:0.48.0
+          args: ["system", "migrate", "--to", "shardpost-system", "--check"]
+          env:
+            - name: CEPH_USER
+              value: shardpost
+            - name: CEPH_INDEX_POOL
+              value: shardpost-index
+            - name: CEPH_DATA_POOL
+              value: shardpost-data
+            - name: CEPH_SYSTEM_POOL
+              value: "" # see above: the tools find the system pool themselves
+            - name: ROOK_NAMESPACE
+              value: rook-ceph
+            - name: LOG_LEVEL
+              value: info
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              memory: 2Gi # the listing of the index pool is held in memory
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

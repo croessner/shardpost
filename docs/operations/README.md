@@ -97,7 +97,7 @@ needs every account back on layout 2 of the full-text index (see
 safe while `ceph.system_pool` is empty and no system init or migration
 ran; after one, no image before 0.47.0 may run against the cluster (it
 neither knows the fence nor the system pool), and the way back is a
-revert of the placement (see [Pools](#pools)).
+revert of the placement (see [Taking it back](#taking-it-back)).
 
 A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
@@ -775,11 +775,11 @@ The system pool is prepared by the manifests but not used while
 stays in the index pool as before 0.47.0). The cephx caps of the
 `CephClient` include it already: they must allow the pool before any
 process runs with `ceph.system_pool`. A cluster is switched only with
-the system tools, which follow in the next release: `shardpost system
-init --pool <pool>` for a new cluster, `shardpost system migrate --to
-<pool>` (in a maintenance window) for an existing one. Until then a
-system pool is used by the bench alone (`--system-pool`, see
-[Bench](bench.md)).
+the system tools (0.48.0): `shardpost system init --pool <pool>` for a
+new cluster, `shardpost system migrate --to <pool>` in a maintenance
+window for an existing one (see
+[Moving the store-wide state](#moving-the-store-wide-state)). The bench
+uses a system pool of its own (`--system-pool`, see [Bench](bench.md)).
 
 What a process says about the placement (see
 [Storage: placement](../architecture/storage.md#system-pool-and-placement)):
@@ -840,6 +840,266 @@ nothing lists from the first start.
 default 100 MiB): a pod that is full waits in its own client, unseen by
 Ceph. `imapceph_rados_inflight_ops` shows the timed operations in flight
 of a process.
+
+## Moving the store-wide state
+
+The system tools ([shardpost-system(1)](../man/man1/shardpost-system.1))
+put the store's own namespaces into the system pool and take them back.
+They are commands of the server binary and run as the Job
+[`hack/system-job.yaml`](../../hack/system-job.yaml): the server's image,
+ServiceAccount and Ceph credentials, `CEPH_SYSTEM_POOL` empty (the tools
+take the system pool from `--pool`/`--to` or from the fence and refuse a
+configured one that names another pool). Every run is one Job; each
+prints its report as JSON on standard output and ends with an exit code:
+
+| Exit | Meaning |
+|---|---|
+| 0 | done, or nothing to do |
+| 1 | an error, a lost lease, an interruption: run it again, it continues |
+| 2 | a precondition does not hold (a running process, a lease held by another tool, a target that is not empty, surplus objects, a missing `--confirm`); the report names it |
+| 3 | a check found the pools different from what they must be (a digest, an object that must not be there) |
+
+To run one command, put its arguments into the Job and wait for it.
+With a small helper:
+
+```bash
+# system_job '<JSON args>': one run of the system tools; prints the
+# report and the exit code.
+system_job() {
+  k="kubectl --context croessner -n shardpost"
+  $k delete job shardpost-system --ignore-not-found --wait
+  sed "s|^          args: .*|          args: $1|" hack/system-job.yaml | $k apply -f -
+  until $k get job shardpost-system -o jsonpath='{.status.succeeded}{.status.failed}' | grep -q 1; do sleep 5; done
+  $k logs job/shardpost-system | sed -n '/^{$/,/^}$/p'
+  $k get pod -l job-name=shardpost-system \
+    -o jsonpath='exit {.items[0].status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
+}
+```
+
+Pin the image of `hack/system-job.yaml` to the release that runs the
+cluster (0.48.0 or later, by digest) before the first run.
+
+**The tool lease.** A tool that writes holds a lease in the fence for as
+long as it works: a second one is refused at once (exit 2, naming the
+holder). The holder renews it every 30 s and stops every write once it
+could not for 90 s (exit 1). The lease of a tool that died is taken over
+with `--wait` after its holder was seen idle for three minutes on the
+taker's clock. The lease protects against a tool that crashed, not
+against one that was stopped: a frozen process can send operations it
+prepared once it wakes up. Therefore:
+
+- `--wait` (a takeover) only when the Job or pod of the old holder is
+  known to be gone (`kubectl get pod -l job-name=shardpost-system`);
+- never suspend or pause the Job of a tool; delete it (SIGTERM: the
+  tool stops writing and gives its lease up) and apply it again;
+- run every host with NTP: the lease does not depend on the clocks, but
+  a holder whose last renewal lies more than 30 s ahead of the taker's
+  clock is refused;
+- the tools keep the OSD operation timeout at 60 s or below and refuse
+  `ceph.client_options` that set more.
+
+Fencing the old holder at the OSDs (`ceph osd blocklist add` of its
+client address before a takeover, which needs a mon cap to write for
+the tools' Ceph client) would close the gap of a stopped holder; it is
+an optional hardening for large clusters and not implemented.
+
+### A new cluster
+
+Create the pool (`pools.yaml`, `nodelete`, the caps of the `CephClient`),
+then run `system_job '["system", "init", "--pool", "shardpost-system"]'`
+before any server, and set `CEPH_SYSTEM_POOL` to `shardpost-system` on
+the server, the push worker and the scrub CronJob. A server with
+`ceph.system_pool` on a pool without the init refuses to start, naming
+the command. The init writes the completion markers of the empty
+indexes, so `admin.kv_index: read` and `imapsieve.learning.index: read`
+read without a listing from the first start.
+
+### An existing cluster (croessner)
+
+About ten minutes without service; LMTP deliveries wait in the MTA's
+queue. The steps:
+
+**Before, in normal operation:**
+
+0. Every host runs NTP, also the one the Job runs on. Read the rules of
+   the tool lease above.
+1. 0.47.0 or later runs everywhere: the server, the push worker and the
+   image of the scrub CronJob. Push, scrub and backfills register
+   (`kubectl exec -i deploy/shardpost-server -c server -- shardpostctl
+   server list` shows their roles).
+2. The caps include the system pool, the pool `shardpost-system` is
+   `HEALTH_OK`, `nodelete` is set on all three pools.
+3. The check: `system_job '["system", "migrate", "--to",
+   "shardpost-system", "--check"]'`. Target, probe and locks must pass
+   (exit 0); the running registrations, the push lease and the watchers
+   it reports are expected now.
+
+**In the window:**
+
+1. Suspend the CronJob:
+
+   ```bash
+   kubectl --context croessner -n shardpost patch cronjob shardpost-scrub -p '{"spec":{"suspend":true}}'
+   ```
+
+2. Scale the push worker and the servers to zero and wait until their
+   pods are gone. No bench, backfill or tools process may run either:
+
+   ```bash
+   kubectl --context croessner -n shardpost scale deployment shardpost-push --replicas=0
+   kubectl --context croessner -n shardpost scale deployment shardpost-server --replicas=0
+   kubectl --context croessner -n shardpost wait --for=delete pod -l app.kubernetes.io/name=shardpost-push --timeout=5m
+   kubectl --context croessner -n shardpost wait --for=delete pod -l app.kubernetes.io/name=shardpost-server --timeout=5m
+   kubectl --context croessner -n shardpost get pods
+   ```
+
+3. Migrate, and keep the report:
+
+   ```bash
+   system_job '["system", "migrate", "--to", "shardpost-system"]' | tee migrate-report.json
+   ```
+
+   Exit 2 right after the scale-down is normal: the push worker's lease
+   stays valid for up to 90 s, job leases for up to 60 s, registrations
+   without an orderly end count for up to three minutes. Run it again
+   after 90 s; if it stays at exit 2, look at the holders and watchers
+   the report names. Exit 1: run it again (it continues). Exit 3: stop
+   and take the run back with `abort` (below). Then compare source and
+   copy once more: `system_job '["system", "verify"]'` (exit 0).
+
+4. Switch the configuration: `CEPH_SYSTEM_POOL` to `shardpost-system`
+   for the server, the push worker and the CronJob, as a patch in
+   `deploy/overlays/croessner-nauthilus/kustomization.yaml`:
+
+   ```yaml
+   - patch: |
+       apiVersion: apps/v1
+       kind: Deployment
+       metadata:
+         name: shardpost-server
+       spec:
+         template:
+           spec:
+             containers:
+               - name: server
+                 env:
+                   - name: CEPH_SYSTEM_POOL
+                     value: shardpost-system
+   - patch: |
+       apiVersion: apps/v1
+       kind: Deployment
+       metadata:
+         name: shardpost-push
+         namespace: shardpost
+       spec:
+         template:
+           spec:
+             containers:
+               - name: push
+                 env:
+                   - name: CEPH_SYSTEM_POOL
+                     value: shardpost-system
+   - patch: |
+       apiVersion: batch/v1
+       kind: CronJob
+       metadata:
+         name: shardpost-scrub
+       spec:
+         jobTemplate:
+           spec:
+             template:
+               spec:
+                 containers:
+                   - name: scrub
+                     env:
+                       - name: CEPH_SYSTEM_POOL
+                         value: shardpost-system
+   ```
+
+   ```bash
+   kubectl --context croessner diff -k deploy/overlays/croessner-nauthilus
+   ```
+
+5. Start again: the apply brings the servers and the push worker back to
+   their replicas; then resume the CronJob:
+
+   ```bash
+   make deploy
+   kubectl --context croessner -n shardpost rollout status deployment/shardpost-server --timeout=5m
+   kubectl --context croessner -n shardpost rollout status deployment/shardpost-push --timeout=5m
+   kubectl --context croessner -n shardpost patch cronjob shardpost-scrub -p '{"spec":{"suspend":false}}'
+   ```
+
+6. Smoke test:
+   - `shardpostctl server list`: roles, and the system pool of every
+     registration;
+   - `shardpostctl job list`: the old jobs are there;
+   - `shardpostctl account list`: all 33 accounts;
+   - `shardpostctl fts layout3 status`: the mark and the registrations,
+     from the new pool;
+   - GETMETADATA `""` `/shared/*`: the server entries from `~server`;
+   - a new test account (its first delivery): its directory entry is in
+     the system pool (`rados -p shardpost-system -N '~accounts' ls`
+     grows; `account list` shows it), not in the index pool;
+   - `hack/auth-smoke.sh`, `hack/kvqueue-smoke.sh`,
+     `hack/learning-smoke.sh`;
+   - an LMTP delivery and a JMAP upload;
+   - `system_job '["system", "verify", "--source-only"]'` (exit 0).
+7. A report under `docs/reports/<date>-system-pool-cutover.md`.
+
+**After seven days or more,** once the owner confirmed it, delete the
+quarantine: `system_job '["system", "cleanup", "--run", "<run>",
+"--confirm", "<run>"]'` (the run is in the report and in `system status`).
+The fence and the poisoned heads stay for good.
+
+From the migration on, no image before 0.47.0 may run against the
+cluster: it knows neither the fence nor the system pool. Should one run
+nevertheless, it fails on the poisoned index heads (format 1000) instead
+of reading an empty place, but what it writes as plain records lands at
+the old place, where `verify --source-only` finds it.
+
+### What stays at the old place
+
+After the migration the store's namespaces of the index pool hold the
+fence `~admin/system.moved`, the poisoned index heads the fence lists
+(`heads`, with their digest `fenced_digest`), the sweep's objects under
+`~accounts/sweep/` and, until `cleanup`, the quarantine
+`<namespace>.moved/<run>` (for example `~admin.moved/<run>`) with the
+old objects. `verify --source-only` checks exactly that. Anything else
+there was written by a process that does not know the system pool: find
+out which one before anything else (the object names say what it is:
+`kv.servers/<instance>`, `kv.jmap/push/lease`, …), then delete them with
+`verify --source-only --delete-surplus --confirm <run>`; `abort`,
+`revert` and `cleanup` take the same option and refuse without it.
+
+### Taking it back
+
+- **Before the servers use the system pool** (the check failed, exit 3,
+  or the window has to end): `system_job '["system", "abort", "--run",
+  "<run>"]'`. Before the quarantine (phases M1 to M3) it only reverts the
+  fence. From M4 on it brings the old place back to the digest of M4
+  from the quarantine and the saved heads, retires the mark and reverts
+  the fence; it refuses a system pool that changed since M4 (use
+  `revert`). The quarantine is kept until `cleanup` (after its minimum
+  age) or the next run. An abort that stopped continues when run again.
+  Run on a run it aborted before, it checks the old place against the
+  digest of M4 again and repairs it from the quarantine; `cleanup`
+  refuses to delete that quarantine while the old place differs.
+  `--delete-copies --confirm <run>` also deletes the copies in the
+  system pool (the run state and the mark stay as the record of the
+  run); otherwise the next run deletes them when its `--confirm` names
+  this run, together with the quarantine. Then start the processes without `CEPH_SYSTEM_POOL`.
+- **After the switch**, in a maintenance window like the migration:
+  stop every process, then `system_job '["system", "revert", "--run",
+  "<run>", "--confirm", "<run>"]'`. The system pool is the truth: its
+  content is copied back, the poisoned heads overwritten, the index pool
+  checked against it, the quarantine deleted, the mark retired, the fence
+  reverted. Then clear `CEPH_SYSTEM_POOL` everywhere and start again. A
+  revert that stopped continues when run again. A native init is
+  reverted the same way.
+- **A new run after `abort` or `revert`** finds the copies of the old
+  one in the system pool and refuses until `--confirm <old run>` names
+  it; it then deletes them and the old quarantine.
 
 ## Measuring the cost per account
 

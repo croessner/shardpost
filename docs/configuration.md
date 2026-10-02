@@ -116,9 +116,15 @@ server or push worker that cannot read at startup starts in the state
 server, the push worker and the scrub CronJob together. The Kubernetes
 manifests set `CEPH_SYSTEM_POOL` (empty until the migration), and an
 environment variable that is set wins over the file even when it is
-empty: change it in the manifests, not in `server.yaml`.
+empty: change it in the manifests, not in `server.yaml`. The system
+tools themselves (`shardpost system …`) do not check the placement and
+take the system pool from their options or from the fence; they run
+with the key empty and refuse a value that names another pool. They also
+refuse a `ceph.client_options` with `rados_osd_op_timeout` above 60 and
+raise the objecter throttles for their parallel copies
+([shardpost-system(1)](man/man1/shardpost-system.1)).
 See [Storage: placement](architecture/storage.md#system-pool-and-placement)
-and [Operations](operations/README.md#pools).
+and [Operations](operations/README.md#moving-the-store-wide-state).
 
 ```yaml
 ceph:

@@ -140,7 +140,7 @@ const (
 // fenceKeys are the omap keys of the fence (with those a migration
 // writes).
 var fenceKeys = []string{pkState, pkToID, pkToName, pkIndexID, pkFSID, pkRun, pkAt, pkBy,
-	"direction", "fenced_digest", "heads", "cleaned_at", keyToolInstance, keyToolEpoch, keyToolSeen}
+	"direction", "fenced_digest", "heads", "cleaned_at", "cleaning_at", keyToolInstance, keyToolEpoch, keyToolSeen}
 
 // Mark is the mark as read (Exists false: there is none).
 type Mark struct {
@@ -332,6 +332,10 @@ func decideFence(v placementView, f Fence, m Mark) (string, error) {
 	return PlacementNative, nil
 }
 
+// authFlushOID is the auth flush log of the admin namespace
+// (internal/auth/flush.go), which every server watches.
+const authFlushOID = "auth-flush"
+
 // probeObjects are the objects of the index pool (namespace, object)
 // whose presence shows the system state of an existing cluster there:
 // stats only, never a listing.
@@ -339,7 +343,7 @@ var probeObjects = [][2]string{
 	{model.AccountsNamespace, "ix.accounts/head"},
 	{model.AdminNamespace, "ix.job/head"},
 	{model.AdminNamespace, "ix.jobs/claimable/head"},
-	{model.AdminNamespace, "auth-flush"},
+	{model.AdminNamespace, authFlushOID},
 	{model.LearningNamespace, "ix.learning/head"},
 	{model.AdminNamespace, "kv." + model.FTSLayoutMarkKey},
 }

@@ -1,0 +1,510 @@
+.TH SHARDPOST-SYSTEM 1 "2026-10-02" "ShardPost 0.48.0" "ShardPost Manual"
+.SH NAME
+shardpost-system \- place the store-wide state in a system pool, check it, take it back
+.SH SYNOPSIS
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system status
+.RB [ \-\-deep ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system init \-\-pool
+.I pool
+.RB [ \-\-confirm
+.IR run ]
+.RB [ \-\-wait ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system migrate \-\-to
+.I pool
+.RB [ \-\-check ]
+.RB [ \-\-parallel
+.IR n ]
+.RB [ \-\-force\-registrations ]
+.RB [ \-\-confirm
+.IR run ]
+.RB [ \-\-wait ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system verify
+.RB [ \-\-source\-only
+.RB [ \-\-delete\-surplus
+.B \-\-confirm
+.IR run ]]
+.RB [ \-\-parallel
+.IR n ]
+.RB [ \-\-wait ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system abort \-\-run
+.I run
+.RB [ \-\-delete\-copies ]
+.RB [ \-\-delete\-surplus ]
+.RB [ \-\-confirm
+.IR run ]
+.RB [ \-\-parallel
+.IR n ]
+.RB [ \-\-wait ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system revert \-\-run
+.I run
+.B \-\-confirm
+.I run
+.RB [ \-\-delete\-surplus ]
+.RB [ \-\-parallel
+.IR n ]
+.RB [ \-\-wait ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B system cleanup \-\-run
+.I run
+.B \-\-confirm
+.I run
+.RB [ \-\-min\-age
+.IR duration ]
+.RB [ \-\-delete\-surplus ]
+.RB [ \-\-parallel
+.IR n ]
+.RB [ \-\-wait ]
+.SH DESCRIPTION
+The store's own namespaces
+.RB ( ~admin :
+admin store, jobs, registrations, auth flush log, queues;
+.BR ~accounts :
+account directory and its queues;
+.BR ~learning :
+the indexes of the learning queue;
+.BR ~server :
+server metadata) live in the index pool, or, with
+.IR ceph.system_pool ,
+in a replicated pool of their own. These commands of the server binary
+put them there and take them back. They talk to the pools directly
+with the server's configuration and Ceph credentials, need no running
+server and no admin socket, and run in a Kubernetes Job of their own
+.RB ( hack/system\-job.yaml ).
+They never register in the admin store. Each prints a report as JSON on
+standard output; the log goes to standard error.
+.PP
+Which pool holds the state is decided by two objects, not by the
+configuration: the fence
+.B ~admin/system.moved
+in the index pool and the mark
+.B ~admin/system.pool
+in the system pool, both naming the pools by id and the cluster by
+fsid. A server whose
+.I ceph.system_pool
+does not match them refuses to start, and one that runs ends within a
+minute once they change (see
+.BR docs/architecture/storage.md ,
+"System pool and placement").
+.PP
+The commands that write hold the
+.I tool lease
+in the fence for as long as they work: a second tool is refused at once,
+naming the holder. The lease is renewed every 30 seconds; a tool that
+could not renew it for 90 seconds stops every write at once and ends
+with exit code 1 (running it again continues). A lease whose holder
+died is taken over with
+.B \-\-wait
+once its holder was seen idle for three minutes on the taker's own
+clock; use that only when the Job or pod of the old holder is known to
+be gone, since a tool that was stopped (SIGSTOP, a frozen container) can
+still send operations it prepared once it wakes up. Never pause the Job
+of a tool. A lease whose last renewal lies more than 30 seconds ahead of
+the taker's clock is refused: run every host with NTP. The tools run
+with an OSD operation timeout of at most 60 seconds and refuse a
+.I ceph.client_options
+that sets more.
+.PP
+Every write command is resumable: run it again after an error, a crash
+or a deleted Job, and it continues where it stopped. Destructive steps
+need the run they belong to named with
+.BR \-\-confirm .
+.SS status
+Shows the fence, the mark, the run state of a migration and the
+registrations of the processes in the admin store (in the system pool
+once the fence says so). With
+.B \-\-deep
+it also counts the objects of the store's namespaces in both pools and
+of every quarantine (it lists the pools). It only reads.
+.SS init
+Initializes the system pool of a new cluster:
+.I pool
+must be replicated and empty, and the index pool must hold nothing of
+the store's own namespaces (else the cluster exists: migrate it). The
+init creates the fence, writes the completion markers of the backfills
+into the empty indexes (so that the admin store and the learning queue
+read without a listing from the first start), writes the mark (the
+commit) and sets the fence to
+.BR native .
+An init that ran before ends at once without writing. With
+.B \-\-confirm
+.I run
+it deletes the content of an earlier run in the system pool (a retired
+mark and its copies, the run state of an aborted migration, the heads of
+an aborted init) and that run's quarantine. Then set
+.I ceph.system_pool
+on the server, the push worker and the scrub CronJob.
+.SS migrate
+Moves the store's own namespaces of an existing cluster into the system
+pool
+.IR pool ,
+in a maintenance window with every server, push worker, scrub, backfill
+and sweep stopped. The phases, recorded in the run state
+.B ~admin/system.migrate
+of the system pool:
+.TP
+.B M0
+the preconditions, after the lease was taken: the target is a pool of
+its own, keeps omap (a probe) and holds nothing but this run's work (or,
+confirmed, an earlier run's copies, which are deleted with that run's
+quarantine after the fence is set); no registration of a process that
+runs (seen within three minutes and not stopped), no valid lease of the
+push worker or of a running job, no held lock, no watcher on the objects
+every server watches
+.RB ( auth\-flush ,
+.BR ix.jobs/claimable/00 ,
+.BR ix.learning/00 ,
+.BR ix.submission/00 ;
+each notified with a 2 second timeout).
+.TP
+.B M1
+the fence becomes
+.B migrating
+(servers refuse from here on), the run state is created.
+.TP
+.B M2
+one listing of the index pool: the source.
+.TP
+.B M3
+the copy, in chunks of 4 MiB, with the xattrs (not the lock state) and
+the omap, and a SHA-256 digest per object (not repeated once M4 is
+done; a copy that stopped half way is replaced).
+.TP
+.B M4
+the target holds exactly the source, both match the digests.
+.TP
+.B M5
+the old objects move into the quarantine
+.IB ns .moved/ run
+of the index pool, each copy checked before its original goes; every
+old index head is saved in the run state and poisoned (format 1000), so
+that a server before 0.47.0 fails on it instead of reading an empty
+place.
+.TP
+.B M6
+the mark: the commit.
+.TP
+.B M7
+the fence becomes
+.BR done ;
+the report goes into the run state.
+.PP
+A migration that ended is a no-op that prints its report again.
+.B \-\-check
+runs M0 without the lease and writes nothing but the probe: registrations,
+leases and watchers are reported, not refused (the check before the
+processes are stopped); a held lock or a target that is not empty still
+refuses.
+.SS verify
+Without
+.BR \-\-source\-only :
+compares the source of the migration (the old place, the quarantine, the
+saved heads) with the copy in the system pool, object by object. Run it
+before the servers use the system pool; once they write there, use
+.BR \-\-source\-only .
+With
+.BR \-\-source\-only :
+checks the old place after a migration: the store's namespaces of the
+index pool may hold the fence, the poisoned heads (unchanged, by the
+digest of M5) and anything under
+.B ~accounts/sweep/
+(the sweep stays in the index pool), nothing else; the quarantine must
+have the digest of M4 until
+.B cleanup
+deleted it. Anything else is a surplus object, written by a process that
+does not know the system pool; find out which one, then delete them with
+.B \-\-delete\-surplus \-\-confirm
+.I run
+(under the lease).
+.SS abort
+Takes a migration (or an init) back before the servers use the system
+pool. The first call records the phase it found; a later call
+continues by it. Before M4: only the fence becomes
+.BR reverted .
+From M4 on: the system pool must still have the digest of M4 (else a
+server used it: use
+.BR revert );
+the quarantine is copied back to the original names, the heads get
+their saved values, surplus objects at the old place refuse (or are
+deleted with
+.B \-\-delete\-surplus
+and
+.BR \-\-confirm ),
+the old place is checked against the digest of M4, the mark is retired
+and the fence becomes
+.BR reverted .
+The quarantine is kept: delete it with
+.B cleanup
+after the minimum age, or with the next run's
+.BR \-\-confirm .
+An abort of a run that is aborted already checks the old place against
+the digest of M4 again and repairs it from the quarantine (a late write
+of a tool that was stopped);
+.B cleanup
+refuses to delete the quarantine while the old place differs.
+.B \-\-delete\-copies
+with
+.B \-\-confirm
+also deletes the copies in the system pool, after the fence is reverted
+(run it again with the same options if it stopped there); the run state
+and the mark stay as the record of the run. Else the next run deletes
+the copies when its
+.B \-\-confirm
+names this run.
+.SS revert
+Takes a committed migration or init back, in a maintenance window: the
+system pool is the truth. With every process stopped (the checks of M0,
+on the system pool), the fence becomes
+.B migrating
+in the direction
+.BR revert ,
+every object of the system pool (but the placement objects) is copied
+to its name in the index pool, overwriting what differs, the poisoned
+heads included; objects of the index pool that the system pool does not
+have refuse until
+.B \-\-delete\-surplus
+deletes them; the index pool is checked against a fresh digest of the
+system pool, the quarantine is deleted, the mark retired and the fence
+set to
+.BR reverted .
+Then clear
+.I ceph.system_pool
+everywhere. The copies stay in the system pool, retired, until a new
+init or migration deletes them.
+.SS cleanup
+Deletes the quarantine of a migration once its fence is
+.BR done ,
+its mark active, the run at least
+.B \-\-min\-age
+old and the old place checks out as with
+.BR "verify \-\-source\-only" .
+The fence and the poisoned heads stay for good; the fence records
+.BR cleaned_at ,
+and from then on
+.B verify \-\-source\-only
+expects no quarantine. It also takes an aborted run (fence
+.BR reverted )
+and deletes only its quarantine.
+.SH OPTIONS
+.TP
+.BI \-\-config " file"
+The server configuration (default: the environment variable
+.BR SHARDPOST_CONFIG ).
+.IR ceph.index_pool ,
+.IR ceph.data_pool ,
+.I ceph.user
+and the Rook secret apply as for a server.
+.I ceph.system_pool
+should be empty (the tools take the system pool from
+.BR \-\-pool ,
+.B \-\-to
+or the fence); a value that names another pool than the command is
+refused.
+.TP
+.BI \-\-pool " pool"
+.RB ( init )
+The system pool to initialize.
+.TP
+.BI \-\-to " pool"
+.RB ( migrate )
+The system pool to migrate into.
+.TP
+.BI \-\-run " run"
+.RB ( abort ,
+.BR revert ,
+.BR cleanup )
+The run to work on, as
+.B status
+shows it (the fence's
+.BR run ).
+.TP
+.BI \-\-confirm " run"
+Confirms a destructive step by naming the run it belongs to: deleting an
+earlier run's copies and quarantine
+.RB ( init ,
+.BR migrate ),
+surplus objects or copies
+.RB ( verify ,
+.BR abort ),
+a revert or a cleanup (required for both).
+.TP
+.B \-\-check
+.RB ( migrate )
+Only the preconditions, reporting running processes instead of refusing
+them.
+.TP
+.BI \-\-parallel " n"
+Objects copied or hashed at a time (16; 1 to 64, other values are
+refused; not for
+.B status
+and
+.BR init ). The tool raises the
+objecter throttles of its connection to let them start
+.RI ( objecter_inflight_ops
+at least 4 per worker,
+.I objecter_inflight_op_bytes
+at least 4 MiB per worker) unless
+.I ceph.client_options
+sets them; values set there that are too small are refused.
+.TP
+.B \-\-force\-registrations
+.RB ( migrate )
+Ignore registrations of processes that seem to run. Only for processes
+known to be dead (a pod killed without its orderly end); the report and
+the log
+.RB ( event=system_force_registration )
+name every registration ignored.
+.TP
+.B \-\-source\-only
+.RB ( verify )
+Check the old place after the migration.
+.TP
+.B \-\-delete\-surplus
+.RB ( verify
+with
+.BR \-\-source\-only ,
+.BR abort ,
+.BR revert ,
+.BR cleanup )
+Delete the surplus objects at the old place (with
+.BR \-\-confirm ).
+.TP
+.B \-\-delete\-copies
+.RB ( abort )
+Delete the copies in the system pool (with
+.BR \-\-confirm ).
+.TP
+.BI \-\-min\-age " duration"
+.RB ( cleanup )
+How long ago the run must have ended (168h).
+.TP
+.B \-\-deep
+.RB ( status )
+Count the objects of both pools.
+.TP
+.B \-\-wait
+Take over the lease of another tool once it was seen idle for three
+minutes. Only when that tool's Job or pod is known to be gone.
+.SH ROLES
+None: the commands use the Ceph credentials of the server
+.RB ( client.shardpost
+in the manifests), not the admin API. Its caps must include the system
+pool.
+.SH EXIT STATUS
+.TP
+.B 0
+Done (also: nothing to do).
+.TP
+.B 1
+An error, a lost lease or an interruption; run the command again to
+continue.
+.TP
+.B 2
+Usage, or a precondition that does not hold: a running process, a lease
+held by another tool, a target that is not empty, surplus objects
+without
+.BR \-\-delete\-surplus ,
+a missing
+.BR \-\-confirm .
+The report names it; nothing was changed that the next run cannot take
+up. Right after the processes were stopped this is normal: the push
+worker's lease is valid for up to 90 seconds, job leases for up to 60,
+registrations without an orderly end for up to three minutes. Run it
+again after 90 seconds.
+.TP
+.B 3
+A check found the pools different from what they must be: a digest that
+does not match, an object that must not be there. Nothing is
+overwritten that must not be.
+.SH EXAMPLES
+The check in normal operation, before the maintenance window:
+.PP
+.RS
+.nf
+shardpost system migrate \-\-to shardpost\-system \-\-check
+.fi
+.RE
+.PP
+The migration, with every process stopped; the run id is in the report
+.RB ( run ):
+.PP
+.RS
+.nf
+shardpost system migrate \-\-to shardpost\-system
+shardpost system verify
+.fi
+.RE
+.PP
+After the servers run with
+.IR ceph.system_pool :
+.PP
+.RS
+.nf
+shardpost system verify \-\-source\-only
+shardpost system status
+.fi
+.RE
+.PP
+Seven days later, the quarantine:
+.PP
+.RS
+.nf
+shardpost system cleanup \-\-run 4f2a9c1e07b3 \-\-confirm 4f2a9c1e07b3
+.fi
+.RE
+.PP
+A migration that failed its checks, taken back before the servers
+started:
+.PP
+.RS
+.nf
+shardpost system abort \-\-run 4f2a9c1e07b3
+.fi
+.RE
+.PP
+Back to the index pool after the switch, with the processes stopped:
+.PP
+.RS
+.nf
+shardpost system revert \-\-run 4f2a9c1e07b3 \-\-confirm 4f2a9c1e07b3
+.fi
+.RE
+.PP
+A new cluster:
+.PP
+.RS
+.nf
+shardpost system init \-\-pool shardpost\-system
+.fi
+.RE
+.SH SEE ALSO
+.BR shardpost\-scrub (1),
+.BR shardpost\-bench (1),
+.BR shardpostctl\-server (1),
+.BR docs/operations/README.md ,
+.B docs/architecture/storage.md

@@ -81,6 +81,11 @@ func main() {
 		os.Exit(runBench(pre, args))
 	}
 
+	// "system" (the placement tools) likewise.
+	if pre, args, ok := splitSystem(os.Args[1:]); ok {
+		os.Exit(runSystem(pre, args))
+	}
+
 	log := logging.New(os.Stdout, "info")
 
 	settings, command, err := loadConfig(os.Args[1:])

@@ -70,6 +70,11 @@ which placement the cluster has; every process checks it when it opens
 the store, and servers every minute, so pods with different placements
 never run side by side
 ([placement](docs/architecture/storage.md#system-pool-and-placement)).
+`shardpost system init` prepares the system pool of a new cluster,
+`shardpost system migrate` moves the state of an existing one there in
+a maintenance window, with a quarantine of the old objects and
+`abort`/`revert` as the ways back
+([shardpost-system(1)](docs/man/man1/shardpost-system.1)).
 
 | Service port | Listener in the container | Use |
 |---|---|---|
