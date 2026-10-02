@@ -44,6 +44,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [ShardPost 0.47.0](reports/2026-10-02-shardpost-0.47.0.md): system pool routing, fence and mark, registration roles, hotspot fixes (stage B11a).
 - [ShardPost 0.46.0](reports/2026-10-02-shardpost-0.46.0.md): full-text layout 3 is the default (with the cluster mark), fts_dict_convert legacy (stage B14c).
 - [ShardPost 0.45.1](reports/2026-10-02-shardpost-0.45.1.md): layout 3 switched on for all accounts; JMAP 503 with Retry-After for locked accounts.
 - [ShardPost 0.45.0](reports/2026-10-02-shardpost-0.45.0.md): full-text layout 3, off by default (stage B14b); 24 instead of 226 operations per delivery in the bench.

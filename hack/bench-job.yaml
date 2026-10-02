@@ -61,7 +61,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: populate
-          image: docker.io/chrroessner/shardpost:0.46.0@sha256:e6207ae4e273072cb620f5716e59b42036fcff96abdb404cab594fc85cf81eb4
+          image: docker.io/chrroessner/shardpost:0.47.0@sha256:6dfa805f2fe37741b597353d286646661530cf4e4c5ac100da0d9d1e85849e5f
           args: ["bench", "populate",
                  "--index-pool", "shardpost-load-index", "--data-pool", "shardpost-load-data",
                  "--prefix", "bench-", "--accounts", "1000", "--messages", "50", "--parallel", "4"]
@@ -102,7 +102,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: measure
-          image: docker.io/chrroessner/shardpost:0.46.0@sha256:e6207ae4e273072cb620f5716e59b42036fcff96abdb404cab594fc85cf81eb4
+          image: docker.io/chrroessner/shardpost:0.47.0@sha256:6dfa805f2fe37741b597353d286646661530cf4e4c5ac100da0d9d1e85849e5f
           args: ["bench", "measure",
                  "--index-pool", "shardpost-load-index", "--data-pool", "shardpost-load-data",
                  "--prefix", "bench-", "--probe-accounts", "20", "--probe-messages", "10",
