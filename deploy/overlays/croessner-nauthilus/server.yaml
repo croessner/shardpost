@@ -219,3 +219,7 @@ jmap:
     starttls: true
     helo: "shardpost.shardpost.svc.cluster.local"
     address_attributes: "rnsMSRecipientAddress"
+    # Delayed sending (FUTURERELEASE, 0.43.0): up to seven days; every
+    # server runs the worker over the one partition.
+    delayed:
+      max_delay_seconds: 604800
