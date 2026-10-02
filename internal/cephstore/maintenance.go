@@ -193,7 +193,7 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 	// The version marker goes on only when every message is indexed;
 	// until then the rebuild key keeps substring search from trusting
 	// the index, also when the rebuild stops midway (see ftsRebuildKey).
-	token, err := u.startFTSRebuild()
+	token, err := u.startFTSRebuild(len(metas))
 	if err != nil {
 		return fmt.Errorf("index version: %w", err)
 	}
@@ -282,16 +282,26 @@ func (u *User) LegacyFTSDict() (int, error) {
 // keys of the posting shards, so the dictionary is written from them
 // without reading a message, and the objects of the old layout go last.
 // Setting a dictionary key that is already there changes nothing, which
-// is why this needs no lock against deliveries and may be repeated.
+// is why this needs no lock against deliveries and may be repeated. A
+// layout 3 index has no layout 2 dictionary to write: nothing is done
+// (a conversion to layout 3 derives the dictionary itself).
 func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)) (model.FTSDictReport, error) {
 	rep := model.FTSDictReport{Terms: map[string]int64{}}
+
+	switch lay, err := u.readLayout(); {
+	case err != nil:
+		return rep, err
+	case lay != nil && lay.F == model.FTSLayout3:
+		progress(1, 1)
+		return rep, nil
+	}
 
 	flush := func(terms []string) error {
 		if err := fence(); err != nil {
 			return err
 		}
 
-		n, err := u.dictApply(terms, true)
+		n, err := u.dictApplyAt(layout2Loc(u.ftsShards), terms, true)
 		rep.Entries += int64(n)
 
 		return err
@@ -329,11 +339,15 @@ func (u *User) convertShard(oid string, rep *model.FTSDictReport, flush func([]s
 
 	for {
 		more, err := listOmapKeys(u.idx, oid, after, "", omapPageSize, func(key string) {
+			after = key
+			if isMarker(key) {
+				return
+			}
+
 			field, _, _ := strings.Cut(key, ":")
 			rep.Terms[field]++
 
 			terms = append(terms, key)
-			after = key
 		})
 		if err != nil {
 			return fmt.Errorf("fts shard %s: %w", oid, err)

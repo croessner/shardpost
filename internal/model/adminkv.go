@@ -10,13 +10,14 @@ var ErrNotFound = errors.New("not found")
 
 // AccountRecordKeys are the keys of the admin store records that belong
 // to one account ("<prefix><escaped account>"): its JMAP push
-// subscriptions, the state last pushed and its JMAP submissions. A purge
-// of the account deletes them (scaling plan B9); jmap checks that its
-// keys are the ones named here.
+// subscriptions, the state last pushed, its JMAP submissions and the
+// record of the fts_due worker (FTSDueRecordKey). A purge of the account
+// deletes them (scaling plan B9, stage B14b); jmap checks that its keys
+// are among the ones named here.
 func AccountRecordKeys(account string) []string {
 	esc := url.PathEscape(account)
 
-	return []string{"jmap/push/acct/" + esc, "jmap/push/seen/" + esc, "jmap/submission/" + esc}
+	return []string{"jmap/push/acct/" + esc, "jmap/push/seen/" + esc, "jmap/submission/" + esc, FTSDueRecordKey(account)}
 }
 
 // KVEntry is one record of the admin store.

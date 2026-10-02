@@ -181,6 +181,10 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		return err
 	}
 
+	if w := settings.FTS.ShardTargetWarning(); w != "" {
+		log.Warn(w)
+	}
+
 	store, err := cephstore.Open(cfg, log)
 	if err != nil {
 		return err
@@ -210,13 +214,16 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 // cephConfig maps the configuration onto the RADOS store settings.
 func cephConfig(settings *config.Config) cephstore.Config {
 	return cephstore.Config{
-		User:        settings.Ceph.User,
-		Key:         settings.Ceph.Key,
-		MonHost:     settings.Ceph.MonHost,
-		IndexPool:   settings.Ceph.IndexPool,
-		DataPool:    settings.Ceph.DataPool,
-		ChunkSize:   settings.Ceph.ChunkSize,
-		FTSShards:   int(settings.Server.FtsShards),
+		User:      settings.Ceph.User,
+		Key:       settings.Ceph.Key,
+		MonHost:   settings.Ceph.MonHost,
+		IndexPool: settings.Ceph.IndexPool,
+		DataPool:  settings.Ceph.DataPool,
+		ChunkSize: settings.Ceph.ChunkSize,
+		FTSShards: int(settings.Server.FtsShards),
+		FTS: cephstore.FTSConfig{Layout: settings.FTS.Layout, ShardsMin: settings.FTS.ShardsMin, ShardsMax: settings.FTS.ShardsMax,
+			ShardTargetKeys: settings.FTS.ShardTargetKeys, AutoReshard: settings.FTS.AutoReshard,
+			FrozenWait: time.Duration(settings.FTS.FrozenWaitSeconds) * time.Second},
 		Quota:       cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
 		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},
 		QuotaRules:  quota.NewPolicy(settings.Quota),

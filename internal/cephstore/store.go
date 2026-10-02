@@ -46,8 +46,11 @@ type Config struct {
 	DataPool string
 	// ChunkSize is the blob chunk size in bytes (default 4 MiB).
 	ChunkSize int64
-	// FTSShards is the number of full-text index shard objects per user.
+	// FTSShards is the number of full-text index shard objects per user
+	// (layout 2, and the target of a conversion back to it).
 	FTSShards int
+	// FTS are the layout settings of the full-text index (stage B14b).
+	FTS FTSConfig
 	// Quota is the per-user limit enforced on delivery (0 = unlimited).
 	Quota QuotaLimit
 	// PublicQuota is the limit of the public namespace, which belongs to
@@ -98,6 +101,21 @@ type Config struct {
 	ClientOptions map[string]string
 }
 
+// FTSConfig are the layout settings of the full-text index
+// (configuration fts.layout and the keys after it).
+type FTSConfig struct {
+	// Layout is the layout of indexes created from now on (2, the default,
+	// or 3; 3 needs the cluster mark).
+	Layout int
+	// ShardsMin, ShardsMax and ShardTargetKeys size layout 3 generations.
+	ShardsMin, ShardsMax, ShardTargetKeys int
+	// AutoReshard queues accounts whose shards outgrew the target.
+	AutoReshard bool
+	// FrozenWait is how long an indexing waits, once, for a conversion
+	// that froze the account's posting objects.
+	FrozenWait time.Duration
+}
+
 // Store owns the librados connection and hands out per-user views. The
 // connection can be replaced at runtime (cephx key rotation): new User
 // views use the new connection, existing views keep the old one until they
@@ -126,6 +144,13 @@ type Store struct {
 	uploadsOnce sync.Once
 	uploadsQ    *sortedindex.Queue
 	uploadsErr  error
+
+	// ftsDueQ is the reshard queue of the full-text index (ftslayout.go);
+	// ftsDueSeen remembers what this server queued.
+	ftsDueOnce sync.Once
+	ftsDueQ    *sortedindex.Queue
+	ftsDueErr  error
+	ftsDueSeen ftsDueMemo
 }
 
 // connRef is a reference-counted librados connection.
@@ -364,7 +389,8 @@ func (s *Store) User(name string) (*User, error) {
 		acctRetention: acctRetention(cfg.AccountLogRetention),
 		limits:        cfg.Limits,
 		uploadTTL:     orDefault(cfg.UploadTTL, DefaultUploadTTL),
-		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange}, nil
+		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange,
+		ftsCfg: ftsUserConfig(cfg.FTS)}, nil
 }
 
 // orDefault is d unless d is zero, then def.

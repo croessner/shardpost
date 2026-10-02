@@ -57,3 +57,56 @@ func TestFTSIMAPSearch(t *testing.T) {
 		}
 	}
 }
+
+// TestFTSLayoutKeys: the layout keys default to today's layout 2 with
+// the bounds of the plan, and layout 3 settings are taken.
+func TestFTSLayoutKeys(t *testing.T) {
+	c, err := Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := FTS{Layout: 2, ShardsMin: 1, ShardsMax: 32, ShardTargetKeys: 100000, AutoReshard: true,
+		FrozenWaitSeconds: 10, ImportReshardSyncSeconds: 60}
+
+	got := c.FTS
+	got.FallbackCharset, got.HTML, got.IMAPSearch, got.VerifyParallel = "", "", "", 0
+
+	if got != want {
+		t.Errorf("defaults %+v", got)
+	}
+
+	if c.FTS.ShardTargetWarning() != "" {
+		t.Error("the default target warns")
+	}
+
+	c, err = Load(configFile(t, "fts:\n  layout: 3\n  shards_min: 2\n  shards_max: 64\n  shard_target_keys: 300000\n  frozen_wait_seconds: 0\n"))
+	if err != nil || c.FTS.Layout != 3 || c.FTS.ShardsMin != 2 || c.FTS.ShardsMax != 64 || c.FTS.FrozenWaitSeconds != 0 {
+		t.Fatalf("layout 3: %+v, %v", c, err)
+	}
+
+	if c.FTS.ShardTargetWarning() == "" {
+		t.Error("a target above 200000 keys does not warn")
+	}
+}
+
+// TestFTSLayoutBounds: values out of range are refused.
+func TestFTSLayoutBounds(t *testing.T) {
+	for _, body := range []string{
+		"fts:\n  layout: 1\n",
+		"fts:\n  layout: 4\n",
+		"fts:\n  shards_min: 0\n",
+		"fts:\n  shards_max: 5000\n",
+		"fts:\n  shards_min: 8\n  shards_max: 4\n",
+		"fts:\n  shard_target_keys: 9999\n",
+		"fts:\n  shard_target_keys: 1000001\n",
+		"fts:\n  frozen_wait_seconds: 61\n",
+		"fts:\n  import_reshard_sync_seconds: 0\n",
+		"fts:\n  import_reshard_sync_seconds: 91\n",
+		"fts:\n  dict_min_terms: -1\n",
+	} {
+		if _, err := Load(configFile(t, body)); err == nil {
+			t.Errorf("accepted %q", body)
+		}
+	}
+}

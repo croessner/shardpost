@@ -19,8 +19,9 @@ func TestAccountRecordKeys(t *testing.T) {
 			}
 		}
 
-		if len(want) != 3 {
-			t.Errorf("the purge deletes %d keys, jmap has 3", len(want))
+		// jmap's three and the record of the fts_due worker
+		if len(want) != 4 || !slices.Contains(want, model.FTSDueRecordKey(account)) {
+			t.Errorf("the purge deletes %v, want jmap's 3 and the fts_due record", want)
 		}
 	}
 }

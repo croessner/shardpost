@@ -1157,7 +1157,7 @@ func (sr *scrubRun) deleteOrphan(guid string, chunks int, st rados.ObjectStat) {
 		}
 
 		m.Size = size
-		if err := u.ftsRemove(&m); err != nil {
+		if err := u.ftsRemoveWait(&m, 0); err != nil {
 			sr.log.Debug("fts remove for orphan failed", "guid", guid, "err", err)
 		}
 	}

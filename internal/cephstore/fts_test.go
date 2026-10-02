@@ -50,7 +50,7 @@ func TestDictCostPerTerm(t *testing.T) {
 // TestDictScan: a scan keeps the terms of its field that contain the
 // token, as terms (without the trigram), and remembers where it stopped.
 func TestDictScan(t *testing.T) {
-	s := newDictScan("voi", "s")
+	s := newDictScan(dictShardOID("voi"), "voi", "s")
 
 	if s.oid != dictShardOID("voi") || s.prefix != "voi:s:" {
 		t.Fatalf("scan %+v", s)
