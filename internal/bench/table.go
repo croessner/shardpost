@@ -72,6 +72,14 @@ func WriteMeasureTable(w io.Writer, r *MeasureReport) error {
 		p.search(r.Search)
 	}
 
+	if r.Convert != nil {
+		p.round(r.Convert)
+	}
+
+	if r.SearchAfter != nil {
+		p.search(r.SearchAfter)
+	}
+
 	if r.Delivery != nil {
 		p.probe(r.Delivery)
 	}

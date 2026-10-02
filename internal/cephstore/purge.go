@@ -28,9 +28,11 @@ import (
 //     (bi:, bimp:, up:) and of the submission copies (sub:), of the
 //     delivery intents (d:) and of the orphan
 //     candidates of the scrub object;
-//   - the fixed objects: the full-text index (fts/, ftst/, ftsh/, ftsd/,
-//     ftsmap), the front-end indexes (ix/<space>/<nn>), account, metadata,
-//     sieve (with the vacation records), scrub;
+//   - the fixed objects: the full-text index (every generation its layout
+//     record names, ftx/<gen>/…; the layout 2 objects fts/, ftst/, ftsh/,
+//     ftsd/ unless the record says they are gone; ftsmap after them), the
+//     front-end indexes (ix/<space>/<nn>), account, metadata, sieve (with
+//     the vacation records), scrub;
 //   - pubseen/<id> for every ps:<id>;
 //   - the registry, last.
 //
@@ -181,8 +183,13 @@ func (u *User) enumerate(strict bool) (*namedObjects, error) {
 		return nil, err
 	}
 
+	fixed, err := u.fixedObjects()
+	if err != nil {
+		return nil, err
+	}
+
 	n.index = append(n.index, others...)
-	n.index = append(n.index, u.fixedObjects()...)
+	n.index = append(n.index, fixed...)
 
 	return n, nil
 }
@@ -332,10 +339,44 @@ func (u *User) enumerateCandidates(n *namedObjects) error {
 	return nil
 }
 
-// fixedObjects are the index objects every account may have.
-func (u *User) fixedObjects() []string {
+// fixedObjects are the index objects every account may have: the
+// full-text index as its layout record names it — every generation
+// (current, "next", "old") before the id map, the layout 2 objects
+// unless the record says they are gone (one read, N13) — the front-end
+// indexes and the account's single objects. An id map that cannot be
+// read leaves the model incomplete.
+func (u *User) fixedObjects() ([]string, error) {
+	lay, err := u.readLayout()
+	if err != nil {
+		return nil, fmt.Errorf("%w: full-text layout record: %w", errModelIncomplete, err)
+	}
+
+	var oids []string
+
+	for _, loc := range nameGens(lay, u.ftsShards) {
+		if loc.v3() {
+			oids = append(oids, loc.objects()...)
+		}
+	}
+
+	if lay == nil || !lay.LG {
+		oids = append(oids, u.layout2Objects()...)
+	}
+
+	for _, space := range purgeFixedIndexSpaces {
+		for s := range uint32(indexShards) {
+			oids = append(oids, indexOID(space, s))
+		}
+	}
+
+	return append(oids, oidFTSMap, oidAccount, oidMetadata, oidSieve, oidScrub), nil
+}
+
+// layout2Objects are the objects of a layout 2 index, of at least the
+// default shard count (an account indexed before fts_shards was lowered).
+func (u *User) layout2Objects() []string {
 	shards := max(u.ftsShards, DefaultFTSShards)
-	oids := make([]string, 0, 3*shards+dictShards+len(purgeFixedIndexSpaces)*indexShards+5)
+	oids := make([]string, 0, 3*shards+dictShards)
 
 	for i := range shards {
 		oids = append(oids, fmt.Sprintf("%s%02d", ftsPrefix, i), fmt.Sprintf("%s%02d", headerPrefix, i),
@@ -346,13 +387,7 @@ func (u *User) fixedObjects() []string {
 		oids = append(oids, dictShardOID3(i))
 	}
 
-	for _, space := range purgeFixedIndexSpaces {
-		for s := range uint32(indexShards) {
-			oids = append(oids, indexOID(space, s))
-		}
-	}
-
-	return append(oids, oidFTSMap, oidAccount, oidMetadata, oidSieve, oidScrub)
+	return oids
 }
 
 // dictShardOID3 names dictionary shard i ("ftst/<nnn>").
@@ -481,8 +516,14 @@ func (u *User) purgeNamed(fence func() error, named *namedObjects) (int, error) 
 }
 
 // purgeRegistry deletes the registry (with the maintenance lock in it).
+// Before, with the full-text index gone, the account leaves the presence
+// index of layout 3 (after its objects, as the completeness rule wants).
 func (u *User) purgeRegistry(fence func() error, removed int) error {
 	if err := fence(); err != nil {
+		return err
+	}
+
+	if err := u.unmarkLayout3(); err != nil {
 		return err
 	}
 

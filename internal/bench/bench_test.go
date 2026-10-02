@@ -195,6 +195,8 @@ func TestClassify(t *testing.T) {
 		"msg/ff00/0": ClassMsg, "fts/07": ClassFTS, "ftst/255": ClassFTST, "ftsh/03": ClassFTSH, "ftsd/01": ClassFTSD,
 		"ftsmap": ClassFTSMap, "metadata": ClassMetadata, "sieve": ClassSieve, "scrub": ClassScrub,
 		"ix/att/04": ClassIx, "ix.accounts/12": ClassStoreIx, "pubseen/x": ClassPubSeen, "whatever": ClassOther,
+		"ftx/9c1e00aa00bb00cc/p0": ClassFTXP, "ftx/9c1e00aa00bb00cc/d3": ClassFTXD, "ftx/9c1e00aa00bb00cc/h12": ClassFTXH,
+		"ftx/9c1e00aa00bb00cc": ClassOther,
 	} {
 		if got := Classify(oid); got != want {
 			t.Errorf("Classify(%q) = %q, want %q", oid, got, want)
