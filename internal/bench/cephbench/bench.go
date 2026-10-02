@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ceph/go-ceph/rados"
@@ -84,6 +86,17 @@ type MeasureOptions struct {
 	// two delivery rounds (0: no delivery probe); the same accounts are
 	// opened in the open rounds.
 	ProbeAccounts, ProbeMessages int
+	// Contention, when above 0, adds two delivery rounds in which
+	// Contention deliveries at a time go into one account (each of them
+	// ProbeMessages messages long), to measure compare-and-swap
+	// contention on the objects of one account.
+	Contention int
+	// Search, when above 0, runs that many search queries
+	// (bench.SearchQueries) in each probe account, before the deliveries.
+	Search int
+	// Expunge, when above 0, expunges that many of the oldest INBOX
+	// messages of each probe account in each of two rounds, at the end.
+	Expunge int
 	// EC are the parameters of the data pool's raw space estimate.
 	EC bench.ECEstimate
 	// Extrapolate scales the inventory to this many accounts (0: no).
@@ -184,7 +197,10 @@ func probeAccounts(accts []bench.AccountUsage, n int) []string {
 	return out
 }
 
-// probe runs the delivery and open rounds.
+// probe runs the search, delivery, open and expunge rounds, in that
+// order: the search sees the accounts as they were left (a run without
+// deliveries and expunges finds what the previous one found), the
+// expunge removes messages last.
 func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accounts []string) error {
 	if len(accounts) == 0 {
 		return nil
@@ -196,17 +212,75 @@ func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accoun
 		return fmt.Errorf("trace directory: %w", err)
 	}
 
-	if o.ProbeMessages > 0 {
-		d, err := m.deliveries(ctx)
-		if err != nil {
-			return err
-		}
-
-		r.Delivery = d
-		r.Notes = append(r.Notes, fmt.Sprintf("the delivery probe added %d messages to each of %d accounts (after the inventory)",
-			2*o.ProbeMessages, len(accounts)))
+	err := m.probeSearch(ctx, r)
+	if err == nil {
+		err = m.probeDeliveries(ctx, r)
 	}
 
+	if err == nil {
+		err = m.probeOpens(ctx, r)
+	}
+
+	if err == nil {
+		err = m.probeExpunge(ctx, r)
+	}
+
+	if m.unparsed > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("%d objecter log lines had an unknown format and were not counted; the operation counts are too low", m.unparsed))
+	}
+
+	return err
+}
+
+func (m *measurer) probeSearch(ctx context.Context, r *bench.MeasureReport) error {
+	if m.o.Search <= 0 {
+		return nil
+	}
+
+	s, err := m.search(ctx, m.o.Search)
+	if err != nil {
+		return err
+	}
+
+	r.Search = s
+	if s.Mismatch {
+		r.Notes = append(r.Notes, "the two search rounds found different messages; the accounts changed during the probe")
+	}
+
+	return nil
+}
+
+func (m *measurer) probeDeliveries(ctx context.Context, r *bench.MeasureReport) error {
+	o := m.o
+	if o.ProbeMessages <= 0 {
+		return nil
+	}
+
+	d, err := m.deliveries(ctx, 1)
+	if err != nil {
+		return err
+	}
+
+	r.Delivery = d
+	r.Notes = append(r.Notes, fmt.Sprintf("the delivery probe added %d messages to each of %d accounts (after the inventory)",
+		2*o.ProbeMessages, len(m.accounts)))
+
+	if o.Contention <= 0 {
+		return nil
+	}
+
+	if d, err = m.deliveries(ctx, o.Contention); err != nil {
+		return err
+	}
+
+	r.Contention = d
+	r.Notes = append(r.Notes, fmt.Sprintf("the contention probe added %d messages to each of %d accounts, %d at a time",
+		2*o.Contention*o.ProbeMessages, len(m.accounts), o.Contention))
+
+	return nil
+}
+
+func (m *measurer) probeOpens(ctx context.Context, r *bench.MeasureReport) error {
 	var err error
 
 	if r.UserOpen, err = m.open(ctx, "Store.User() and Close()", openOnly); err != nil {
@@ -214,14 +288,26 @@ func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accoun
 	}
 
 	r.UserOpen.HeapBytes = m.heapPerView()
-
 	r.SessionOpen, err = m.open(ctx, "Store.User(), ListMailboxes(), Info(INBOX), Close()", openSession)
 
-	if m.unparsed > 0 {
-		r.Notes = append(r.Notes, fmt.Sprintf("%d objecter log lines had an unknown format and were not counted; the operation counts are too low", m.unparsed))
+	return err
+}
+
+func (m *measurer) probeExpunge(ctx context.Context, r *bench.MeasureReport) error {
+	if m.o.Expunge <= 0 {
+		return nil
 	}
 
-	return err
+	e, err := m.expunge(ctx, m.o.Expunge)
+	if err != nil {
+		return err
+	}
+
+	r.Expunge = e
+	r.Notes = append(r.Notes, fmt.Sprintf("the expunge probe removed the %d oldest INBOX messages of each of %d accounts",
+		2*m.o.Expunge, len(m.accounts)))
+
+	return nil
 }
 
 // measurer runs the rounds of a measurement.
@@ -235,12 +321,17 @@ type measurer struct {
 
 // round runs fn once per account (and unit) on the untraced store,
 // recording the latency of each call, and once more on a store of its
-// own with the objecter log on, counting the operations.
-func (m *measurer) round(ctx context.Context, units int, fn func(s *cephstore.Store, account string, unit int) error) (*bench.Latency, bench.OpCounts, int64, error) {
+// own with the objecter log on, counting the operations. With p above 1,
+// p workers run the units of one account at the same time (each of them
+// units calls). It returns the calls of one round and its wall time.
+func (m *measurer) round(ctx context.Context, units, p int, fn func(s *cephstore.Store, account string, unit int) error) (*bench.Latency, bench.OpCounts, int64, time.Duration, error) {
 	lat := &bench.Latency{}
-	n := int64(0)
 
-	err := m.each(ctx, units, func(account string, unit int) error {
+	var n atomic.Int64
+
+	start := time.Now()
+
+	err := m.each(ctx, units, p, func(account string, unit int) error {
 		start := time.Now()
 
 		if err := fn(m.o.Store, account, unit); err != nil {
@@ -248,39 +339,76 @@ func (m *measurer) round(ctx context.Context, units int, fn func(s *cephstore.St
 		}
 
 		lat.Add(time.Since(start))
-
-		n++
+		n.Add(1)
 
 		return nil
 	})
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, 0, err
 	}
 
-	ops, err := m.traced(ctx, units, fn)
+	took := time.Since(start)
+	ops, err := m.traced(ctx, units, p, fn)
 
-	return lat, ops, n, err
+	return lat, ops, n.Load(), took, err
 }
 
-func (m *measurer) each(ctx context.Context, units int, fn func(account string, unit int) error) error {
+// each runs fn for every account, units times, the accounts one after
+// the other; p workers run the units of an account at the same time
+// (each of them units calls, unit counting them per worker).
+func (m *measurer) each(ctx context.Context, units, p int, fn func(account string, unit int) error) error {
 	for _, a := range m.accounts {
-		for u := range units {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-
-			if err := fn(a, u); err != nil {
-				return fmt.Errorf("account %s: %w", a, err)
-			}
+		if err := eachUnit(ctx, units, max(p, 1), func(u int) error { return fn(a, u) }); err != nil {
+			return fmt.Errorf("account %s: %w", a, err)
 		}
 	}
 
 	return nil
 }
 
+// eachUnit runs fn units times in each of p workers and returns the
+// first error; a worker stops at its first error or when ctx ends.
+func eachUnit(ctx context.Context, units, p int, fn func(unit int) error) error {
+	if p == 1 {
+		for u := range units {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			if err := fn(u); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	var (
+		wg   sync.WaitGroup
+		once sync.Once
+		werr error
+	)
+
+	for range p {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			if err := eachUnit(ctx, units, 1, fn); err != nil {
+				once.Do(func() { werr = err })
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	return werr
+}
+
 // traced runs fn for every account on a store with the objecter log and
 // counts the operations from the log.
-func (m *measurer) traced(ctx context.Context, units int, fn func(s *cephstore.Store, account string, unit int) error) (bench.OpCounts, error) {
+func (m *measurer) traced(ctx context.Context, units, p int, fn func(s *cephstore.Store, account string, unit int) error) (bench.OpCounts, error) {
 	m.traces++
 	path := filepath.Join(m.o.TraceDir, fmt.Sprintf("objecter-%d-%d.log", os.Getpid(), m.traces))
 
@@ -292,7 +420,7 @@ func (m *measurer) traced(ctx context.Context, units int, fn func(s *cephstore.S
 		return nil, err
 	}
 
-	err = m.each(ctx, units, func(a string, u int) error { return fn(s, a, u) })
+	err = m.each(ctx, units, p, func(a string, u int) error { return fn(s, a, u) })
 
 	var ids map[int64]string
 
@@ -336,10 +464,11 @@ func (m *measurer) traced(ctx context.Context, units int, fn func(s *cephstore.S
 	return ops, err
 }
 
-// deliveries runs the two delivery rounds.
+// deliveries runs the two delivery rounds, p deliveries at a time into
+// each account (1: one after the other).
 // The messages continue each account's numbering, as a further populate
 // would, and go to INBOX through Sieve.
-func (m *measurer) deliveries(ctx context.Context) (*bench.ProbeReport, error) {
+func (m *measurer) deliveries(ctx context.Context, p int) (*bench.ProbeReport, error) {
 	next := map[string]int{}
 
 	for _, a := range m.accounts {
@@ -351,9 +480,14 @@ func (m *measurer) deliveries(ctx context.Context) (*bench.ProbeReport, error) {
 		next[a] = n
 	}
 
+	var mu sync.Mutex
+
 	deliver := func(s *cephstore.Store, account string, _ int) error {
+		mu.Lock()
 		n := next[account]
 		next[account] = n + 1
+		mu.Unlock()
+
 		raw, _ := m.o.Gen.Message(account, n)
 		_, err := m.o.NewDeliverer(s).Deliver(ctx, bench.Request(account, raw, ""))
 
@@ -362,18 +496,22 @@ func (m *measurer) deliveries(ctx context.Context) (*bench.ProbeReport, error) {
 
 	cas0 := bench.CASRetries()
 
-	lat, ops, n, err := m.round(ctx, m.o.ProbeMessages, deliver)
+	lat, ops, n, took, err := m.round(ctx, m.o.ProbeMessages, p, deliver)
 	if err != nil {
 		return nil, fmt.Errorf("delivery probe: %w", err)
 	}
 
 	// The counter holds the retries of both rounds (the traced round
 	// delivers as many messages).
-	p := &bench.ProbeReport{Accounts: len(m.accounts), Deliveries: n, Latency: lat.Summary(),
+	r := &bench.ProbeReport{Accounts: len(m.accounts), Parallel: p, Deliveries: n, Latency: lat.Summary(),
 		CASRetries: bench.CASDelta(cas0, bench.CASRetries(), 2*n)}
-	p.Ops, p.Total = bench.Rates(ops, n)
+	r.Ops, r.Total = bench.Rates(ops, n)
 
-	return p, nil
+	if took > 0 {
+		r.PerSecond = float64(n) / took.Seconds()
+	}
+
+	return r, nil
 }
 
 func messageCount(s *cephstore.Store, account string) (int, error) {
@@ -417,7 +555,7 @@ func openSession(s *cephstore.Store, account string, _ int) error {
 }
 
 func (m *measurer) open(ctx context.Context, what string, fn func(*cephstore.Store, string, int) error) (*bench.OpenReport, error) {
-	lat, ops, n, err := m.round(ctx, 1, fn)
+	lat, ops, n, _, err := m.round(ctx, 1, 1, fn)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", what, err)
 	}

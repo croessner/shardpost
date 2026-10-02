@@ -247,20 +247,24 @@ Measured on the test cluster (`TestHotPathOps` in
 [opcount_test.go](../../internal/cephstore/opcount_test.go), run with
 `SHARDPOST_TEST_OPCOUNT=1` through `hack/ceph-test-cluster.sh`; the OSD's
 `op_r` and `op_w`; four full-text shards, a 500-byte message), against
-the same test on 0.41.0:
+the same test on 0.41.0 and 0.43.0:
 
-| Operation | Reads 0.41 → 0.42 | Writes 0.41 → 0.42 |
+| Operation | Reads 0.41 → 0.43 → 0.44 | Writes 0.41 → 0.43 → 0.44 |
 |---|---|---|
-| LMTP delivery, a view per message | 16.4 → 17.1 | 14.0 → 15.0 |
-| APPEND, ten in one session | 15.6 → 15.6 | 12.2 → 12.2 |
-| EXPUNGE of one message | 15.0 → 15.0 | 12.4 → 13.4 |
-| CREATE and DELETE of an empty mailbox | 16.0 → 18.0 | 9.0 → 12.0 |
-| JMAP upload | 0.0 → 1.2 | 1.0 → 3.2 |
+| LMTP delivery, a view per message | 16.4 → 17.1 → 12.8 | 14.0 → 15.0 → 15.0 |
+| APPEND, ten in one session | 15.6 → 15.6 → 11.5 | 12.2 → 12.2 → 12.2 |
+| EXPUNGE of one message | 15.0 → 15.0 → 15.0 | 12.4 → 13.4 → 13.4 |
+| CREATE and DELETE of an empty mailbox | 16.0 → 20.0 → 20.0 | 9.0 → 12.0 → 12.0 |
+| JMAP upload | 0.0 → 1.2 → 1.2 | 1.0 → 3.2 → 3.2 |
 
-The extra reads of the LMTP delivery are CAS retries: the removal a
-closed view sends in the background meets the next delivery's
-reservation on the same registry object. The full-text index dominates
-a delivery either way (with the default sixteen shards more so).
+The extra reads of the LMTP delivery in 0.42 and 0.43 are CAS retries:
+the removal a closed view sends in the background meets the next
+delivery's reservation on the same registry object. In 0.44 a posting
+shard costs one read instead of two and the id map no read of its own
+(see [full-text write path](#full-text-write-path)): one read less per
+full-text shard and one per LMTP delivery, 16 + 1 with the default
+sixteen shards (245.6 → an expected 228.6 operations per delivery in
+the R4 bench setup, calculated, not measured). The full-text index dominates a delivery either way.
 
 **The uploads.** A JMAP upload is a blob that nothing points at, so it
 costs an entry in the due queue `ix.uploads` (namespace `~accounts`), the
@@ -1079,6 +1083,39 @@ in posting lists; a trigram dictionary supports substring searches.
 | `fts/<nn>`, `server.fts_shards` of them (16), shard = fnv1a(term) | term, `<field>:<token>` (`s:invoice`) | posting list: document IDs, sorted, delta-varint |
 | `ftst/<nnn>`, 256 of them, shard = fnv1a(trigram) | `<trigram>:<term>` (`voi:s:invoice`), one key per trigram of the token | empty |
 | `ftsmap` | `g:<guid>`, `i:<id>`, `n` | document ID, GUID, next ID |
+
+<a id="full-text-write-path"></a>
+**Full-text write path.** Indexing a message (or a batch of an import)
+first allocates its document id in one compare-and-swap on `ftsmap`
+(`ensureDocIDs`), then updates the posting lists of every shard its
+terms fall into, all shards at the same time, each in one
+compare-and-swap: a read of the terms' lists with the object version
+and a write guarded by it (`casPostings`). That read is also where lists
+of GUIDs from before document IDs are found: the round then ends
+without a write, the GUIDs get document IDs, and the next round
+converts the lists to the ID encoding as it adds the message. Whether
+the index is fresh — the condition of the version marker `v` below — is
+decided inside the id map's compare-and-swap as well: an id map with `n`
+is not fresh; only when `n` is missing (and the view has not seen ids
+before) are the posting shards looked up, one stat each until the first
+one found, and the round is repeated with the answer. A delivery into
+an account with document IDs thus costs one read and one write on
+`ftsmap` and one read and one write per posting shard it touches.
+
+An omap compare-and-swap of the account's objects (`casOmap`: posting
+shards, id map, registry, account, mailbox UID shards and the other omap
+objects of the account; not the header changes of a mailbox — modseq,
+flags — which go through `casHeader`, `kind="header"`, without backoff;
+the header object's recent mark, retirement and move intents go through
+`casOmap`) that loses
+against another writer (the object version changed between its read
+and its write) waits at random 1 to 10 ms, times the number of rounds
+it lost so far, before it reads again, so that writers of the same
+object do not collide again in the next round; it gives up after 16
+rounds. Every lost round counts in
+`imapceph_rados_cas_retries_total{kind="omap",class}`, `class` being the
+object class (`fts`, `ftsmap`, `registry`, `mbox`, `account`, ...).
+`shardpost bench measure --contention` measures it.
 
 A term that is new for the account costs one dictionary key per trigram
 of its token (at most 38, a token has at most 40 characters). The keys

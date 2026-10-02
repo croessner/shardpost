@@ -245,6 +245,9 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	fs.IntVar(&o.Every, "sample-every", 1, "take the inventory of every n-th account (by number)")
 	fs.IntVar(&o.ProbeAccounts, "probe-accounts", 20, "accounts of the delivery and open rounds (0: inventory only)")
 	fs.IntVar(&o.ProbeMessages, "probe-messages", 10, "messages per probe account and delivery round (0: no delivery rounds)")
+	fs.IntVar(&o.Contention, "contention", 0, "also deliver this many messages at a time into each probe account (0: no contention rounds)")
+	fs.IntVar(&o.Search, "search", 0, "search queries per probe account (0: no search rounds)")
+	fs.IntVar(&o.Expunge, "expunge", 0, "INBOX messages per probe account and expunge round (0: no expunge rounds)")
 	fs.Int64Var(&o.Extrapolate, "extrapolate", 1000000, "scale the per-account means to this many accounts (0: no)")
 	fs.IntVar(&ec.DataChunks, "ec-k", 2, "data chunks of the data pool's erasure code profile")
 	fs.IntVar(&ec.CodingChunks, "ec-m", 1, "coding chunks of the data pool's erasure code profile")
@@ -258,7 +261,9 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	}
 
 	sizes, err := bench.ParseSizes(f.sizes)
-	if err != nil || o.Every <= 0 || o.ProbeAccounts < 0 || o.ProbeMessages < 0 || f.parallel <= 0 {
+	if err != nil || o.Every <= 0 || o.ProbeAccounts < 0 || o.ProbeMessages < 0 ||
+		o.Contention < 0 || o.Search < 0 || o.Expunge < 0 ||
+		f.parallel <= 0 {
 		log.Error("bench: invalid options", "err", err)
 		return benchRefused
 	}

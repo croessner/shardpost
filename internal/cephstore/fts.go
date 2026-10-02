@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/ceph/go-ceph/rados"
 	"go.opentelemetry.io/otel/attribute"
@@ -168,7 +169,7 @@ func (u *User) ftsIndex(guid string, raw []byte) error {
 }
 
 // ftsIndexDocs indexes several messages at once. Indexing a message
-// costs round trips — the id map, a read and a compare-and-swap per
+// costs round trips — the id map, a compare-and-swap per
 // posting shard, a write per dictionary shard its new terms touch — so a
 // batch of an import that pays them once instead of once per message is
 // much cheaper.
@@ -250,7 +251,7 @@ func (u *User) addPostings(oid string, terms []string, docsOf map[string][]uint6
 func (u *User) addPostingsPage(oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
 	var fresh []string
 
-	err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool) {
+	err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) []byte) (map[string][]byte, []string) {
 		fresh = fresh[:0]
 		set := map[string][]byte{}
 
@@ -260,14 +261,10 @@ func (u *User) addPostingsPage(oid string, terms []string, docsOf map[string][]u
 				fresh = append(fresh, t)
 			}
 
-			if p, ok = conv(p); !ok {
-				return nil, nil, false
-			}
-
-			set[t] = postings.AddAll(p, docsOf[t])
+			set[t] = postings.AddAll(conv(p), docsOf[t])
 		}
 
-		return set, nil, true
+		return set, nil
 	})
 
 	return fresh, err
@@ -314,49 +311,41 @@ func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []stri
 
 // casPostings is casOmap over posting lists with legacy conversion: fn
 // receives the current lists and a converter that turns a legacy GUID
-// list into the id encoding. Ids for GUIDs of legacy lists are allocated
-// before the write; if a list gained GUIDs unknown to us in between, fn
-// returns ok=false and the attempt is repeated with the new ids.
-func (u *User) casPostings(oid string, terms []string, fn func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool)) error {
+// list into the id encoding. The legacy check runs on the lists the
+// compare-and-swap reads anyway: when they hold GUIDs without a known id,
+// the round ends without a write, the ids are allocated and the
+// compare-and-swap starts again with them (a list that gained further
+// GUIDs in between repeats this). fn is called only when every GUID of
+// cur has an id, so conv always converts completely.
+func (u *User) casPostings(oid string, terms []string, fn func(cur map[string][]byte, conv func([]byte) []byte) (map[string][]byte, []string)) error {
 	known := map[string]uint64{}
+	conv := legacyConverter(known)
 
 	for attempt := 0; attempt < casRetries; attempt++ {
-		cur, err := getOmapKeys(u.idx, oid, terms)
-		if err != nil && errCode(err) != syscall.ENOENT {
-			return err
-		}
+		var need []string
 
-		need := legacyGUIDsNeeded(cur, known)
-
-		if len(need) > 0 {
-			ids, err := u.ensureDocIDs(need)
-			if err != nil {
-				return err
-			}
-
-			for g, id := range ids {
-				known[g] = id
-			}
-		}
-
-		conv := legacyConverter(known)
-		retry := false
-
-		err = casOmap(u, u.idx, oid, terms, func(cur map[string][]byte) (map[string][]byte, []string) {
-			set, rm, ok := fn(cur, conv)
-			if !ok {
-				retry = true
+		err := casOmap(u, u.idx, oid, terms, func(cur map[string][]byte) (map[string][]byte, []string) {
+			if need = legacyGUIDsNeeded(cur, known); len(need) > 0 {
 				return nil, nil
 			}
 
-			return set, rm
+			return fn(cur, conv)
 		})
 		if err != nil {
 			return err
 		}
 
-		if !retry {
+		if len(need) == 0 {
 			return nil
+		}
+
+		ids, err := u.ensureDocIDs(need)
+		if err != nil {
+			return err
+		}
+
+		for g, id := range ids {
+			known[g] = id
 		}
 	}
 
@@ -386,26 +375,24 @@ func legacyGUIDsNeeded(cur map[string][]byte, known map[string]uint64) []string 
 }
 
 // legacyConverter returns the converter casPostings hands to its fn: it
-// turns a legacy GUID list into the id encoding using known, and reports
-// false if a GUID has no id in known.
-func legacyConverter(known map[string]uint64) func([]byte) ([]byte, bool) {
-	return func(p []byte) ([]byte, bool) {
+// turns a legacy GUID list into the id encoding using known. casPostings
+// calls fn only after legacyGUIDsNeeded found every GUID of the lists in
+// known, so a GUID without an id does not occur there.
+func legacyConverter(known map[string]uint64) func([]byte) []byte {
+	return func(p []byte) []byte {
 		if len(p) == 0 || !postings.IsLegacy(p) {
-			return p, true
+			return p
 		}
 
 		var ids []uint64
 
 		for _, g := range postings.LegacyGUIDs(p) {
-			id, ok := known[hex.EncodeToString(g)]
-			if !ok {
-				return nil, false
+			if id, ok := known[hex.EncodeToString(g)]; ok {
+				ids = append(ids, id)
 			}
-
-			ids = append(ids, id)
 		}
 
-		return postings.Encode(ids), true
+		return postings.Encode(ids)
 	}
 }
 
@@ -513,6 +500,14 @@ func idKey(id uint64) string    { return "i:" + strconv.FormatUint(id, 10) }
 
 // ensureDocIDs returns the ids of the GUIDs, allocating missing ones in
 // one compare-and-swap on the map object.
+//
+// The first ids of an index this version writes from the start get the
+// version marker (markFreshIndex). Whether the index is fresh is decided
+// inside the compare-and-swap: an id map with "n" is not, and only one
+// without it (and without ids seen by the view, ftsHasIDs) needs the
+// posting shards looked up. The compare-and-swap function does no I/O,
+// so it ends that round without a write, the shards are looked up and
+// the round is repeated with the answer.
 func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 	// Deduplicate: a GUID named twice must not get two ids.
 	guids = slices.Compact(slices.Sorted(slices.Values(guids)))
@@ -524,51 +519,86 @@ func (u *User) ensureDocIDs(guids []string) (map[string]uint64, error) {
 
 	keys = append(keys, freshIndexKeys...)
 
-	fresh, err := u.freshIndexOnce()
-	if err != nil {
-		return nil, err
+	fresh := freshUnknown
+	if u.ftsHasIDs.Load() {
+		fresh = freshNo
 	}
 
 	out := map[string]uint64{}
 
-	err = casOmap(u, u.idx, oidFTSMap, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
-		for k := range out {
-			delete(out, k)
-		}
+	for attempt := 0; attempt < casRetries; attempt++ {
+		var lookup, hasIDs bool
 
-		next, _ := strconv.ParseUint(string(cur["n"]), 10, 64)
-		if next == 0 {
-			next = 1
-		}
+		err := casOmap(u, u.idx, oidFTSMap, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+			_, hasN := cur["n"]
+			lookup, hasIDs = false, hasN
 
-		set := map[string][]byte{}
-
-		for _, g := range guids {
-			if v, ok := cur[docKey(g)]; ok {
-				out[g], _ = strconv.ParseUint(string(v), 10, 64)
-				continue
+			set, next := assignDocIDs(cur, guids, out)
+			if len(set) == 0 {
+				return nil, nil
 			}
 
-			out[g] = next
-			set[docKey(g)] = []byte(strconv.FormatUint(next, 10))
-			set[idKey(next)] = []byte(g)
-			next++
+			if !hasN && fresh == freshUnknown {
+				lookup = true
+				return nil, nil
+			}
+
+			hasIDs = true
+			set["n"] = []byte(strconv.FormatUint(next, 10))
+			markFreshIndex(cur, set, fresh == freshYes)
+
+			return set, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fts docids: %w", err)
 		}
 
-		if len(set) == 0 {
-			return nil, nil
+		if !lookup {
+			if hasIDs {
+				u.ftsHasIDs.Store(true)
+			}
+
+			return out, nil
 		}
 
-		set["n"] = []byte(strconv.FormatUint(next, 10))
-		markFreshIndex(cur, set, fresh)
-
-		return set, nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("fts docids: %w", err)
+		if fresh, err = u.freshByShards(); err != nil {
+			return nil, fmt.Errorf("fts docids: %w", err)
+		}
 	}
 
-	return out, nil
+	return nil, fmt.Errorf("fts docids: %s: too many concurrent writers", oidFTSMap)
+}
+
+// assignDocIDs fills out with the ids of the GUIDs in the id map cur
+// and gives the others the next free ones; it returns the keys to set
+// for them (nil: all had ids) and the next free id after them.
+func assignDocIDs(cur map[string][]byte, guids []string, out map[string]uint64) (map[string][]byte, uint64) {
+	clear(out)
+
+	next, _ := strconv.ParseUint(string(cur["n"]), 10, 64)
+	if next == 0 {
+		next = 1
+	}
+
+	var set map[string][]byte
+
+	for _, g := range guids {
+		if v, ok := cur[docKey(g)]; ok {
+			out[g], _ = strconv.ParseUint(string(v), 10, 64)
+			continue
+		}
+
+		if set == nil {
+			set = map[string][]byte{}
+		}
+
+		out[g] = next
+		set[docKey(g)] = []byte(strconv.FormatUint(next, 10))
+		set[idKey(next)] = []byte(g)
+		next++
+	}
+
+	return set, next
 }
 
 // docIDOf returns the id of a GUID (ok=false: never indexed with ids).
@@ -1312,7 +1342,9 @@ func casOmapOp(u *User, ioctx *rados.IOContext, oid string, keys []string,
 // ImportLock CAS; "" for every other). Creating the account's registry
 // registers the account in the directory first (registerAccount): once
 // per account lifetime, and refused with ErrImportLocked while a purge
-// of the account is under way, unless session is the purge's own.
+// of the account is under way, unless session is the purge's own. A
+// round lost to another writer is counted (casRetry, by object class)
+// and followed by a growing random wait (casBackoff).
 func casOmapOpAs(u *User, ioctx *rados.IOContext, oid string, keys []string, session string,
 	fn func(cur map[string][]byte) (set map[string][]byte, rm []string, extra func(*rados.WriteOp)),
 ) (err error) {
@@ -1346,7 +1378,12 @@ func casOmapOpAs(u *User, ioctx *rados.IOContext, oid string, keys []string, ses
 
 		switch errCode(err) {
 		case syscall.ERANGE, syscall.EOVERFLOW, syscall.EEXIST:
-			mh.casRetry("omap")
+			mh.casRetry("omap", casClass(oid))
+
+			if attempt+1 < casRetries {
+				time.Sleep(casBackoff(attempt))
+			}
+
 			continue
 		}
 

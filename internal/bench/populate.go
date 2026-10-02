@@ -89,6 +89,9 @@ type CASSummary struct {
 	Total       float64            `json:"total"`
 	PerDelivery float64            `json:"per_delivery"`
 	ByKind      map[string]float64 `json:"by_kind,omitempty"`
+	// ByClass are the retries by object class (registry, mbox, fts,
+	// ftsmap, ...).
+	ByClass map[string]float64 `json:"by_class,omitempty"`
 }
 
 // PopulateReport is the result of a population run.
@@ -289,7 +292,7 @@ func Request(account string, raw []byte, mailbox string) delivery.Request {
 	return delivery.Request{Account: account, Rcpt: account + "@bench.invalid", From: "bench@example.org", Raw: raw, Mailbox: mailbox}
 }
 
-func (p *populator) report(took time.Duration, cas0 map[string]float64) *PopulateReport {
+func (p *populator) report(took time.Duration, cas0 CASReading) *PopulateReport {
 	n := p.delivered.Load()
 	rep := &PopulateReport{Prefix: p.o.Prefix, First: p.o.First, Accounts: p.o.Accounts, MessagesPerAccount: p.o.Messages,
 		Mailboxes: p.o.Mailboxes, Sizes: p.o.Gen.Sizes.String(), Seed: p.o.Gen.Seed,

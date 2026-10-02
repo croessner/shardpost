@@ -14,7 +14,12 @@ reports per account and per delivery:
   pool;
 - RADOS operations per delivery by object class (reads, writes, class
   method calls);
-- delivery latency (p50, p90, p99) and compare-and-swap retries;
+- delivery latency (p50, p90, p99) and compare-and-swap retries, by
+  kind and by object class;
+- with `measure --contention P`, the same for `P` deliveries at a time
+  into one account;
+- with `measure --search K` and `--expunge N`, the cost of a search query
+  and of an expunge, and a fingerprint of the search results;
 - the cost of `Store.User()` and of opening a session.
 
 The per-account values are then extrapolated (default: to one million
@@ -261,8 +266,47 @@ higher `--messages`; to measure a part of many accounts, use
   per delivery, counted from the client library's objecter log
   (`debug_objecter` 10, one line per operation) in a round of its own;
   `reads`, `writes` (at least one write step) and `calls` (object class
-  methods). The latency and the compare-and-swap retries come from a
-  round without the log. Both rounds deliver into populated accounts.
+  methods). The latency, `deliveries_per_second` and the
+  compare-and-swap retries (`cas_retries.by_kind`, `by_class`) come from
+  a round without the log. Both rounds deliver into populated accounts,
+  one delivery at a time.
+- `contention` (only with `measure --contention P`): the same two rounds
+  again, with `P` deliveries at a time into each probe account
+  (`--probe-messages` each; the accounts one after the other). The
+  deliveries contend for the account's registry, INBOX header, id map
+  and posting shards. `cas_retries.by_class` shows where they collide
+  (`registry`, `mbox`, `ftsmap`, `fts`, …) and `ops_per_delivery`
+  includes the reads and writes of the lost rounds; a lost round of the
+  omap compare-and-swap (`kind` `omap`: registry, account, id map,
+  posting shards, mailbox UID shards; not the header changes of a
+  mailbox, `kind` `header`, which retry without waiting) waits 1 to 10 ms times the rounds it lost before it
+  reads again. Compare `deliveries_per_second` and the latency with the
+  `delivery` rounds. `--contention` is not `--parallel`, which only sets
+  how many accounts the inventory and `populate` work on at once.
+- `search` (only with `measure --search K`): runs first, before any
+  delivery. Every probe account answers `K` queries from a fixed set
+  drawn from the generator's vocabulary (whole words, word starts and
+  inner parts of 3 to 6 characters; frequent and rare words; `TEXT`,
+  `BODY`, `SUBJECT`, `FROM`), each in a view of its own: the candidates
+  of the IMAP substring search (`SearchCandidates`, `TEXT` as header
+  and body) and the word search (`SearchFields`). `ops_per_call` and
+  the latency are per query, the view's first check of the index
+  included. `queries[]` gives per query the messages found
+  (`candidates`, `words`, `not_narrowed` for accounts where the index
+  cannot narrow) and a SHA-256 `fingerprint` of the results (account,
+  field set, GUID); `fingerprint` covers all queries. A run with
+  `--probe-messages 0` and without `--expunge` leaves the accounts as
+  they were, so two such runs on the same accounts, one before and one
+  after a change of the index (a conversion, a new layout), must report
+  the same `fingerprint`; where they differ, `queries[]` shows which
+  query. `mismatch` says that the two rounds of one run found different
+  messages. Without probe accounts (`--probe-accounts 0`) there is no
+  search.
+- `expunge` (only with `measure --expunge N`): runs last. Every probe
+  account loses its `N` oldest INBOX messages in each of two rounds, one
+  EXPUNGE per message in a view of its own; `ops_per_call`, the latency
+  and the compare-and-swap retries are per expunge. The messages are
+  gone afterwards (a later `populate` does not refill them).
 - `user_open`, `session_open`: `Store.User()` opens two I/O contexts and
   sends nothing to an OSD; a session adds the registry and INBOX reads.
   `heap_bytes_per_view` is the Go heap of an open view (the client

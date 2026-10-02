@@ -213,7 +213,7 @@ func (u *User) blobRef(guid string, delta int) (int, error) {
 		}
 
 		if c := errCode(err); c == syscall.ERANGE || c == syscall.EOVERFLOW {
-			mh.casRetry("refs")
+			mh.casRetry("refs", casClassMsg)
 			continue
 		}
 

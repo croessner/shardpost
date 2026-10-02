@@ -176,6 +176,47 @@ one open view holds. The probe messages stay in the accounts; the next
 .B populate
 counts them.
 .PP
+With
+.BI \-\-contention " p"
+two more delivery rounds follow in the same way, in which
+.I p
+deliveries at a time go into one probe account (each of them
+.B \-\-probe\-messages
+long; the accounts one after the other). The deliveries then contend
+for the same objects of the account; the report gives their latency,
+the deliveries per second, the compare-and-swap retries by kind and by
+object class, and the operations per delivery, retries included.
+.PP
+With
+.BI \-\-search " k"
+the probe accounts first answer
+.I k
+search queries each, before any delivery, in two rounds like the
+deliveries. The queries are a fixed set drawn from the vocabulary of the
+message generator (the same for every account and every run): whole
+words, word starts and parts from inside a word of 3 to 6 characters,
+frequent and rare words, as TEXT, BODY, SUBJECT and FROM. Each query
+asks the full-text index the way IMAP SEARCH does (the candidates of a
+substring search, TEXT as header and body) and the way the word search
+does, in a view of its own. The report gives the latency and the
+operations per query, and per query the messages found and a SHA-256
+fingerprint of the results (account, field set, GUID); the fingerprint
+of all queries compares the results of two runs. A run with
+.B "\-\-probe\-messages 0"
+and without
+.B \-\-expunge
+changes nothing, so the next run on the same accounts must report the
+same fingerprint (for instance before and after a conversion of the
+index).
+.PP
+With
+.BI \-\-expunge " n"
+the probe accounts lose their
+.I n
+oldest INBOX messages in each of two more rounds, at the end of the run,
+one EXPUNGE per message in a view of its own; the report gives the
+latency, the compare-and-swap retries and the operations per expunge.
+.PP
 The objecter log
 .RB ( debug_objecter
 10, one line per operation) is written to
@@ -299,6 +340,27 @@ only).
 Messages per probe account and delivery round (10; 0 for no delivery
 rounds).
 .TP
+.BI \-\-contention " p"
+Add two delivery rounds with
+.I p
+deliveries at a time into each probe account (0, the default: none).
+Not to be confused with
+.BR \-\-parallel ,
+which works on several accounts at once.
+.TP
+.BI \-\-search " k"
+Search queries per probe account and round (0, the default: no search
+rounds). With
+.B "\-\-probe\-accounts 0"
+there are no probe accounts and no search.
+.TP
+.BI \-\-expunge " n"
+INBOX messages to expunge per probe account and round (0, the default:
+no expunge rounds). The messages are gone afterwards. Like
+.BR \-\-search ,
+it does nothing with
+.BR "\-\-probe\-accounts 0" .
+.TP
 .BI \-\-extrapolate " n"
 Scale the per-account means to
 .I n
@@ -351,7 +413,18 @@ has the keys
 .BR extrapolated ,
 .BR pools ,
 .B delivery
-(latency, cas_retries, ops_per_delivery by pool and class),
+(parallel, latency, deliveries_per_second, cas_retries by_kind and
+by_class, ops_per_delivery by pool and class),
+.B contention
+(the same, with
+.BR \-\-contention ),
+.B search
+(count, latency, ops_per_call, queries with their key, kind, text,
+candidates, words and fingerprint, and the fingerprint of all; with
+.BR \-\-search ),
+.B expunge
+(count, latency, cas_retries, ops_per_call; with
+.BR \-\-expunge ),
 .B user_open
 and
 .BR session_open .
@@ -390,6 +463,33 @@ shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-messages 500
 shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-sample\-every 10
+.RE
+.fi
+.PP
+Eight deliveries at a time into each of 20 accounts, ten messages each,
+to measure compare-and-swap contention:
+.PP
+.nf
+.RS
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-contention 8 \e
+    \-\-json /tmp/contention.json
+jq '.contention.cas_retries' /tmp/contention.json
+.RE
+.fi
+.PP
+Compare the search results of the same accounts before and after a
+change of the index, and measure what an expunge costs:
+.PP
+.nf
+.RS
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-probe\-messages 0 \e
+    \-\-search 24 \-\-json /tmp/search\-before.json
+# ... change the index, then the same command with search\-after.json
+jq -r .search.fingerprint /tmp/search\-before.json /tmp/search\-after.json
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-probe\-messages 0 \-\-expunge 5
 .RE
 .fi
 .PP

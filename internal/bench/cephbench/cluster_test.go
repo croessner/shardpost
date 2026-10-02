@@ -28,16 +28,20 @@ import (
 // the bench pools are created here.
 
 const (
-	benchIndex  = "shardpost-bench-test-index"
-	benchData   = "shardpost-bench-test-data"
-	ftsShards   = 4
-	testMsgs    = 12
-	testAccts   = 3
-	probeMsgs   = 3
-	probeAccts  = 2
-	mboxShard   = 4
-	chunkSize   = 64 << 10
-	createTries = 60
+	benchIndex = "shardpost-bench-test-index"
+	benchData  = "shardpost-bench-test-data"
+	ftsShards  = 4
+	testMsgs   = 12
+	testAccts  = 3
+	probeMsgs  = 3
+	probeAccts = 2
+	contention = 4
+	// searchQueries covers every kind and key (bench.SearchQueries).
+	searchQueries = 12
+	expunges      = 2
+	mboxShard     = 4
+	chunkSize     = 64 << 10
+	createTries   = 60
 )
 
 var poolsOnce sync.Once
@@ -429,6 +433,7 @@ func TestPopulateAndMeasure(t *testing.T) {
 
 	m, err := Measure(ctx, MeasureOptions{Guard: guard(prefix), Config: cfg, Store: s, NewDeliverer: deliverer,
 		Gen: populateOptions(prefix).Gen, Every: 1, Parallel: 4, ProbeAccounts: probeAccts, ProbeMessages: probeMsgs,
+		Contention: contention, Search: searchQueries, Expunge: expunges,
 		EC: bench.ECEstimate{DataChunks: 2, CodingChunks: 1, StripeUnit: 4096, MinAlloc: 4096}, Extrapolate: 1000,
 		TraceDir: t.TempDir(), Log: discard()})
 	if err != nil {
@@ -437,7 +442,12 @@ func TestPopulateAndMeasure(t *testing.T) {
 
 	checkInventory(t, m)
 	checkProbe(t, m)
+	checkContention(t, m)
 	checkOpens(t, m)
+	checkSearch(t, m)
+	checkExpunge(t, m)
+
+	checkSearchStable(t, s, cfg, prefix, m.Search.Fingerprint)
 
 	var out strings.Builder
 	if err := bench.WriteMeasureTable(&out, m); err != nil {
@@ -445,6 +455,30 @@ func TestPopulateAndMeasure(t *testing.T) {
 	}
 
 	t.Log("\n" + out.String())
+}
+
+// checkSearchStable runs the search probe alone twice more: the
+// accounts changed after the first search (deliveries, expunges), so
+// the second finds something else, and the third, on unchanged
+// accounts, exactly what the second found.
+func checkSearchStable(t *testing.T, s *cephstore.Store, cfg cephstore.Config, prefix, first string) {
+	t.Helper()
+
+	search := func() string {
+		m, err := Measure(context.Background(), MeasureOptions{Guard: guard(prefix), Config: cfg, Store: s, Every: 1,
+			Parallel: 4, ProbeAccounts: probeAccts, Search: searchQueries, TraceDir: t.TempDir(), Log: discard()})
+		if err != nil || m.Search == nil || m.Search.Mismatch {
+			t.Fatalf("search probe %+v: %v", m, err)
+		}
+
+		return m.Search.Fingerprint
+	}
+
+	second, third := search(), search()
+	if second == first || third != second {
+		t.Errorf("search fingerprints %s, %s, %s: want the second to differ from the first and the third to equal it",
+			first, second, third)
+	}
 }
 
 // exactly checks that every account has n objects of a class.
@@ -519,7 +553,79 @@ func checkProbe(t *testing.T, m *bench.MeasureReport) {
 		t.Errorf("registry or mailbox untouched: %+v", d.Ops[benchIndex])
 	}
 
+	// A posting shard costs one read, the compare-and-swap's own, and
+	// the id map one compare-and-swap; a delivery into an index with
+	// ids does not look up whether the index is fresh (the CAS reads
+	// "n").
+	if o := d.Ops[benchIndex][bench.ClassFTS]; o.Reads > o.Writes {
+		t.Errorf("posting shard reads per delivery %v above the writes %v", o.Reads, o.Writes)
+	}
+
+	if o := d.Ops[benchIndex][bench.ClassFTSMap]; o.Reads > 1 || o.Writes > 1 {
+		t.Errorf("id map ops per delivery %+v, want at most one read and one write", o)
+	}
+
 	t.Logf("ops per delivery %+v", d.Total)
+}
+
+// checkContention: the deliveries of the contention rounds all arrive,
+// and their retries are counted by object class.
+func checkContention(t *testing.T, m *bench.MeasureReport) {
+	t.Helper()
+
+	d := m.Contention
+	if d == nil || d.Parallel != contention || d.Deliveries != probeAccts*contention*probeMsgs || d.PerSecond <= 0 {
+		t.Fatalf("contention probe %+v", d)
+	}
+
+	for class := range d.CASRetries.ByClass {
+		if class == "" {
+			t.Errorf("CAS retries without a class: %+v", d.CASRetries)
+		}
+	}
+
+	t.Logf("contention: %.1f deliveries/s, CAS retries %+v, ops per delivery %+v", d.PerSecond, d.CASRetries, d.Total)
+}
+
+// checkSearch: every query ran in every probe account, frequent words
+// are found, and the two rounds agree.
+func checkSearch(t *testing.T, m *bench.MeasureReport) {
+	t.Helper()
+
+	r := m.Search
+	if r == nil || r.Count != probeAccts*searchQueries || len(r.Queries) != searchQueries || r.Mismatch || r.Total.Reads <= 0 {
+		t.Fatalf("search probe %+v", r)
+	}
+
+	found := 0
+
+	for _, q := range r.Queries {
+		if q.Words > 0 || q.Candidates > 0 {
+			found++
+		}
+	}
+
+	if found == 0 {
+		t.Errorf("no query found anything: %+v", r.Queries)
+	}
+
+	t.Logf("search: %d of %d queries found messages, ops per query %+v, fingerprint %s", found, len(r.Queries), r.Total, r.Fingerprint)
+}
+
+// checkExpunge: the expunges happened and wrote to the posting shards.
+func checkExpunge(t *testing.T, m *bench.MeasureReport) {
+	t.Helper()
+
+	r := m.Expunge
+	if r == nil || r.Count != probeAccts*expunges {
+		t.Fatalf("expunge probe %+v", r)
+	}
+
+	if w := r.Ops[benchIndex][bench.ClassFTS].Writes; w < 1 {
+		t.Errorf("posting shard writes per expunge %v", w)
+	}
+
+	t.Logf("expunge: ops per expunge %+v", r.Total)
 }
 
 func checkOpens(t *testing.T, m *bench.MeasureReport) {

@@ -9,10 +9,16 @@ import (
 // package needs no store.
 const casMetric = "imapceph_rados_cas_retries_total"
 
-// CASRetries returns the store's compare-and-swap retries so far, by
-// object kind.
-func CASRetries() map[string]float64 {
-	out := map[string]float64{}
+// CASKey is one series of the retry counter: the kind of
+// compare-and-swap and the class of the object.
+type CASKey struct{ Kind, Class string }
+
+// CASReading is the retry counter at one moment, by series.
+type CASReading map[CASKey]float64
+
+// CASRetries returns the store's compare-and-swap retries so far.
+func CASRetries() CASReading {
+	out := CASReading{}
 
 	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
@@ -25,15 +31,18 @@ func CASRetries() map[string]float64 {
 		}
 
 		for _, m := range f.GetMetric() {
-			kind := ""
+			var k CASKey
 
 			for _, l := range m.GetLabel() {
-				if l.GetName() == "kind" {
-					kind = l.GetValue()
+				switch l.GetName() {
+				case "kind":
+					k.Kind = l.GetValue()
+				case "class":
+					k.Class = l.GetValue()
 				}
 			}
 
-			out[kind] += m.GetCounter().GetValue()
+			out[k] += m.GetCounter().GetValue()
 		}
 	}
 
@@ -41,12 +50,13 @@ func CASRetries() map[string]float64 {
 }
 
 // CASDelta is the retries between two readings, per delivery of n.
-func CASDelta(before, after map[string]float64, n int64) CASSummary {
-	s := CASSummary{ByKind: map[string]float64{}}
+func CASDelta(before, after CASReading, n int64) CASSummary {
+	s := CASSummary{ByKind: map[string]float64{}, ByClass: map[string]float64{}}
 
-	for kind, v := range after {
-		if d := v - before[kind]; d > 0 {
-			s.ByKind[kind] = d
+	for k, v := range after {
+		if d := v - before[k]; d > 0 {
+			s.ByKind[k.Kind] += d
+			s.ByClass[k.Class] += d
 			s.Total += d
 		}
 	}
