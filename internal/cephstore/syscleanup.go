@@ -106,6 +106,28 @@ func (t *sysTool) cleanupRun(f Fence) error {
 			ErrSystemRefused, f.Run, rs.Values[rsPhase])
 	}
 
+	return t.abortedOldPlace(f, rs)
+}
+
+// abortedOldPlace checks the old place of a run aborted from M4 on
+// against m4_digest: its quarantine is the last copy should the old place
+// have changed since (a late write of a stopped tool, K3), so it goes
+// only while the old place still has the digest of M4.
+func (t *sysTool) abortedOldPlace(f Fence, rs runState) error {
+	if rs.Values[rsRun] != f.Run || !phaseAtLeast(rs.Values[rsAbortFrom], PhaseM4) {
+		return nil
+	}
+
+	m4, err := parseSums(rs.Values[rsM4Digest])
+	if err != nil {
+		return err
+	}
+
+	if err := t.checkOldPlace(m4); err != nil {
+		return fmt.Errorf("%w; the quarantine is kept: run \"shardpost system abort --run %s\" again to repair the old place from it",
+			err, f.Run)
+	}
+
 	return nil
 }
 

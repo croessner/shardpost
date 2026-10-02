@@ -40,6 +40,7 @@ shardpost-system \- place the store-wide state in a system pool, check it, take 
 .IR run ]]
 .RB [ \-\-parallel
 .IR n ]
+.RB [ \-\-wait ]
 .br
 .B shardpost
 .RB [ \-\-config
@@ -50,6 +51,8 @@ shardpost-system \- place the store-wide state in a system pool, check it, take 
 .RB [ \-\-delete\-surplus ]
 .RB [ \-\-confirm
 .IR run ]
+.RB [ \-\-parallel
+.IR n ]
 .RB [ \-\-wait ]
 .br
 .B shardpost
@@ -60,6 +63,8 @@ shardpost-system \- place the store-wide state in a system pool, check it, take 
 .B \-\-confirm
 .I run
 .RB [ \-\-delete\-surplus ]
+.RB [ \-\-parallel
+.IR n ]
 .RB [ \-\-wait ]
 .br
 .B shardpost
@@ -72,6 +77,8 @@ shardpost-system \- place the store-wide state in a system pool, check it, take 
 .RB [ \-\-min\-age
 .IR duration ]
 .RB [ \-\-delete\-surplus ]
+.RB [ \-\-parallel
+.IR n ]
 .RB [ \-\-wait ]
 .SH DESCRIPTION
 The store's own namespaces
@@ -255,6 +262,11 @@ The quarantine is kept: delete it with
 .B cleanup
 after the minimum age, or with the next run's
 .BR \-\-confirm .
+An abort of a run that is aborted already checks the old place against
+the digest of M4 again and repairs it from the quarantine (a late write
+of a tool that was stopped);
+.B cleanup
+refuses to delete the quarantine while the old place differs.
 .B \-\-delete\-copies
 with
 .B \-\-confirm
@@ -347,7 +359,11 @@ Only the preconditions, reporting running processes instead of refusing
 them.
 .TP
 .BI \-\-parallel " n"
-Objects copied or hashed at a time (16; 1 to 64). The tool raises the
+Objects copied or hashed at a time (16; 1 to 64, other values are
+refused; not for
+.B status
+and
+.BR init ). The tool raises the
 objecter throttles of its connection to let them start
 .RI ( objecter_inflight_ops
 at least 4 per worker,

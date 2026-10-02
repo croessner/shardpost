@@ -143,9 +143,9 @@ func orNone(f Fence) string {
 // remnant is what the old place holds after a migration, as verify
 // --source-only checks it.
 type remnant struct {
-	// surplus are the objects that must not be there (namespace/object,
-	// in the index pool).
-	surplus []string
+	// surplus are the objects that must not be there (in the index
+	// pool).
+	surplus []objRef
 	x       mismatches
 }
 
@@ -189,11 +189,12 @@ func (t *sysTool) verifySource(f Fence) error {
 // result is the outcome of a remnant check: mismatches and surplus
 // objects are ErrSystemMismatch.
 func (r *remnant) result(t *sysTool) error {
-	for _, s := range r.surplus {
+	names := refNames(r.surplus)
+	for _, s := range names {
 		r.x.add("%s: must not be at the old place", s)
 	}
 
-	t.rep.Surplus = append(t.rep.Surplus, limited(r.surplus)...)
+	t.rep.Surplus = append(t.rep.Surplus, limited(names)...)
 
 	return r.x.err(t, "the old place")
 }
@@ -233,8 +234,6 @@ func (t *sysTool) checkRemnant(f Fence) (*remnant, error) {
 		}
 	}
 
-	slices.Sort(r.surplus)
-
 	return r, nil
 }
 
@@ -253,7 +252,7 @@ func fenceHeads(f Fence) ([]string, error) {
 
 // beyondHeads lists what the old place holds besides the fence, the
 // sweep's objects and the heads.
-func (t *sysTool) beyondHeads(heads []string) ([]string, error) {
+func (t *sysTool) beyondHeads(heads []string) ([]objRef, error) {
 	old, err := t.listPool(t.cfg.IndexPool, func(ns, oid string) bool {
 		return model.SystemNamespace(ns) && !isSweep(ns, oid) && (ns != model.AdminNamespace || oid != FenceOID)
 	})
@@ -261,12 +260,12 @@ func (t *sysTool) beyondHeads(heads []string) ([]string, error) {
 		return nil, err
 	}
 
-	var out []string
+	var out []objRef
 
 	for ns, oids := range old {
 		for _, oid := range oids {
 			if !slices.Contains(heads, objName(ns, oid)) {
-				out = append(out, objName(ns, oid))
+				out = append(out, objRef{ns, oid})
 			}
 		}
 	}
@@ -338,7 +337,7 @@ func (t *sysTool) checkQuarantine(f Fence, r *remnant) error {
 	if f.Values[fkCleanedAt] != "" {
 		for qns, oids := range l {
 			for _, oid := range oids {
-				r.surplus = append(r.surplus, objName(qns, oid))
+				r.surplus = append(r.surplus, objRef{qns, oid})
 			}
 		}
 
@@ -460,23 +459,24 @@ func (t *sysTool) confirmed(run, what string) error {
 
 // deleteSurplus deletes the surplus objects of the index pool under the
 // lease and names them in the report.
-func (t *sysTool) deleteSurplus(surplus []string) error {
+func (t *sysTool) deleteSurplus(surplus []objRef) error {
 	l := listing{}
 
-	for _, name := range surplus {
-		ns, oid := splitName(name)
-		l[ns] = append(l[ns], oid)
+	for _, o := range surplus {
+		l[o.ns] = append(l[o.ns], o.oid)
 	}
+
+	names := refNames(surplus)
 
 	n, err := t.deleteListed(t.cfg.IndexPool, l)
 	t.rep.Deleted += n
-	t.rep.Surplus = append(t.rep.Surplus, limited(surplus)...)
+	t.rep.Surplus = append(t.rep.Surplus, limited(names)...)
 
 	if err != nil {
 		return err
 	}
 
-	t.log.Warn("surplus objects deleted at the old place", "event", "system_surplus_deleted", rsObjects, n, "first", surplus[0])
+	t.log.Warn("surplus objects deleted at the old place", "event", "system_surplus_deleted", rsObjects, n, "first", names[0])
 
 	return systemStep("surplus")
 }

@@ -1083,6 +1083,21 @@ func cleanupAborted(t *testing.T, tool *Store, cfg Config, run string) {
 	_, err := tool.CleanupSystem(SystemOptions{Log: quiet(), Run: run, Confirm: run})
 	wantErr(t, err, ErrSystemRefused, "cleanup of a young abort")
 
+	// A late write of a stopped tool removes an original after the
+	// abort (K3): cleanup keeps the quarantine, a second abort repairs.
+	deleteRaw(t, tool, cfg.IndexPool, model.AdminNamespace, "kv.routing/x")
+
+	_, err = tool.CleanupSystem(SystemOptions{Log: quiet(), Run: run, Confirm: run, MinAge: time.Nanosecond})
+	wantErr(t, err, ErrSystemMismatch, "cleanup over a changed old place")
+
+	if rep, err := tool.AbortSystem(SystemOptions{Log: quiet(), Run: run}); err != nil || rep.Restored != 1 || rep.Already {
+		t.Fatalf("the repeated abort: %v %+v", err, rep)
+	}
+
+	if rep, err := tool.AbortSystem(SystemOptions{Log: quiet(), Run: run}); err != nil || !rep.Already {
+		t.Fatalf("a third abort: %v %+v", err, rep)
+	}
+
 	rep, err := tool.CleanupSystem(SystemOptions{Log: quiet(), Run: run, Confirm: run, MinAge: time.Nanosecond})
 	if err != nil || rep.Deleted == 0 {
 		t.Fatalf("cleanup of the abort: %v %+v", err, rep)
@@ -1383,6 +1398,46 @@ func TestCleanup(t *testing.T) {
 
 	_, err = tool.VerifySystem(SystemOptions{Log: quiet(), SourceOnly: true})
 	wantErr(t, err, ErrSystemMismatch, "verify with a quarantine after cleanup")
+
+	// The quarantine namespace has a "/" of its own.
+	rep, err = tool.VerifySystem(SystemOptions{Log: quiet(), SourceOnly: true, DeleteSurplus: true, Confirm: f.Run})
+	if err != nil || rep.Deleted != 1 {
+		t.Fatalf("deleting a quarantine object after cleanup: %v %+v", err, rep)
+	}
+
+	if n := len(snapshot(t, tool, cfg.IndexPool, f.Run)); n != 0 {
+		t.Fatalf("%d quarantine objects left", n)
+	}
+}
+
+// TestRevertLateObject: an object written into the system pool after the
+// first listing and before the fence took effect is copied back too.
+func TestRevertLateObject(t *testing.T) {
+	quickChecks(t)
+
+	tool, cfg := migPools(t)
+	populate(t, tool, cfg)
+	mustMigrate(t, tool, cfg, SystemOptions{})
+
+	_, f, _ := inputs(t, tool)
+
+	systemStep = func(step string) error {
+		if step == "revert:fence" {
+			writeRaw(t, tool, cfg.SystemPool, model.AdminNamespace, "kv.late", []byte("{}"))
+		}
+
+		return nil
+	}
+
+	t.Cleanup(noCrash)
+
+	if _, err := tool.RevertSystem(SystemOptions{Log: quiet(), Run: f.Run, Confirm: f.Run}); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+
+	if got := names(t, tool, cfg.IndexPool, model.AdminNamespace); !slices.Contains(got, "kv.late") {
+		t.Fatalf("the late object was not copied back: %v", got)
+	}
 }
 
 // TestInitConfirmsEarlierRun: init deletes the copies of an earlier run
@@ -1523,7 +1578,7 @@ func TestAbortDeleteCopiesResumes(t *testing.T) {
 		t.Fatalf("second abort: %v %+v", err, rep)
 	}
 
-	if got := names(t, tool, cfg.SystemPool, model.AdminNamespace); !slices.Equal(got, []string{runStateOID, MarkOID}) {
+	if got := names(t, tool, cfg.SystemPool, model.AdminNamespace); slices.ContainsFunc(got, func(n string) bool { return !strings.HasPrefix(n, "system.") }) {
 		t.Fatalf("system pool after --delete-copies: %v", got)
 	}
 

@@ -50,6 +50,8 @@ func TestSystemFlags(t *testing.T) {
 		{systemMigrate, []string{"--to", "p", "--check", "--wait"}, false},
 		{systemMigrate, []string{"--to", "p", "--check", "--confirm", "r1"}, true},
 		{systemMigrate, []string{"--to", "p", "--parallel", "65"}, false},
+		{systemMigrate, []string{"--to", "p", "--parallel", "0"}, false},
+		{systemRevert, []string{"--run", "r1", "--confirm", "r1", "--parallel", "64"}, true},
 		{systemMigrate, []string{"--to", "p", "--force-registrations", "--confirm", "r1", "--wait"}, true},
 		{systemVerify, nil, true},
 		{systemVerify, []string{"--delete-surplus", "--confirm", "r1"}, false},
@@ -86,13 +88,13 @@ func TestSystemFlags(t *testing.T) {
 func TestSystemExit(t *testing.T) {
 	for err, want := range map[error]int{
 		nil: systemOK,
-		fmt.Errorf("x: %w", cephstore.ErrSystemMismatch):                     systemMismatch,
-		fmt.Errorf("x: %w", cephstore.ErrSystemRefused):                      systemRefused,
-		fmt.Errorf("x: %w", cephstore.ErrInitRefused):                        systemRefused,
+		fmt.Errorf("x: %w", cephstore.ErrSystemMismatch):                            systemMismatch,
+		fmt.Errorf("x: %w", cephstore.ErrSystemRefused):                             systemRefused,
+		fmt.Errorf("x: %w", cephstore.ErrInitRefused):                               systemRefused,
 		fmt.Errorf("x: %w: %w", cephstore.ErrSystemRefused, cephstore.ErrFenceHeld): systemRefused,
-		fmt.Errorf("x: %w", cephstore.ErrSystemPlacement):                    systemRefused,
-		fmt.Errorf("x: %w", cephstore.ErrLeaseLost):                          systemFailed,
-		errors.New("timeout"):                                                systemFailed,
+		fmt.Errorf("x: %w", cephstore.ErrSystemPlacement):                           systemRefused,
+		fmt.Errorf("x: %w", cephstore.ErrLeaseLost):                                 systemFailed,
+		errors.New("timeout"):                                                       systemFailed,
 	} {
 		if got := systemExit(err); got != want {
 			t.Errorf("%v: exit %d, want %d", err, got, want)

@@ -49,10 +49,10 @@ const (
 
 // systemFlags are the options of the system subcommands.
 type systemFlags struct {
-	pool, to, run, confirm                                    string
+	pool, to, run, confirm                                      string
 	deep, wait, check, force, sourceOnly, delCopies, delSurplus bool
-	parallel                                                  int
-	minAge                                                    time.Duration
+	parallel                                                    int
+	minAge                                                      time.Duration
 }
 
 // register adds the flags of subcommand sub.
@@ -115,6 +115,10 @@ func (f *systemFlags) validate(sub string) error {
 		return errors.New("--delete-surplus belongs to verify --source-only")
 	}
 
+	if sub != systemStatus && sub != systemInit && f.parallel < 1 {
+		return fmt.Errorf("--parallel must be 1 to %d", cephstore.MaxSystemParallel)
+	}
+
 	return f.ranges()
 }
 
@@ -125,7 +129,7 @@ func (f *systemFlags) ranges() error {
 		return errors.New("--delete-surplus and --delete-copies need --confirm <run>")
 	case f.check && f.wait:
 		return errors.New("migrate --check takes no lease; --wait does not apply")
-	case f.parallel < 0 || f.parallel > cephstore.MaxSystemParallel:
+	case f.parallel > cephstore.MaxSystemParallel:
 		return fmt.Errorf("--parallel must be 1 to %d", cephstore.MaxSystemParallel)
 	case f.minAge < 0:
 		return errors.New("--min-age must not be negative")
@@ -161,7 +165,9 @@ func (f *systemFlags) target() string {
 
 // splitSystem finds "system" after the global options; it returns those
 // options and the arguments after "system".
-func splitSystem(args []string) ([]string, []string, bool) { return splitCommandAt(args, commandSystem) }
+func splitSystem(args []string) ([]string, []string, bool) {
+	return splitCommandAt(args, commandSystem)
+}
 
 // systemUsage is the usage line.
 const systemUsage = "usage: shardpost [--config <file>] system status|init|migrate|verify|abort|revert|cleanup [flags]"

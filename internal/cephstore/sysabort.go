@@ -70,9 +70,10 @@ type abortion struct {
 	run      string
 	rs       runState
 	restored atomic.Int64
-	// copiesOnly: the run is aborted already, only its copies are left
-	// to delete (an abort with DeleteCopies that stopped).
-	copiesOnly bool
+	// again: the run is aborted already (fence reverted); the abort
+	// checks the old place again, repairs it from the quarantine and
+	// deletes the copies with DeleteCopies.
+	again bool
 }
 
 // abortable reports whether f is a fence abort takes: a migration or an
@@ -91,12 +92,9 @@ func (a *abortion) precheck(f Fence) error {
 		return fmt.Errorf("%w: abort needs --run <id> (the run of the fence)", ErrSystemRefused)
 	case !a.confirmed():
 		return fmt.Errorf("%w: --delete-copies and --delete-surplus need --confirm %s", ErrSystemRefused, a.run)
-	case f.State == FenceReverted && f.Run == a.run && t.o.DeleteCopies:
-		a.copiesOnly = true
-		return t.systemPoolOf(f)
 	case f.State == FenceReverted && f.Run == a.run:
-		t.rep.Already = true
-		return nil
+		a.again = true
+		return t.systemPoolOf(f)
 	case f.State == FenceDone || f.State == FenceNative:
 		return fmt.Errorf("%w: run %s is committed (fence %s): take it back with \"shardpost system revert --run %s --confirm %s\"",
 			ErrSystemRefused, f.Run, f.State, f.Run, f.Run)
@@ -116,12 +114,8 @@ func (a *abortion) confirmed() bool {
 func (a *abortion) do() error {
 	t := a.t
 
-	if a.copiesOnly {
-		if _, err := t.takeLease(keepPlan(Fence{State: FenceReverted, Run: a.run})); err != nil {
-			return err
-		}
-
-		return a.deleteCopies()
+	if a.again {
+		return a.repeat()
 	}
 
 	f, err := t.takeLease(func(f Fence) (map[string]string, error) {
@@ -162,6 +156,66 @@ func (a *abortion) do() error {
 	}
 }
 
+// repeat is abort on a run it aborted before: an abort from M4 to M6
+// checks the old place against m4_digest again and repairs it from the
+// quarantine and the saved heads (a late write of a stopped tool, K3);
+// then the copies go with DeleteCopies.
+func (a *abortion) repeat() error {
+	t := a.t
+
+	if _, err := t.takeLease(keepPlan(Fence{State: FenceReverted, Run: a.run})); err != nil {
+		return err
+	}
+
+	rs, err := t.readRunState()
+	if err != nil {
+		return err
+	}
+
+	a.rs = rs
+
+	if from := rs.Values[rsAbortFrom]; rs.Values[rsRun] == a.run && rs.Values[rsPhase] == PhaseAbort && phaseAtLeast(from, PhaseM4) {
+		if err := a.repair(); err != nil {
+			return err
+		}
+	}
+
+	if !t.o.DeleteCopies && t.rep.Restored == 0 && t.rep.Deleted == 0 {
+		t.rep.Already = true
+	}
+
+	return a.deleteCopies()
+}
+
+// repair brings the old place of an aborted run back to m4_digest.
+func (a *abortion) repair() error {
+	t := a.t
+
+	m4, err := parseSums(a.rs.Values[rsM4Digest])
+	if err != nil {
+		return err
+	}
+
+	stored, err := t.readDigests(runShards(a.rs))
+	if err != nil {
+		return err
+	}
+
+	if err := a.restoreAll(stored); err != nil {
+		return err
+	}
+
+	if err := a.surplus(stored); err != nil {
+		return err
+	}
+
+	if t.rep.Restored > 0 {
+		t.log.Warn("the old place of an aborted run was repaired", "event", "system_abort_repaired", rsRun, a.run, "restored", t.rep.Restored)
+	}
+
+	return t.checkOldPlace(m4)
+}
+
 // start records abort_from and phase "abort" in one write, unless an
 // earlier abort did; it returns abort_from.
 func (a *abortion) start() (string, error) {
@@ -197,8 +251,9 @@ func (a *abortion) unchanged() error {
 }
 
 // deleteCopies deletes the copies in the system pool (DeleteCopies). The
-// run state and the mark stay as the record of the run: the next run
-// confirms it and deletes them together with the run's quarantine.
+// run state with its digests and the mark stay as the record of the
+// run (a repeated abort repairs from them): the next run confirms it and
+// deletes them together with the run's quarantine.
 func (a *abortion) deleteCopies() error {
 	t := a.t
 
@@ -207,7 +262,7 @@ func (a *abortion) deleteCopies() error {
 	}
 
 	objs, err := listAllOf(t.conn, t.sysPool, func(ns, oid string) bool {
-		return model.SystemNamespace(ns) && (ns != model.AdminNamespace || (oid != MarkOID && oid != runStateOID))
+		return model.SystemNamespace(ns) && !placementObject(ns, oid)
 	})
 	if err != nil {
 		return err
@@ -275,7 +330,7 @@ func (a *abortion) restore() error {
 		return err
 	}
 
-	if err := a.checkOldPlace(m4); err != nil {
+	if err := t.checkOldPlace(m4); err != nil {
 		return err
 	}
 
@@ -426,12 +481,12 @@ func (a *abortion) surplus(stored nsDigests) error {
 		return err
 	}
 
-	var extra []string
+	var extra []objRef
 
 	for ns, oids := range old {
 		for _, oid := range oids {
 			if _, ok := stored[ns][oid]; !ok {
-				extra = append(extra, objName(ns, oid))
+				extra = append(extra, objRef{ns, oid})
 			}
 		}
 	}
@@ -441,27 +496,24 @@ func (a *abortion) surplus(stored nsDigests) error {
 
 // handleSurplus deletes surplus objects with DeleteSurplus (the command
 // checked the confirmation), else refuses naming them.
-func (t *sysTool) handleSurplus(extra []string) error {
+func (t *sysTool) handleSurplus(extra []objRef) error {
 	if len(extra) == 0 {
 		return nil
 	}
 
-	slices.Sort(extra)
-
 	if !t.o.DeleteSurplus {
-		t.rep.Surplus = append(t.rep.Surplus, limited(extra)...)
+		names := refNames(extra)
+		t.rep.Surplus = append(t.rep.Surplus, limited(names)...)
 
 		return fmt.Errorf("%w: %d objects at the old place are not part of the run (first %s): find out which process wrote them, then delete them with --delete-surplus --confirm %s",
-			ErrSystemRefused, len(extra), extra[0], t.rep.Run)
+			ErrSystemRefused, len(extra), names[0], t.rep.Run)
 	}
 
 	return t.deleteSurplus(extra)
 }
 
 // checkOldPlace compares the old place with m4_digest.
-func (a *abortion) checkOldPlace(m4 map[string]string) error {
-	t := a.t
-
+func (t *sysTool) checkOldPlace(m4 map[string]string) error {
 	old, err := t.movableIn(t.cfg.IndexPool)
 	if err != nil {
 		return err

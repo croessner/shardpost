@@ -1,7 +1,7 @@
 package cephstore
 
 import (
-		"fmt"
+	"fmt"
 	"maps"
 	"strconv"
 	"sync/atomic"
@@ -91,6 +91,12 @@ func (r *reversal) do() error {
 	}
 
 	if err := r.start(f); err != nil {
+		return err
+	}
+
+	// Listed again under the fence: what was written before it took
+	// effect is copied too.
+	if sys, err = t.movableIn(t.sysPool); err != nil {
 		return err
 	}
 
@@ -251,14 +257,14 @@ func (r *reversal) surplus(sys listing) error {
 		return err
 	}
 
-	var extra []string
+	var extra []objRef
 
 	in := sys.set()
 
 	for ns, oids := range old {
 		for _, oid := range oids {
 			if !in[objName(ns, oid)] {
-				extra = append(extra, objName(ns, oid))
+				extra = append(extra, objRef{ns, oid})
 			}
 		}
 	}
@@ -266,10 +272,15 @@ func (r *reversal) surplus(sys listing) error {
 	return r.t.handleSurplus(extra)
 }
 
-// compare checks the index pool against a fresh digest of the system
-// pool.
-func (r *reversal) compare(sys listing) error {
+// compare checks the index pool against a fresh listing and digest of
+// the system pool.
+func (r *reversal) compare(listing) error {
 	t := r.t
+
+	sys, err := t.movableIn(t.sysPool)
+	if err != nil {
+		return err
+	}
 
 	want, err := t.digestListing(t.sysPool, sys, func(ns string) string { return ns })
 	if err != nil {

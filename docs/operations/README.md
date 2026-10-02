@@ -1082,6 +1082,9 @@ out which one before anything else (the object names say what it is:
   the fence; it refuses a system pool that changed since M4 (use
   `revert`). The quarantine is kept until `cleanup` (after its minimum
   age) or the next run. An abort that stopped continues when run again.
+  Run on a run it aborted before, it checks the old place against the
+  digest of M4 again and repairs it from the quarantine; `cleanup`
+  refuses to delete that quarantine while the old place differs.
   `--delete-copies --confirm <run>` also deletes the copies in the
   system pool (the run state and the mark stay as the record of the
   run); otherwise the next run deletes them when its `--confirm` names

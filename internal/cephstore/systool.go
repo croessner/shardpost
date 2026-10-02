@@ -186,35 +186,35 @@ type Finding struct {
 // SystemReport is what a system tool did and found; it is printed as
 // JSON whatever the outcome.
 type SystemReport struct {
-	Command      string            `json:"command"`
-	Run          string            `json:"run,omitempty"`
-	Phase        string            `json:"phase,omitempty"`
-	IndexPool    *model.PoolRef    `json:"index_pool,omitempty"`
-	SystemPool   *model.PoolRef    `json:"system_pool,omitempty"`
-	Fence        map[string]string `json:"fence,omitempty"`
-	Mark         map[string]string `json:"mark,omitempty"`
-	RunState     map[string]string `json:"run_state,omitempty"`
-	Objects      int               `json:"objects,omitempty"`
-	Bytes        int64             `json:"bytes,omitempty"`
-	Copied       int               `json:"copied,omitempty"`
-	Kept         int               `json:"kept,omitempty"`
-	Replaced     int               `json:"replaced,omitempty"`
-	Quarantined  int               `json:"quarantined,omitempty"`
-	Poisoned     int               `json:"poisoned,omitempty"`
-	Restored     int               `json:"restored,omitempty"`
-	Deleted      int               `json:"deleted,omitempty"`
-	Digests      map[string]string `json:"digests,omitempty"`
-	FencedDigest string            `json:"fenced_digest,omitempty"`
-	Heads        []string          `json:"heads,omitempty"`
-	Findings     []Finding         `json:"findings,omitempty"`
-	Surplus      []string          `json:"surplus,omitempty"`
-	Mismatches   []string          `json:"mismatches,omitempty"`
-	Registrations []Registration   `json:"registrations,omitempty"`
-	Namespaces   []NamespaceCount  `json:"namespaces,omitempty"`
-	Done         bool              `json:"done,omitempty"`
-	Already      bool              `json:"already,omitempty"`
-	Started      time.Time         `json:"started"`
-	Finished     time.Time         `json:"finished,omitzero"`
+	Command       string            `json:"command"`
+	Run           string            `json:"run,omitempty"`
+	Phase         string            `json:"phase,omitempty"`
+	IndexPool     *model.PoolRef    `json:"index_pool,omitempty"`
+	SystemPool    *model.PoolRef    `json:"system_pool,omitempty"`
+	Fence         map[string]string `json:"fence,omitempty"`
+	Mark          map[string]string `json:"mark,omitempty"`
+	RunState      map[string]string `json:"run_state,omitempty"`
+	Objects       int               `json:"objects,omitempty"`
+	Bytes         int64             `json:"bytes,omitempty"`
+	Copied        int               `json:"copied,omitempty"`
+	Kept          int               `json:"kept,omitempty"`
+	Replaced      int               `json:"replaced,omitempty"`
+	Quarantined   int               `json:"quarantined,omitempty"`
+	Poisoned      int               `json:"poisoned,omitempty"`
+	Restored      int               `json:"restored,omitempty"`
+	Deleted       int               `json:"deleted,omitempty"`
+	Digests       map[string]string `json:"digests,omitempty"`
+	FencedDigest  string            `json:"fenced_digest,omitempty"`
+	Heads         []string          `json:"heads,omitempty"`
+	Findings      []Finding         `json:"findings,omitempty"`
+	Surplus       []string          `json:"surplus,omitempty"`
+	Mismatches    []string          `json:"mismatches,omitempty"`
+	Registrations []Registration    `json:"registrations,omitempty"`
+	Namespaces    []NamespaceCount  `json:"namespaces,omitempty"`
+	Done          bool              `json:"done,omitempty"`
+	Already       bool              `json:"already,omitempty"`
+	Started       time.Time         `json:"started"`
+	Finished      time.Time         `json:"finished,omitzero"`
 }
 
 // Registration is a server registration as status and the checks show
@@ -577,7 +577,26 @@ func movable(ns, oid string) bool {
 // and object.
 func objName(ns, oid string) string { return ns + "/" + oid }
 
-// splitName is the inverse of objName (the namespaces have no "/").
+// objRef is an object by namespace and name (a quarantine namespace has
+// a "/" itself, so a name made by objName cannot always be split).
+type objRef struct{ ns, oid string }
+
+func (o objRef) name() string { return objName(o.ns, o.oid) }
+
+// refNames are the names of refs, sorted.
+func refNames(refs []objRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r.name())
+	}
+
+	slices.Sort(out)
+
+	return out
+}
+
+// splitName is the inverse of objName for the store's own namespaces
+// (they have no "/"; not for a quarantine namespace).
 func splitName(name string) (string, string) {
 	ns, oid, _ := strings.Cut(name, "/")
 	return ns, oid
@@ -600,6 +619,11 @@ func (l listing) set() map[string]bool {
 }
 
 // listPool lists every namespace of pool and keeps what keep accepts.
+//
+// TODO(mail.de scale): abort, revert, verify and cleanup list the whole
+// index pool several times per run (the old place, the quarantine, the
+// check after the copy); at 10^7 objects each listing is a walk over
+// every placement group. Reuse one listing per run once that matters.
 func (t *sysTool) listPool(pool string, keep func(ns, oid string) bool) (listing, error) {
 	c, err := t.openCtx(pool, rados.AllNamespaces)
 	if err != nil {

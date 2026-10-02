@@ -45,7 +45,7 @@ spec:
         app.kubernetes.io/name: shardpost-system
     spec:
       restartPolicy: Never
-      terminationGracePeriodSeconds: 60 # time to stop writing and give the lease up
+      terminationGracePeriodSeconds: 120 # time to stop writing and give the lease up
       serviceAccountName: shardpost-server # reads the Rook secret of client.shardpost
       automountServiceAccountToken: true
       securityContext:
