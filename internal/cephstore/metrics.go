@@ -26,7 +26,7 @@ func (metricsHooks) listing(site string)    { metrics.RadosListings.WithLabelVal
 // small fixed set, so that the label never grows with accounts or
 // mailboxes.
 const (
-	casClassFTS      = "fts"      // fts/, ftst/, ftsh/, ftsd/: the full-text index
+	casClassFTS      = "fts"      // fts/, ftst/, ftsh/, ftsd/, ftx/: the full-text index
 	casClassFTSMap   = "ftsmap"   // ftsmap: document ids and index markers
 	casClassRegistry = "registry" // mailboxes: the mailbox registry
 	casClassMbox     = "mbox"     // mbox/<id>[/<n>]: mailbox header and UID shards
@@ -41,6 +41,7 @@ const (
 var casClassPrefixes = []struct{ prefix, class string }{
 	{oidFTSMap, casClassFTSMap},
 	{"fts", casClassFTS},
+	{ftxPrefix, casClassFTS},
 	{mboxPrefix, casClassMbox},
 	{msgPrefix, casClassMsg},
 	{"ix/", casClassIndex},

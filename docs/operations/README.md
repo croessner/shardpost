@@ -91,7 +91,9 @@ Define a compatibility strategy for old and new writers beforehand.
 Do not rename or recreate pools and namespaces when rebranding.
 
 Going back behind 0.43.0 needs an empty delayed submission queue (see
-[Delayed submissions](#delayed-submissions)).
+[Delayed submissions](#delayed-submissions)). Going back behind 0.45.0
+needs every account back on layout 2 of the full-text index (see
+[Full-text layout 3](#full-text-layout-3)).
 
 A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
@@ -632,6 +634,88 @@ that send many requests at once, `imapceph_jmap_limit_total` (see
 [observability](../observability.md)). `hack/auth-smoke.sh` checks a
 rollout: logins hit the cache, a flush makes the next login a miss,
 and parallel JMAP requests get no 429 or 503.
+
+## Full-text layout 3
+
+Layout 3 of the full-text index ([storage](../architecture/storage.md#full-text-index-layout-3))
+writes a handful of objects per delivery instead of nearly all 288 of
+layout 2. Servers before 0.45.0 cannot read it, so it is switched on in
+steps, and only a cluster mark lets a server create it.
+
+**Switching it on.**
+
+1. Roll out 0.45.0 (or later) to every server. Every server registers
+   itself at startup and then every minute (`servers/<instance>` in the
+   admin store), whether or not it runs jobs or an admin listener.
+2. Wait three minutes after the rollout: a replaced pod leaves the
+   registration of its predecessor fresh for that long, and `enable`
+   would count one pod too many.
+3. `shardpostctl fts layout3 status` lists the registrations; check that
+   every running pod is fresh and reports `fts_layout3`.
+4. `shardpostctl fts layout3 enable -pods <number of running pods>`. It
+   refuses when the fresh registrations are not exactly that many and
+   names them. `-force` skips the check (audited) — only when you are
+   sure no older server runs.
+5. Set `fts.layout: 3` in the overlay and roll it out: new accounts get
+   layout 3 from now on.
+6. Convert the existing accounts, with little parallelism
+   (`jobs.batch_parallel`), at a quiet time: `shardpostctl plan -all
+   -layout 3 fts_layout`, `shardpostctl apply <plan-id>`. Each account
+   is locked for its conversion: deliveries into it fail temporarily
+   (LMTP 451, the MTA retries) for the duration of its job, a few
+   seconds for an account of a few thousand messages; measure it with
+   `shardpost bench measure --convert` first ([bench](bench.md)).
+
+From then on the `fts_due` worker (on the server that holds its lease,
+with `fts.auto_reshard`) reshards an account whose objects outgrew
+`fts.shard_target_keys`; `imapceph_fts_reshard_due_total` and
+`imapceph_fts_layout_runs_total{mode="reshard"}` show it. An import
+reshards between its batches itself (`shardpostctl migrate`): the import
+lock would keep the jobs out until the import ends. The migrator talks
+to the same pod through the socket of its sidecar, where the runs of the
+reshard endpoint live; on another pod it works, too, only slower (a
+stopped run is seen after its 90 s heartbeat aged).
+
+**Findings and repairs.**
+
+- A delivery or search of one account keeps failing with "the
+  full-text index is being converted": a conversion whose run ended
+  without clearing it. `shardpostctl fts layout show <account>` shows
+  its token; `shardpostctl fts layout clear <account>` removes it when
+  its run (job or import) has ended. The scrub job does the same, and
+  so does every job or import that takes the account lock.
+- "full-text index object missing, repair with fts_rebuild"
+  (`imapceph_fts_shard_missing_total`, scrub `FTSShardsMissing`): an
+  object of the current generation is gone; `shardpostctl plan
+  fts_rebuild <account>`.
+- Scrub `FTSMixedLayout`: layout 2 objects in a layout 3 account, written
+  by a server before 0.45.0 after a wrong way back: `fts_rebuild`.
+- `imapceph_fts_shards_capped_total` rises: accounts outgrew
+  `fts.shards_max` objects; raise it, or the threshold at which Ceph
+  reports large omap objects (`osd_deep_scrub_large_omap_object_key_threshold`,
+  200 000 keys) if `fts.shard_target_keys` was raised beyond it.
+
+**The registrations.** They are deleted 24 hours after their last
+heartbeat by the expiry worker of the job system; with
+`admin.kv_index: off` or `jobs.enabled: false` on every server only
+`status` and `enable` delete them. With `admin.kv_index` `write` or
+`off`, `status` and `enable` list the admin namespace (rare, and started
+by an operator).
+
+**Going back.** In order:
+
+1. `fts.layout: 2` on every server (new indexes in layout 2);
+2. `shardpostctl plan -all -layout 2 fts_layout` and apply it;
+3. `shardpostctl fts layout3 disable` — it removes the mark, waits five
+   seconds and exits 0 only when no account has layout 3 any more
+   (`list` shows the others);
+4. roll the image back.
+
+In an emergency, when an older server already runs against layout 3
+accounts (IMAP search is slow but right there, JMAP search finds too
+little): export `shardpostctl fts layout3 list`, run `fts_rebuild` for
+those accounts under the older version, and let the sweep remove the
+layout 3 objects later under 0.45.0 or newer.
 
 ## Measuring the cost per account
 
