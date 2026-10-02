@@ -173,7 +173,7 @@ func queueEnv(t *testing.T, s *Store, relay sendqueue.Submitter) (*sendqueue.Ser
 
 	t.Cleanup(kv.Close)
 
-	q, err := sendqueue.New(sendqueue.Options{KV: kv, Accounts: accounts{s}, Relay: relay, Poll: 200 * time.Millisecond})
+	q, err := sendqueue.New(sendqueue.Options{KV: kv, Accounts: accounts{s}, Directory: s, Relay: relay, Poll: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,5 +444,38 @@ func TestSubmissionPurge(t *testing.T) {
 
 	if left := append(objects(t, u.idx), objects(t, u.data)...); len(left) > 0 {
 		t.Fatalf("objects left: %v", left)
+	}
+}
+
+// TestSubmissionAccountGoneCluster: a submission of an account whose
+// directory entry is gone (purged by a server that left the queue
+// behind) fails instead of being sent; a live account's is sent.
+func TestSubmissionAccountGoneCluster(t *testing.T) {
+	s := testStore(t)
+	relay := &countingRelay{}
+	q, _ := queueEnv(t, s, relay)
+	gone, live := testUser(t, s), testUser(t, s)
+
+	a := schedule(t, q, gone, 0)
+	b := schedule(t, q, live, 0)
+
+	ix, release, err := s.AccountIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ix.Remove(gone.name); err != nil {
+		t.Fatal(err)
+	}
+
+	release()
+
+	stop := runQueue(q)
+	defer stop()
+
+	waitUntil(t, "both to end", func() bool { return ended(t, q, gone, a) && ended(t, q, live, b) })
+
+	if relay.calls.Load() != 1 {
+		t.Fatalf("relay calls %d, want only the live account's", relay.calls.Load())
 	}
 }

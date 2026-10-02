@@ -16,6 +16,7 @@ import (
 // submission queue (sendqueue.Service).
 type SubmissionAdmin interface {
 	List(account string) ([]*sendqueue.Record, error)
+	ListAll(after string, limit int) ([]*sendqueue.Record, string, error)
 	Cancel(account, id, by string) (*sendqueue.Record, error)
 }
 
@@ -57,6 +58,37 @@ func (s *Server) ListSubmissions(w http.ResponseWriter, r *http.Request, account
 	})
 
 	out := adminapi.SubmissionList{Items: make([]adminapi.Submission, 0, len(list))}
+	for _, rec := range list {
+		out.Items = append(out.Items, apiSubmission(rec))
+	}
+
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ListAllSubmissions lists the records of every account, a page at a
+// time (a listing of the admin namespace).
+func (s *Server) ListAllSubmissions(w http.ResponseWriter, r *http.Request, p adminapi.ListAllSubmissionsParams) {
+	if !requireAllAccounts(w, r, RoleDiagnose) || !s.submissionsEnabled(w) {
+		return
+	}
+
+	limit := 100
+	if p.Limit != nil {
+		limit = *p.Limit
+	}
+
+	if limit < 1 || limit > 1000 {
+		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "limit must be 1 to 1000")
+		return
+	}
+
+	list, next, err := s.o.Submissions.ListAll(deref(p.After), limit)
+	if err != nil {
+		s.importError(w, r, err)
+		return
+	}
+
+	out := adminapi.SubmissionList{Items: make([]adminapi.Submission, 0, len(list)), Next: optional(next)}
 	for _, rec := range list {
 		out.Items = append(out.Items, apiSubmission(rec))
 	}

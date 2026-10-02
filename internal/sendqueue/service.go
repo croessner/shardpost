@@ -83,7 +83,10 @@ type Options struct {
 	Relay Submitter
 	// Book is the JMAP view (nil: none).
 	Book Book
-	Log  *slog.Logger
+	// Directory is the account directory: a submission of an account
+	// that is gone or being purged is not sent (nil: not checked).
+	Directory model.AccountDirectory
+	Log       *slog.Logger
 	// Partitions is the number of worker partitions (accounts by hash);
 	// MaxPartitions bounds how many one server holds (0: all).
 	Partitions, MaxPartitions int
@@ -171,6 +174,10 @@ type Spec struct {
 	XClient     bool
 	Login       string
 	ClientAddr  string
+	// View is the JMAP view of the submission (opaque here), kept so
+	// that the view can be written when the submission ends even if its
+	// entry is missing (Book.Settle).
+	View []byte
 	// Raw is the message as it is sent (Bcc removed).
 	Raw []byte
 }
@@ -199,7 +206,7 @@ func (s *Service) Schedule(u model.User, sp Spec) (*Record, error) {
 	now := s.o.Now().UTC()
 	rec := &Record{Account: sp.Account, ID: sp.ID, Gen: 1, State: StatePending, Release: sp.Release.UTC(),
 		Due: sp.Release.UTC(), Created: now, GUID: guid, Size: int64(len(sp.Raw)), MailFrom: sp.MailFrom,
-		RcptTo: sp.RcptTo, XClient: sp.XClient, Login: sp.Login, ClientAddr: sp.ClientAddr}
+		RcptTo: sp.RcptTo, XClient: sp.XClient, Login: sp.Login, ClientAddr: sp.ClientAddr, View: sp.View}
 
 	eid, pos := EntryID(sp.Account, sp.ID), rec.position(s.o.SendingTimeout)
 
@@ -319,6 +326,35 @@ func (s *Service) List(account string) ([]*Record, error) {
 	}
 
 	return out, nil
+}
+
+// ListAll returns up to limit records of every account whose keys sort
+// after after, and the key to continue from ("" at the end). It lists
+// the admin namespace (a diagnosis tool, not a running path): it finds
+// records that List cannot, such as one whose copy and entry are lost.
+func (s *Service) ListAll(after string, limit int) ([]*Record, string, error) {
+	entries, err := s.o.KV.List(recordPrefix, after, limit)
+	if err != nil {
+		return nil, "", err
+	}
+
+	out := make([]*Record, 0, len(entries))
+
+	for _, e := range entries {
+		rec, err := parseRecord(e.Value)
+		if err != nil {
+			rec = &Record{ID: e.Key, Reason: err.Error()}
+		}
+
+		out = append(out, rec)
+	}
+
+	next := ""
+	if len(entries) == limit && limit > 0 {
+		next = entries[len(entries)-1].Key
+	}
+
+	return out, next, nil
 }
 
 // PurgeAccount removes the records and queue entries of an account's

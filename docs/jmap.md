@@ -1277,22 +1277,26 @@ and bounds the delay (see [configuration](configuration.md#delayed-sending)).
   of two days and more, else to the hour or the minute), so that the
   session state does not change with every request.
 - **Asking for it.** The envelope's `mailFrom` carries exactly one of
-  `HOLDFOR` (whole seconds, at most `maxDelayedSend`) or `HOLDUNTIL` (an
-  RFC 3339 date-time, at most `maxDelayedSend` ahead, with a minute of
-  slack for the client's clock); names are case-insensitive. Anything
-  else — a value that does not parse, a hold beyond the limit, two hold
-  parameters, any other parameter, a parameter of a recipient — is
-  `invalidProperties` on `envelope`, and nothing is scheduled.
-  `HOLDFOR=0` and a `HOLDUNTIL` that has passed send at once. `sendAt` is
-  server-set (RFC 8621 7) and refused in a creation, as before.
+  `HOLDFOR` (1 to 999999999 seconds as RFC 4865 3 writes it, at most
+  `maxDelayedSend`) or `HOLDUNTIL` (an RFC 3339 date-time in UTC, ending
+  in `Z`, at most `maxDelayedSend` ahead, with a minute of slack for the
+  client's clock); names are case-insensitive. Anything else — a value
+  that does not parse, `HOLDFOR=0`, a `HOLDUNTIL` with an offset, a hold
+  beyond the limit, two hold parameters, any other parameter, a
+  parameter of a recipient — is `invalidProperties` on `envelope`, and
+  nothing is scheduled. A `HOLDUNTIL` that has passed sends at once.
+  `sendAt` is server-set (RFC 8621 7) and refused in a creation, as
+  before.
 - **What is kept.** All checks of an immediate submission run at
   creation (identity, sender, recipients, size). The message is then
   copied, without its Bcc field, into a blob of the account's own (it
   does not reference the message in the mailbox), and the submission
   waits in the submission queue of the admin store
   ([storage](architecture/storage.md#delayed-submissions)). The
-  EmailSubmission is created with `undoStatus` `pending`, `sendAt` the
-  release time and `deliveryStatus` null.
+  EmailSubmission is recorded first, with `undoStatus` `pending`,
+  `sendAt` the release time and `deliveryStatus` null, so that a worker
+  that sends at once finds it; a submission that cannot be scheduled is
+  taken back (`serverFail`).
 - **Canceling.** `EmailSubmission/set` with
   `update: {id: {undoStatus: "canceled"}}` cancels a pending submission
   as long as the worker has not begun to send it; from then on it is

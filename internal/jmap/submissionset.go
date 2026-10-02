@@ -158,7 +158,8 @@ type submissionCreate struct {
 	EmailID    string    `json:"emailId"`
 }
 
-// create sends one message and records the submission.
+// create sends one message and records the submission (a delayed one
+// is recorded before it is scheduled, see schedule).
 func (r *submissionRun) create(ctx context.Context, cid string, raw json.RawMessage) {
 	s, serr := r.send(ctx, raw)
 	if serr != nil {
@@ -167,12 +168,11 @@ func (r *submissionRun) create(ctx context.Context, cid string, raw json.RawMess
 		return
 	}
 
-	err := updateSubmissions(r.kv, r.sess.account, r.opts, func(b *submissionBook) error {
-		b.Subs = append(b.Subs, s)
-		b.note(s.ID, model.OpCreated)
+	var err error
+	if s.UndoStatus != undoPending {
+		err = r.record(s)
+	}
 
-		return nil
-	})
 	if err != nil {
 		// The message is sent; only its record is missing. The client is
 		// told it was created, since sending it again would send it twice.
@@ -183,6 +183,16 @@ func (r *submissionRun) create(ctx context.Context, cid string, raw json.RawMess
 		propDeliveryStatus, propDSNBlobIDs, propMDNBlobIDs})
 	r.sess.created[cid] = s.ID
 	r.emailOf[s.ID] = s.EmailID
+}
+
+// record adds a submission to the account's records.
+func (r *submissionRun) record(s *submission) error {
+	return updateSubmissions(r.kv, r.sess.account, r.opts, func(b *submissionBook) error {
+		b.Subs = append(b.Subs, s)
+		b.note(s.ID, model.OpCreated)
+
+		return nil
+	})
 }
 
 // send checks a creation and hands the message to the relay.
@@ -239,8 +249,11 @@ func (r *submissionRun) send(ctx context.Context, raw json.RawMessage) (*submiss
 }
 
 // schedule hands a submission with a release time to the delayed
-// submission queue: the copy of the message, the queue entry and the
-// record are written before the client hears of it.
+// submission queue. The account's record of it (pending) is written
+// first, so that a worker that sends it at once finds it to settle;
+// the queue keeps the record's view as well, for a record that is lost
+// all the same (see submissionBookView.Settle). A schedule that fails
+// takes the record back.
 func (r *submissionRun) schedule(ident *identity, emailID, threadID string, env *envelope, release time.Time, msg []byte) (*submission, *setError) {
 	to := make([]string, 0, len(env.RcptTo))
 	for _, rc := range env.RcptTo {
@@ -258,14 +271,44 @@ func (r *submissionRun) schedule(ident *identity, emailID, threadID string, env 
 		}
 	}
 
+	s := &submission{ID: id, IdentityID: ident.ID, EmailID: emailID, ThreadID: threadID, Envelope: *env,
+		SendAt: release.UTC(), UndoStatus: undoPending}
+
+	sp.View, _ = json.Marshal(s)
+
+	if err := r.record(s); err != nil {
+		r.sess.log.Warn("jmap: delayed submission not recorded", "err", err)
+
+		return nil, &setError{Type: setServerFail, Description: "the submission could not be recorded; try again later"}
+	}
+
 	if _, err := r.opts.Delayed.Queue.Schedule(r.sess.user, sp); err != nil {
 		r.sess.log.Warn("jmap: delayed submission not scheduled", "err", err)
+
+		if derr := r.forget(id); derr != nil {
+			r.sess.log.Warn("jmap: record of an unscheduled submission left as pending", "id", id, "err", derr)
+		}
 
 		return nil, &setError{Type: setServerFail, Description: "the submission could not be scheduled; try again later"}
 	}
 
-	return &submission{ID: id, IdentityID: ident.ID, EmailID: emailID, ThreadID: threadID, Envelope: *env,
-		SendAt: release.UTC(), UndoStatus: undoPending}, nil
+	return s, nil
+}
+
+// forget removes a submission from the account's records.
+func (r *submissionRun) forget(id string) error {
+	return updateSubmissions(r.kv, r.sess.account, r.opts, func(b *submissionBook) error {
+		for i, s := range b.Subs {
+			if s.ID == id {
+				b.Subs = append(b.Subs[:i], b.Subs[i+1:]...)
+				b.note(id, model.OpDestroyed)
+
+				return nil
+			}
+		}
+
+		return errNoChange
+	})
 }
 
 // submissionCreatable are the properties a creation may carry.
@@ -442,7 +485,7 @@ func checkOriginator(hdr textproto.Header) *setError {
 // and only with delayed sending (submissionExtensions); everything else
 // is refused, as is a hold beyond maxDelayedSend, a second hold
 // parameter, or one without a valid value (RFC 4865 4.2). A HOLDUNTIL
-// that has passed, and HOLDFOR=0, send now.
+// that has passed sends now.
 func checkParameters(env *envelope, delayed *DelayedOptions, now time.Time) (time.Time, *setError) {
 	for _, rc := range env.RcptTo {
 		if len(rc.Parameters) > 0 {
@@ -480,20 +523,17 @@ func checkParameters(env *envelope, delayed *DelayedOptions, now time.Time) (tim
 	return time.Time{}, nil
 }
 
-// holdFor reads HOLDFOR: whole seconds, at most maxDelay.
+// holdFor reads HOLDFOR: whole seconds, 1 to 999999999 (RFC 4865 3,
+// at most nine digits), at most maxDelay.
 func holdFor(v string, maxDelay time.Duration, now time.Time) (time.Time, *setError) {
 	n, err := strconv.ParseUint(v, 10, 32)
-	if err != nil || strings.TrimSpace(v) != v || v == "" {
-		return time.Time{}, invalidProperty(propEnvelope, "HOLDFOR is not a number of seconds: "+v)
+	if err != nil || len(v) > 9 || n == 0 || strings.TrimSpace(v) != v {
+		return time.Time{}, invalidProperty(propEnvelope, "HOLDFOR is not 1 to 999999999 seconds: "+v)
 	}
 
 	d := time.Duration(n) * time.Second
 	if d > maxDelay {
 		return time.Time{}, invalidProperty(propEnvelope, "HOLDFOR is longer than maxDelayedSend")
-	}
-
-	if n == 0 {
-		return time.Time{}, nil
 	}
 
 	return now.Add(d).UTC(), nil
@@ -503,12 +543,12 @@ func holdFor(v string, maxDelay time.Duration, now time.Time) (time.Time, *setEr
 // client computes it from the advertised latest time, on its own clock.
 const holdUntilSlack = time.Minute
 
-// holdUntil reads HOLDUNTIL: an RFC 3339 date-time, at most maxDelay
-// ahead.
+// holdUntil reads HOLDUNTIL: an RFC 3339 date-time in UTC ("Z", RFC
+// 4865 3), at most maxDelay ahead.
 func holdUntil(v string, maxDelay time.Duration, now time.Time) (time.Time, *setError) {
 	t, err := time.Parse(time.RFC3339, v)
-	if err != nil {
-		return time.Time{}, invalidProperty(propEnvelope, "HOLDUNTIL is not an RFC 3339 date-time: "+v)
+	if err != nil || !strings.HasSuffix(v, "Z") {
+		return time.Time{}, invalidProperty(propEnvelope, "HOLDUNTIL is not an RFC 3339 date-time in UTC: "+v)
 	}
 
 	if t.After(now.Add(maxDelay + holdUntilSlack)) {

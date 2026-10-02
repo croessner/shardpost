@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -194,8 +195,15 @@ func (b *submissionBook) expire(maxAge time.Duration, maxKept int) {
 			return
 		}
 
-		b.note(b.Subs[0].ID, model.OpDestroyed)
-		b.Subs = b.Subs[1:]
+		// The oldest that is not pending goes; pending ones are kept
+		// (their number is bounded by what the queue holds).
+		i := slices.IndexFunc(b.Subs, func(s *submission) bool { return s.UndoStatus != undoPending })
+		if i < 0 {
+			return
+		}
+
+		b.note(b.Subs[i].ID, model.OpDestroyed)
+		b.Subs = append(b.Subs[:i], b.Subs[i+1:]...)
 	}
 }
 
@@ -254,12 +262,41 @@ func SubmissionBook(kv model.AdminKV, retention time.Duration, maxKept int) send
 	return &submissionBookView{kv: kv, opts: submissionDefaults(&SubmissionOptions{Retention: retention, MaxKept: maxKept}, 0)}
 }
 
+// viewOf is the JMAP view a queue record kept (nil without one).
+func viewOf(rec *sendqueue.Record) *submission {
+	if len(rec.View) == 0 {
+		return nil
+	}
+
+	s := &submission{}
+	if json.Unmarshal(rec.View, s) != nil || s.ID != rec.ID {
+		return nil
+	}
+
+	return s
+}
+
+// destroyed reports whether the change log records the destruction of
+// id (by the client, or by expiry).
+func (b *submissionBook) destroyed(id string) bool {
+	for _, c := range b.Log {
+		if c.ID == id && c.Op == string(model.OpDestroyed) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // errNoChange aborts an update that has nothing to write.
 var errNoChange = errors.New("nothing to change")
 
 // Settle implements sendqueue.Book: the submission's undoStatus and
-// deliveryStatus, if the account still has it (a client may have
-// destroyed it; RFC 8621 7.5 says that does not cancel it).
+// deliveryStatus. A submission the client destroyed stays destroyed
+// (RFC 8621 7.5: that does not cancel it); one the records lack without
+// having destroyed it (its record write failed or was lost) is added
+// from the view the queue kept. An account without records (purged) is
+// left alone.
 func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
 	status := undoFinal
 	if rec.State == sendqueue.StateCanceled {
@@ -277,7 +314,20 @@ func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
 
 	err := updateSubmissions(v.kv, rec.Account, v.opts, func(b *submissionBook) error {
 		s := b.find(rec.ID)
-		if s == nil || s.UndoStatus == status {
+
+		switch {
+		case s == nil:
+			s = viewOf(rec)
+			if s == nil || b.State == 0 || b.destroyed(rec.ID) {
+				return errNoChange
+			}
+
+			s.UndoStatus, s.DeliveryStatus = status, ds
+			b.Subs = append(b.Subs, s)
+			b.note(s.ID, model.OpCreated)
+
+			return nil
+		case s.UndoStatus == status:
 			return errNoChange
 		}
 

@@ -876,11 +876,16 @@ the leases, the clocks or the timeout say. A cancel is the
 compare-and-swap `pending → canceled`; a cancel and the start of a send
 cannot both succeed.
 
-**Order of the writes.** Creating: the copy's intent, the copy, the
-queue entry, the record, then the JMAP view (a completeness index: the
-entry before the record). Ending (worker, cancel): the JMAP view, the
-copy with its intent, the record, the entry (the record before the
-entry). The entry's position follows from the record: a pending
+**Order of the writes.** Creating: the JMAP view (`pending`, so that a
+worker that sends at once finds the entry to settle), the copy's
+intent, the copy, the queue entry, the record (a completeness index: the
+entry before the record); a schedule that fails takes the JMAP view
+back. The record keeps the JMAP view as created, and settling adds it
+to the account's records when it is missing there and the change log
+does not show the client destroyed it (a lost view write); an account
+without any records (purged) gets none. Ending (worker, cancel): the
+JMAP view, the copy with its intent, the record, the entry (the record
+before the entry). The entry's position follows from the record: a pending
 submission at its next attempt, one being sent at the end of its
 sending timeout, an ended one at once (its clean-up is due). A reader
 that finds an entry elsewhere moves it to the record's position; an
@@ -895,8 +900,25 @@ the two writes. A crash anywhere is finished from the entry.
 queue (from the key it read last, so entries of other partitions do not
 hide its own) and sends up to `concurrency` at once. It wakes on a
 notify on shard 0 of the queue (each new submission sends one), when
-the earliest entry it saw becomes due, and every `poll_seconds`. The
-leases spread the work; the compare-and-swap on the record is the fence.
+the earliest entry it saw becomes due, and every `poll_seconds`; free
+partitions it tries to take only on the poll, so a notify costs no lock
+operations. The leases spread the work; the compare-and-swap on the
+record is the fence. Entries of partitions it does not hold that are
+overdue by more than a poll are counted
+(`imapceph_jmap_submission_queue_entries{state="unowned"}`) and warned
+about: a partition nobody holds is never sent, so servers ×
+`max_partitions` must reach `partitions`. Before it sends, the worker
+checks the account directory: a submission of an account whose entry is
+gone or `purging` fails instead of being sent.
+
+**Shutdown.** A stopping worker starts no new conversation (also none
+that waited for a slot), waits for the running ones to end — up to the
+relay's timeouts, ten minutes for the answer to a message — and gives
+its leases back. A dial the shutdown canceled leaves the submission
+pending without counting an attempt. A server killed in the middle
+(SIGKILL, the pod's grace period ran out) leaves the record in
+`sending`: at most once still holds, the submission ends as unknown
+after the sending timeout.
 
 **Purge, scrub, sweep.** A purge removes the records and entries of an
 account's submissions, named by the `sub:` intents of its registry,

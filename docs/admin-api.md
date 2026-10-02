@@ -864,6 +864,7 @@ canceled for the user:
 ```sh
 shardpostctl submission list user@example.org                 # role diagnose
 shardpostctl submission cancel user@example.org S5f0c1e2d3b4a  # role support
+shardpostctl submission list -all                              # role diagnose, scope of all accounts; lists ~admin
 ```
 
 API: `GET /admin/v1/accounts/{account}/submissions` (role `diagnose`)
@@ -876,7 +877,12 @@ message is not sent, its copy is deleted, the EmailSubmission shows
 `canceled`, and the record names the canceling principal
 (`canceled_by` `admin:<identity>`). A submission the worker has begun to
 send is `conflict` (409); one that ended and was cleaned up is
-`no_such_submission` (404). Without the admin store indexes there is no
+`no_such_submission` (404). `GET /admin/v1/submissions` (role
+`diagnose`, scope of all accounts, `after` and `limit` up to 1000) lists
+the records of every account in key order: one listing of the admin
+namespace per page, a tool for diagnosis and for the empty-queue check
+before a rollback, which also finds a record whose copy and queue entry
+were lost. Without the admin store indexes there is no
 queue and both answer `temporary` (503). See the
 [manual page](man/man1/shardpostctl-submission.1).
 

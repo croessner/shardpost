@@ -77,7 +77,9 @@ func startSubmissionQueue(ctx context.Context, log *slog.Logger, settings *confi
 	c := settings.JMAP.Submission
 	d := c.Delayed
 
-	o := sendqueue.Options{KV: kv, Accounts: importStore{store}, Log: log.With("component", "sendqueue"),
+	warnSendingTimeout(log, settings)
+
+	o := sendqueue.Options{KV: kv, Accounts: importStore{store}, Directory: store, Log: log.With("component", "sendqueue"),
 		Book:       jmap.SubmissionBook(kv, sec(c.RetentionSeconds), int(c.MaxKept)),
 		Partitions: int(d.Partitions), MaxPartitions: int(d.MaxPartitions), Poll: sec(d.PollSeconds),
 		SendingTimeout: sec(d.SendingTimeoutSeconds), Concurrency: int(d.Concurrency), RetryAttempts: int(d.RetryAttempts)}
@@ -114,6 +116,49 @@ func startSubmissionQueue(ctx context.Context, log *slog.Logger, settings *confi
 		<-done
 		kv.Close()
 	}, nil
+}
+
+// longestConversation bounds a conversation with the relay for a
+// message of size bytes: a step timeout for each command but the
+// recipients (connect, greeting, EHLO, STARTTLS, EHLO, XCLIENT,
+// greeting, MAIL, DATA, the upload's own), the upload time at
+// 256 KiB/s, and the ten minutes the relay may take to answer the
+// message (outbound.Relay). Each RCPT may add a step timeout more; a
+// relay that is that slow for every recipient is not budgeted.
+func longestConversation(step time.Duration, size int64) time.Duration {
+	const dataAnswer = 10 * time.Minute
+
+	return 10*step + time.Duration(size/(256<<10))*time.Second + dataAnswer
+}
+
+// warnSendingTimeout warns when the sending timeout of delayed
+// submissions does not exceed the longest conversation with the relay:
+// such a conversation would be reported as interrupted (never sent
+// twice, but the user sees "unknown").
+func warnSendingTimeout(log *slog.Logger, settings *config.Config) {
+	c := settings.JMAP.Submission
+	if !c.Delayed.Enabled() {
+		return
+	}
+
+	step := sec(c.TimeoutSeconds)
+	if step <= 0 {
+		step = 30 * time.Second
+	}
+
+	size := c.MaxSize
+	if size <= 0 {
+		size = settings.JMAP.MaxSizeUpload
+	}
+
+	if size <= 0 {
+		size = jmap.DefaultLimits.MaxSizeUpload
+	}
+
+	if need, have := longestConversation(step, size), sec(c.Delayed.SendingTimeoutSeconds); have <= need {
+		log.Warn("jmap.submission.delayed.sending_timeout_seconds does not exceed the longest conversation with the relay; "+
+			"such a submission would end as unknown", "sending_timeout", have, "longest_conversation", need)
+	}
 }
 
 // submissionRelay is the relay of JMAP submissions, immediate and

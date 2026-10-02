@@ -6,6 +6,13 @@ shardpostctl-submission \- list and cancel delayed JMAP submissions of an accoun
 .RB [ \-json ]
 .I account
 .br
+.B shardpostctl submission list \-all
+.RB [ \-json ]
+.RB [ \-after
+.IR key ]
+.RB [ \-limit
+.IR n ]
+.br
 .B shardpostctl submission cancel
 .RB [ \-json ]
 .I account
@@ -39,6 +46,18 @@ the release time, the attempts so far, the size and the envelope. The
 list is read from the account's own records, without a listing of the
 cluster. Role:
 .BR diagnose .
+.PP
+With
+.B \-all
+it lists the records of every account instead, in key order, a page at
+a time. This lists the admin namespace of the cluster (one listing per
+page, which visits every placement group of the pool): use it for
+diagnosis and to check that the queue is empty before going back to a
+release older than 0.43.0, not routinely. It also shows a record whose
+message copy and queue entry were lost, which the per-account list
+cannot see. Role:
+.B diagnose
+with the scope of all accounts.
 .SS submission cancel
 Cancels a pending submission as a JMAP client would (undoStatus
 canceled): the message is not sent, its copy is deleted, and the user's
@@ -55,6 +74,20 @@ submission as canceled. Role:
 .TP
 .B \-json
 Print the answer as JSON.
+.TP
+.B \-all
+.BR list :
+the records of every account (see above).
+.TP
+.BI \-after " key"
+.BR "list \-all" :
+continue after this key (printed as
+.B more:
+at the end of a full page).
+.TP
+.BI \-limit " n"
+.BR "list \-all" :
+records per page, 1 to 1000 (100).
 .SH EXAMPLES
 A user asks why a message they scheduled has not gone out yet:
 .PP
@@ -74,7 +107,15 @@ shardpostctl submission cancel user@example.org S5f0c1e2d3b4a5f6e7d8c9b0a
 .fi
 .PP
 Before going back to a release older than 0.43.0 the queue has to be
-empty; find what an account still has waiting, as JSON:
+empty; check every account:
+.PP
+.nf
+.RS
+shardpostctl submission list -all
+.RE
+.fi
+.PP
+What one account still has waiting, as JSON:
 .PP
 .nf
 .RS
@@ -108,7 +149,9 @@ The caller lacks the role
 .B diagnose
 (list) or
 .B support
-(cancel), or may not address the account.
+(cancel), may not address the account, or lacks the scope of all
+accounts
+.RB ( "list \-all" ).
 .SH SEE ALSO
 .BR shardpostctl (1),
 .BR shardpostctl-account (1)

@@ -94,6 +94,25 @@ func checkSubmissionList(t *testing.T, c *adminapi.ClientWithResponses, recs []*
 	}
 }
 
+// TestListAllSubmissions: every record, paged by key.
+func TestListAllSubmissions(t *testing.T) {
+	withSubmissions(t)
+	_, c := serveDiag(t, nil, RoleDiagnose)
+	ctx := context.Background()
+	limit := 1
+
+	first, err := c.ListAllSubmissionsWithResponse(ctx, &adminapi.ListAllSubmissionsParams{Limit: &limit})
+	if err != nil || first.JSON200 == nil || len(first.JSON200.Items) != 1 || first.JSON200.Next == nil {
+		t.Fatalf("first page: %v %s", err, first.Body)
+	}
+
+	rest, err := c.ListAllSubmissionsWithResponse(ctx, &adminapi.ListAllSubmissionsParams{After: first.JSON200.Next})
+	if err != nil || rest.JSON200 == nil || len(rest.JSON200.Items) != 1 || rest.JSON200.Next != nil ||
+		rest.JSON200.Items[0].Id == first.JSON200.Items[0].Id {
+		t.Fatalf("second page: %v %s", err, rest.Body)
+	}
+}
+
 // TestSubmissionsRoles: without support no cancel; without a queue 503.
 func TestSubmissionsRoles(t *testing.T) {
 	recs := withSubmissions(t)

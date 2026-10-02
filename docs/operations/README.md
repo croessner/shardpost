@@ -134,9 +134,38 @@ longest conversation with the relay (ten minutes for its answer to the
 message plus a step timeout per command); a shorter one reports live
 conversations as unknown (`outcome="conflict"`), never sends twice.
 
-**Stopping a server.** A server that stops gives its partition leases
-back; another server takes them on its next poll. A server that dies
-keeps them until the cls_lock runs out (three minutes).
+**Partitions.** The servers running the worker times `max_partitions`
+must reach `partitions`; otherwise a partition nobody holds is never
+sent. `imapceph_jmap_submission_queue_entries{state="unowned"}` above 0
+and the log line `due submissions of partitions this server does not
+hold are overdue` show it.
+
+**Stopping a server.** A server that stops starts no new conversation,
+waits for the running ones (up to the relay's timeouts, ten minutes for
+its answer to a message; give the pod a grace period to match, or
+accept the next point), and gives its partition leases back; another
+server takes them on its next poll. A server that is killed while
+sending (SIGKILL) is safe for at most once: the submission ends as
+unknown after the sending timeout and is not sent again. A server that
+dies keeps its leases until the cls_lock runs out (three minutes).
+
+**Mixed versions.** While any server before 0.43.0 runs, no message
+copies may exist: keep `max_delay_seconds` at 0 until the last old
+server is gone, and do not go back while the queue holds anything. Old
+servers know nothing of the copies, records and queue entries:
+
+- the scrub of an old server (`scrub.orphan_source` `listing` or
+  `shadow`) takes a copy for an orphan blob and deletes it after two
+  runs — the submission then fails;
+- the purge of an old server leaves the copies, the records and the
+  queue entries of the purged account behind; a server of 0.43.0 or
+  later would then find them — it checks the account directory before
+  sending and fails a submission of an account that is gone or being
+  purged, but nothing else stops it;
+- `shardpost scrub --sweep --repair` of an old server takes the copies
+  for remnants and deletes them;
+- an old server neither sends nor cancels (`cannotUnsend`) a queued
+  submission.
 
 **Rollback.** Servers before 0.43.0 do not send queued submissions and
 do not clean them up. Before going back:
@@ -144,8 +173,9 @@ do not clean them up. Before going back:
 1. Set `max_delay_seconds` to 0 on every server (no new delayed
    submissions; the workers keep sending what is queued).
 2. Wait until the queue is empty: `imapceph_jmap_submission_queue_entries{state="all"}`
-   is 0, or `shardpostctl submission list` is empty for the accounts
-   that used it. A submission due far ahead can be canceled with
+   is 0, and `shardpostctl submission list -all` finds no record (it
+   lists the admin namespace once per page and also finds records
+   whose copy or queue entry was lost). A submission due far ahead can be canceled with
    `shardpostctl submission cancel` (tell the user).
 3. Then roll back.
 

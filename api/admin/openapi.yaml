@@ -473,6 +473,43 @@ paths:
                 $ref: "#/components/schemas/SubmissionList"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/submissions:
+    get:
+      operationId: listAllSubmissions
+      summary: Every delayed JMAP submission record
+      description: |
+        The records of the delayed submission queue of every account, in
+        key order, a page at a time. Unlike the per-account list it lists
+        the admin namespace (one listing per page, visiting every
+        placement group of the pool): a tool for diagnosis and for the
+        check that the queue is empty before a rollback, not for
+        routine use. It also finds a record whose message copy and queue
+        entry are lost. Requires the role `diagnose` and the scope of
+        all accounts.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: One page of records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionList"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/submissions/{submission}/cancel:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1682,6 +1719,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Submission"
+        next:
+          type: string
+          description: Pass as `after` for the next page (listAllSubmissions only); absent at the end.
     Submission:
       type: object
       description: |

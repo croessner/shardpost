@@ -202,7 +202,7 @@ func (s *session) data(rep *Report, raw []byte) (*Report, error) {
 
 	s.step(s.dataTimeout)
 
-	code, msg, err := s.c.Text.ReadResponse(250)
+	code, msg, err := s.c.Text.ReadResponse(2) // any 2xx takes the message
 	if err != nil {
 		var te *textproto.Error
 		if !errors.As(err, &te) {

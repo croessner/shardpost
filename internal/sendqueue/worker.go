@@ -45,7 +45,15 @@ func (s *Service) Run(ctx context.Context) {
 	defer timer.Stop()
 
 	for {
-		w.leases()
+		// Free partitions are taken over on the poll only: a notify
+		// wakes every worker, and trying every lock then would cost
+		// partitions × servers lock operations per submission.
+		take := w.lastTake.IsZero() || time.Since(w.lastTake) >= s.o.Poll
+		if take {
+			w.lastTake = time.Now()
+		}
+
+		w.leases(take)
 
 		wait := s.o.Poll
 		if len(w.held) > 0 {
@@ -68,8 +76,14 @@ type worker struct {
 	s     *Service
 	held  map[int]model.Lease
 	start int
-	// counted is when the queue was last counted for the gauge.
-	counted time.Time
+	// counted is when the queue was last counted for the gauge,
+	// lastTake when free partitions were last tried.
+	counted, lastTake time.Time
+	// unowned counts, per round, the entries of partitions this worker
+	// does not hold that are overdue by more than a poll; warned is
+	// when that was last logged.
+	unowned int
+	warned  time.Time
 }
 
 // lockName is the lease name of partition p.
@@ -78,15 +92,20 @@ func lockName(p int) string { return fmt.Sprintf("%s/p%d", model.SubmissionQueue
 // partitionOf is the partition of an account.
 func (s *Service) partitionOf(account string) int { return model.IndexShard(account, s.o.Partitions) }
 
-// leases drops the leases that are lost and takes free ones up to the
-// bound, starting at a random partition so that servers spread.
-func (w *worker) leases() {
+// leases drops the leases that are lost and, with take, takes free ones
+// up to the bound, starting at a random partition so that servers
+// spread.
+func (w *worker) leases(take bool) {
 	for p, l := range w.held {
 		if l.Lost() {
 			l.Release()
 			delete(w.held, p)
 			w.s.o.Log.Info("sendqueue: partition lease lost", "partition", p)
 		}
+	}
+
+	if !take {
+		return
 	}
 
 	limit := w.s.o.MaxPartitions
@@ -139,6 +158,7 @@ const (
 func (w *worker) round(ctx context.Context) time.Duration {
 	now := w.s.o.Now()
 	after := ""
+	w.unowned = 0
 
 	for range pages {
 		due, err := w.s.q.DueAfter(now, after, page)
@@ -157,6 +177,7 @@ func (w *worker) round(ctx context.Context) time.Duration {
 	}
 
 	w.gauge(now)
+	w.reportUnowned(now)
 
 	return w.nextWait(now)
 }
@@ -177,6 +198,10 @@ func (w *worker) handlePage(ctx context.Context, due []model.DueEntry, now time.
 
 		p := w.s.partitionOf(account)
 		if _, held := w.held[p]; !held {
+			if now.Sub(e.Due) > w.s.o.Poll {
+				w.unowned++
+			}
+
 			continue
 		}
 
@@ -186,6 +211,13 @@ func (w *worker) handlePage(ctx context.Context, due []model.DueEntry, now time.
 		}
 
 		sem <- struct{}{}
+
+		// A shutdown that came while this waited for a slot starts
+		// nothing more.
+		if ctx.Err() != nil {
+			<-sem
+			break
+		}
 
 		wg.Add(1)
 
@@ -198,6 +230,23 @@ func (w *worker) handlePage(ctx context.Context, due []model.DueEntry, now time.
 	}
 
 	wg.Wait()
+}
+
+// reportUnowned publishes the overdue entries of partitions this worker
+// does not hold, and warns (at most once per poll) when there are any:
+// a partition nobody holds is never sent (servers × max_partitions must
+// reach partitions).
+func (w *worker) reportUnowned(now time.Time) {
+	metrics.SubmissionQueue.WithLabelValues("unowned").Set(float64(w.unowned))
+
+	if w.unowned == 0 || now.Sub(w.warned) < w.s.o.Poll {
+		return
+	}
+
+	w.warned = now
+	w.s.o.Log.Warn("sendqueue: due submissions of partitions this server does not hold are overdue; "+
+		"is every partition held (servers x max_partitions >= partitions)?", "overdue", w.unowned,
+		"held", len(w.held), "partitions", w.s.o.Partitions)
 }
 
 // nextWait is the time until the first entry due after now (bounded by
@@ -359,7 +408,7 @@ func (s *Service) interrupted(rec *Record, extra []model.DueKey) {
 // the relay, then the outcome by compare-and-swap on the generation it
 // wrote.
 func (s *Service) send(ctx context.Context, rec *Record, extra []model.DueKey, lost func() bool) {
-	if lost() {
+	if lost() || ctx.Err() != nil {
 		return
 	}
 
@@ -392,14 +441,21 @@ func (s *Service) send(ctx context.Context, rec *Record, extra []model.DueKey, l
 
 // outcome is the result of one attempt.
 type outcome struct {
-	state    State // final, failed, or pending (retry)
-	unknown  bool
-	delivery map[string]Delivery
-	reason   string
+	state   State // final, failed, or pending (retry)
+	unknown bool
+	// uncounted is a retry that does not count as an attempt: the server
+	// is shutting down and the relay was never reached.
+	uncounted bool
+	delivery  map[string]Delivery
+	reason    string
 }
 
 // attempt reads the copy and hands it to the relay.
 func (s *Service) attempt(ctx context.Context, rec *Record) outcome {
+	if reason := s.accountGone(rec.Account); reason != "" {
+		return outcome{state: StateFailed, reason: reason, delivery: deliveries(rec.RcptTo, Delivery{Delivered: DeliveredNo})}
+	}
+
 	raw, err := s.readCopy(rec)
 
 	switch {
@@ -417,7 +473,16 @@ func (s *Service) attempt(ctx context.Context, rec *Record) outcome {
 
 	rep, err := s.o.Relay.Submit(ctx, as, rec.MailFrom, rec.RcptTo, raw)
 
+	return s.classify(ctx, rec, rep, err)
+}
+
+// classify is the outcome of the relay's answer (or error).
+func (s *Service) classify(ctx context.Context, rec *Record, rep *outbound.Report, err error) outcome {
 	switch {
+	case err != nil && ctx.Err() != nil && !errors.Is(err, outbound.ErrInData):
+		// The shutdown canceled the dial (the only use of ctx): nothing
+		// was transferred, and the attempt does not count.
+		return outcome{state: StatePending, uncounted: true, reason: "the server stopped before sending: " + err.Error()}
 	case errors.Is(err, outbound.ErrInData):
 		return outcome{state: StateFinal, unknown: true, reason: err.Error(),
 			delivery: deliveries(rec.RcptTo, Delivery{Delivered: DeliveredUnknown})}
@@ -436,6 +501,35 @@ func (s *Service) attempt(ctx context.Context, rec *Record) outcome {
 	}
 
 	return out
+}
+
+// accountGone says why an account may not send any more: its directory
+// entry is gone (purged) or it is being purged. A submission's copy
+// registers the account when it is written, so a live account always
+// has an entry. A directory that cannot be read lets the send go on.
+func (s *Service) accountGone(account string) string {
+	if s.o.Directory == nil {
+		return ""
+	}
+
+	ix, release, err := s.o.Directory.AccountIndex()
+	if err != nil {
+		return ""
+	}
+	defer release()
+
+	e, ok, err := model.GetAccountEntry(ix, account)
+
+	switch {
+	case err != nil:
+		return ""
+	case !ok:
+		return "the account no longer exists"
+	case e.State == model.AccountPurging:
+		return "the account is being purged"
+	}
+
+	return ""
 }
 
 // readCopy reads the copy of a submission's message.
@@ -490,6 +584,11 @@ func (s *Service) finish(sending *Record, out outcome) {
 
 		r.Gen++
 		r.State, r.Reason, r.Unknown = out.state, out.reason, out.unknown
+
+		if out.uncounted {
+			r.Attempts-- // Due stays: the next worker sends at once
+			return nil
+		}
 
 		if out.state == StatePending {
 			r.Due = now.Add(s.backoff(r.Attempts))

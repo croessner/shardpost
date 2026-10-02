@@ -24,11 +24,17 @@ type fakeRelay struct {
 	report *outbound.Report
 	// hold, when set, blocks Submit until it is closed.
 	hold chan struct{}
+	// onCall, when set, runs at every call.
+	onCall func()
 }
 
 func (f *fakeRelay) Submit(_ context.Context, as *outbound.XClient, _ string, _ []string, raw []byte) (*outbound.Report, error) {
 	if f.hold != nil {
 		<-f.hold
+	}
+
+	if f.onCall != nil {
+		f.onCall()
 	}
 
 	f.mu.Lock()
@@ -168,7 +174,7 @@ func (e *env) worker(t *testing.T) *worker {
 	t.Helper()
 
 	w := &worker{s: e.svc, held: map[int]model.Lease{}}
-	w.leases()
+	w.leases(true)
 
 	if len(w.held) != e.svc.o.Partitions {
 		t.Fatalf("held %d of %d partitions", len(w.held), e.svc.o.Partitions)
@@ -640,7 +646,7 @@ func TestPartitions(t *testing.T) {
 	}
 
 	w1 := &worker{s: e.svc, held: map[int]model.Lease{}}
-	w1.leases()
+	w1.leases(true)
 	t.Cleanup(w1.releaseAll)
 
 	if len(w1.held) != 1 {
@@ -666,7 +672,7 @@ func TestPartitions(t *testing.T) {
 	// The other three partitions are free for three more workers.
 	for range 3 {
 		w := &worker{s: e.svc, held: map[int]model.Lease{}}
-		w.leases()
+		w.leases(true)
 		t.Cleanup(w.releaseAll)
 
 		if len(w.held) != 1 {
@@ -687,10 +693,10 @@ func TestLeaseHandover(t *testing.T) {
 	e := newEnv(t)
 
 	first := &worker{s: e.svc, held: map[int]model.Lease{}}
-	first.leases()
+	first.leases(true)
 
 	second := &worker{s: e.svc, held: map[int]model.Lease{}}
-	second.leases()
+	second.leases(true)
 
 	if len(first.held) != 1 || len(second.held) != 0 {
 		t.Fatalf("held %d and %d", len(first.held), len(second.held))
@@ -705,7 +711,7 @@ func TestLeaseHandover(t *testing.T) {
 	}
 
 	first.releaseAll()
-	second.leases()
+	second.leases(true)
 	t.Cleanup(second.releaseAll)
 	second.round(context.Background())
 
@@ -730,7 +736,7 @@ func TestLostLease(t *testing.T) {
 		t.Fatal("sent with a lost lease")
 	}
 
-	w.leases()
+	w.leases(true)
 	w.round(context.Background())
 
 	if e.relay.count() != 1 {
@@ -771,5 +777,115 @@ func TestRunWakesOnNotify(t *testing.T) {
 func TestNoQueueWithoutIndexes(t *testing.T) {
 	if _, err := New(Options{KV: memstore.NewAdminKVMode(model.KVIndexOff)}); !errors.Is(err, ErrNoQueue) {
 		t.Fatalf("New: %v", err)
+	}
+}
+
+// TestShutdownDoesNotCountAttempt: a dial the shutdown canceled leaves
+// the submission pending, due as before, without an attempt counted.
+func TestShutdownDoesNotCountAttempt(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.RetryAttempts = 1 })
+	rec := e.schedule(t, "alice", 0)
+	w := e.worker(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.relay.err = errors.New("relay connect: context canceled")
+	e.relay.onCall = cancel
+
+	got, err := e.svc.Get("alice", rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.svc.send(ctx, got, nil, func() bool { return false })
+
+	r, err := e.svc.Get("alice", rec.ID)
+	if err != nil || r.State != StatePending || r.Attempts != 0 || !r.Due.Equal(rec.Due) {
+		t.Fatalf("after a canceled dial: %v %#v", err, r)
+	}
+
+	// A canceled context starts nothing.
+	w.round(ctx)
+
+	if e.relay.count() != 1 {
+		t.Fatalf("relay calls %d", e.relay.count())
+	}
+}
+
+// TestAccountGone: a submission of an account whose directory entry is
+// gone is failed, not sent.
+func TestAccountGone(t *testing.T) {
+	e := newEnv(t)
+	e.svc.o.Directory = e.store
+	rec := e.schedule(t, "alice", 0)
+
+	ix, release, err := e.store.AccountIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ix.Remove("alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	release()
+
+	e.worker(t).round(context.Background())
+
+	if s := e.book.get(rec.ID); s == nil || s.State != StateFailed || e.relay.count() != 0 {
+		t.Fatalf("calls %d, %#v", e.relay.count(), s)
+	}
+}
+
+// TestAccountLiveSends: with the directory checked, a live account's
+// submission is sent.
+func TestAccountLiveSends(t *testing.T) {
+	e := newEnv(t)
+	e.svc.o.Directory = e.store
+	e.schedule(t, "alice", 0)
+	e.worker(t).round(context.Background())
+
+	if e.relay.count() != 1 {
+		t.Fatalf("calls %d", e.relay.count())
+	}
+}
+
+// TestLeasesTakenOnPollOnly: without take a worker only drops lost
+// leases and tries no lock.
+func TestLeasesTakenOnPollOnly(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.Partitions = 4 })
+	w := &worker{s: e.svc, held: map[int]model.Lease{}}
+	t.Cleanup(w.releaseAll)
+
+	w.leases(false)
+
+	if len(w.held) != 0 {
+		t.Fatalf("took %d leases without take", len(w.held))
+	}
+
+	w.leases(true)
+
+	if len(w.held) != 4 {
+		t.Fatalf("took %d of 4", len(w.held))
+	}
+}
+
+// TestUnownedReported: overdue entries of partitions nobody here holds
+// are counted.
+func TestUnownedReported(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.Partitions, o.MaxPartitions, o.Poll = 4, 1, time.Second })
+
+	for i := range 20 {
+		e.schedule(t, fmt.Sprintf("user%d", i), 0)
+	}
+
+	e.clock.add(time.Minute)
+
+	w := &worker{s: e.svc, held: map[int]model.Lease{}}
+	w.leases(true)
+	t.Cleanup(w.releaseAll)
+	w.round(context.Background())
+
+	if w.unowned == 0 || w.unowned+e.relay.count() != 20 {
+		t.Fatalf("unowned %d, sent %d", w.unowned, e.relay.count())
 	}
 }

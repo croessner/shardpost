@@ -279,14 +279,15 @@ func TestDelayedCancel(t *testing.T) {
 
 // TestDelayedRefuses: hold parameters beyond maxDelayedSend, two of
 // them, bad values and other parameters are invalidProperties; nothing
-// is scheduled. HOLDFOR=0 and a HOLDUNTIL in the past send at once.
+// is scheduled. A HOLDUNTIL in the past sends at once.
 func TestDelayedRefuses(t *testing.T) {
 	s, u, relay, q := delayedServer(t, time.Hour)
 	ident := identityID(t, s)
 	m := deliver(t, u, "Drafts", draftMessage)
 
 	for _, c := range []struct{ param, value string }{
-		{"HOLDFOR", "3601"}, {"HOLDFOR", "-1"}, {"HOLDFOR", "1.5"}, {"HOLDFOR", ""},
+		{"HOLDFOR", "3601"}, {"HOLDFOR", "-1"}, {"HOLDFOR", "1.5"}, {"HOLDFOR", ""}, {"HOLDFOR", "0"},
+		{"HOLDFOR", "0000000060"}, {"HOLDUNTIL", time.Now().Add(time.Minute).Format("2006-01-02T15:04:05+00:00")},
 		{"HOLDUNTIL", time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)}, {"HOLDUNTIL", "tomorrow"},
 		{"SIZE", "100"},
 	} {
@@ -307,7 +308,7 @@ func TestDelayedRefuses(t *testing.T) {
 	}
 
 	for _, c := range []struct{ param, value string }{
-		{"HOLDFOR", "0"}, {"HOLDUNTIL", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		{"HOLDUNTIL", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
 	} {
 		res := submitHold(t, s, ident, m.GUID, c.param, c.value, "")
 		if k, _ := res["created"].(map[string]any)["k"].(map[string]any); k == nil || k[propUndoStatus] != undoFinal {
@@ -315,7 +316,7 @@ func TestDelayedRefuses(t *testing.T) {
 		}
 	}
 
-	if relay.count() != 2 {
+	if relay.count() != 1 {
 		t.Errorf("relay calls %d", relay.count())
 	}
 }
@@ -361,4 +362,98 @@ func TestHoldUntilSlack(t *testing.T) {
 	if got, serr := holdFor(strconv.Itoa(3600), time.Hour, now); serr != nil || !got.Equal(now.Add(time.Hour).UTC()) {
 		t.Errorf("HOLDFOR=3600: %v %#v", got, serr)
 	}
+}
+
+// TestSettleWithoutRecord: a submission the worker settles before (or
+// without) its record in the account's records is added from the view
+// the queue kept; one the client destroyed stays destroyed, and an
+// account without records gets none.
+func TestSettleWithoutRecord(t *testing.T) {
+	kv := memstore.NewAdminKV()
+	book := SubmissionBook(kv, 0, 0)
+	opts := submissionDefaults(&SubmissionOptions{}, 0)
+
+	view := func(id string) []byte {
+		raw, _ := json.Marshal(&submission{ID: id, EmailID: "M1", SendAt: time.Now().UTC(), UndoStatus: undoPending})
+		return raw
+	}
+
+	final := func(id string) *sendqueue.Record {
+		return &sendqueue.Record{Account: "test", ID: id, State: sendqueue.StateFinal, View: view(id),
+			Delivery: map[string]sendqueue.Delivery{"bob@example.net": {SMTPReply: "250 ok", Delivered: sendqueue.DeliveredQueued}}}
+	}
+
+	// No records at all (a purged account): nothing is created.
+	if err := book.Settle(final("S01")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := kv.Get(submissionKey("test")); err == nil {
+		t.Fatal("settling created the records of an account without any")
+	}
+
+	// The account has records, one destroyed by the client.
+	if err := updateSubmissions(kv, "test", opts, func(b *submissionBook) error {
+		b.Subs = append(b.Subs, &submission{ID: "S02", UndoStatus: undoPending})
+		b.note("S02", model.OpCreated)
+		b.Subs = b.Subs[:0]
+		b.note("S02", model.OpDestroyed)
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"S02", "S03"} {
+		if err := book.Settle(final(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	b, err := loadSubmissions(kv, "test", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if b.find("S02") != nil {
+		t.Error("a destroyed submission came back")
+	}
+
+	s := b.find("S03")
+	if s == nil || s.UndoStatus != undoFinal || s.EmailID != "M1" || s.DeliveryStatus["bob@example.net"].Delivered != "queued" {
+		t.Fatalf("the missing submission was not added: %#v", s)
+	}
+}
+
+// TestDelayedRecordedBeforeScheduled: the account's record of a delayed
+// submission exists before the queue has it, so a worker that sends at
+// once settles it to final.
+func TestDelayedRecordedBeforeScheduled(t *testing.T) {
+	s, u, relay, q := delayedServer(t, time.Hour)
+	ident := identityID(t, s)
+	m := deliver(t, u, "Drafts", draftMessage)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		q.Run(ctx)
+	}()
+
+	defer func() { cancel(); <-stopped }()
+
+	res := submitHold(t, s, ident, m.GUID, "HOLDFOR", "1", "")
+	id := res["created"].(map[string]any)["k"].(map[string]any)[propID].(string)
+
+	for range 400 {
+		if relay.count() == 1 && submissionStatus(t, s, id) == undoFinal {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("calls %d, status %q", relay.count(), submissionStatus(t, s, id))
 }

@@ -10,7 +10,7 @@
 #   3. check that both are pending, in JMAP and in shardpostctl
 #      submission list, then cancel the second one,
 #   4. wait until the first is final and has arrived in the INBOX, and
-#      check that the second did not arrive (also after its release time),
+#      check that the second did not arrive (30 s past its release time),
 #   5. remove the arrived test message and the submission records, and
 #      print the delayed submission metrics of every pod.
 #
@@ -122,6 +122,7 @@ calls=$(py '"[" + ",".join([
 			"envelope": {"mailFrom": {"email": e["ACCOUNT"], "parameters": {"HOLDFOR": e["HOLD"]}},
 				"rcptTo": [{"email": e["ACCOUNT"]}]}} for k in ("sent", "canceled")},
 		"onSuccessDestroyEmail": ["#sent", "#canceled"]}, "s"])]) + "]"' <<<'{}')
+submitted=$(date +%s)
 res=$(api "$calls") || fail "EmailSubmission/set: $res"
 read -r sent canceled < <(echo "$res" | py '" ".join(next(r[1]["created"][k]["id"] for r in j["methodResponses"] if r[0] == "EmailSubmission/set") for k in ("sent", "canceled"))') ||
 	fail "the submissions were not created: $res"
@@ -172,6 +173,12 @@ done
 api "[[\"EmailSubmission/get\",{\"accountId\":\"$ACCT\",\"ids\":[\"$sent\"]},\"g\"]]" |
 	py 'json.dumps(j["methodResponses"][0][1]["list"][0]["deliveryStatus"])'
 echo "sent and arrived: $got"
+
+# The canceled one would have been released with the first; give it 30 s
+# past that before taking its absence for good.
+while [ "$(date +%s)" -lt $((submitted + HOLD + 30)) ]; do
+	sleep 5
+done
 
 [ -z "$(arrived canceled)" ] || fail "the canceled submission arrived"
 echo "the canceled one did not arrive"

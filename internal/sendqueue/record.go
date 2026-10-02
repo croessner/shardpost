@@ -152,6 +152,8 @@ type Record struct {
 	Reason string `json:"reason,omitempty"`
 	// CanceledBy names who canceled ("jmap", "admin:<principal>").
 	CanceledBy string `json:"canceled_by,omitempty"`
+	// View is the JMAP view of the submission as created (Spec.View).
+	View json.RawMessage `json:"view,omitempty"`
 }
 
 // position is where the record's queue entry belongs: a pending
