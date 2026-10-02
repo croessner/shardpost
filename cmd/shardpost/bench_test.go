@@ -37,6 +37,7 @@ func TestBenchRefusals(t *testing.T) {
 		"one pool for both":   {"populate", "--index-pool", "load", "--data-pool", "load"},
 		"bad inbox share":     {"populate", "--index-pool", "load-index", "--data-pool", "load-data", "--inbox-share", "2"},
 		"bad sample interval": {"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--sample-every", "0"},
+		"negative contention": {"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--contention", "-1"},
 	} {
 		if code := runBench(nil, args); code != benchRefused {
 			t.Errorf("%s: exit %d, want %d", name, code, benchRefused)

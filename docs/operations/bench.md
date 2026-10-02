@@ -14,7 +14,10 @@ reports per account and per delivery:
   pool;
 - RADOS operations per delivery by object class (reads, writes, class
   method calls);
-- delivery latency (p50, p90, p99) and compare-and-swap retries;
+- delivery latency (p50, p90, p99) and compare-and-swap retries, by
+  kind and by object class;
+- with `measure --contention P`, the same for `P` deliveries at a time
+  into one account;
 - the cost of `Store.User()` and of opening a session.
 
 The per-account values are then extrapolated (default: to one million
@@ -261,8 +264,22 @@ higher `--messages`; to measure a part of many accounts, use
   per delivery, counted from the client library's objecter log
   (`debug_objecter` 10, one line per operation) in a round of its own;
   `reads`, `writes` (at least one write step) and `calls` (object class
-  methods). The latency and the compare-and-swap retries come from a
-  round without the log. Both rounds deliver into populated accounts.
+  methods). The latency, `deliveries_per_second` and the
+  compare-and-swap retries (`cas_retries.by_kind`, `by_class`) come from
+  a round without the log. Both rounds deliver into populated accounts,
+  one delivery at a time.
+- `contention` (only with `measure --contention P`): the same two rounds
+  again, with `P` deliveries at a time into each probe account
+  (`--probe-messages` each; the accounts one after the other). The
+  deliveries contend for the account's registry, INBOX header, id map
+  and posting shards. `cas_retries.by_class` shows where they collide
+  (`registry`, `mbox`, `ftsmap`, `fts`, …) and `ops_per_delivery`
+  includes the reads and writes of the lost rounds; a lost round of the
+  omap compare-and-swap (`kind` `omap`: registry, account, id map,
+  posting shards) waits 1 to 10 ms times the rounds it lost before it
+  reads again. Compare `deliveries_per_second` and the latency with the
+  `delivery` rounds. `--contention` is not `--parallel`, which only sets
+  how many accounts the inventory and `populate` work on at once.
 - `user_open`, `session_open`: `Store.User()` opens two I/O contexts and
   sends nothing to an OSD; a session adds the registry and INBOX reads.
   `heap_bytes_per_view` is the Go heap of an open view (the client

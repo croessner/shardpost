@@ -136,10 +136,11 @@ type User struct {
 	chunkSize    int64
 	ftsShards    int
 	// ftsCurrent caches whether the index can be trusted
-	// (ftsIndexCurrent); ftsHasIDs that the id map has ids, so that the
-	// index is not fresh (freshIndexOnce).
+	// (ftsIndexCurrent); ftsHasIDs that the view has seen ids in the id
+	// map, so that the index is not fresh (ensureDocIDs, which posting
+	// shards may call at the same time).
 	ftsCurrent int
-	ftsHasIDs  bool
+	ftsHasIDs  atomic.Bool
 	// legacyDict caches whether the account still has the dictionary
 	// objects of the layout before 0.35.0 (see legacyDictMatches).
 	legacyDict    int
@@ -1588,7 +1589,7 @@ func (u *User) casHeader(mb *Mailbox, fn func(info *MailboxInfo, modseq uint64) 
 		}
 
 		if c := errCode(err); c == syscall.ERANGE || c == syscall.EOVERFLOW {
-			mh.casRetry("header")
+			mh.casRetry("header", casClassMbox)
 			continue
 		}
 
@@ -2811,7 +2812,7 @@ func (u *User) registerKeywords(mb *Mailbox, newKeywords []string) {
 // restampFlags stamps the collided records again with a fresh modseq and
 // replaces their entries in updated (in place) by the restamped ones.
 func (u *User) restampFlags(name string, collided []uint32, apply func(old []string) []string, depth int, updated []Meta) error {
-	mh.casRetry("modseq_restamp")
+	mh.casRetry("modseq_restamp", casClassMbox)
 
 	again, err := u.setFlags(name, collided, 0, apply, true, depth+1)
 	if err != nil {

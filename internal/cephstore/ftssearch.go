@@ -119,18 +119,26 @@ func markFreshIndex(cur, set map[string][]byte, fresh bool) {
 	}
 }
 
-// freshIndexOnce is freshIndex, asked until the view has seen ids.
-func (u *User) freshIndexOnce() (bool, error) {
-	if u.ftsHasIDs {
-		return false, nil
+// Whether the index is fresh, as ensureDocIDs knows it in a round.
+const (
+	freshUnknown = iota
+	freshYes
+	freshNo
+)
+
+// freshByShards is the answer of ensureDocIDs for an id map without
+// ids: fresh unless a posting shard exists.
+func (u *User) freshByShards() (int, error) {
+	exist, err := u.ftsPostingsExist()
+	if err != nil {
+		return freshUnknown, err
 	}
 
-	fresh, err := u.freshIndex()
-	if err == nil && !fresh {
-		u.ftsHasIDs = true
+	if exist {
+		return freshNo, nil
 	}
 
-	return fresh, err
+	return freshYes, nil
 }
 
 // ftsPostingsExist reports whether any posting shard object exists.
@@ -144,24 +152,6 @@ func (u *User) ftsPostingsExist() (bool, error) {
 	}
 
 	return false, nil
-}
-
-// freshIndex reports whether the id map has no ids yet and no posting
-// shard exists: the precondition of markFreshIndex, looked up before the
-// compare-and-swap (which checks "n" again).
-func (u *User) freshIndex() (bool, error) {
-	vals, err := getOmapKeys(u.idx, oidFTSMap, []string{"n"})
-	if err != nil && errCode(err) != syscall.ENOENT {
-		return false, err
-	}
-
-	if _, ok := vals["n"]; ok {
-		return false, nil
-	}
-
-	exist, err := u.ftsPostingsExist()
-
-	return !exist, err
 }
 
 // errRebuildSuperseded is what a rebuild gets whose key another rebuild

@@ -44,7 +44,8 @@ func WritePopulateTable(w io.Writer, r *PopulateReport) error {
 		t.f("messages per account\t%d into %v, sizes %s, seed %d\n", r.MessagesPerAccount, r.Mailboxes, r.Sizes, r.Seed)
 		t.f("deliveries\t%d (%d failed), %s in %.1f s, %.1f/s\n", r.Deliveries, r.Failures, human(r.Bytes), r.Seconds, r.PerSecond)
 		t.latency("delivery latency\t", r.Latency)
-		t.f("CAS retries\t%.0f (%.3f per delivery) %v\n", r.CASRetries.Total, r.CASRetries.PerDelivery, r.CASRetries.ByKind)
+		t.f("CAS retries\t%.0f (%.3f per delivery) by kind %v, by class %v\n",
+			r.CASRetries.Total, r.CASRetries.PerDelivery, r.CASRetries.ByKind, r.CASRetries.ByClass)
 	})
 
 	return p.err
@@ -69,6 +70,10 @@ func WriteMeasureTable(w io.Writer, r *MeasureReport) error {
 
 	if r.Delivery != nil {
 		p.probe(r.Delivery)
+	}
+
+	if r.Contention != nil {
+		p.probe(r.Contention)
 	}
 
 	for _, o := range []*OpenReport{r.UserOpen, r.SessionOpen} {
@@ -133,9 +138,12 @@ func (p *printer) extrapolation(e *Extrapolation) {
 }
 
 func (p *printer) probe(d *ProbeReport) {
-	p.f("\nDelivery into populated accounts (%d accounts, %d deliveries per round)\n", d.Accounts, d.Deliveries)
+	p.f("\nDelivery into populated accounts (%d accounts, %d deliveries per round, %d at a time into one account)\n",
+		d.Accounts, d.Deliveries, max(d.Parallel, 1))
 	p.latency("  latency ", d.Latency)
-	p.f("  CAS retries %.0f (%.3f per delivery) %v\n", d.CASRetries.Total, d.CASRetries.PerDelivery, d.CASRetries.ByKind)
+	p.f("  %.1f deliveries/s\n", d.PerSecond)
+	p.f("  CAS retries %.0f (%.3f per delivery) by kind %v, by class %v\n",
+		d.CASRetries.Total, d.CASRetries.PerDelivery, d.CASRetries.ByKind, d.CASRetries.ByClass)
 	p.ops("per delivery", d.Ops, d.Total)
 }
 

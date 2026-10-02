@@ -116,7 +116,7 @@ func (b *radosOmap) Write(oid string, ver uint64, set map[string][]byte, rm []st
 	case 0:
 		return err
 	case syscall.ERANGE, syscall.EOVERFLOW, syscall.EEXIST:
-		mh.casRetry("index")
+		mh.casRetry("index", casClassIndex)
 		return sortedindex.ErrConflict
 	case syscall.ENOENT:
 		if ver == sortedindex.AnyVersion && len(set) == 0 {

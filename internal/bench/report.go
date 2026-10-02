@@ -19,11 +19,14 @@ type PoolStats struct {
 
 // ProbeReport is the cost of deliveries into populated accounts.
 type ProbeReport struct {
-	Accounts   int   `json:"accounts"`
+	Accounts int `json:"accounts"`
+	// Parallel deliveries went into one account at a time.
+	Parallel   int   `json:"parallel"`
 	Deliveries int64 `json:"deliveries"`
-	// Latency and CASRetries are of the deliveries without the
-	// objecter log.
+	// Latency, PerSecond and CASRetries are of the deliveries without
+	// the objecter log (PerSecond over the wall time of that round).
 	Latency    LatencySummary `json:"latency"`
+	PerSecond  float64        `json:"deliveries_per_second"`
 	CASRetries CASSummary     `json:"cas_retries"`
 	// Ops are the operations per delivery by pool and class, counted in
 	// a second round of the same size with the objecter log on.
@@ -72,9 +75,12 @@ type MeasureReport struct {
 	Pools        map[string]PoolStats `json:"pools"`
 	Extrapolated *Extrapolation       `json:"extrapolated,omitempty"`
 	Delivery     *ProbeReport         `json:"delivery,omitempty"`
-	UserOpen     *OpenReport          `json:"user_open,omitempty"`
-	SessionOpen  *OpenReport          `json:"session_open,omitempty"`
-	Notes        []string             `json:"notes,omitempty"`
+	// Contention is the delivery probe with several deliveries into one
+	// account at a time (measure --contention).
+	Contention  *ProbeReport `json:"contention,omitempty"`
+	UserOpen    *OpenReport  `json:"user_open,omitempty"`
+	SessionOpen *OpenReport  `json:"session_open,omitempty"`
+	Notes       []string     `json:"notes,omitempty"`
 }
 
 // Extrapolate scales the inventory to n accounts.

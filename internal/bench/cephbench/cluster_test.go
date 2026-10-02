@@ -35,6 +35,7 @@ const (
 	testAccts   = 3
 	probeMsgs   = 3
 	probeAccts  = 2
+	contention  = 4
 	mboxShard   = 4
 	chunkSize   = 64 << 10
 	createTries = 60
@@ -429,6 +430,7 @@ func TestPopulateAndMeasure(t *testing.T) {
 
 	m, err := Measure(ctx, MeasureOptions{Guard: guard(prefix), Config: cfg, Store: s, NewDeliverer: deliverer,
 		Gen: populateOptions(prefix).Gen, Every: 1, Parallel: 4, ProbeAccounts: probeAccts, ProbeMessages: probeMsgs,
+		Contention: contention,
 		EC: bench.ECEstimate{DataChunks: 2, CodingChunks: 1, StripeUnit: 4096, MinAlloc: 4096}, Extrapolate: 1000,
 		TraceDir: t.TempDir(), Log: discard()})
 	if err != nil {
@@ -437,6 +439,7 @@ func TestPopulateAndMeasure(t *testing.T) {
 
 	checkInventory(t, m)
 	checkProbe(t, m)
+	checkContention(t, m)
 	checkOpens(t, m)
 
 	var out strings.Builder
@@ -519,7 +522,38 @@ func checkProbe(t *testing.T, m *bench.MeasureReport) {
 		t.Errorf("registry or mailbox untouched: %+v", d.Ops[benchIndex])
 	}
 
+	// A posting shard costs one read, the compare-and-swap's own, and
+	// the id map one compare-and-swap; a delivery into an index with
+	// ids does not look up whether the index is fresh (the CAS reads
+	// "n").
+	if o := d.Ops[benchIndex][bench.ClassFTS]; o.Reads > o.Writes {
+		t.Errorf("posting shard reads per delivery %v above the writes %v", o.Reads, o.Writes)
+	}
+
+	if o := d.Ops[benchIndex][bench.ClassFTSMap]; o.Reads > 1 || o.Writes > 1 {
+		t.Errorf("id map ops per delivery %+v, want at most one read and one write", o)
+	}
+
 	t.Logf("ops per delivery %+v", d.Total)
+}
+
+// checkContention: the deliveries of the contention rounds all arrive,
+// and their retries are counted by object class.
+func checkContention(t *testing.T, m *bench.MeasureReport) {
+	t.Helper()
+
+	d := m.Contention
+	if d == nil || d.Parallel != contention || d.Deliveries != probeAccts*contention*probeMsgs || d.PerSecond <= 0 {
+		t.Fatalf("contention probe %+v", d)
+	}
+
+	for class := range d.CASRetries.ByClass {
+		if class == "" {
+			t.Errorf("CAS retries without a class: %+v", d.CASRetries)
+		}
+	}
+
+	t.Logf("contention: %.1f deliveries/s, CAS retries %+v, ops per delivery %+v", d.PerSecond, d.CASRetries, d.Total)
 }
 
 func checkOpens(t *testing.T, m *bench.MeasureReport) {

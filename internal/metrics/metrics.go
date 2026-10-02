@@ -38,6 +38,7 @@ const (
 	labelSource  = "source"
 	labelLimit   = "limit"
 	labelState   = "state"
+	labelClass   = "class"
 )
 
 var (
@@ -47,11 +48,13 @@ var (
 		Help:    "Latency of RADOS operations by kind.",
 		Buckets: []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5},
 	}, []string{labelOp})
-	// CASRetries counts compare-and-swap conflicts that led to a retry.
+	// CASRetries counts compare-and-swap conflicts that led to a retry,
+	// by the kind of compare-and-swap and the class of the object (a
+	// small fixed set, see docs/observability.md).
 	CASRetries = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: subsystemRados, Name: "cas_retries_total",
-		Help: "Compare-and-swap conflicts that led to a retry, by object kind.",
-	}, []string{labelKind})
+		Help: "Compare-and-swap conflicts that led to a retry, by kind of compare-and-swap and object class.",
+	}, []string{labelKind, labelClass})
 	// RadosListings counts RADOS object listings by call site. A listing
 	// visits every placement group of the pool, so its cost grows with
 	// the whole pool; running paths must not list (scaling plan,

@@ -176,6 +176,17 @@ one open view holds. The probe messages stay in the accounts; the next
 .B populate
 counts them.
 .PP
+With
+.BI \-\-contention " p"
+two more delivery rounds follow in the same way, in which
+.I p
+deliveries at a time go into one probe account (each of them
+.B \-\-probe\-messages
+long; the accounts one after the other). The deliveries then contend
+for the same objects of the account; the report gives their latency,
+the deliveries per second, the compare-and-swap retries by kind and by
+object class, and the operations per delivery, retries included.
+.PP
 The objecter log
 .RB ( debug_objecter
 10, one line per operation) is written to
@@ -299,6 +310,14 @@ only).
 Messages per probe account and delivery round (10; 0 for no delivery
 rounds).
 .TP
+.BI \-\-contention " p"
+Add two delivery rounds with
+.I p
+deliveries at a time into each probe account (0, the default: none).
+Not to be confused with
+.BR \-\-parallel ,
+which works on several accounts at once.
+.TP
 .BI \-\-extrapolate " n"
 Scale the per-account means to
 .I n
@@ -351,7 +370,11 @@ has the keys
 .BR extrapolated ,
 .BR pools ,
 .B delivery
-(latency, cas_retries, ops_per_delivery by pool and class),
+(parallel, latency, deliveries_per_second, cas_retries by_kind and
+by_class, ops_per_delivery by pool and class),
+.B contention
+(the same, with
+.BR \-\-contention ),
 .B user_open
 and
 .BR session_open .
@@ -390,6 +413,18 @@ shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-messages 500
 shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-sample\-every 10
+.RE
+.fi
+.PP
+Eight deliveries at a time into each of 20 accounts, ten messages each,
+to measure compare-and-swap contention:
+.PP
+.nf
+.RS
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-contention 8 \e
+    \-\-json /tmp/contention.json
+jq '.contention.cas_retries' /tmp/contention.json
 .RE
 .fi
 .PP
