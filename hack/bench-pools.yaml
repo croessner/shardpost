@@ -1,0 +1,40 @@
+# Bench pools for "shardpost bench" (scaling plan, stage R4; see
+# docs/operations/bench.md). They mirror deploy/base/ceph/pools.yaml: the
+# index pool replicated (size 3, failure domain host, HDD), the data pool
+# erasure coded 2+1, so the measurement sees the production layout.
+# Rook creates a CRUSH rule per pool with the same failure domain and
+# device class as for the production pools.
+#
+#   kubectl --context croessner -n rook-ceph apply -f hack/bench-pools.yaml
+#   kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data
+#
+# Deleting the CRs deletes the pools and everything the bench wrote:
+#
+#   kubectl --context croessner -n rook-ceph delete -f hack/bench-pools.yaml
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: shardpost-load-index
+  namespace: rook-ceph
+spec:
+  failureDomain: host
+  deviceClass: hdd
+  replicated:
+    size: 3
+    requireSafeReplicaSize: true
+  parameters:
+    pg_autoscale_mode: "on"
+---
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: shardpost-load-data
+  namespace: rook-ceph
+spec:
+  failureDomain: host
+  deviceClass: hdd
+  erasureCoded:
+    dataChunks: 2
+    codingChunks: 1
+  parameters:
+    pg_autoscale_mode: "on"

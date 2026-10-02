@@ -1,0 +1,98 @@
+# One-off bench run (scaling plan, stage R4; docs/operations/bench.md,
+# shardpost-bench(1)): populate fills the bench pools with 1000 accounts
+# of 50 messages each, then measure takes the inventory and counts the
+# operations. Same image and Ceph credentials as the server; nothing goes
+# through IMAP, LMTP or Nauthilus.
+#
+# Before: the bench pools exist (hack/bench-pools.yaml) and the CephClient
+# shardpost may use them (docs/operations/bench.md, "Ceph permissions").
+# CEPH_INDEX_POOL and CEPH_DATA_POOL below are the PRODUCTION pools: the
+# bench refuses to run when --index-pool or --data-pool names one of them.
+#
+#   kubectl --context croessner -n shardpost apply -f hack/bench-job.yaml
+#   kubectl --context croessner -n shardpost logs -f job/shardpost-bench -c populate
+#   kubectl --context croessner -n shardpost logs job/shardpost-bench -c measure \
+#     | sed -n '/^{$/,$p' > measure.json
+#   kubectl --context croessner -n shardpost delete job shardpost-bench
+#
+# A populate that stopped is resumed by applying the Job again (after
+# deleting the old one): complete accounts are skipped.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shardpost-bench
+  namespace: shardpost
+  labels:
+    app.kubernetes.io/name: shardpost-bench
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 43200
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shardpost-bench
+    spec:
+      restartPolicy: Never
+      serviceAccountName: shardpost-server # reads the Rook secret of client.shardpost
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 167
+        runAsGroup: 167
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: populate
+          image: docker.io/chrroessner/shardpost:0.43.0 # pin the digest of the release
+          args: ["bench", "populate",
+                 "--index-pool", "shardpost-load-index", "--data-pool", "shardpost-load-data",
+                 "--prefix", "bench-", "--accounts", "1000", "--messages", "50", "--parallel", "16"]
+          env: &env
+            - name: CEPH_USER
+              value: shardpost
+            - name: CEPH_INDEX_POOL
+              value: shardpost-index # production: the guard compares with it
+            - name: CEPH_DATA_POOL
+              value: shardpost-data # production: the guard compares with it
+            - name: ROOK_NAMESPACE
+              value: rook-ceph
+            # As in the production configuration, so the accounts look like
+            # production accounts.
+            - name: MBOX_SHARD_SIZE
+              value: "100000"
+            - name: QUOTA_BYTES
+              value: "1073741824"
+            - name: QUOTA_MSGS
+              value: "100000"
+            - name: GOMEMLIMIT
+              value: "700MiB"
+          resources: &resources
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext: &securityContext
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts: &mounts
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: measure
+          image: docker.io/chrroessner/shardpost:0.43.0 # pin the digest of the release
+          args: ["bench", "measure",
+                 "--index-pool", "shardpost-load-index", "--data-pool", "shardpost-load-data",
+                 "--prefix", "bench-", "--probe-accounts", "20", "--probe-messages", "10",
+                 "--extrapolate", "1000000", "--json", "-"]
+          env: *env
+          resources: *resources
+          securityContext: *securityContext
+          volumeMounts: *mounts
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi # objecter logs of the measure rounds

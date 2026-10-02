@@ -92,6 +92,10 @@ type Config struct {
 	// namespaces finds (the behaviour before 0.42.0) instead of what the
 	// data model names; see purge.go.
 	PurgeListing bool
+	// ClientOptions are further librados options, set on the connection
+	// after the store's own (the bench turns the objecter log on with
+	// them to count operations); nil for the server.
+	ClientOptions map[string]string
 }
 
 // Store owns the librados connection and hands out per-user views. The
@@ -217,6 +221,12 @@ func connect(cfg Config, log *slog.Logger) (*rados.Conn, error) {
 		}
 	}
 
+	for k, v := range cfg.ClientOptions {
+		if err := conn.SetConfigOption(k, v); err != nil {
+			return nil, fmt.Errorf("rados: set %s: %w", k, err)
+		}
+	}
+
 	if err := conn.Connect(); err != nil {
 		return nil, fmt.Errorf("rados: connect: %w", err)
 	}
@@ -235,6 +245,44 @@ func (s *Store) ref() *connRef {
 	s.cur.refs.Add(1)
 
 	return s.cur
+}
+
+// WithConn runs fn with the store's current librados connection, which
+// stays open until fn returns. It is for tools that read the pools
+// beyond the data model (the bench's inventory); the store's own code
+// does not use it.
+func (s *Store) WithConn(fn func(*rados.Conn) error) error {
+	r := s.ref()
+	defer r.refs.Done()
+
+	return fn(r.conn)
+}
+
+// Drain waits until every view and index the store handed out on its
+// current connection has been closed and the background work of the
+// views has finished, at most timeout; it reports whether that
+// happened. A tool calls it before Close, when it opens nothing new any
+// more: shutting the connection down under a view's background work
+// crashes inside librados. The server does not use it (its sessions end
+// with the process).
+func (s *Store) Drain(timeout time.Duration) bool {
+	s.mu.RLock()
+	r := s.cur
+	s.mu.RUnlock()
+
+	done := make(chan struct{})
+
+	go func() {
+		r.refs.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Close shuts the librados connection down.

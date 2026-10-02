@@ -530,6 +530,15 @@ that send many requests at once, `imapceph_jmap_limit_total` (see
 rollout: logins hit the cache, a flush makes the next login a miss,
 and parallel JMAP requests get no 429 or 503.
 
+## Measuring the cost per account
+
+`shardpost bench` fills two bench pools of its own with accounts and
+messages and reports objects, bytes and RADOS operations per account
+and per delivery (scaling plan, stage R4). It refuses the production
+pools. How to create and delete the bench pools, the cephx caps it
+needs and the Job are in [Bench](bench.md); the options in the
+[manual page](../man/man1/shardpost-bench.1).
+
 ## Scrub, backup and observability
 
 Scrub can change data. For an investigation, first define a dry run and the

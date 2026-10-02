@@ -24,12 +24,13 @@ One page per subject, in the style of `doveadm`:
 | [shardpostctl-trace(1)](man1/shardpostctl-trace.1) | `trace on/status/off` |
 | [shardpostctl-auth(1)](man1/shardpostctl-auth.1) | `auth flush` |
 
-One page covers commands of the server binary that operators run as
+Two pages cover commands of the server binary that operators run as
 jobs of their own:
 
 | Page | Covers |
 | --- | --- |
 | [shardpost-scrub(1)](man1/shardpost-scrub.1) | `shardpost scrub`, `scrub --batch`, `scrub --sweep` |
+| [shardpost-bench(1)](man1/shardpost-bench.1) | `shardpost bench populate`, `bench measure` (separate bench pools) |
 
 ## Reading them
 
