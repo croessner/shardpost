@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL 1 "2026-10-02" "ShardPost 0.43.0" "ShardPost Manual"
+.TH SHARDPOSTCTL 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
 .SH NAME
 shardpostctl \- administrative client for a ShardPost mail server
 .SH SYNOPSIS
@@ -106,6 +106,10 @@ Flush the auth cache of every server, for one account or for all.
 .TP
 .BR shardpostctl-submission (1)
 List and cancel the delayed JMAP submissions of an account.
+.TP
+.BR shardpostctl-fts (1)
+The layouts of the full-text index: the layout 3 mark, the accounts with
+layout 3, the layout record of an account.
 .SH CONNECTION FLAGS
 These flags come before the command. They select the listener and apply
 to every command.
@@ -302,6 +306,7 @@ Default admin socket inside the server pod.
 .BR shardpostctl-auth (1),
 .BR shardpostctl-deliver (1),
 .BR shardpostctl-export (1),
+.BR shardpostctl-fts (1),
 .BR shardpostctl-job (1),
 .BR shardpostctl-learning (1),
 .BR shardpostctl-mailbox (1),

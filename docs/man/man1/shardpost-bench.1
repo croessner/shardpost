@@ -1,4 +1,4 @@
-.TH SHARDPOST-BENCH 1 "2026-10-02" "ShardPost 0.43.0" "ShardPost Manual"
+.TH SHARDPOST-BENCH 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
 .SH NAME
 shardpost-bench \- fill separate bench pools with accounts and measure what an account costs in Ceph
 .SH SYNOPSIS
@@ -144,6 +144,13 @@ class:
 (header store),
 .B ftsd
 (dictionary before 0.35.0),
+.BR ftx\-p ,
+.BR ftx\-d ,
+.B ftx\-h
+(posting, dictionary and header objects of a layout 3 index,
+.BR ftx/<gen>/p<i> ,
+.BR d<j> ,
+.BR h<k> ),
 .BR ftsmap ,
 .BR metadata ,
 .BR sieve ,
@@ -217,6 +224,22 @@ oldest INBOX messages in each of two more rounds, at the end of the run,
 one EXPUNGE per message in a view of its own; the report gives the
 latency, the compare-and-swap retries and the operations per expunge.
 .PP
+With
+.B \-\-convert
+(and
+.BR "\-\-fts\-layout 3" )
+the probe accounts' full-text index is converted to layout 3 after the
+search probe, as a
+.B fts_layout
+job would do it: account lock, conversion, unlock. The latency is that
+of the first round, which converts from layout 2: the time the account
+is locked, during which deliveries fail temporarily (the 451 window of
+the job). The operations are counted in the second round, which
+reshards the converted index once more. With
+.B \-\-search
+the search probe runs again after the conversion and must report the
+same fingerprint; a note says when it does not.
+.PP
 The objecter log
 .RB ( debug_objecter
 10, one line per operation) is written to
@@ -266,6 +289,14 @@ the Rook secret,
 .IR server.quota_bytes ,
 .IR fts.* )
 applies to the bench as to a server.
+.TP
+.BI \-\-fts\-layout " n"
+The layout of full-text indexes the run creates: 2 or 3 (0, the
+default:
+.I fts.layout
+of the configuration). With 3 the bench sets the layout 3 mark in the
+admin namespace of the bench pools (never in production pools: the
+guard checks them first).
 .TP
 .BI \-\-index\-pool " pool"
 The bench index pool (replicated; required).
@@ -361,6 +392,11 @@ no expunge rounds). The messages are gone afterwards. Like
 it does nothing with
 .BR "\-\-probe\-accounts 0" .
 .TP
+.B \-\-convert
+.BR measure :
+convert the probe accounts to layout 3 and reshard them once more (needs
+.BR "\-\-fts\-layout 3" ).
+.TP
 .BI \-\-extrapolate " n"
 Scale the per-account means to
 .I n
@@ -425,6 +461,11 @@ candidates, words and fingerprint, and the fingerprint of all; with
 .B expunge
 (count, latency, cas_retries, ops_per_call; with
 .BR \-\-expunge ),
+.B convert
+and
+.B search_after_convert
+(with
+.BR \-\-convert ),
 .B user_open
 and
 .BR session_open .
@@ -490,6 +531,19 @@ shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
 jq -r .search.fingerprint /tmp/search\-before.json /tmp/search\-after.json
 shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-probe\-messages 0 \-\-expunge 5
+.RE
+.fi
+.PP
+New accounts in layout 3, and the conversion of layout 2 accounts with
+the search results compared before and after:
+.PP
+.nf
+.RS
+shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-prefix bench\-l3 \-\-fts\-layout 3
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-probe\-accounts 100 \e
+    \-\-probe\-messages 0 \-\-search 12 \-\-fts\-layout 3 \-\-convert
 .RE
 .fi
 .PP

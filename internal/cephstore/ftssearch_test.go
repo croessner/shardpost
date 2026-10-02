@@ -8,26 +8,35 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"shardpost/internal/fts"
 )
 
-// memIndex is the key layout of the index in memory: the posting shards
-// and the dictionary as sorted omap keys, the postings by term.
+// memIndex is the key layout of the index in memory: the posting
+// objects and the dictionary of one generation (either layout) as
+// sorted omap keys, the postings by term.
 type memIndex struct {
-	keys    map[string][]string
-	posts   map[string]map[string]bool
-	nShards int
-	legacy  bool
-	stale   bool // without the version marker
+	keys   map[string][]string
+	posts  map[string]map[string]bool
+	loc    ftsLoc
+	legacy bool
+	stale  bool // without the version marker
+	// reads counts the reads of scan (one per object and round).
+	reads atomic.Int64
 }
 
 func newMemIndex(nShards int, docs map[string]string) *memIndex {
-	ix := &memIndex{keys: map[string][]string{}, posts: map[string]map[string]bool{}, nShards: nShards}
+	return newMemIndexAt(layout2Loc(nShards), docs)
+}
 
-	for guid, raw := range docs {
-		ix.add(guid, fts.Terms([]byte(raw)))
+// newMemIndexAt is newMemIndex over the generation loc.
+func newMemIndexAt(loc ftsLoc, docs map[string]string) *memIndex {
+	ix := &memIndex{keys: map[string][]string{}, posts: map[string]map[string]bool{}, loc: loc}
+
+	for _, guid := range slices.Sorted(maps.Keys(docs)) {
+		ix.add(guid, fts.Terms([]byte(docs[guid])))
 	}
 
 	return ix
@@ -41,41 +50,80 @@ func (ix *memIndex) add(guid string, terms []string) {
 			ix.posts[t] = map[string]bool{}
 			fresh = append(fresh, t)
 
-			oid := fmt.Sprintf("%s%02d", ftsPrefix, shardNo(t, ix.nShards))
+			oid := ix.loc.postingOID(t)
 			ix.keys[oid] = append(ix.keys[oid], t)
 		}
 
 		ix.posts[t][guid] = true
 	}
 
-	byShard, _ := dictEntries(fresh)
+	byShard, _ := dictEntriesAt(ix.loc, fresh)
 	for oid, keys := range byShard {
 		ix.keys[oid] = append(ix.keys[oid], keys...)
 	}
 
 	for oid := range ix.keys {
 		sort.Strings(ix.keys[oid])
+		ix.keys[oid] = slices.Compact(ix.keys[oid])
 	}
 }
 
-func (ix *memIndex) list(oid, after, prefix string, limit uint64, fn func(string)) (bool, error) {
-	n := uint64(0)
+// remove takes a message out as ftsRemove does: its id out of the lists
+// of its terms, the terms whose lists became empty out of the posting
+// objects and the dictionary.
+func (ix *memIndex) remove(guid string, terms []string) {
+	var gone []string
 
-	for _, k := range ix.keys[oid] {
-		if k <= after || !strings.HasPrefix(k, prefix) {
+	for _, t := range terms {
+		if ix.posts[t] == nil {
 			continue
 		}
 
-		if n == limit {
-			return true, nil
+		delete(ix.posts[t], guid)
+
+		if len(ix.posts[t]) == 0 {
+			delete(ix.posts, t)
+			gone = append(gone, t)
+			ix.drop(ix.loc.postingOID(t), t)
 		}
-
-		fn(k)
-
-		n++
 	}
 
-	return false, nil
+	byShard, _ := dictEntriesAt(ix.loc, gone)
+	for oid, keys := range byShard {
+		for _, k := range keys {
+			ix.drop(oid, k)
+		}
+	}
+}
+
+func (ix *memIndex) drop(oid, key string) {
+	ix.keys[oid] = slices.DeleteFunc(ix.keys[oid], func(k string) bool { return k == key })
+}
+
+func (ix *memIndex) scan(oid string, reqs []*scanReq) error {
+	ix.reads.Add(1)
+
+	for _, q := range reqs {
+		n := uint64(0)
+		q.more = false
+
+		for _, k := range ix.keys[oid] {
+			if k <= q.after || !strings.HasPrefix(k, q.prefix) {
+				continue
+			}
+
+			if n == q.limit {
+				q.more = true
+				break
+			}
+
+			q.fn(k)
+
+			n++
+		}
+	}
+
+	return nil
 }
 
 func (ix *memIndex) postingsUnion(terms []string) (map[string]bool, error) {
@@ -92,7 +140,8 @@ func (ix *memIndex) postingsUnion(terms []string) (map[string]bool, error) {
 
 func (ix *memIndex) legacyDictPresent() (bool, error) { return ix.legacy, nil }
 func (ix *memIndex) current() (bool, error)           { return !ix.stale, nil }
-func (ix *memIndex) shards() int                      { return ix.nShards }
+func (ix *memIndex) postingOIDs() []string            { return ix.loc.postingOIDs() }
+func (ix *memIndex) dictOID(tri string) string        { return ix.loc.dictOID(tri) }
 
 // candidateDocs are the messages of memstore's candidate test.
 var candidateDocs = []string{

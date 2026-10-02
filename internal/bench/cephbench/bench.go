@@ -97,6 +97,9 @@ type MeasureOptions struct {
 	// Expunge, when above 0, expunges that many of the oldest INBOX
 	// messages of each probe account in each of two rounds, at the end.
 	Expunge int
+	// Convert converts the full-text index of the probe accounts to
+	// layout 3 after the search probe (see bench.MeasureReport.Convert).
+	Convert bool
 	// EC are the parameters of the data pool's raw space estimate.
 	EC bench.ECEstimate
 	// Extrapolate scales the inventory to this many accounts (0: no).
@@ -213,6 +216,10 @@ func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accoun
 	}
 
 	err := m.probeSearch(ctx, r)
+	if err == nil {
+		err = m.probeConvert(ctx, r)
+	}
+
 	if err == nil {
 		err = m.probeDeliveries(ctx, r)
 	}

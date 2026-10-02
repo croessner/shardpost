@@ -141,6 +141,11 @@ func (s *Server) OpenImport(w http.ResponseWriter, r *http.Request, account admi
 		return
 	}
 
+	if err := s.afterImportLock(r, account, session, u, req.Messages); err != nil {
+		s.importError(w, r, err)
+		return
+	}
+
 	auditf(r, "session", session)
 	writeJSON(w, http.StatusOK, adminapi.ImportSession{Account: account, Session: session, ExpiresAt: exp.UTC()})
 }
@@ -190,6 +195,8 @@ func (s *Server) CloseImport(w http.ResponseWriter, r *http.Request, account adm
 		s.importError(w, r, err)
 		return
 	}
+
+	s.rs.forgetSession(account, p.XImportSession)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -354,6 +361,12 @@ func (s *Server) ImportMessages(w http.ResponseWriter, r *http.Request, account 
 	}
 	defer c.u.Close()
 
+	if s.refuseDuringReshard(w, account, p.XImportSession, c.u) {
+		return
+	}
+
+	s.applyHint(account, p.XImportSession, c.u)
+
 	msgs, release, err := s.readImportBatch(r)
 	defer release()
 
@@ -510,6 +523,10 @@ func (s *Server) ImportChanges(w http.ResponseWriter, r *http.Request, account a
 		return
 	}
 	defer c.u.Close()
+
+	if s.refuseDuringReshard(w, account, p.XImportSession, c.u) {
+		return
+	}
 
 	var req adminapi.ImportChanges
 	if err := decodeJSON(r, &req); err != nil {

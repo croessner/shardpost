@@ -74,6 +74,12 @@ type ScrubReport struct {
 	CreationsUndone   int `json:",omitempty"`
 	// StaleMetadata are METADATA entries of mailboxes that are gone.
 	StaleMetadata int `json:",omitempty"`
+	// FTSMixedLayout and FTSShardsMissing are findings of the full-text
+	// layout (scrubfts.go; repair: fts_rebuild), FTSPresenceFixed the
+	// entries of the layout 3 presence index the run corrected.
+	FTSMixedLayout   int `json:",omitempty"`
+	FTSShardsMissing int `json:",omitempty"`
+	FTSPresenceFixed int `json:",omitempty"`
 	// Shadow compares the listing with the intents (orphan source
 	// "shadow").
 	Shadow *ShadowReport `json:",omitempty"`
@@ -87,7 +93,8 @@ var _ model.ScrubOutcome = (*ScrubReport)(nil)
 // again by the next run).
 func (r *ScrubReport) Findings() int {
 	n := r.OrphanBlobs + r.MissingBlobs + r.RefsFixed + r.MoveIntents + r.DeliveryIntents + r.OrphanCandidates +
-		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects + r.IntentsOpen + r.StaleMetadata
+		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects + r.IntentsOpen + r.StaleMetadata +
+		r.FTSMixedLayout + r.FTSShardsMissing
 	if r.QuotaFixed {
 		n++
 	}
@@ -298,6 +305,9 @@ func (sr *scrubRun) repair(idx *scrubIndex) error {
 
 	// 5. Quota counters.
 	sr.fixQuota(idx.quota)
+
+	// 6. The layout of the full-text index.
+	sr.scrubFTSLayout()
 
 	return nil
 }
@@ -1157,7 +1167,7 @@ func (sr *scrubRun) deleteOrphan(guid string, chunks int, st rados.ObjectStat) {
 		}
 
 		m.Size = size
-		if err := u.ftsRemove(&m); err != nil {
+		if err := u.ftsRemoveWait(&m, 0); err != nil {
 			sr.log.Debug("fts remove for orphan failed", "guid", guid, "err", err)
 		}
 	}

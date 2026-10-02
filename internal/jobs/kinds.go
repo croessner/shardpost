@@ -69,6 +69,7 @@ func Kinds(grace time.Duration) []Kind {
 		&aclReconcile{kindBase{KindACLReconcile, RoleRepair, true, false}},
 		&ftsRebuild{kindBase{KindFTSRebuild, RoleRepair, true, true}},
 		&ftsDictConvert{kindBase{KindFTSDict, RoleRepair, true, false}},
+		&ftsLayoutKind{kindBase{KindFTSLayout, RoleRepair, true, true}},
 		&mailboxNameConvert{kindBase{KindMailboxName, RoleRepair, true, true}},
 		&attachmentBackfill{kindBase{KindAttachments, RoleRepair, true, false}},
 		&mailboxDelete{kindBase{KindMailboxDelete, RoleDelete, true, true}},
@@ -179,6 +180,14 @@ func (k *scrubKind) Run(_ context.Context, run *Run) (any, error) {
 
 	if err := run.Fence(); err != nil {
 		return nil, err
+	}
+
+	// The fallback for a full-text conversion whose run ended without
+	// clearing it (§4.6).
+	if tok, err := ClearStaleLayout(run.m.st.kv, run.User, run.m.now()); err != nil {
+		run.Partial("fts layout: %v", err)
+	} else if tok != "" {
+		run.Env.Log.Info("scrub cleared an unfinished full-text conversion", "account", run.Job.Account, "tok", tok)
 	}
 
 	rep, err := sc.RunScrub(model.ScrubRequest{Repairs: classes, Grace: k.grace, Fence: run.Fence})

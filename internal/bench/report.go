@@ -113,6 +113,13 @@ type MeasureReport struct {
 	// --expunge.
 	Search      *SearchReport `json:"search,omitempty"`
 	Expunge     *RoundReport  `json:"expunge,omitempty"`
+	// Convert is the probe of measure --convert: the first round
+	// converts the probe accounts to layout 3 (its latency is the time
+	// the account is locked, the 451 window of a fts_layout job), the
+	// counted second round reshards them once more; SearchAfter repeats
+	// the search probe after it, whose fingerprint must equal Search's.
+	Convert     *RoundReport  `json:"convert,omitempty"`
+	SearchAfter *SearchReport `json:"search_after_convert,omitempty"`
 	UserOpen    *OpenReport   `json:"user_open,omitempty"`
 	SessionOpen *OpenReport   `json:"session_open,omitempty"`
 	Notes       []string      `json:"notes,omitempty"`

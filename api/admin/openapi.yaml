@@ -543,9 +543,10 @@ paths:
         Computes what the job would do (target set, effects) and stores the
         plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
         and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-        `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-        (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-        `delete`). A plan
+        `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+        `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+        `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+        cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
         that changes other accounts (ACL repairs, purge) needs them in the
         client scope. The account must be canonical.
       requestBody:
@@ -572,9 +573,9 @@ paths:
         directory, one account after another with a bounded parallelism
         (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
         `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-        `attachment_backfill` (role `repair`); the batch needs the role of
+        `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
         its kind and the scope of all accounts (socket callers; mutual-TLS
-        clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+        clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
         takes the maintenance lock per account; an account another job or
         an import holds is tried again at the end. `skip_idle` (scrub
         only) skips the accounts that did not change since their last
@@ -1517,6 +1518,217 @@ paths:
           description: Replaced.
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/fts/layout3:
+    get:
+      operationId: getFTSLayout3
+      summary: Layout 3 of the full-text index in the cluster
+      description: |
+        Whether the cluster mark that allows layout 3 is set, and the
+        server registrations: every server since 0.45.0 registers at
+        startup and then every minute (`servers/<instance>` in the admin
+        store); a registration seen within three minutes is fresh, one not
+        renewed for 24 hours is deleted. Reading the registrations lists
+        the admin namespace when `admin.kv_index` is not `read`. Requires
+        the role `diagnose`.
+      responses:
+        "200":
+          description: The mark and the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/layout3/enable:
+    post:
+      operationId: enableFTSLayout3
+      summary: Allow layout 3 in the cluster
+      description: |
+        Sets the cluster mark after checking that exactly `pods` fresh
+        registrations report the capability `fts_layout3`: servers before
+        0.45.0 do not register, so the expected number of pods is the
+        check. A pod replaced less than three minutes ago leaves its
+        predecessor's record fresh; wait and try again. `force` skips the
+        check (recorded in the audit log and in the mark). With the mark,
+        servers with `fts.layout: 3` create new indexes in layout 3 and
+        `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+        when the registrations do not match. Requires the role `repair`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FTSLayout3Enable"
+      responses:
+        "200":
+          description: The mark is set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/layout3/disable:
+    post:
+      operationId: disableFTSLayout3
+      summary: Remove the layout 3 mark
+      description: |
+        Removes the cluster mark, so that no new layout 3 index is
+        created; waits five seconds (creators read the mark when they
+        create) and then reads the presence index of the accounts that
+        still have a layout 3 index. A downgrade to a version before
+        0.45.0 is possible only when that list is empty: convert the
+        accounts back with `fts_layout` `layout: 2` first. Requires the
+        role `repair`.
+      responses:
+        "200":
+          description: The mark is gone; the accounts that still have layout 3.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Disable"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/layout3/accounts:
+    get:
+      operationId: listFTSLayout3Accounts
+      summary: The accounts with a layout 3 index
+      description: |
+        The presence index `ix.fts_layout`: every account that has (or is
+        being converted to) a layout 3 index, entered before its layout 3
+        objects are created and removed after a conversion back to layout
+        2. With `verify` each account's layout record is read and an entry
+        whose account has no layout 3 index is marked. Requires the role
+        `diagnose` and the scope of all accounts.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 320
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+        - name: verify
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: A page of accounts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayoutAccountPage"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/fts/layout:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: getFTSLayout
+      summary: The layout of the account's full-text index
+      description: |
+        The layout record of the account's index: the current generation
+        (layout 2 without a record), a conversion in progress (`next`,
+        with the token of its run) and sources a conversion has not
+        removed yet (`old`). One read; the account is not resolved through
+        Nauthilus. Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The layout record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayoutState"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/fts/layout/clear:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    post:
+      operationId: clearFTSLayout
+      summary: Remove an unfinished conversion
+      description: |
+        Removes the conversion in progress of the account's full-text
+        index when its run has ended: a job that is not running any more,
+        or an import reshard whose heartbeat is older than 90 seconds. Its
+        freeze is lifted (only the freeze of exactly that run), its
+        target objects deleted. A conversion whose run still works is
+        left alone. Sources an ended run left behind after its switch
+        (the record's `old`) are deleted as well. The fallback for a run
+        that could not clean up; the jobs scrub does the same. Requires
+        the role `repair`.
+      responses:
+        "200":
+          description: What was cleared ("" for nothing) and the record after.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayoutClear"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/import/fts-reshard:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/ImportSessionHeader"
+    post:
+      operationId: startImportReshard
+      summary: Reshard the full-text index between import batches
+      description: |
+        Checks the key counts of the account's layout 3 index (one read per
+        object) and reshards it under the import session when they ask for
+        more objects, without leaving the import lock: a `fts_layout` job
+        would wait for the import to end. The run waits
+        `jobs.settle_seconds` first, works synchronously up to
+        `fts.import_reshard_sync_seconds` and then answers 202 and goes on
+        in the background, renewing the import lock and its heartbeat every
+        30 seconds. A second POST of the session while its run is active
+        answers 202 without starting another; one while another run (other
+        session) has a heartbeat younger than 90 seconds answers `conflict`
+        (409); an older one is cleared and replaced. Import batches of the
+        session answer `conflict` (409) while its reshard runs. `g` is the
+        index generation at the answer: it changes when a reshard
+        switched. Requires the role `import`.
+      responses:
+        "200":
+          description: Nothing to do (`idle`), or the reshard finished (`done`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportReshard"
+        "202":
+          description: The reshard goes on in the background (`running`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportReshard"
+        default:
+          $ref: "#/components/responses/Error"
+    get:
+      operationId: getImportReshard
+      summary: State of the import reshard
+      description: |
+        `running`, `done` or `failed` (with `error`) from this server's
+        runs; without one (another server, a restart) from the layout
+        record: a conversion of the session with a heartbeat younger than
+        90 seconds is `running`, an older one `failed`, otherwise `idle`.
+        `g` is the current index generation. Requires the role `import`.
+      responses:
+        "200":
+          description: The state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportReshard"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/trace:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1825,6 +2037,13 @@ components:
           type: string
           description: Resume this session (it must hold the lock or the lock must be free); omitted, the server chooses one.
           pattern: "^[A-Za-z0-9_-]{16,64}$"
+        messages:
+          type: integer
+          minimum: 0
+          description: |
+            How many messages the import is going to store (a hint): a
+            fresh layout 3 full-text index is sized for them when the first
+            batch creates it. Kept by this server for the session.
     ImportSession:
       type: object
       required: [account, session, expires_at]
@@ -2079,14 +2298,15 @@ components:
       properties:
         kind:
           type: string
-          pattern: "^(index_check|scrub|fts_rebuild|attachment_backfill)$"
+          pattern: "^(index_check|scrub|fts_rebuild|attachment_backfill|fts_layout)$"
           description: The kind to run on every account.
         params:
           type: object
           additionalProperties: true
           description: |
             Parameters of the kind for every account; scrub: `classes`
-            (empty = all). The other kinds take none.
+            (empty = all); fts_layout: `layout`, `shards`, `due_only`. The
+            other kinds take none.
         skip_idle:
           type: boolean
           description: |
@@ -2201,6 +2421,178 @@ components:
           $ref: "#/components/schemas/DirectoryEntry"
         after:
           $ref: "#/components/schemas/DirectoryEntry"
+    FTSLayoutShape:
+      type: object
+      required: [layout]
+      properties:
+        layout:
+          type: integer
+          description: 2 (fixed shards) or 3 (an index generation).
+        gen:
+          type: string
+          description: The generation (layout 3).
+        s:
+          type: integer
+          description: Posting objects.
+        d:
+          type: integer
+          description: Dictionary objects.
+        h:
+          type: integer
+          description: Header text objects.
+    FTSLayoutState:
+      type: object
+      required: [current]
+      properties:
+        current:
+          $ref: "#/components/schemas/FTSLayoutShape"
+        next:
+          $ref: "#/components/schemas/FTSLayoutShape"
+        next_tok:
+          type: string
+          description: The run of the conversion in progress (`job-<id>/<lease generation>` or `<session>/<nonce>`).
+        next_at:
+          type: string
+          format: date-time
+          description: Last heartbeat of an import reshard run.
+        old:
+          type: array
+          description: Source generations a conversion switched away from and has not removed yet.
+          items:
+            $ref: "#/components/schemas/FTSLayoutShape"
+        old_toks:
+          type: array
+          description: The runs that left the `old` generations, in the same order.
+          items:
+            type: string
+        old_at:
+          type: array
+          description: |
+            The last heartbeat of each run of `old_toks` (RFC 3339), in the
+            same order; empty for a job, whose job state tells whether it
+            still runs. An import reshard renews it until it removed its
+            sources.
+          items:
+            type: string
+    FTSLayoutClear:
+      type: object
+      required: [cleared, state]
+      properties:
+        cleared:
+          type: string
+          description: The tokens of the runs whose conversion or left-behind sources were removed, comma-separated; empty for none.
+        state:
+          $ref: "#/components/schemas/FTSLayoutState"
+    FTSLayout3Mark:
+      type: object
+      required: [enabled_at, pods]
+      properties:
+        enabled_at:
+          type: string
+          format: date-time
+        principal:
+          type: string
+        pods:
+          type: integer
+        forced:
+          type: boolean
+    ServerRegistration:
+      type: object
+      required: [instance, version, caps, seen, fresh]
+      properties:
+        instance:
+          type: string
+        version:
+          type: string
+        caps:
+          type: array
+          items:
+            type: string
+        seen:
+          type: string
+          format: date-time
+        fresh:
+          type: boolean
+          description: Seen within the last three minutes.
+    FTSLayout3Status:
+      type: object
+      required: [enabled, servers]
+      properties:
+        enabled:
+          type: boolean
+        mark:
+          $ref: "#/components/schemas/FTSLayout3Mark"
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServerRegistration"
+    FTSLayout3Enable:
+      type: object
+      required: [pods]
+      properties:
+        pods:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          description: The number of servers running now; exactly as many fresh registrations must report layout 3.
+        force:
+          type: boolean
+          description: Set the mark without the check.
+    FTSLayout3Disable:
+      type: object
+      required: [accounts]
+      properties:
+        accounts:
+          type: array
+          items:
+            type: string
+          description: Accounts that still have a layout 3 index (at most 1000).
+        more:
+          type: boolean
+          description: There are more than listed.
+    FTSLayoutAccount:
+      type: object
+      required: [account]
+      properties:
+        account:
+          type: string
+        since:
+          type: string
+          format: date-time
+        layout:
+          $ref: "#/components/schemas/FTSLayoutState"
+        mismatch:
+          type: boolean
+          description: With verify, the account has no layout 3 index (or no conversion to it).
+        error:
+          type: string
+    FTSLayoutAccountPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FTSLayoutAccount"
+        next:
+          type: string
+          description: Pass as `after` for the next page; absent at the end.
+    ImportReshard:
+      type: object
+      required: [state, g]
+      properties:
+        state:
+          type: string
+          pattern: "^(idle|running|done|failed)$"
+          description: |
+            `idle` (nothing to do or nothing runs), `running`, `done` (the
+            reshard finished; this server's runs only), `failed` (with
+            `error`).
+        g:
+          type: string
+          description: The current index generation (empty in layout 2).
+        error:
+          type: string
     TraceStatus:
       type: object
       required: [account, active]
@@ -2501,13 +2893,17 @@ components:
       properties:
         kind:
           type: string
-          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, mailbox_name_convert, attachment_backfill, mailbox_delete, expunge, purge]
+          enum: [scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, fts_layout, mailbox_name_convert, attachment_backfill, mailbox_delete, expunge, purge]
         params:
           type: object
           additionalProperties: true
           description: |
             scrub: `classes` (deliveries, moves, retired, uncovered, entries,
-            refs, orphans, unknown, quota; empty = all); mailbox_delete:
+            refs, orphans, unknown, quota; empty = all); fts_layout:
+            `layout` (2 or 3; omitted: the account's), `shards` (forced
+            object counts of a layout 3 target; 0: from the key counts),
+            `due_only` (end without a change while the key counts ask for
+            the shape the index has); mailbox_delete:
             `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
             `deleted: true` (every message flagged \Deleted when planned).
     Plan:

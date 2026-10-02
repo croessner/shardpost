@@ -44,8 +44,10 @@ func (u *User) ScrubState() (model.ScrubState, error) {
 
 // ScrubPending implements model.ScrubProber: any key of the scrub object
 // (orphan candidates "o:", the quota count), an intent in the registry
-// (d:, bi:, bimp:, up:, sub:, ci:, dm:; one read op), or a MOVE or removal
-// intent on a mailbox (i:, r:; one read op per mailbox, no listing).
+// (d:, bi:, bimp:, up:, sub:, ci:, dm:; one read op), an unfinished
+// full-text conversion (the layout record's "next" or "old"; one read),
+// or a MOVE or removal intent on a mailbox (i:, r:; one read op per
+// mailbox, no listing).
 func (u *User) ScrubPending() (string, error) {
 	switch n, err := u.firstKeys(oidScrub, ""); {
 	case err != nil:
@@ -54,11 +56,8 @@ func (u *User) ScrubPending() (string, error) {
 		return "scrub candidates", nil
 	}
 
-	switch p, err := u.anyKey(oidRegistry, intentPrefixes...); {
-	case err != nil:
-		return "", fmt.Errorf("read intents: %w", err)
-	case p != "":
-		return "intents " + p, nil
+	if p, err := u.intentsPending(); p != "" || err != nil {
+		return p, err
 	}
 
 	for _, prefix := range []string{regUploadPrefix, regSubmissionPrefix} {
@@ -85,6 +84,25 @@ func (u *User) ScrubPending() (string, error) {
 	}
 
 	return "", nil
+}
+
+// intentsPending reports an intent in the registry or an unfinished
+// full-text conversion: the jobs scrub clears the latter when its run
+// has ended (§4.6), so the batch must not skip the account.
+func (u *User) intentsPending() (string, error) {
+	switch p, err := u.anyKey(oidRegistry, intentPrefixes...); {
+	case err != nil:
+		return "", fmt.Errorf("read intents: %w", err)
+	case p != "":
+		return "intents " + p, nil
+	}
+
+	l, err := u.readLayout()
+	if err != nil || l == nil || (l.Next == nil && len(l.Old) == 0) {
+		return "", err
+	}
+
+	return "fts conversion", nil
 }
 
 // firstKeys reports whether an object of the index pool has a key with
@@ -193,7 +211,7 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 	// The version marker goes on only when every message is indexed;
 	// until then the rebuild key keeps substring search from trusting
 	// the index, also when the rebuild stops midway (see ftsRebuildKey).
-	token, err := u.startFTSRebuild()
+	token, err := u.startFTSRebuild(len(metas))
 	if err != nil {
 		return fmt.Errorf("index version: %w", err)
 	}
@@ -282,16 +300,26 @@ func (u *User) LegacyFTSDict() (int, error) {
 // keys of the posting shards, so the dictionary is written from them
 // without reading a message, and the objects of the old layout go last.
 // Setting a dictionary key that is already there changes nothing, which
-// is why this needs no lock against deliveries and may be repeated.
+// is why this needs no lock against deliveries and may be repeated. A
+// layout 3 index has no layout 2 dictionary to write: nothing is done
+// (a conversion to layout 3 derives the dictionary itself).
 func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)) (model.FTSDictReport, error) {
 	rep := model.FTSDictReport{Terms: map[string]int64{}}
+
+	switch lay, err := u.readLayout(); {
+	case err != nil:
+		return rep, err
+	case lay != nil && lay.F == model.FTSLayout3:
+		progress(1, 1)
+		return rep, nil
+	}
 
 	flush := func(terms []string) error {
 		if err := fence(); err != nil {
 			return err
 		}
 
-		n, err := u.dictApply(terms, true)
+		n, err := u.dictApplyAt(layout2Loc(u.ftsShards), terms, true)
 		rep.Entries += int64(n)
 
 		return err
@@ -329,11 +357,15 @@ func (u *User) convertShard(oid string, rep *model.FTSDictReport, flush func([]s
 
 	for {
 		more, err := listOmapKeys(u.idx, oid, after, "", omapPageSize, func(key string) {
+			after = key
+			if isMarker(key) {
+				return
+			}
+
 			field, _, _ := strings.Cut(key, ":")
 			rep.Terms[field]++
 
 			terms = append(terms, key)
-			after = key
 		})
 		if err != nil {
 			return fmt.Errorf("fts shard %s: %w", oid, err)

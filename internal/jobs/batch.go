@@ -37,7 +37,7 @@ const KindBatch = "batch"
 
 // FanOutKinds are the kinds a batch can run. Their Run must not rely on
 // a plan of the account: a batch has one plan for all accounts.
-var FanOutKinds = []string{KindIndexCheck, KindScrub, KindFTSRebuild, KindAttachments}
+var FanOutKinds = []string{KindIndexCheck, KindScrub, KindFTSRebuild, KindAttachments, KindFTSLayout}
 
 // ErrDirectoryNotReady refuses a batch while the account directory
 // cannot be trusted to name every account.
@@ -133,8 +133,12 @@ func checkBatchParams(p BatchParams) error {
 		return fmt.Errorf("%w: skip_idle is for scrub only", ErrInvalidParams)
 	}
 
-	if p.Kind == KindScrub {
+	switch p.Kind {
+	case KindScrub:
 		_, err := parseScrub(p.Params)
+		return err
+	case KindFTSLayout:
+		_, err := parseFTSLayout(p.Params)
 		return err
 	}
 
@@ -884,6 +888,8 @@ func (b *batch) lock(ctx context.Context, u model.User) (context.Context, func()
 
 		return nil, nil, err
 	}
+
+	clearForeignLayout(u, b.run.layoutToken(), b.run.Env.Log)
 
 	actx, cancel := context.WithCancel(ctx)
 	stop := b.keepLock(u, cancel)

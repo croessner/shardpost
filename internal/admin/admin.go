@@ -134,12 +134,27 @@ type Options struct {
 	// AuthFlush flushes the auth cache of the cluster; nil when this
 	// server has none (the flush then answers that nothing is cached).
 	AuthFlush AuthFlusher
+	// KV is the admin store of the full-text layout mark and the server
+	// registrations, FTSLayouts the store's layout administration (nil:
+	// those operations answer 503).
+	KV         model.AdminKV
+	FTSLayouts FTSLayoutStore
+	// ImportReshardSettle is how long an import reshard waits before its
+	// first change (jobs.settle_seconds), ImportReshardSync how long the
+	// request waits for it (fts.import_reshard_sync_seconds).
+	ImportReshardSettle time.Duration
+	ImportReshardSync   time.Duration
+	// LayoutDisableWait is how long layout 3 disable waits before it
+	// reads the presence index (0: five seconds).
+	LayoutDisableWait time.Duration
 }
 
 // Server implements the generated adminapi.ServerInterface.
 type Server struct {
 	o       Options
 	handler http.Handler
+	// rs are the import reshard runs of this server.
+	rs reshards
 }
 
 var _ adminapi.ServerInterface = (*Server)(nil)
@@ -161,6 +176,8 @@ func New(o Options) *Server {
 	o.ImportMaxChanges = cmp.Or(o.ImportMaxChanges, 10000)
 	o.TraceMaxDuration = cmp.Or(o.TraceMaxDuration, 24*time.Hour)
 	o.TraceDefaultDuration = min(cmp.Or(o.TraceDefaultDuration, 30*time.Minute), o.TraceMaxDuration)
+	o.ImportReshardSync = cmp.Or(o.ImportReshardSync, time.Minute)
+	o.LayoutDisableWait = cmp.Or(o.LayoutDisableWait, defaultDisableWait)
 
 	clients := make(map[string][]string, len(o.Clients))
 	for id, roles := range o.Clients {
@@ -180,7 +197,8 @@ func New(o Options) *Server {
 		o.AllAccountsClients[i] = strings.ToLower(id)
 	}
 
-	s := &Server{o: o}
+	s := &Server{o: o, rs: reshards{runs: map[string]*reshardRun{}, hints: map[string]int{}}}
+	s.rs.ctx, s.rs.cancel = context.WithCancel(context.Background())
 	mux := http.NewServeMux()
 	adminapi.HandlerWithOptions(s, adminapi.StdHTTPServerOptions{
 		BaseRouter: mux,

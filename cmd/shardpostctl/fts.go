@@ -1,0 +1,355 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"shardpost/internal/adminapi"
+)
+
+// Layouts of the full-text index (stage B14b):
+//
+//	fts layout3 status [-json]                         role diagnose
+//	fts layout3 enable -pods n [-force] [-json]        role repair
+//	fts layout3 disable [-json]                        role repair (exit 65 while accounts have layout 3)
+//	fts layout3 list [-verify] [-after a] [-limit n] [-json]  role diagnose, scope of all accounts
+//	fts layout show [-json] <account>                  role diagnose
+//	fts layout clear [-json] <account>                 role repair
+
+// Verbs and labels shared with other commands.
+const (
+	verbShow       = "show"
+	verbStatus     = "status"
+	labelPrincipal = "principal"
+	labelNext      = "next"
+)
+
+const (
+	cmdFTS   = "fts"
+	ftsUsage = "usage: shardpostctl fts layout3 status|enable -pods n [-force]|disable|list [-verify] [-after a] [-limit n] [-json] | " +
+		"fts layout show|clear [-json] <account>"
+)
+
+// ftsArgs are the flags of the fts commands.
+type ftsArgs struct {
+	asJSON, force, verify bool
+	pods, limit           int
+	after                 string
+	rest                  []string
+}
+
+// ftsCmd dispatches the fts commands.
+func ftsCmd(client *adminapi.ClientWithResponses, args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		sayln(stderr, ftsUsage)
+		return exUsage
+	}
+
+	group, verb := args[0], args[1]
+
+	fs := flag.NewFlagSet(cmdFTS+" "+group+" "+verb, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	var a ftsArgs
+
+	fs.BoolVar(&a.asJSON, "json", false, "print JSON")
+	fs.BoolVar(&a.force, "force", false, "enable: set the mark without the registrations check (audited)")
+	fs.BoolVar(&a.verify, "verify", false, "list: read each account's layout record")
+	fs.IntVar(&a.pods, "pods", 0, "enable: the number of servers running now (required)")
+	fs.IntVar(&a.limit, "limit", 100, "list: accounts per page")
+	fs.StringVar(&a.after, "after", "", "list: continue after this account")
+
+	rest, err := parseInterleaved(fs, args[2:])
+	if err != nil {
+		return exUsage
+	}
+
+	a.rest = rest
+	ctx := context.Background()
+
+	switch {
+	case group == "layout3" && len(rest) == 0:
+		return layout3Cmd(ctx, client, verb, a, stdout, stderr)
+	case group == "layout" && len(rest) == 1 && (verb == verbShow || verb == "clear"):
+		return accountLayoutCmd(ctx, client, verb, rest[0], a, stdout, stderr)
+	default:
+		sayln(stderr, ftsUsage)
+		return exUsage
+	}
+}
+
+// layout3Cmd runs the cluster commands.
+func layout3Cmd(ctx context.Context, c *adminapi.ClientWithResponses, verb string, a ftsArgs, stdout, stderr io.Writer) int {
+	switch verb {
+	case verbStatus:
+		return request(stderr, func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+			resp, err := c.GetFTSLayout3WithResponse(ctx)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}, func(st *adminapi.FTSLayout3Status) int { return printLayout3(stdout, st, a.asJSON) })
+	case "enable":
+		return layout3Enable(ctx, c, a, stdout, stderr)
+	case "disable":
+		return layout3Disable(ctx, c, a, stdout, stderr)
+	case verbList:
+		return layout3List(ctx, c, a, stdout, stderr)
+	default:
+		sayln(stderr, ftsUsage)
+		return exUsage
+	}
+}
+
+func layout3Enable(ctx context.Context, c *adminapi.ClientWithResponses, a ftsArgs, stdout, stderr io.Writer) int {
+	// Servers before 0.45.0 do not register: without the number of pods
+	// "every registered server" would be trivially true (N2).
+	if a.pods < 1 {
+		sayln(stderr, "shardpostctl: fts layout3 enable needs -pods <number of running servers>")
+		return exUsage
+	}
+
+	body := adminapi.FTSLayout3Enable{Pods: a.pods}
+	if a.force {
+		body.Force = &a.force
+	}
+
+	return request(stderr, func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+		resp, err := c.EnableFTSLayout3WithResponse(ctx, body)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+
+		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+	}, func(st *adminapi.FTSLayout3Status) int { return printLayout3(stdout, st, a.asJSON) })
+}
+
+func layout3Disable(ctx context.Context, c *adminapi.ClientWithResponses, a ftsArgs, stdout, stderr io.Writer) int {
+	return request(stderr, func() (*adminapi.FTSLayout3Disable, *adminapi.Error, int, error) {
+		resp, err := c.DisableFTSLayout3WithResponse(ctx)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+
+		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+	}, func(d *adminapi.FTSLayout3Disable) int {
+		if a.asJSON {
+			printJSON(stdout, d)
+		} else {
+			for _, acct := range d.Accounts {
+				sayln(stdout, acct)
+			}
+		}
+
+		if len(d.Accounts) == 0 {
+			if !a.asJSON {
+				sayln(stdout, "layout 3 mark removed; no account has layout 3")
+			}
+
+			return exOK
+		}
+
+		more := ""
+		if d.More != nil && *d.More {
+			more = " (and more)"
+		}
+
+		sayf(stderr, "shardpostctl: the mark is removed, but %d accounts%s still have layout 3: downgrade not possible yet "+
+			"(convert them with fts_layout layout 2)\n", len(d.Accounts), more)
+
+		return exDataErr
+	})
+}
+
+func layout3List(ctx context.Context, c *adminapi.ClientWithResponses, a ftsArgs, stdout, stderr io.Writer) int {
+	p := adminapi.ListFTSLayout3AccountsParams{After: optional(a.after), Limit: &a.limit}
+	if a.verify {
+		p.Verify = &a.verify
+	}
+
+	return request(stderr, func() (*adminapi.FTSLayoutAccountPage, *adminapi.Error, int, error) {
+		resp, err := c.ListFTSLayout3AccountsWithResponse(ctx, &p)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+
+		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+	}, func(page *adminapi.FTSLayoutAccountPage) int {
+		if a.asJSON {
+			return printJSON(stdout, page)
+		}
+
+		for _, it := range page.Items {
+			sayln(stdout, layoutAccountLine(it))
+		}
+
+		if page.Next != nil {
+			sayf(stdout, "more: -after %s\n", *page.Next)
+		}
+
+		return exOK
+	})
+}
+
+// layoutAccountLine is one account of the presence index.
+func layoutAccountLine(it adminapi.FTSLayoutAccount) string {
+	line := it.Account
+
+	if it.Since != nil {
+		line += "  since " + it.Since.UTC().Format(time.RFC3339)
+	}
+
+	if it.Layout != nil {
+		line += "  " + shapeText(it.Layout.Current)
+	}
+
+	if it.Mismatch != nil && *it.Mismatch {
+		line += "  MISMATCH (no layout 3 index)"
+	}
+
+	if it.Error != nil {
+		line += "  error: " + *it.Error
+	}
+
+	return line
+}
+
+// printLayout3 prints the mark and the registrations.
+func printLayout3(stdout io.Writer, st *adminapi.FTSLayout3Status, asJSON bool) int {
+	if asJSON {
+		return printJSON(stdout, st)
+	}
+
+	rows := [][2]string{{"enabled", fmt.Sprint(st.Enabled)}}
+
+	if m := st.Mark; m != nil {
+		rows = append(rows, [2]string{"enabled_at", m.EnabledAt.UTC().Format(time.RFC3339)}, [2]string{"pods", fmt.Sprint(m.Pods)})
+
+		if m.Principal != nil {
+			rows = append(rows, [2]string{labelPrincipal, *m.Principal})
+		}
+
+		if m.Forced != nil && *m.Forced {
+			rows = append(rows, [2]string{"forced", fmt.Sprint(*m.Forced)})
+		}
+	}
+
+	table(stdout, rows)
+
+	for _, s := range st.Servers {
+		fresh := "stale"
+		if s.Fresh {
+			fresh = "fresh"
+		}
+
+		sayf(stdout, "server %s  %s  %s  seen %s  caps %s\n", s.Instance, s.Version, fresh, s.Seen.UTC().Format(time.RFC3339), strings.Join(s.Caps, ","))
+	}
+
+	return exOK
+}
+
+// accountLayoutCmd shows or clears an account's layout record.
+func accountLayoutCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb, account string, a ftsArgs, stdout, stderr io.Writer) int {
+	if verb == verbShow {
+		return request(stderr, func() (*adminapi.FTSLayoutState, *adminapi.Error, int, error) {
+			resp, err := c.GetFTSLayoutWithResponse(ctx, account)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}, func(st *adminapi.FTSLayoutState) int {
+			if a.asJSON {
+				return printJSON(stdout, st)
+			}
+
+			printLayoutState(stdout, st)
+
+			return exOK
+		})
+	}
+
+	return request(stderr, func() (*adminapi.FTSLayoutClear, *adminapi.Error, int, error) {
+		resp, err := c.ClearFTSLayoutWithResponse(ctx, account)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+
+		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+	}, func(cl *adminapi.FTSLayoutClear) int {
+		if a.asJSON {
+			return printJSON(stdout, cl)
+		}
+
+		if cl.Cleared == "" {
+			sayln(stdout, "nothing cleared (no conversion, or its run still works)")
+		} else {
+			sayln(stdout, "cleared", cl.Cleared)
+		}
+
+		printLayoutState(stdout, &cl.State)
+
+		return exOK
+	})
+}
+
+// printLayoutState prints a layout record.
+func printLayoutState(stdout io.Writer, st *adminapi.FTSLayoutState) {
+	rows := [][2]string{{"current", shapeText(st.Current)}}
+
+	if st.Next != nil {
+		rows = append(rows, [2]string{labelNext, shapeText(*st.Next)})
+	}
+
+	if st.NextTok != nil {
+		rows = append(rows, [2]string{"next_tok", *st.NextTok})
+	}
+
+	if st.NextAt != nil {
+		rows = append(rows, [2]string{"next_at", st.NextAt.UTC().Format(time.RFC3339)})
+	}
+
+	if st.Old != nil {
+		for i, o := range *st.Old {
+			rows = append(rows, [2]string{"old", shapeText(o) + oldRun(st, i)})
+		}
+	}
+
+	table(stdout, rows)
+}
+
+// oldRun is the run that left old entry i, with its heartbeat for an
+// import reshard (" tok <token> at <time>").
+func oldRun(st *adminapi.FTSLayoutState, i int) string {
+	var text string
+
+	if st.OldToks != nil && i < len(*st.OldToks) {
+		text = " tok " + (*st.OldToks)[i]
+	}
+
+	if st.OldAt != nil && i < len(*st.OldAt) && (*st.OldAt)[i] != "" {
+		text += " at " + (*st.OldAt)[i]
+	}
+
+	return text
+}
+
+// shapeText is a generation as "layout 3 gen 9c1e… S/D/H 1/1/1".
+func shapeText(s adminapi.FTSLayoutShape) string {
+	text := fmt.Sprintf("layout %d", s.Layout)
+
+	if s.Gen != nil && *s.Gen != "" {
+		text += " gen " + *s.Gen
+	}
+
+	if s.S != nil && s.D != nil && s.H != nil {
+		text += fmt.Sprintf(" S/D/H %d/%d/%d", *s.S, *s.D, *s.H)
+	}
+
+	return text
+}

@@ -267,6 +267,7 @@ func TestCASClass(t *testing.T) {
 		"fts/03":         casClassFTS,
 		"ftst/127":       casClassFTS,
 		"ftsh/01":        casClassFTS,
+		"ftx/0011/p3":    casClassFTS,
 		"ftsmap":         casClassFTSMap,
 		"mailboxes":      casClassRegistry,
 		"account":        casClassAccount,

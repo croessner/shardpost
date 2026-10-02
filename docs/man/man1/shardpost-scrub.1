@@ -1,4 +1,4 @@
-.TH SHARDPOST-SCRUB 1 "2026-10-01" "ShardPost 0.42.0" "ShardPost Manual"
+.TH SHARDPOST-SCRUB 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
 .SH NAME
 shardpost-scrub \- scrub accounts, submit the nightly batch scrub, sweep the pools for debris
 .SH SYNOPSIS
@@ -49,6 +49,29 @@ for you; switch only after the last older server is gone.
 With
 .I scrub.dry_run
 it only reports.
+.PP
+The scrub also looks at the layout of the account's full-text index (see
+.BR shardpostctl-fts (1)).
+It reports, without repairing them, an object of the current layout 3
+generation that is missing or carries another generation
+.RB ( FTSShardsMissing ;
+searches and deliveries of the account fail until
+.B fts_rebuild
+rebuilds the index) and an object of layout 2 in an account whose layout
+2 objects should be gone
+.RB ( FTSMixedLayout ,
+written by a server before 0.45.0 after a wrong way back; repair with
+.BR fts_rebuild ).
+It enters an account with layout 3 in the presence index
+.B ix.fts_layout
+when it is missing there and removes an entry older than the grace
+period whose account has no layout 3 any more
+.RB ( FTSPresenceFixed ).
+The scrub job of the job system
+.RB ( "shardpost scrub \-\-batch" ,
+.BR "shardpostctl plan scrub" )
+also removes an unfinished full-text conversion whose job does not run
+any more or whose import reshard stopped sending its heartbeat.
 .SS scrub \-\-batch
 Plans the scrub of every account as one batch job with
 .B skip_idle
@@ -59,7 +82,12 @@ nightly CronJob runs. See
 Finds what no account's data model names: debris that servers before
 0.42.0 left without an intent, the objects of accounts purged before the
 purge named its objects, full-text shards above a lowered
-.IR server.fts_shards .
+.IR server.fts_shards ,
+layout 3 generations of the full-text index the layout record does not
+name (a creation that lost a race, a conversion whose run crashed after
+its record was removed). The data model names every generation of the
+record (current, the conversion in progress, sources not removed yet),
+which costs one read of the record per account.
 It is a tool for a one-off cleanup, not a routine: it lists both pools
 in every namespace, which costs a walk over every placement group of
 each pool.

@@ -135,12 +135,18 @@ type User struct {
 	log          *slog.Logger
 	chunkSize    int64
 	ftsShards    int
-	// ftsCurrent caches whether the index can be trusted
-	// (ftsIndexCurrent); ftsHasIDs that the view has seen ids in the id
-	// map, so that the index is not fresh (ensureDocIDs, which posting
-	// shards may call at the same time).
-	ftsCurrent int
-	ftsHasIDs  atomic.Bool
+	// ftsCfg are the layout settings, ftsHint the number of messages an
+	// import or a rebuild is going to index (sizes a fresh layout 3
+	// index; 0 unknown).
+	ftsCfg  ftsUserCfg
+	ftsHint int
+	// ftsRS caches the layout and the trust of the index for the
+	// searches of the view (ftsState); ftsHasIDs that the view has seen
+	// ids in the id map, so that the index is not fresh (ensureDocIDs,
+	// which posting shards may call at the same time).
+	ftsMu     sync.Mutex
+	ftsRS     *ftsReadState
+	ftsHasIDs atomic.Bool
 	// legacyDict caches whether the account still has the dictionary
 	// objects of the layout before 0.35.0 (see legacyDictMatches).
 	legacyDict    int
@@ -2200,7 +2206,7 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 	// be there; then the scrubber deletes it).
 	undo := func(chunks int, indexed bool) {
 		if indexed {
-			_ = u.ftsRemove(&Meta{GUID: guid, Size: size.Bytes, Chunks: chunks})
+			_ = u.ftsRemoveWait(&Meta{GUID: guid, Size: size.Bytes, Chunks: chunks}, 0)
 		}
 
 		// After a failed blob write (chunks 0) the write removed what it

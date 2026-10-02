@@ -31,7 +31,7 @@ func (srv *servers) setupHTTP(log *slog.Logger, settings *config.Config, store *
 		return err
 	}
 
-	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog, srv.sendq)
+	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog, srv.sendq, srv.kv)
 	if err != nil {
 		return err
 	}

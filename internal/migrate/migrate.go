@@ -194,6 +194,8 @@ func (r *run) all(ctx context.Context) error {
 		return fmt.Errorf("list source mailboxes: %w", err)
 	}
 
+	r.hint(ctx, mailboxes)
+
 	keep, err := r.mailboxes(ctx, mailboxes)
 	if err != nil {
 		return err
@@ -611,7 +613,7 @@ func (r *run) copyMessages(ctx context.Context, mb srcMailbox, st *srcStatus, id
 			continue
 		}
 
-		res, err := r.tgt.Import(ctx, id, parts)
+		res, err := r.importBatch(ctx, id, parts)
 		if tooLarge(err) && len(parts) == 1 {
 			// Larger than the target accepts: reported, not retried forever.
 			r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("%s: uid %d (%d bytes) is too large for the target, skipped", mb.Name, parts[0].Meta.UID, len(parts[0].Raw)))
@@ -630,6 +632,8 @@ func (r *run) copyMessages(ctx context.Context, mb srcMailbox, st *srcStatus, id
 		mr.Bytes += res.Bytes
 
 		log.Info("batch imported", "messages", len(parts), "last_uid", parts[len(parts)-1].Meta.UID, "remaining", len(missing))
+
+		r.reshard(ctx)
 	}
 
 	return nil

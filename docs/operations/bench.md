@@ -9,9 +9,9 @@ accounts and messages, writing directly through the RADOS store, and
 reports per account and per delivery:
 
 - objects and bytes per pool and object class (`mbox`, `msg`, `fts`,
-  `ftst`, `ftsh`, `ftsmap`, registry, account, …), with omap keys and
-  bytes, and the raw space the data objects take in the erasure coded
-  pool;
+  `ftst`, `ftsh`, `ftsmap`, the layout 3 objects `ftx-p`, `ftx-d`,
+  `ftx-h`, registry, account, …), with omap keys and bytes, and the raw
+  space the data objects take in the erasure coded pool;
 - RADOS operations per delivery by object class (reads, writes, class
   method calls);
 - delivery latency (p50, p90, p99) and compare-and-swap retries, by
@@ -20,6 +20,12 @@ reports per account and per delivery:
   into one account;
 - with `measure --search K` and `--expunge N`, the cost of a search query
   and of an expunge, and a fingerprint of the search results;
+- with `--fts-layout 3` (`populate` and `measure`) new accounts get
+  layout 3 of the full-text index (the bench sets the layout 3 mark in
+  its own pools), and with `measure --convert` the probe accounts are
+  converted to it as a `fts_layout` job would do: the time each account
+  is locked (the window in which its deliveries fail temporarily), the
+  operations of a reshard, and the search fingerprints before and after;
 - the cost of `Store.User()` and of opening a session.
 
 The per-account values are then extrapolated (default: to one million
@@ -251,10 +257,12 @@ higher `--messages`; to measure a part of many accounts, use
 ## Reading the report
 
 - `inventory.per_account.<pool>.<class>`: the mean, minimum and maximum
-  per account. The full-text shards have a fixed count per account
-  (`fts/` and `ftsh/`: `server.fts_shards`, `ftst/`: 256), so they do
-  not grow with the messages; `msg` grows with the messages and their
-  size (one object per `ceph.chunk_size`).
+  per account. The full-text shards of layout 2 have a fixed count per
+  account (`fts/` and `ftsh/`: `server.fts_shards`, `ftst/`: 256), so they
+  do not grow with the messages; those of layout 3 (`ftx-p`, `ftx-d`,
+  `ftx-h`) start at `fts.shards_min` each and grow by resharding;
+  `msg` grows with the messages and their size (one object per
+  `ceph.chunk_size`).
 - `inventory.per_message`: the account mean divided by the message
   count, meaningful for the data pool and the index entries.
 - `data_raw`: the estimated raw space of the data objects with the
@@ -307,6 +315,16 @@ higher `--messages`; to measure a part of many accounts, use
   EXPUNGE per message in a view of its own; `ops_per_call`, the latency
   and the compare-and-swap retries are per expunge. The messages are
   gone afterwards (a later `populate` does not refill them).
+- `convert` (only with `measure --convert`, which needs `--fts-layout
+  3`): runs after the search. The first round converts every probe
+  account from layout 2 to layout 3 under its account lock; its latency
+  is the lock time, the window of a `fts_layout` job in which the
+  account's deliveries answer 451. The second round, the counted one,
+  reshards the converted index once more (`ops_per_call` is therefore
+  the cost of a layout 3 reshard of the account, not of the first
+  conversion). With `--search` the search runs again afterwards
+  (`search_after_convert`); its `fingerprint` must equal `search`'s, a
+  note says when it does not.
 - `user_open`, `session_open`: `Store.User()` opens two I/O contexts and
   sends nothing to an OSD; a session adds the registry and INBOX reads.
   `heap_bytes_per_view` is the Go heap of an open view (the client

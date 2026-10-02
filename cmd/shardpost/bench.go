@@ -60,6 +60,9 @@ type benchFlags struct {
 	indexPool, dataPool, prefix, jsonOut, sizes string
 	parallel                                    int
 	seed                                        uint64
+	// ftsLayout is the layout of new full-text indexes (0: the
+	// configuration's); 3 sets the cluster mark in the bench pools.
+	ftsLayout int
 }
 
 func (f *benchFlags) register(fs *flag.FlagSet) {
@@ -70,6 +73,7 @@ func (f *benchFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.jsonOut, "json", "", "write the report as JSON to this file (- for standard output)")
 	fs.StringVar(&f.sizes, "sizes", bench.DefaultSizes, "message size distribution <weight>:<min>-<max>,...")
 	fs.Uint64Var(&f.seed, "seed", 1, "seed of the message generator")
+	fs.IntVar(&f.ftsLayout, "fts-layout", 0, "layout of new full-text indexes: 2 or 3 (3 sets the layout 3 mark in the bench pools; 0: the configuration's)")
 }
 
 // runBench runs a bench subcommand and returns the exit code.
@@ -129,6 +133,10 @@ func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, 
 	cfg := cephConfig(settings)
 	cfg.IndexPool, cfg.DataPool = f.indexPool, f.dataPool
 
+	if f.ftsLayout != 0 {
+		cfg.FTS.Layout = f.ftsLayout
+	}
+
 	rotate, err := rookCredentials(ctx, log, settings, &cfg)
 	if err != nil {
 		log.Error("bench: credentials", "err", err)
@@ -143,6 +151,15 @@ func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, 
 
 	if rotate != nil {
 		rotate(store)
+	}
+
+	if cfg.FTS.Layout == 3 {
+		if err := cephbench.MarkLayout3(store); err != nil {
+			log.Error("bench: layout 3 mark", "err", err)
+			cephbench.Close(store)
+
+			return g, cfg, nil, benchFailed
+		}
 	}
 
 	return g, cfg, store, benchOK
@@ -248,6 +265,7 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	fs.IntVar(&o.Contention, "contention", 0, "also deliver this many messages at a time into each probe account (0: no contention rounds)")
 	fs.IntVar(&o.Search, "search", 0, "search queries per probe account (0: no search rounds)")
 	fs.IntVar(&o.Expunge, "expunge", 0, "INBOX messages per probe account and expunge round (0: no expunge rounds)")
+	fs.BoolVar(&o.Convert, "convert", false, "convert the probe accounts' full-text index to layout 3 (needs --fts-layout 3) and reshard it once more, counting the second round")
 	fs.Int64Var(&o.Extrapolate, "extrapolate", 1000000, "scale the per-account means to this many accounts (0: no)")
 	fs.IntVar(&ec.DataChunks, "ec-k", 2, "data chunks of the data pool's erasure code profile")
 	fs.IntVar(&ec.CodingChunks, "ec-m", 1, "coding chunks of the data pool's erasure code profile")
@@ -261,9 +279,7 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	}
 
 	sizes, err := bench.ParseSizes(f.sizes)
-	if err != nil || o.Every <= 0 || o.ProbeAccounts < 0 || o.ProbeMessages < 0 ||
-		o.Contention < 0 || o.Search < 0 || o.Expunge < 0 ||
-		f.parallel <= 0 {
+	if err != nil || !measureValid(&o, &f) {
 		log.Error("bench: invalid options", "err", err)
 		return benchRefused
 	}
@@ -284,6 +300,19 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	}
 
 	return benchExit(log, err, code)
+}
+
+// measureValid checks the counts of measure (--convert needs
+// --fts-layout 3).
+func measureValid(o *cephbench.MeasureOptions, f *benchFlags) bool {
+	counts := []int{o.ProbeAccounts, o.ProbeMessages, o.Contention, o.Search, o.Expunge}
+	for _, n := range counts {
+		if n < 0 {
+			return false
+		}
+	}
+
+	return o.Every > 0 && f.parallel > 0 && (!o.Convert || f.ftsLayout == 3)
 }
 
 // writeBenchReport writes the table (to standard error when the JSON

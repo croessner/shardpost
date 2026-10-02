@@ -300,6 +300,7 @@ shardpostctl plan quota_recalc user@example.org
 shardpostctl plan acl_reconcile user@example.org
 shardpostctl plan fts_rebuild user@example.org
 shardpostctl plan fts_dict_convert user@example.org        # dictionary layout of 0.35.0
+shardpostctl plan -layout 3 fts_layout user@example.org    # full-text layout 3 (needs the cluster mark)
 shardpostctl plan mailbox_name_convert user@example.org    # modified UTF-7 names of 0.35.2 and earlier
 shardpostctl plan attachment_backfill user@example.org     # JMAP hasAttachment of older messages
 shardpostctl plan -mailbox "Archiv/2019" mailbox_delete user@example.org
@@ -327,7 +328,8 @@ only the repairs that were planned and are still needed.
 | `quota_recalc` | `repair` | yes | recount the usage from the index and set it |
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index (with the header store) and rebuild it from all messages; when it completes it sets the index version marker that IMAP substring search needs to narrow fully, see [configuration](configuration.md#full-text-index-fts) |
-| `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account |
+| `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account; does nothing on a layout 3 index |
+| `fts_layout` | `repair` | yes | convert the full-text index between layout 2 and layout 3 or reshard a layout 3 index (see [storage](architecture/storage.md#full-text-conversion)); `params`: `layout` (2 or 3; omitted: the account's), `shards` (forced object counts of a layout 3 target, 1–4096; omitted: from the key counts and `fts.shard_target_keys`), `due_only` (no change while the counts ask for the shape the index has; how the `fts_due` worker plans it). `layout: 3` needs the cluster mark (`POST /admin/v1/fts/layout3/enable`), read when the job is planned and when it starts. The plan shows the layout record and, for layout 3, the shape the counts ask for; the result names source and target generations and counts terms, dictionary keys, header texts and documents (`noop` when nothing changed). A job that fails or is cancelled clears its unfinished conversion itself |
 | `mailbox_name_convert` | `repair` | yes | rename mailboxes stored under a modified UTF-7 name to their UTF-8 name (children move with the parent) and rewrite subscriptions without a mailbox the same way; a rename whose target exists is a conflict (with its children) and is skipped; names that are not valid UTF-8 are reported (see [Upgrade: modified UTF-7 names](#upgrade-modified-utf-7-mailbox-names)) |
 | `attachment_backfill` | `repair` | no | read every message whose index record does not carry `hasAttachment` (stored before the record had the field) and remember the answer in the JMAP locator (`a:<guid>`, see [JMAP: hasAttachment](jmap.md#hasattachment)); changes no message and no index record, may be repeated and then reads only what is left, stops when an import or another job locks the account; a mailbox that cannot be listed and a message that cannot be read are skipped and counted (`skipped_mailboxes`, `failed`, the first errors in `errors`); the plan counts such messages and the ones already remembered |
 | `mailbox_delete` | `delete` | yes | delete the mailbox including its child mailboxes (not INBOX) |
@@ -419,12 +421,14 @@ shardpostctl plan -all -skip-idle scrub            # role repair; what the night
 shardpostctl plan -all -classes refs scrub
 shardpostctl plan -all fts_rebuild                 # locks each account in turn
 shardpostctl plan -all attachment_backfill
+shardpostctl plan -all -layout 2 fts_layout        # every account back to layout 2
 shardpostctl apply -wait <plan-id>
 ```
 
 `POST /admin/v1/plans` plans a **batch**: one kind run on every account of
 the account directory. Body: `kind` (`index_check`, `scrub`,
-`fts_rebuild`, `attachment_backfill`), `params` (scrub: `classes`) and
+`fts_rebuild`, `attachment_backfill`, `fts_layout`), `params` (scrub:
+`classes`; fts_layout: `layout`, `shards`, `due_only`) and
 `skip_idle` (scrub only). The plan and its job have the kind `batch` and
 no account; `summary` names the kind, its role, whether it locks the
 accounts, the parallelism and the directory (shards, backfill marker).
@@ -925,6 +929,38 @@ cache of Nauthilus itself. See
 [Operations: Auth cache](operations/README.md#auth-cache) for what each
 change costs until it takes effect.
 
+## Full-text layout 3
+
+```sh
+shardpostctl fts layout3 status                    # mark and server registrations (role diagnose)
+shardpostctl fts layout3 enable -pods 3            # role repair
+shardpostctl fts layout3 list -verify              # accounts with layout 3 (scope of all accounts)
+shardpostctl fts layout3 disable                   # exit 65 while accounts have layout 3
+shardpostctl fts layout show user@example.org      # the account's layout record
+shardpostctl fts layout clear user@example.org     # remove a conversion whose run ended
+```
+
+Layout 3 of the full-text index ([storage](architecture/storage.md#full-text-index-layout-3))
+needs a cluster mark, because servers before 0.45.0 cannot read it.
+
+| Endpoint | Role | Effect |
+| --- | --- | --- |
+| `GET /admin/v1/fts/layout3` | `diagnose` | whether the mark is set (when, by whom, for how many pods, `forced`) and the server registrations (`servers/<instance>`: version, capabilities, last heartbeat, `fresh` within three minutes) |
+| `POST /admin/v1/fts/layout3/enable` | `repair` | `{"pods": n, "force": false}`: sets the mark when exactly `n` fresh registrations report `fts_layout3`, otherwise `409 conflict` naming the instances; `force` skips the check (audited, recorded in the mark) |
+| `POST /admin/v1/fts/layout3/disable` | `repair` | removes the mark, waits five seconds, and lists the accounts of the presence index `ix.fts_layout` (`accounts`, up to 1000, `more`): a downgrade below 0.45.0 needs it empty |
+| `GET /admin/v1/fts/layout3/accounts` | `diagnose`, scope of all accounts | the presence index a page at a time (`after`, `limit` up to 10000); `verify=true` reads each account's layout record and marks entries without a layout 3 index (`mismatch`) |
+| `GET /admin/v1/accounts/{account}/fts/layout` | `diagnose` | the layout record: `current` (layout 2 without a record), `next` with `next_tok` and `next_at` (a conversion in progress), `old` with `old_toks` and `old_at` (sources a run left after its switch, the runs and their last import heartbeats, empty for a job) |
+| `POST /admin/v1/accounts/{account}/fts/layout/clear` | `repair` | removes the conversion in progress when its run has ended (a job that does not run any more, an import reshard whose heartbeat is older than 90 s): lifts exactly its freeze, deletes its targets; the same for sources an ended run left after its switch (`old`); `cleared` lists the tokens, comma-separated ("" when nothing was cleared) |
+
+Every server since 0.45.0 registers at startup and every minute, also
+without jobs or an admin listener; a registration not renewed for 24
+hours is deleted by the expiry worker of the job system (with
+`admin.kv_index: off` or `jobs.enabled: false` everywhere, only by
+`status` and `enable`). With `admin.kv_index` other than `read`, `status`
+and `enable` list the admin namespace. A pod replaced less than three
+minutes ago leaves the fresh record of its predecessor, so `enable`
+refuses until it aged.
+
 ## Cluster operation (mTLS)
 
 The component `deploy/components/admin-mtls` (active in the
@@ -973,6 +1009,29 @@ imapsync cannot do this, because IMAP APPEND always assigns new UIDs.
   `admin.import.lock_ttl_seconds`). While it is held, IMAP, POP3,
   ManageSieve, LMTP (`451 4.2.1`) and local delivery reject the account
   temporarily. Only the canonical account from the userdb is accepted.
+  The body may carry `messages`, the number of messages the import is
+  going to store: a fresh layout 3 full-text index is sized for them
+  (kept by the server for the session). Taking the lock clears an
+  unfinished full-text conversion another run left (an aborted import
+  session's, a job's that lost the account).
+- **Full-text reshard:** `POST .../import/fts-reshard` (same session
+  header) reads the key counts of the account's layout 3 index and, when
+  they ask for more objects, reshards it under the session — a
+  `fts_layout` job would wait for the import lock. It waits
+  `jobs.settle_seconds`, works up to `fts.import_reshard_sync_seconds`
+  and answers 200 (`idle`: nothing to do, `done`, `failed` with `error`)
+  or 202 (`running`, it goes on in the background, renewing the lock and
+  its heartbeat every 30 s); every answer carries the index generation
+  `g`. A second POST of the session while its run is active answers 202
+  without starting another; a run of another session with a heartbeat
+  younger than 90 s answers `409 conflict`, an older one is cleared and
+  replaced. `GET .../import/fts-reshard` reports `idle`, `running`,
+  `done` or `failed`, from this server's runs or, without one, from the
+  layout record. While the session's reshard runs, its message and
+  change batches answer `409 conflict`. The runs live in the server the
+  importer talks to (`migrate` reaches the same pod through the socket of
+  the import sidecar); a server shutdown stops them and clears their
+  conversion. A layout 2 index is never resharded.
 - **Mailboxes:** `PUT .../import/mailboxes` creates the mailbox with the
   UIDVALIDITY of the source (with the Dovecot mailbox GUID as its stable
   ID where available) or takes over an existing one with the same
@@ -1040,6 +1099,13 @@ For long runs, detached with a log under `/work`:
 kubectl -n shardpost exec deploy/shardpost-server -c import -- sh -c \
   'nohup shardpostctl -timeout 10m migrate --json user@example.org >/work/user.json 2>/work/user.log &'
 ```
+
+Before it copies, the migrator sends the number of the source's messages
+as the import hint, and after every batch it calls the full-text
+reshard (above), waiting for a running one; a batch answered 409 because
+of it is sent again. A failed reshard is a warning. Run it with
+`shardpostctl -timeout 10m`: the synchronous part of a reshard fits into
+the default two minutes, large batches may not.
 
 Exit codes: 0 everything verified, 1 parts failed (run it again), 64
 usage, 69 run aborted.

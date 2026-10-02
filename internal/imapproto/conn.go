@@ -722,6 +722,11 @@ func (c *conn) storeErr(tag string, err error) {
 		c.no(tag, "OVERQUOTA", "Quota exceeded")
 	case errors.Is(err, model.ErrLimit):
 		c.limitErr(tag, err)
+	case errors.Is(err, model.ErrIndexUnavailable):
+		// The full-text index is being converted, or an object of it is
+		// missing (the scrub reports it): a temporary condition.
+		c.log.Warn("command refused, full-text index unavailable", "err", err)
+		c.no(tag, "UNAVAILABLE", "Search index temporarily unavailable, try again later")
 	case errors.Is(err, model.ErrImportLocked):
 		// Another namespace the command needs — the public folders, a
 		// sharing account — is being imported or maintained.

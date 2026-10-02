@@ -539,8 +539,17 @@ exceed a limit by one entry each.
 | `fts.html` | `text` | what is made of a `text/html` part: `text` its visible text (tags, comments, `script`, `style`, `template` and `title` dropped, character references decoded, a line break at every block element), `raw` the markup as it is (what earlier versions indexed), `skip` nothing |
 | `fts.imap_search` | `substring` | how IMAP `SEARCH` matches text: `substring` as RFC 3501 and RFC 9051 specify (the index narrows the candidates, every candidate is checked); `word` lets the index answer `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, by word, stem and part of a word |
 | `fts.verify_parallel` | 8 | how many messages one IMAP `SEARCH` checks against its text keys at the same time (1–64), each read under `server.memory_budget_bytes` |
+| `fts.layout` | `2` | object layout of indexes created from now on: `2` the fixed shards of every version before 0.45.0, `3` the adaptive index generations (see [storage](architecture/storage.md#full-text-index-layout-3)); `3` takes effect only while the cluster mark is set (`shardpostctl fts layout3 enable`), otherwise new indexes stay in layout 2. The layout of an existing index is the one it records; `fts_layout` jobs convert |
+| `fts.shards_min` | 1 | posting, dictionary and header objects of a fresh layout 3 index without a size hint (1–4096) |
+| `fts.shards_max` | 32 | upper bound of the object counts a reshard chooses (`shards_min`–4096); beyond it the objects grow past `fts.shard_target_keys` (metric `imapceph_fts_shards_capped_total`, a log warning) |
+| `fts.shard_target_keys` | 100000 | keys a layout 3 object should hold (T, 10000–1000000; a value above 200000 is accepted with a startup warning: Ceph reports large omap objects from 200000 keys unless `osd_deep_scrub_large_omap_object_key_threshold` is raised). A writer that sees an object with more than 1.5·T keys queues the account for a reshard |
+| `fts.auto_reshard` | `true` | the `fts_due` worker plans `fts_layout` jobs for the queued accounts (it runs with the job system) |
+| `fts.frozen_wait_seconds` | 10 | how long one indexing (a delivery, an import batch, a removal) waits, once, for a conversion that froze the account's index before it fails with a temporary error (0–60; the undo of a delivery, the upload expiry and the scrubber's orphans never wait) |
+| `fts.import_reshard_sync_seconds` | 60 | how long `POST /admin/v1/accounts/{account}/import/fts-reshard` works before it answers 202 and goes on in the background (1–90; below the 2 minute default client timeout of `shardpostctl`) |
+| `fts.dict_min_terms` | 0 | reserved for a later stage (dictionary only from a vocabulary size); no effect yet |
 
-YAML only.
+YAML only. `server.fts_shards` keeps the object count of layout 2, which
+is also the target of a conversion back from layout 3.
 
 **The text.** One preparation serves the index, IMAP `SEARCH` keys
 checked against the message, the JMAP `header` filter and the cached

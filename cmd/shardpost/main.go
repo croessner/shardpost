@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"shardpost/internal/config"
+	"shardpost/internal/jobs"
 	"shardpost/internal/logging"
 	"strings"
 	"sync/atomic"
@@ -171,13 +172,7 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 
 	membudget.SetLimit(settings.Server.MemoryBudgetBytes)
 
-	// Load validated both; they are package settings because the index,
-	// IMAP SEARCH and the preview share one text preparation.
-	if err := charset.SetFallback(settings.FTS.FallbackCharset); err != nil {
-		return err
-	}
-
-	if err := fts.SetHTMLMode(settings.FTS.HTML); err != nil {
+	if err := textSettings(log, settings); err != nil {
 		return err
 	}
 
@@ -207,16 +202,38 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	return serve(ctx, log, settings, store, programs, quotaSvc)
 }
 
+// textSettings applies the text preparation settings. Load validated
+// them; they are package settings because the index, IMAP SEARCH and the
+// preview share one text preparation.
+func textSettings(log *slog.Logger, settings *config.Config) error {
+	if err := charset.SetFallback(settings.FTS.FallbackCharset); err != nil {
+		return err
+	}
+
+	if err := fts.SetHTMLMode(settings.FTS.HTML); err != nil {
+		return err
+	}
+
+	if w := settings.FTS.ShardTargetWarning(); w != "" {
+		log.Warn(w)
+	}
+
+	return nil
+}
+
 // cephConfig maps the configuration onto the RADOS store settings.
 func cephConfig(settings *config.Config) cephstore.Config {
 	return cephstore.Config{
-		User:        settings.Ceph.User,
-		Key:         settings.Ceph.Key,
-		MonHost:     settings.Ceph.MonHost,
-		IndexPool:   settings.Ceph.IndexPool,
-		DataPool:    settings.Ceph.DataPool,
-		ChunkSize:   settings.Ceph.ChunkSize,
-		FTSShards:   int(settings.Server.FtsShards),
+		User:      settings.Ceph.User,
+		Key:       settings.Ceph.Key,
+		MonHost:   settings.Ceph.MonHost,
+		IndexPool: settings.Ceph.IndexPool,
+		DataPool:  settings.Ceph.DataPool,
+		ChunkSize: settings.Ceph.ChunkSize,
+		FTSShards: int(settings.Server.FtsShards),
+		FTS: cephstore.FTSConfig{Layout: settings.FTS.Layout, ShardsMin: settings.FTS.ShardsMin, ShardsMax: settings.FTS.ShardsMax,
+			ShardTargetKeys: settings.FTS.ShardTargetKeys, AutoReshard: settings.FTS.AutoReshard,
+			FrozenWait: time.Duration(settings.FTS.FrozenWaitSeconds) * time.Second},
 		Quota:       cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
 		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},
 		QuotaRules:  quota.NewPolicy(settings.Quota),
@@ -436,6 +453,9 @@ type servers struct {
 	jmapFront *jmap.Server
 	// jmapKV is the admin store the JMAP push subscriptions are kept in.
 	jmapKV *cephstore.AdminKV
+	// kv is the admin store of the server registration, the full-text
+	// layout mark and the admin API (open for the server's lifetime).
+	kv *cephstore.AdminKV
 	// sieveConfig are the Sieve settings ManageSieve compiles with; JMAP
 	// compiles scripts with the same.
 	sieveConfig map[string]string
@@ -485,7 +505,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	defer bg.stop()
 
 	srv := newServers(log, settings, store, authn, tlsCfg, bg.imapSieve, programs, sieveCfg)
-	srv.sendq = bg.sendq
+	srv.sendq, srv.kv = bg.sendq, bg.kv
 
 	logRelay(log, settings)
 
@@ -534,6 +554,41 @@ func scrubCommand(ctx context.Context, command string) (func(*cephstore.Store, *
 	return nil, false
 }
 
+// startRegistration opens the server's own admin store and registers the
+// server in it (servers/<instance>) now and every model.ServerHeartbeat,
+// whether or not this server runs jobs or an admin listener (N8, F8d).
+// The returned function stops the heartbeat and closes the admin store;
+// serve defers it, so both happen before the store closes.
+func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store) (*cephstore.AdminKV, func(), error) {
+	kv, err := store.AdminKV()
+	if err != nil {
+		return nil, nil, fmt.Errorf("admin store: %w", err)
+	}
+
+	instance, _ := os.Hostname()
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		jobs.RunRegistration(ctx, kv, instance, version.Version, model.ServerHeartbeat, log.With("component", "registration"))
+	}()
+
+	return kv, func() {
+		cancel()
+		<-done
+		kv.Close()
+		shutdownStep("registration")
+	}, nil
+}
+
+// shutdownStep is told each step of serve's shutdown that has to come
+// before another: the admin API (which uses the registration's admin
+// store) before the registration closes that store. A test records the
+// order.
+var shutdownStep = func(string) {}
+
 // uploadExpiryPoll is how often the upload expiry worker looks for
 // expired JMAP uploads, and how often the other servers try its lease.
 const uploadExpiryPoll = time.Minute
@@ -571,6 +626,7 @@ func (srv *servers) shutdown(settings *config.Config, quotaSvc *quota.Service) {
 	actx, cancel := context.WithTimeout(context.Background(), adminDrain)
 	srv.admin.shutdown(actx)
 	cancel()
+	shutdownStep("admin")
 }
 
 // newServers builds the protocol servers.

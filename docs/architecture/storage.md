@@ -20,7 +20,8 @@ user namespaces.
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
 | `mbox/<id>/<n>` | Further message entries | [user.go](../../internal/cephstore/user.go) |
 | `msg/<guid>/<n>` | Immutable payload chunks; chunk 0 carries `refs` | [blob.go](../../internal/cephstore/blob.go) |
-| `fts/<shard>`, `ftst/<shard>`, `ftsmap` | Posting lists, trigram dictionary, GUID/doc ID mapping; `ftsd/<shard>` is the dictionary layout before 0.35.0 | [fts.go](../../internal/cephstore/fts.go) |
+| `fts/<shard>`, `ftst/<shard>`, `ftsmap` | Posting lists, trigram dictionary, GUID/doc ID mapping and layout record (layout 2); `ftsd/<shard>` is the dictionary layout before 0.35.0 | [fts.go](../../internal/cephstore/fts.go) |
+| `ftx/<gen>/p<i>`, `d<j>`, `h<k>` | Posting lists, dictionary and header texts of a layout 3 index generation ([layout 3](#full-text-index-layout-3)) | [ftslayout.go](../../internal/cephstore/ftslayout.go) |
 | Script/metadata objects | Sieve texts, the active script, private/shared metadata | [scripts.go](../../internal/cephstore/scripts.go), [metadata.go](../../internal/cephstore/metadata.go) |
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `pubseen/<id>` | Private `\Seen` marks of the public folder `<id>` (registry key `ps:<id>`) | [acl.go](../../internal/cephstore/acl.go) |
@@ -30,6 +31,7 @@ user namespaces.
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
 | `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
 | `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
+| `~accounts` / `ix.fts_layout/…`, `ix.fts_due/…` in the index pool | Presence index of the accounts with a layout 3 full-text index; reshard queue of the `fts_due` worker | [ftslayout.go](../../internal/cephstore/ftslayout.go), [ftsdue.go](../../internal/jobs/ftsdue.go) |
 
 The index pool is replicated because its omap structures require it.
 The data pool is EC 2+1 in the existing manifest. That is one concrete
@@ -37,7 +39,8 @@ operational configuration, not a general recommendation for every cluster size.
 By default, messages consist of 4 MiB chunks; the count is part of
 the metadata. `readBlob` uses the configured chunk size to
 compute the offsets. It must not be changed casually while data exists.
-The FTS shard count likewise affects the object mapping.
+The FTS shard count likewise affects the object mapping of layout 2;
+a layout 3 index records its own counts.
 
 The mailbox shard size, by contrast, is stored in the mailbox header and is
 fixed at creation time. For a UID, `shard = (uid - 1) / shardSize`.
@@ -682,6 +685,10 @@ pool).
 | `ix.plan/…` (1 shard) | hint index of `plan/`: `{kind, account, expires}` |
 | `ix.idem/…` (16 shards) | hint index of `idem/`: `{job_id}` |
 | `ix.jmap/push/acct/…` (64 shards) | hint index of `jmap/push/acct/`: `{verified, expires}` (any subscription verified, the latest expiry) |
+| `kv.servers/<instance>` | registration of a server (`{version, caps, seen}`), renewed every minute, deleted 24 hours after its last heartbeat ([layout 3](#full-text-mixed-versions)) |
+| `ix.servers/…` (1 shard) | hint index of `servers/`: `{version, caps}`, without `seen`, so a heartbeat does not write it |
+| `kv.fts/layout3` | the cluster mark that allows full-text layout 3 |
+| `kv.fts_due/<account>` | the job the `fts_due` worker planned for the account's generation (deleted with the account) |
 | `ix.jobs/claimable/…` | due queue of the jobs a runner may have to claim |
 | `ix.jobs/expiry/…` | due queue of the jobs, plans and idempotency keys that expire |
 | `ix.jobs/expiry/lock` | cls_lock of the expiry worker |
@@ -1104,6 +1111,9 @@ one found, and the round is repeated with the answer. A delivery into
 an account with document IDs thus costs one read and one write on
 `ftsmap` and one read and one write per posting shard it touches.
 
+The previous paragraph describes layout 2; a layout 3 index keeps the
+same keys in fewer objects, see [layout 3](#full-text-index-layout-3).
+
 An omap compare-and-swap of the account's objects (`casOmap`: posting
 shards, id map, registry, account, mailbox UID shards and the other omap
 objects of the account; not the header changes of a mailbox — modseq,
@@ -1185,8 +1195,8 @@ dictionary keys.
 The header store `ftsh/<nn>` keeps `HeaderText` per message — the
 decoded header lines that IMAP `SEARCH` checks header keys against —
 compressed with DEFLATE, at most 64 KiB of text (a longer header is not
-kept). It is written with the posting lists (delivery, `APPEND`, JMAP,
-import, `fts_rebuild`) and removed with them (expunge, purge, mailbox
+kept). It is written before the posting lists (delivery, `APPEND`, JMAP,
+import, `fts_rebuild`; see [layout 3](#full-text-index-layout-3) for why) and removed with them (expunge, purge, mailbox
 deletion, the scrubber's orphans, `DeleteFTS`); keyed by GUID, it is not
 touched by `COPY` or `MOVE`. Like the rest of the index it does not
 count against the quota.
@@ -1246,6 +1256,256 @@ all (`BODY ab`) reads every message. With `fts.imap_search: word` the
 index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, as
 earlier versions did. JMAP and the admin `text` search always use the
 index alone.
+
+<a id="full-text-index-layout-3"></a>
+## Full-text index layout 3
+
+Layout 2 — the objects described in the previous section, the only
+layout before 0.45.0 — has a fixed set of objects per account: 16
+posting shards, 256 dictionary shards, 16 header shards. A delivery
+touches nearly all of them: 245.6 RADOS operations in the R4
+measurement, 225 of them for the index
+([report](../reports/2026-10-02-r4-measurement.md)). Layout 3 keeps the
+same keys and values in an *index generation* whose object counts
+follow the size of the account
+([ftslayout.go](../../internal/cephstore/ftslayout.go)). Searches give
+the same results in both layouts; only object names and counts differ.
+
+| Object | omap key | Value |
+|---|---|---|
+| `ftx/<gen>/p<i>`, S of them, shard = fnv1a(term) mod S | `<field>:<token>` | posting list (as in layout 2) |
+| | `!g`, `!s`, `!n`, `!dn` | generation, state (`live` or `frozen:<tok>`), terms, dictionary keys of the terms |
+| `ftx/<gen>/d<j>`, D of them, shard = fnv1a(trigram) mod D | `<trigram>:<field>:<token>` | empty |
+| | `!g` | generation |
+| `ftx/<gen>/h<k>`, H of them, shard = fnv1a(GUID) mod H | GUID | header text (format byte 1, DEFLATE) |
+| | `!g` | generation |
+| `ftsmap` | `L` | the layout record (JSON) |
+| | `V`, `c` | version marker of layout 3 (instead of `v`), number of documents |
+
+`<gen>` is a random token of 16 hex digits. Keys that start with `!` are
+markers: every full enumeration skips them (a conversion, the
+dictionary conversion), and no prefix scan can reach them. A version
+before 0.45.0 reading a layout 3 account finds no `v` and narrows
+nothing (IMAP search is slow but right).
+
+The **layout record** `L` names the current generation (`f` 3, `g`,
+`s`, `d`, `h`), a conversion in progress (`next`: target generation and
+the token of its run, for the import reshard also its heartbeat `at`),
+sources a conversion has not removed yet (`old`, each with the token of
+its run and, for the import reshard, the heartbeat `at` it carries over
+from `next` at the switch) and whether the layout
+2 objects are gone (`lg`). Without `L` the account has layout 2.
+Writers read `L` in the id map's compare-and-swap of every indexing (no
+extra read); removals read it with the document id; readers cache it
+per view, with the trust markers, and check the markers of every object
+they read in the same operation.
+
+**Creating an index.** A fresh index (no `n`, no `L`, no layout 2
+posting object) gets layout 3 when `fts.layout` is 3 and the cluster
+mark `fts/layout3` exists in the admin store, read at that moment
+without a cache. The account is entered in the presence index
+`ix.fts_layout` (in `~accounts`; account → `since`) first, then the S +
+D + H objects are created exclusively with their markers, then the
+compare-and-swap that allocates the first document ids writes `L`, `V`
+and `c`. A writer that loses that race to another creator deletes its
+objects and follows the record that won; the presence entry belongs to
+the account and stays. An account converted to layout 3 while it had no
+documents gets `V` with its first document ids (no `n` and no rebuild
+under way), so its substring searches narrow from the start. Objects of
+a generation come into being only
+there, in `fts_rebuild` (which decides the layout the same way when it
+starts) and in a conversion. A fresh index has S = D = H =
+`fts.shards_min` (1), or, when an import or a rebuild knows how many
+messages it brings, the counts the bench corpus estimates for that many
+messages.
+
+**Writing.** An indexing writes the header texts first (in both layouts:
+a conversion that freezes the posting objects afterwards finds them in
+the source it copies), then one compare-and-swap per posting object —
+reading the terms of a page (1020 terms and the four markers) and
+writing the lists and the counters — then the dictionary keys of the
+new terms blindly, asserting that the object exists. The new terms of
+every attempt in a generation count, also of one that ended at an
+anomaly after some objects were written: a retry finds those terms
+existing and would not name them again. A removal's retry that reads a
+list an earlier attempt emptied as non-empty again (a delivery during
+the frozen wait) drops that term from the keys it removes. An *anomaly* — a frozen object,
+a missing object, a foreign `!g`, in layout 2 a missing posting object
+while `L` exists — ends the attempt; the writer reads `L` and
+
+- repeats the whole indexing in the generation `L` names when it is
+  another one (the same document ids; nothing more goes into the old
+  generation);
+- waits, once per indexing, for a conversion that froze the objects
+  (`fts.frozen_wait_seconds`) and then goes on in the new generation, or
+  fails with a temporary error (LMTP 451) — also for a freeze of another
+  run while a conversion is named, because lifting it would write into
+  a source being copied;
+- lifts a freeze that no conversion names any more in its own versioned
+  write;
+- fails on a missing object of the named generation (the scrub reports
+  it, `fts_rebuild` repairs it); a layout 3 object is never created by a
+  writer.
+
+A layout 2 index without `L` is written with the operations of 0.44.0:
+a missing posting object is created in the writer's compare-and-swap
+(the `L` it read with its ids says no conversion runs). That is safe
+because a conversion takes the account lock — which refuses new
+logins, deliveries and imports, but does not end the IMAP, POP3 or JMAP
+sessions already open — and waits `jobs.settle_seconds` before it
+records `L`; only a writer that sleeps through a whole conversion could
+create an object of the removed layout 2 objects afterwards, which the
+scrub reports (`fts_mixed_layout`) and the purge and the sweep remove.
+With `L` present a missing layout 2 posting object is an anomaly as
+above. A reader of layout 2 that finds a posting object missing reads
+`L` once per search, also when its cached view had none: an idle
+session keeps that view across a whole conversion, and without the
+read its next search would take the removed objects for empty. A
+missing dictionary or header object of layout 2 is empty, as before.
+
+One indexing follows at most two generation changes and waits at most
+once; the posting goroutines report a freeze and the indexing waits
+centrally. A dictionary write that finds its object missing in another
+generation is ignored: the terms are in the source the conversion
+derives its dictionary from.
+
+**Removing.** The removal reads the document id and `L` in one read,
+removes the header text, takes the document out of the posting lists
+(the anomaly rule as above; in another generation the removal is
+repeated there) and removes the dictionary keys of the terms that became
+empty. The document id is freed in any case, also when the blob cannot
+be read or an object is frozen: a list that still holds it holds a dead
+id, which searches resolve to nothing and conversions and rebuilds leave
+out. The undo of a delivery, the upload expiry and the scrubber's
+orphans do not wait for a frozen index.
+
+**Reading.** A search reads over the generation the view cached. A
+missing object or a foreign `!g` makes it read `L` again: in another
+generation it starts over (at most twice), in the same one it fails
+(IMAP `NO [UNAVAILABLE]`, JMAP `serverFail`). A frozen object of the generation `L`
+still names is read on — its state is complete. The dictionary ranges
+of the trigrams that fall into one object are read in one operation per
+round, so with D = 1 a substring lookup costs one read per round.
+
+**What it costs.** With S = D = H = 1 a delivery costs about 21
+operations (`TestHotPathOps` on the test cluster: 10.3 reads and 10.4
+writes per LMTP delivery, a view per message; 13.3 and 13.4 with S = D
+= H = 4); the full-text part is 2 S + D + 1. An expunge costs about 7
+operations of the index plus the blob read. A small account has 4
+full-text objects instead of 284; the keys are the same.
+
+<a id="full-text-reshard"></a>
+**Growth and reshard.** A posting compare-and-swap that finds more than
+1.5 × `fts.shard_target_keys` (T, 100 000) terms in its object, or more
+than that many dictionary keys per dictionary object (`!dn` · S / D),
+and an id map compare-and-swap with more than 1.5 T documents per header
+object, queue the account in `ix.fts_due` (in `~accounts`; id the
+account, generation the FNV-64 of the index generation, due now); a
+server queues a generation at most once per ten minutes. The worker
+`fts_due` runs with the job system on the server that holds its lease
+(`fts.auto_reshard`) and owns the entries: an entry of a purged account
+or of a generation that was replaced goes; a locked account and a job
+that has not ended postpone it (5 minutes, doubling up to 6 hours);
+otherwise it plans and applies `fts_layout {"due_only": true}` and
+remembers the job in the admin record `fts_due/<account>` (deleted with
+the account). A job that switched removes entry and record; one that
+found nothing to do (the per-object trigger and the target from the sums
+can disagree) leaves the entry six hours alone. The targets are
+S′ = 2^⌈log2(Σ`!n` / T)⌉, D′ from Σ`!dn`, H′ from `c`, each at least
+`fts.shards_min` and at most `fts.shards_max` (32). Beyond 32 × T, 3.2
+million terms or dictionary keys per account with the defaults, the
+objects grow past T (`imapceph_fts_shards_capped_total` and a log line
+say when); Ceph reports large omap objects from 200 000 keys per object
+(`osd_deep_scrub_large_omap_object_key_threshold`), 6.4 million per
+account.
+
+<a id="full-text-conversion"></a>
+**Conversion.** The job `fts_layout` (role `repair`, exclusive, also as
+a batch) converts between the layouts and reshards a layout 3 index. A
+run identifies itself by a token, `job-<id>/<lease generation>`, and
+holds the account lock (deliveries fail temporarily for the whole job):
+
+| Phase | |
+|---|---|
+| P2 | fence; `L.next` = target generation and token. A `next` of exactly this token is continued; any other is foreign — also one of the same job with another lease generation, which may still be writing — its targets are deleted and it is replaced. Sources a crashed run left in `old` are deleted. 2→3 enters the presence index first. |
+| P3 | `!s` = `frozen:<tok>` on every source posting object (a missing layout 2 one is created frozen). |
+| P5 | the targets are created afresh; the sources are read page by page, markers and dead ids left out, lists of GUIDs from before document ids converted; the dictionary is derived from the terms, the header texts of live documents copied; written blindly in pieces of at most 2048 keys asserting the objects exist, fenced before each; then the counters. |
+| P6 | fence; `L` names the target (only while `next` carries exactly this token), the source goes to `old`; 2→3 moves `v` to `V`, 3→2 removes `L` (and moves `V` back to `v`) and the account from the presence index. |
+| P7 | fence; the sources are deleted (only while `old` names this run), then the `old` entry; 2→3 sets `lg`. |
+
+Between P6 and P7 the sources are frozen while `L` already names the
+target: writers with an older `L` meet the freeze, read `L` and write
+into the target. A run that fails or is cancelled clears its
+conversion itself (`ClearFTSLayoutNext`: the record's `next` first, then
+the freezes of exactly its token — never another run's — then its
+targets); after a lost lease it leaves it, and the server that takes
+over replaces it. The runner clears it as well after it stored the
+final state of a single-account job, the cancel of a job that ended
+does, anyone who takes the account lock (an exclusive job, a batch per
+account, `OpenImport`) clears any foreign one, and the scrub job clears
+one whose job is not running any more or whose import heartbeat is
+older than 90 seconds (also `shardpostctl fts layout clear`); the same
+rule applies to the `old` entries a run left after its switch.
+
+<a id="full-text-import-reshard"></a>
+**During an import.** The account lock of an import keeps `fts_layout`
+jobs out until the import ends, so a large import would run on the
+objects of a fresh index. `shardpostctl migrate` tells the target how
+many messages it brings (the hint sizes a fresh index) and after every
+batch calls `POST /admin/v1/accounts/{account}/import/fts-reshard`
+under its session: the endpoint reads the counters (S + D + H + 1
+reads) and, when they ask for more objects, reshards under the import
+session with the token `<session>/<nonce>`. The run waits
+`jobs.settle_seconds`, renews the import lock and its heartbeat `at` in
+`L.next` (after the switch in its `L.old` entry, until P7) every 30
+seconds, and counts as fenced while the last renewal
+worked and its context lives. The request waits up to
+`fts.import_reshard_sync_seconds` and then answers 202; the session's
+batches answer 409 while the reshard runs. The runs of a server are
+kept in a map per account (one run per session, started under one
+mutex); a GET on another server falls back to `L.next`. The background
+run has a view of its own and stops, clearing its conversion, before the
+store closes at shutdown.
+
+**Purge, sweep, scrub.** The data model names every generation of `L`
+(current, `next`, `old`) before the id map, and the layout 2 objects in
+any case, also with `lg`: a layout 2 writer that slept through the
+conversion may have left one, and deleting absent objects is cheap (one
+more read per account for `L`). A purge
+removes the account from the presence index before its registry; an
+unnamed generation (a creation that lost its race and crashed) is a
+remnant for the sweep. The scrub reports a missing object of the current
+generation and layout 2 objects in an account with `lg` (a stat of
+`fts/00`, `ftsh/00` and `ftst/000`: `fts_mixed_layout`), both repaired
+by `fts_rebuild`, and keeps the
+presence index in step. The full-text objects do not count against the
+quota, in neither layout.
+
+<a id="full-text-mixed-versions"></a>
+**Mixed versions and the way back.** Every server since 0.45.0
+registers itself (`servers/<instance>` in the admin store, at startup
+and every minute, with its version and the capability `fts_layout3`;
+the hint index `ix.servers` carries version and capabilities only, so a
+heartbeat does not write it; a registration not renewed for 24 hours is
+deleted). While a server before 0.45.0 holds the lease of the expiry
+worker, it removes the `jobs/expiry` entries of the registrations it
+does not know; those records then expire only through `status` and
+`enable`, which delete registrations older than 24 hours. Older servers
+do not register and cannot read layout 3, so
+the cluster mark is set by `shardpostctl fts layout3 enable --pods n`
+only when exactly `n` fresh registrations report the capability
+(`--force` skips that, audited). Without the mark no layout 3 index is
+created whatever `fts.layout` says. The way back:
+
+1. `fts.layout: 2` on every server;
+2. `shardpostctl plan -all -layout 2 fts_layout` and apply it;
+3. `shardpostctl fts layout3 disable` — it removes the mark, waits five
+   seconds and succeeds only when the presence index is empty;
+4. roll the image back.
+
+In an emergency (an older server already runs): export
+`shardpostctl fts layout3 list`, run `fts_rebuild` for those accounts
+under the older version, and the sweep later under 0.45.0 or newer.
 
 ## Repair and its limits
 

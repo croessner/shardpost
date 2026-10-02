@@ -22,7 +22,9 @@ import (
 type background struct {
 	imapSieve *imapsieve.Engine
 	sendq     *sendqueue.Service
-	stops     []func()
+	// kv is the admin store of the server registration (startRegistration).
+	kv    *cephstore.AdminKV
+	stops []func()
 }
 
 // stop ends the workers, the last started first.
@@ -38,8 +40,18 @@ func startBackground(ctx context.Context, log *slog.Logger, settings *config.Con
 ) (*background, error) {
 	b := &background{}
 
+	// The registration (and its admin store) stops with the background,
+	// before the caller closes the store (R4.8).
+	kv, stopRegistration, err := startRegistration(ctx, log, store)
+	if err != nil {
+		return nil, err
+	}
+
+	b.kv, b.stops = kv, append(b.stops, stopRegistration)
+
 	imapSieve, stopWorker, err := newIMAPSieve(ctx, log, settings, store, programs, sieveCfg)
 	if err != nil {
+		b.stop()
 		return nil, err
 	}
 

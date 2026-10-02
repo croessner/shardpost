@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"shardpost/internal/fts"
+	"shardpost/internal/model"
 )
 
 // The candidate search of IMAP SEARCH (substring semantics) has to
@@ -35,13 +36,21 @@ const (
 	ftsRebuildKey = "r"
 )
 
-// omapLister lists the keys of an object that start with prefix and
-// sort after after, at most limit, and reports whether there are more.
-type omapLister func(oid, after, prefix string, limit uint64, fn func(key string)) (bool, error)
+// scanReq is one page of a key range scan: the keys after after that
+// start with prefix, at most limit, each handed to fn; more is set by
+// the read when the range goes on.
+type scanReq struct {
+	after, prefix string
+	limit         uint64
+	fn            func(key string)
+	more          bool
+}
 
 // candidateIndex is what the candidate search reads.
 type candidateIndex interface {
-	list(oid, after, prefix string, limit uint64, fn func(key string)) (bool, error)
+	// scan reads a page of each range of one object; ranges of the same
+	// object go in one read.
+	scan(oid string, reqs []*scanReq) error
 	// postingsUnion returns the messages of the posting lists of terms.
 	postingsUnion(terms []string) (map[string]bool, error)
 	// legacyDictPresent reports whether the account still has the
@@ -49,61 +58,40 @@ type candidateIndex interface {
 	legacyDictPresent() (bool, error)
 	// current reports whether the index can be trusted (indexCurrent).
 	current() (bool, error)
-	shards() int
+	// postingOIDs are the posting objects; dictOID is the dictionary
+	// object of a trigram (injected, so that the tests run the search
+	// over either layout's names, N12).
+	postingOIDs() []string
+	dictOID(tri string) string
 }
 
-// radosIndex is the candidateIndex of a User.
-type radosIndex struct{ u *User }
+// list is one page of one range of an object.
+func list(ix candidateIndex, oid, after, prefix string, limit uint64, fn func(string)) (bool, error) {
+	r := &scanReq{after: after, prefix: prefix, limit: limit, fn: fn}
+	err := ix.scan(oid, []*scanReq{r})
 
-func (r radosIndex) list(oid, after, prefix string, limit uint64, fn func(string)) (bool, error) {
-	return listOmapKeys(r.u.idx, oid, after, prefix, limit, fn)
+	return r.more, err
 }
-
-func (r radosIndex) postingsUnion(terms []string) (map[string]bool, error) {
-	return r.u.postingsUnion(terms)
-}
-
-func (r radosIndex) legacyDictPresent() (bool, error) { return r.u.hasLegacyDict() }
-func (r radosIndex) current() (bool, error)           { return r.u.ftsIndexCurrent() }
-func (r radosIndex) shards() int                      { return r.u.ftsShards }
-
-func (u *User) lister() omapLister { return radosIndex{u}.list }
-
-// Whether the index can be trusted, cached per view.
-const (
-	ftsCurrentUnknown = iota
-	ftsCurrentYes
-	ftsCurrentNo
-)
 
 // indexCurrent reports, from the keys ftsVersionKey and ftsRebuildKey of
-// the id map, whether the index can be trusted: the marker is there and
-// no rebuild is running.
+// the id map, whether a layout 2 index can be trusted: the marker is
+// there and no rebuild is running.
 func indexCurrent(vals map[string][]byte) bool {
+	return indexCurrentIn(vals, false)
+}
+
+// indexCurrentIn is indexCurrent for the version marker of a layout
+// (ftsVersionKey3 in layout 3).
+func indexCurrentIn(vals map[string][]byte, v3 bool) bool {
 	_, rebuilding := vals[ftsRebuildKey]
 
-	return string(vals[ftsVersionKey]) == ftsVersion && !rebuilding
-}
-
-// ftsIndexCurrent reports whether the index can be trusted.
-func (u *User) ftsIndexCurrent() (bool, error) {
-	if u.ftsCurrent == ftsCurrentUnknown {
-		vals, err := getOmapKeys(u.idx, oidFTSMap, []string{ftsVersionKey, ftsRebuildKey})
-		if err != nil && errCode(err) != syscall.ENOENT {
-			return false, err
-		}
-
-		u.ftsCurrent = ftsCurrentNo
-		if indexCurrent(vals) {
-			u.ftsCurrent = ftsCurrentYes
-		}
+	key := ftsVersionKey
+	if v3 {
+		key = ftsVersionKey3
 	}
 
-	return u.ftsCurrent == ftsCurrentYes, nil
+	return string(vals[key]) == ftsVersion && !rebuilding
 }
-
-// freshIndexKeys are the keys of the id map markFreshIndex looks at.
-var freshIndexKeys = []string{"n", ftsVersionKey, ftsRebuildKey}
 
 // markFreshIndex adds the version marker to the first write of the id
 // map of an index this version writes from the start: there is no id
@@ -161,28 +149,74 @@ var errRebuildSuperseded = errors.New("another rebuild of the index started mean
 
 // startFTSRebuild sets ftsRebuildKey to a token of this run and returns
 // it; the index is not trusted until finishFTSRebuild with the token.
-func (u *User) startFTSRebuild() (string, error) {
-	u.ftsCurrent = ftsCurrentUnknown
+// It decides the layout of the new index (§4.2): with fts.layout 3 and
+// the cluster mark a generation sized for m messages is created and
+// named in the same write, and the account entered in the presence
+// index first; otherwise the index is layout 2 and the account leaves
+// the presence index. The caller deleted the old index (DeleteFTS).
+func (u *User) startFTSRebuild(m int) (string, error) {
+	u.ftsForget()
+
 	token := newGUID()
 
-	return token, casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
-		return map[string][]byte{ftsRebuildKey: []byte(token)}, nil
+	want3, err := u.layout3Wanted()
+	if err != nil {
+		return "", err
+	}
+
+	set := map[string][]byte{ftsRebuildKey: []byte(token)}
+
+	var gen *ftsLoc
+
+	if want3 {
+		s, d, h := u.ftsCfg.sizing.shapeFor(m)
+		loc := ftsLoc{f: model.FTSLayout3, g: newFTSGen(), s: s, d: d, h: h}
+
+		if err := u.markLayout3(); err != nil {
+			return "", err
+		}
+
+		if err := u.createGen(loc); err != nil {
+			_ = u.deleteObjects(loc.objects())
+			return "", err
+		}
+
+		gen = &loc
+		l := &ftsLayout{F: model.FTSLayout3, G: loc.g, S: s, D: d, H: h, Dict: true, LG: true}
+		set[ftsLayoutKey], set[ftsCountKey] = l.encode(), []byte("0")
+	} else if err := u.unmarkLayout3(); err != nil {
+		return "", err
+	}
+
+	err = casOmap(u, u.idx, oidFTSMap, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
+		return set, nil
 	})
+	if err != nil && gen != nil {
+		_ = u.deleteObjects(gen.objects())
+	}
+
+	return token, err
 }
 
-// finishFTSRebuild sets the version marker and removes ftsRebuildKey in
-// one write — only while the key still holds the token of this run.
+// finishFTSRebuild sets the version marker of the layout and removes
+// ftsRebuildKey in one write — only while the key still holds the token
+// of this run.
 func (u *User) finishFTSRebuild(token string) error {
-	u.ftsCurrent = ftsCurrentUnknown
+	defer u.ftsForget()
 
 	var superseded bool
 
-	err := casOmap(u, u.idx, oidFTSMap, []string{ftsRebuildKey}, func(cur map[string][]byte) (map[string][]byte, []string) {
+	err := casOmap(u, u.idx, oidFTSMap, []string{ftsRebuildKey, ftsLayoutKey}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		if superseded = !rebuildOwned(cur, token); superseded {
 			return nil, nil
 		}
 
-		return map[string][]byte{ftsVersionKey: []byte(ftsVersion)}, []string{ftsRebuildKey}
+		key := ftsVersionKey
+		if l, _ := parseLayout(cur[ftsLayoutKey]); l != nil && l.F == model.FTSLayout3 {
+			key = ftsVersionKey3
+		}
+
+		return map[string][]byte{key: []byte(ftsVersion)}, []string{ftsRebuildKey}
 	})
 	if err == nil && superseded {
 		err = errRebuildSuperseded
@@ -206,7 +240,12 @@ func (u *User) SearchCandidates(fields []string, query string) (hits map[string]
 	end := u.trace(spanFTSSearch, attribute.StringSlice("store.fields", fields))
 	defer func() { end(err) }()
 
-	return searchCandidates(radosIndex{u}, fields, query)
+	err = u.ftsRead(func(ix *radosIndex) error {
+		hits, err = searchCandidates(ix, fields, query)
+		return err
+	})
+
+	return hits, err
 }
 
 // searchCandidates intersects the candidates of the words of the query
@@ -294,7 +333,7 @@ func spanTerms(ix candidateIndex, fields []string, sp fts.Span) ([]string, bool,
 				return nil, false, lerr
 			}
 
-			found, complete, err = dictMatches(ix.list, f, sp.Token, fts.Trigrams(sp.Token))
+			found, complete, err = dictMatches(ix, f, sp.Token, fts.Trigrams(sp.Token))
 		}
 
 		if err != nil || !complete {
@@ -327,8 +366,8 @@ func prefixKeys(ix candidateIndex, prefix string) ([]string, bool, error) {
 	)
 
 	shards := map[string][]string{}
-	for i := 0; i < ix.shards(); i++ {
-		shards[fmt.Sprintf("%s%02d", ftsPrefix, i)] = nil
+	for _, oid := range ix.postingOIDs() {
+		shards[oid] = nil
 	}
 
 	err := parallel(shards, func(oid string, _ []string) error {
@@ -340,12 +379,12 @@ func prefixKeys(ix candidateIndex, prefix string) ([]string, bool, error) {
 		for more := true; more; {
 			var err error
 
-			more, err = ix.list(oid, after, prefix, omapPageSize, func(key string) {
+			more, err = list(ix, oid, after, prefix, omapPageSize, func(key string) {
 				after = key
 				found = append(found, key)
 			})
 			if err != nil {
-				return fmt.Errorf("fts shard %s: %w", oid, err)
+				return err
 			}
 
 			if more && len(found) >= maxCandidates {

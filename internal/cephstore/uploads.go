@@ -42,17 +42,20 @@ const DefaultUploadTTL = 24 * time.Hour
 
 // uploadsQueue opens the due queue of the uploads once per process.
 func (s *Store) uploadsQueue() (*sortedindex.Queue, error) {
-	s.uploadsOnce.Do(func() {
-		h, err := s.openHandle(model.AccountsNamespace)
-		if err != nil {
-			s.uploadsErr = err
-			return
-		}
-
-		s.uploadsQ = sortedindex.NewQueue(&handleOmap{h: h, key: s.indexKey(model.AccountsNamespace)}, model.UploadsQueue, model.DefaultQueueShards)
-	})
+	s.uploadsOnce.Do(func() { s.uploadsQ, s.uploadsErr = s.accountsQueue(model.UploadsQueue) })
 
 	return s.uploadsQ, s.uploadsErr
+}
+
+// accountsQueue opens the due queue name in "~accounts" on a handle that
+// follows key rotations.
+func (s *Store) accountsQueue(name string) (*sortedindex.Queue, error) {
+	h, err := s.openHandle(model.AccountsNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return sortedindex.NewQueue(&handleOmap{h: h, key: s.indexKey(model.AccountsNamespace)}, name, model.DefaultQueueShards), nil
 }
 
 // uploadEntryID is the id of an upload in the queue.
@@ -173,7 +176,7 @@ func (u *User) collectBlob(guid string, size int64, chunks int, unindex bool, cu
 	}
 
 	if unindex {
-		if err := u.ftsRemove(&Meta{GUID: guid, Size: size, Chunks: chunks}); err != nil {
+		if err := u.ftsRemoveWait(&Meta{GUID: guid, Size: size, Chunks: chunks}, 0); err != nil {
 			u.log.Debug("fts remove of a collected blob failed", "guid", guid, "err", err)
 		}
 	}

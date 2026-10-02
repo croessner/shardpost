@@ -29,6 +29,9 @@ type adminServers struct {
 	unixSrv *http.Server
 	unixLn  net.Listener
 	tlsSrv  *http.Server
+	// api is the handler behind them; its import reshard runs stop at
+	// shutdown, before the store closes.
+	api *admin.Server
 
 	// jobs is the maintenance job runner (nil when disabled).
 	jobs      *jobs.Manager
@@ -40,7 +43,7 @@ type adminServers struct {
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
 func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store,
-	notices *sharenotice.Recorder, flushLog *auth.FlushLog, sendq *sendqueue.Service,
+	notices *sharenotice.Recorder, flushLog *auth.FlushLog, sendq *sendqueue.Service, kv *cephstore.AdminKV,
 ) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
@@ -70,16 +73,8 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		flusher = flushLog
 	}
 
-	s := admin.New(admin.Options{AuthFlush: flusher, Delivery: deliverer, Auth: authn, Log: log.With("component", "admin"), Version: version.Version,
-		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients,
-		Import: importer, ImportLockTTL: time.Duration(c.Import.LockTTLSeconds) * time.Second,
-		ImportMaxBatchBytes: c.Import.MaxBatchBytes, ImportMaxBatchMessages: c.Import.MaxBatchMessages, ImportMaxInventory: c.Import.MaxInventory, ImportMaxChanges: c.Import.MaxChanges,
-		ImportShardSize: c.Import.ShardSize, Accounts: importer,
-		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
-		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
-		ClientScopes:         scopes, AllAccountsClients: all, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
-		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: learning, Submissions: submissionAdmin(sendq), SearchScanLimit: c.SearchScanLimit,
-		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices})
+	s := admin.New(adminOptions(log, settings, authn, deliverer, store, notices, flusher, sendq, kv, a.jobs, learning, clients, scopes, all, instance))
+	a.api = s
 
 	if c.Addr != "" {
 		srv, err := s.TLSServer(c.TLSCert, c.TLSKey, c.ClientCA)
@@ -100,6 +95,28 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	}
 
 	return a, nil
+}
+
+// adminOptions are the options of the admin API.
+func adminOptions(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store,
+	notices *sharenotice.Recorder, flusher admin.AuthFlusher, sendq *sendqueue.Service, kv *cephstore.AdminKV, jobsMgr *jobs.Manager,
+	learning *learnindex.Queue, clients, scopes map[string][]string, all []string, instance string,
+) admin.Options {
+	c := settings.Admin
+	importer := importStore{store}
+
+	return admin.Options{AuthFlush: flusher, Delivery: deliverer, Auth: authn, Log: log.With("component", "admin"), Version: version.Version,
+		Hostname: settings.Server.LmtpHostname, MaxMessageBytes: cephstore.MaxMessageLen, SocketRoles: c.SocketRoles, Clients: clients,
+		Import: importer, ImportLockTTL: time.Duration(c.Import.LockTTLSeconds) * time.Second,
+		ImportMaxBatchBytes: c.Import.MaxBatchBytes, ImportMaxBatchMessages: c.Import.MaxBatchMessages, ImportMaxInventory: c.Import.MaxInventory, ImportMaxChanges: c.Import.MaxChanges,
+		ImportShardSize: c.Import.ShardSize, Accounts: importer,
+		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
+		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
+		ClientScopes:         scopes, AllAccountsClients: all, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
+		StorePing: store.Ping, Jobs: jobsMgr, Directory: store, Learning: learning, Submissions: submissionAdmin(sendq), SearchScanLimit: c.SearchScanLimit,
+		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices,
+		KV: kv, FTSLayouts: store, ImportReshardSettle: time.Duration(settings.Jobs.SettleSeconds) * time.Second,
+		ImportReshardSync: time.Duration(settings.FTS.ImportReshardSyncSeconds) * time.Second}
 }
 
 // submissionAdmin is the queue as the admin API's interface (nil, not a
@@ -144,10 +161,21 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
-	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store}
+	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store}
 
 	if sendq != nil {
 		env.Submissions = sendq
+	}
+
+	// The fts_due worker reshards the accounts the writers queued.
+	if settings.FTS.AutoReshard {
+		q, lock, err := store.FTSDueQueue()
+		if err != nil {
+			kv.Close()
+			return fmt.Errorf("fts reshard queue: %w", err)
+		}
+
+		env.FTSDue = &jobs.FTSDue{Queue: q, Lock: lock}
 	}
 
 	a.jobsKV = kv
@@ -213,5 +241,11 @@ func (a *adminServers) shutdown(ctx context.Context) {
 		if srv != nil {
 			_ = srv.Shutdown(ctx)
 		}
+	}
+
+	// srv.Shutdown does not wait for goroutines: the import reshard runs
+	// end here, before the caller closes the store (R4.2).
+	if a.api != nil {
+		a.api.Close()
 	}
 }

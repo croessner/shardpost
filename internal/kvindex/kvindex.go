@@ -52,6 +52,7 @@ var collections = []*Collection{
 	{Name: "plan", Shards: 1, Value: planValue},
 	{Name: "idem", Shards: 16, Value: idemValue},
 	{Name: "jmap/push/acct", Shards: 64, Value: pushValue},
+	{Name: "servers", Shards: 1, Value: serverValue},
 }
 
 // Collections returns the indexed collections.
@@ -148,6 +149,22 @@ func pushValue(rec []byte) []byte {
 			v.Expires = s.Expires.UTC()
 		}
 	}
+
+	return marshal(v)
+}
+
+// ServerValue is the index value of a server registration: version and
+// capabilities, without the time it was last seen, so that a heartbeat
+// does not write the index (stage B14b).
+type ServerValue struct {
+	Version string   `json:"version"`
+	Caps    []string `json:"caps"`
+}
+
+func serverValue(rec []byte) []byte {
+	var v ServerValue
+
+	_ = json.Unmarshal(rec, &v)
 
 	return marshal(v)
 }

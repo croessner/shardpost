@@ -415,7 +415,7 @@ func aclExplain(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs
 		return printJSON(stdout, e)
 	}
 
-	table(stdout, [][2]string{{"principal", e.Principal + " (" + string(e.Lookup) + " " + deref(e.CanonicalPrincipal) + ")"},
+	table(stdout, [][2]string{{labelPrincipal, e.Principal + " (" + string(e.Lookup) + " " + deref(e.CanonicalPrincipal) + ")"},
 		{"rights", e.Rights}, {"own entry", e.OwnEntry}, {"anyone", e.AnyoneEntry}, {"visible", fmt.Sprint(e.Visible)},
 		{"pointer", fmt.Sprint(e.Pointer.Present)}})
 

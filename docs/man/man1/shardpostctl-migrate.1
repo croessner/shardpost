@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-MIGRATE 1 "2026-09-30" "ShardPost 0.34.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-MIGRATE 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-migrate \- copy an account from another IMAP server, keeping its identities
 .SH SYNOPSIS
@@ -48,6 +48,27 @@ vacation response, and the target refuses it.
 While a run is in progress, the account is locked: IMAP, POP3 and LMTP
 refuse it. Role:
 .BR import .
+.SS The full-text index
+Before it copies messages the migrator tells the target how many
+messages the source's mailboxes hold (STATUS MESSAGES of each); a fresh
+layout 3 full-text index (see
+.BR shardpostctl-fts (1))
+is sized for them. After every batch it asks the target to check the
+index: when its objects outgrew
+.IR fts.shard_target_keys ,
+the target reshards it under the import session, since a
+.B fts_layout
+job would wait for the import to end. The target works up to
+.I fts.import_reshard_sync_seconds
+(60) on the request and then goes on in the background; the migrator
+asks every five seconds until the reshard ended. Batches sent while it
+runs are answered 409 and are sent again afterwards. A reshard that
+fails is a warning; the import goes on and the fts_due worker reshards
+later. A layout 2 index is never resharded. Run the migrator with
+.B shardpostctl \-timeout 10m
+so that the synchronous part of a reshard fits into one request; the
+default request timeout of two minutes suffices for it, but not for
+large batches.
 .SS Public folders
 The second form imports a namespace of the source other than the
 personal one \(em a public namespace of Dovecot, as a rule \(em into the

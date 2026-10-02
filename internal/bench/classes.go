@@ -17,6 +17,9 @@ const (
 	ClassFTSH      = "ftsh"       // ftsh/<nn>: header store
 	ClassFTSD      = "ftsd"       // ftsd/<nn>: dictionary before 0.35.0
 	ClassFTSMap    = "ftsmap"     // ftsmap
+	ClassFTXP      = "ftx-p"      // ftx/<gen>/p<i>: layout 3 posting lists
+	ClassFTXD      = "ftx-d"      // ftx/<gen>/d<j>: layout 3 dictionary
+	ClassFTXH      = "ftx-h"      // ftx/<gen>/h<k>: layout 3 header texts
 	ClassMetadata  = "metadata"   // metadata
 	ClassSieve     = "sieve"      // sieve
 	ClassScrub     = "scrub"      // scrub
@@ -62,6 +65,10 @@ func Classify(oid string) string {
 		return ClassMbox
 	}
 
+	if rest, ok := strings.CutPrefix(oid, "ftx/"); ok {
+		return ftxClass(rest)
+	}
+
 	for _, p := range prefixClasses {
 		if strings.HasPrefix(oid, p.prefix) {
 			return p.class
@@ -69,4 +76,23 @@ func Classify(oid string) string {
 	}
 
 	return ClassOther
+}
+
+// ftxClass is the class of a layout 3 object "<gen>/<kind><n>".
+func ftxClass(rest string) string {
+	_, obj, ok := strings.Cut(rest, "/")
+	if !ok || obj == "" {
+		return ClassOther
+	}
+
+	switch obj[0] {
+	case 'p':
+		return ClassFTXP
+	case 'd':
+		return ClassFTXD
+	case 'h':
+		return ClassFTXH
+	default:
+		return ClassOther
+	}
 }
