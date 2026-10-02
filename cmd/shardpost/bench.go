@@ -40,12 +40,16 @@ const commandBench = "bench"
 
 // splitBench finds "bench" after the global options; it returns those
 // options and the arguments after "bench".
-func splitBench(args []string) ([]string, []string, bool) {
+func splitBench(args []string) ([]string, []string, bool) { return splitCommandAt(args, commandBench) }
+
+// splitCommandAt finds the command word after the global options; it
+// returns those options and the arguments after the word.
+func splitCommandAt(args []string, word string) ([]string, []string, bool) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case flagConfig:
 			i++
-		case commandBench:
+		case word:
 			return args[:i], args[i+1:], true
 		default:
 			return nil, nil, false
