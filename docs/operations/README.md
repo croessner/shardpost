@@ -136,7 +136,10 @@ conversations as unknown (`outcome="conflict"`), never sends twice.
 
 **Partitions.** The servers running the worker times `max_partitions`
 must reach `partitions`; otherwise a partition nobody holds is never
-sent. `imapceph_jmap_submission_queue_entries{state="unowned"}` above 0
+sent. To survive the loss of one server, (servers − 1) ×
+`max_partitions` must reach it. Keep `max_partitions` at 0 (every
+server may hold every partition, the default) unless there is a reason
+to spread them by hand. `imapceph_jmap_submission_queue_entries{state="unowned"}` above 0
 and the log line `due submissions of partitions this server does not
 hold are overdue` show it.
 
@@ -160,8 +163,9 @@ servers know nothing of the copies, records and queue entries:
 - the purge of an old server leaves the copies, the records and the
   queue entries of the purged account behind; a server of 0.43.0 or
   later would then find them — it checks the account directory before
-  sending and fails a submission of an account that is gone or being
-  purged, but nothing else stops it;
+  sending and fails a submission of an account that is being purged or
+  has neither a directory entry nor a registry, but nothing else stops
+  it;
 - `shardpost scrub --sweep --repair` of an old server takes the copies
   for remnants and deletes them;
 - an old server neither sends nor cancels (`cannotUnsend`) a queued

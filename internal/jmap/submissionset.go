@@ -170,7 +170,7 @@ func (r *submissionRun) create(ctx context.Context, cid string, raw json.RawMess
 
 	var err error
 	if s.UndoStatus != undoPending {
-		err = r.record(s)
+		_, err = r.record(s)
 	}
 
 	if err != nil {
@@ -185,14 +185,20 @@ func (r *submissionRun) create(ctx context.Context, cid string, raw json.RawMess
 	r.emailOf[s.ID] = s.EmailID
 }
 
-// record adds a submission to the account's records.
-func (r *submissionRun) record(s *submission) error {
-	return updateSubmissions(r.kv, r.sess.account, r.opts, func(b *submissionBook) error {
+// record adds a submission to the account's records and returns the
+// sequence of its creation in the change log.
+func (r *submissionRun) record(s *submission) (uint64, error) {
+	var seq uint64
+
+	err := updateSubmissions(r.kv, r.sess.account, r.opts, func(b *submissionBook) error {
 		b.Subs = append(b.Subs, s)
 		b.note(s.ID, model.OpCreated)
+		seq = b.State
 
 		return nil
 	})
+
+	return seq, err
 }
 
 // send checks a creation and hands the message to the relay.
@@ -276,11 +282,14 @@ func (r *submissionRun) schedule(ident *identity, emailID, threadID string, env 
 
 	sp.View, _ = json.Marshal(s)
 
-	if err := r.record(s); err != nil {
+	seq, err := r.record(s)
+	if err != nil {
 		r.sess.log.Warn("jmap: delayed submission not recorded", "err", err)
 
 		return nil, &setError{Type: setServerFail, Description: "the submission could not be recorded; try again later"}
 	}
+
+	sp.ViewSeq = seq
 
 	if _, err := r.opts.Delayed.Queue.Schedule(r.sess.user, sp); err != nil {
 		r.sess.log.Warn("jmap: delayed submission not scheduled", "err", err)

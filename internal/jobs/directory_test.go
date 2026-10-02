@@ -282,7 +282,7 @@ func TestPurgeRemovesSubmissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.env.Submissions = q
+	m.env.Submissions = &purgeOrder{q: q, store: store}
 
 	ids := map[string]string{"alice": "S0a", "bob": "S0b"}
 
@@ -301,6 +301,10 @@ func TestPurgeRemovesSubmissions(t *testing.T) {
 		t.Errorf("alice's submission left: %v", err)
 	}
 
+	if po := m.env.Submissions.(*purgeOrder); po.state != model.AccountPurging {
+		t.Errorf("the queue records were removed while the directory entry was %q, not purging", po.state)
+	}
+
 	if list, err := q.List("bob"); err != nil || len(list) != 1 {
 		t.Errorf("bob's submissions %d %v", len(list), err)
 	}
@@ -309,4 +313,31 @@ func TestPurgeRemovesSubmissions(t *testing.T) {
 	if copies, _ := u.(model.SubmissionCopies).SubmissionCopies(); len(copies) != 0 {
 		t.Errorf("alice's copies left: %d", len(copies))
 	}
+}
+
+// purgeOrder records the directory state of the account when the purge
+// removes its delayed submissions.
+type purgeOrder struct {
+	q     *sendqueue.Service
+	store *memstore.Store
+	state string
+}
+
+func (p *purgeOrder) PurgeAccount(u model.User, account string) (int, error) {
+	ix, release, err := p.store.AccountIndex()
+	if err != nil {
+		return 0, err
+	}
+
+	e, _, err := model.GetAccountEntry(ix, account)
+
+	release()
+
+	if err != nil {
+		return 0, err
+	}
+
+	p.state = e.State
+
+	return p.q.PurgeAccount(u, account)
 }

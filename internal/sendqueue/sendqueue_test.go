@@ -818,21 +818,93 @@ func TestAccountGone(t *testing.T) {
 	e.svc.o.Directory = e.store
 	rec := e.schedule(t, "alice", 0)
 
+	// Purged by a server that left the queue behind: no registry, no
+	// directory entry.
+	if _, err := e.user(t, "alice").(model.NamespacePurger).PurgeNamespace(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	removeEntry(t, e, "alice")
+	e.worker(t).round(context.Background())
+
+	if s := e.book.get(rec.ID); s == nil || s.State != StateFailed || e.relay.count() != 0 {
+		t.Fatalf("calls %d, %#v", e.relay.count(), s)
+	}
+}
+
+// removeEntry removes an account's directory entry.
+func removeEntry(t *testing.T, e *env, account string) {
+	t.Helper()
+
+	ix, release, err := e.store.AccountIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if err := ix.Remove(account); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAccountWithoutEntrySends: an account with a registry but without a
+// directory entry (older than the directory, not backfilled) is live.
+func TestAccountWithoutEntrySends(t *testing.T) {
+	e := newEnv(t)
+	e.svc.o.Directory = e.store
+	e.schedule(t, "alice", 0)
+	removeEntry(t, e, "alice")
+	e.worker(t).round(context.Background())
+
+	if e.relay.count() != 1 {
+		t.Fatalf("calls %d", e.relay.count())
+	}
+}
+
+// TestAccountPurgingNotSent: an account the purge has marked is not
+// sent to.
+func TestAccountPurgingNotSent(t *testing.T) {
+	e := newEnv(t)
+	e.svc.o.Directory = e.store
+	rec := e.schedule(t, "alice", 0)
+
 	ix, release, err := e.store.AccountIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ix.Remove("alice"); err != nil {
+	if err := model.MarkAccountPurging(ix, "alice", "job-x", "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
 	release()
-
 	e.worker(t).round(context.Background())
 
 	if s := e.book.get(rec.ID); s == nil || s.State != StateFailed || e.relay.count() != 0 {
 		t.Fatalf("calls %d, %#v", e.relay.count(), s)
+	}
+}
+
+// brokenDirectory cannot be read.
+type brokenDirectory struct{}
+
+func (brokenDirectory) AccountIndex() (model.SortedIndex, func(), error) {
+	return nil, nil, errors.New("directory unavailable")
+}
+
+func (brokenDirectory) HasRegistry(string) (bool, error) { return false, errors.New("unavailable") }
+
+// TestDirectoryUnreadableRetries: a directory that cannot be read is a
+// temporary failure: retried, not sent on a guess.
+func TestDirectoryUnreadableRetries(t *testing.T) {
+	e := newEnv(t)
+	e.svc.o.Directory = brokenDirectory{}
+	rec := e.schedule(t, "alice", 0)
+	e.worker(t).round(context.Background())
+
+	r, err := e.svc.Get("alice", rec.ID)
+	if err != nil || r.State != StatePending || r.Attempts != 1 || e.relay.count() != 0 {
+		t.Fatalf("calls %d, %v %#v", e.relay.count(), err, r)
 	}
 }
 

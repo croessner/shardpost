@@ -1212,10 +1212,23 @@ func purgeObjects(run *Run, _ purgeSummary, cp *purgeCheckpoint) error {
 		return err
 	}
 
+	// Still under the maintenance lock, the directory entry turns
+	// purging: from the moment the registry (and the lock in it) is gone,
+	// no late session or delivery can create the account again, only
+	// this job's own lock session (a restart). The submission worker
+	// checks the entry before it sends, so from here on it sends nothing
+	// of this account.
+	if dp, ok := run.User.(model.DirectoryPurger); ok {
+		if err := dp.MarkPurging(lockSession(run.Job.ID)); err != nil {
+			return fmt.Errorf("account directory: %w", err)
+		}
+	}
+
 	// The delayed submissions are named by the copies' intents in the
 	// registry, which goes with the namespace: their records and queue
-	// entries go first (the copies with the namespace). A record left
-	// behind fails when its worker finds the copy gone.
+	// entries go now (the copies with the namespace). A record left
+	// behind fails when its worker finds the account purging or the
+	// copy gone.
 	if run.Env.Submissions != nil {
 		n, err := run.Env.Submissions.PurgeAccount(run.User, run.Job.Account)
 		if err != nil {
@@ -1223,16 +1236,6 @@ func purgeObjects(run *Run, _ purgeSummary, cp *purgeCheckpoint) error {
 		}
 
 		cp.Removed += n
-	}
-
-	// Still under the maintenance lock, the directory entry turns
-	// purging: from the moment the registry (and the lock in it) is gone,
-	// no late session or delivery can create the account again, only
-	// this job's own lock session (a restart).
-	if dp, ok := run.User.(model.DirectoryPurger); ok {
-		if err := dp.MarkPurging(lockSession(run.Job.ID)); err != nil {
-			return fmt.Errorf("account directory: %w", err)
-		}
 	}
 
 	// The registry with the maintenance lock goes last; renewing the lock

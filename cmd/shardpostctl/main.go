@@ -11,7 +11,7 @@
 //	shardpostctl [connection flags] messages | search | message show|export | flags | copy | move | sieve ... | learning ...
 //	shardpostctl [connection flags] export -o file.tar <account> | archive verify <file> | restore [-account A] <file>
 //	shardpostctl [connection flags] auth flush [<account>]
-//	shardpostctl [connection flags] submission list <account> | submission cancel <account> <id>
+//	shardpostctl [connection flags] submission list <account> | submission list -all | submission cancel <account> <id>
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary

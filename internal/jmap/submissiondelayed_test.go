@@ -378,13 +378,13 @@ func TestSettleWithoutRecord(t *testing.T) {
 		return raw
 	}
 
-	final := func(id string) *sendqueue.Record {
-		return &sendqueue.Record{Account: "test", ID: id, State: sendqueue.StateFinal, View: view(id),
+	final := func(id string, seq uint64) *sendqueue.Record {
+		return &sendqueue.Record{Account: "test", ID: id, State: sendqueue.StateFinal, View: view(id), ViewSeq: seq,
 			Delivery: map[string]sendqueue.Delivery{"bob@example.net": {SMTPReply: "250 ok", Delivered: sendqueue.DeliveredQueued}}}
 	}
 
 	// No records at all (a purged account): nothing is created.
-	if err := book.Settle(final("S01")); err != nil {
+	if err := book.Settle(final("S01", 1)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -392,31 +392,41 @@ func TestSettleWithoutRecord(t *testing.T) {
 		t.Fatal("settling created the records of an account without any")
 	}
 
-	// The account has records, one destroyed by the client.
+	// The account has records: S02 created (seq 1) and destroyed by the
+	// client, S03 created (seq 3) and lost, S04 created long ago (seq 0
+	// in this log's terms: before what it reaches back to).
 	if err := updateSubmissions(kv, "test", opts, func(b *submissionBook) error {
-		b.Subs = append(b.Subs, &submission{ID: "S02", UndoStatus: undoPending})
+		b.State = 10
 		b.note("S02", model.OpCreated)
-		b.Subs = b.Subs[:0]
 		b.note("S02", model.OpDestroyed)
+		b.note("S03", model.OpCreated)
 
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, id := range []string{"S02", "S03"} {
-		if err := book.Settle(final(id)); err != nil {
+	for id, seq := range map[string]uint64{"S02": 11, "S03": 13, "S04": 5, "S05": 0} {
+		if err := book.Settle(final(id, seq)); err != nil {
 			t.Fatal(err)
 		}
 	}
+
+	checkSettled(t, kv, opts)
+}
+
+// checkSettled checks what TestSettleWithoutRecord settled: only S03
+// came back.
+func checkSettled(t *testing.T, kv model.AdminKV, opts *SubmissionOptions) {
+	t.Helper()
 
 	b, err := loadSubmissions(kv, "test", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if b.find("S02") != nil {
-		t.Error("a destroyed submission came back")
+	if b.find("S02") != nil || b.find("S04") != nil || b.find("S05") != nil {
+		t.Error("a destroyed submission, or one past the log's reach, came back")
 	}
 
 	s := b.find("S03")

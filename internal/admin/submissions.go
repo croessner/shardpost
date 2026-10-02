@@ -68,6 +68,8 @@ func (s *Server) ListSubmissions(w http.ResponseWriter, r *http.Request, account
 // ListAllSubmissions lists the records of every account, a page at a
 // time (a listing of the admin namespace).
 func (s *Server) ListAllSubmissions(w http.ResponseWriter, r *http.Request, p adminapi.ListAllSubmissionsParams) {
+	auditf(r, "submissions", "all", "after", deref(p.After))
+
 	if !requireAllAccounts(w, r, RoleDiagnose) || !s.submissionsEnabled(w) {
 		return
 	}

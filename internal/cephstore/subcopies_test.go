@@ -459,16 +459,13 @@ func TestSubmissionAccountGoneCluster(t *testing.T) {
 	a := schedule(t, q, gone, 0)
 	b := schedule(t, q, live, 0)
 
-	ix, release, err := s.AccountIndex()
-	if err != nil {
+	// Purged by a server that left the queue behind: no registry, no
+	// directory entry (an entry alone is no proof: see the next test).
+	if _, err := gone.PurgeNamespace(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ix.Remove(gone.name); err != nil {
-		t.Fatal(err)
-	}
-
-	release()
+	removeDirEntry(t, s, gone.name)
 
 	stop := runQueue(q)
 	defer stop()
@@ -477,5 +474,42 @@ func TestSubmissionAccountGoneCluster(t *testing.T) {
 
 	if relay.calls.Load() != 1 {
 		t.Fatalf("relay calls %d, want only the live account's", relay.calls.Load())
+	}
+}
+
+// removeDirEntry removes an account's directory entry.
+func removeDirEntry(t *testing.T, s *Store, account string) {
+	t.Helper()
+
+	ix, release, err := s.AccountIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if err := ix.Remove(account); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSubmissionWithoutEntryCluster: an account with a registry but no
+// directory entry (from before the directory, not backfilled) is live
+// and its submission is sent.
+func TestSubmissionWithoutEntryCluster(t *testing.T) {
+	s := testStore(t)
+	relay := &countingRelay{}
+	q, _ := queueEnv(t, s, relay)
+	u := testUser(t, s)
+	rec := schedule(t, q, u, 0)
+
+	removeDirEntry(t, s, u.name)
+
+	stop := runQueue(q)
+	defer stop()
+
+	waitUntil(t, "the send", func() bool { return ended(t, q, u, rec) })
+
+	if relay.calls.Load() != 1 {
+		t.Fatalf("relay calls %d", relay.calls.Load())
 	}
 }

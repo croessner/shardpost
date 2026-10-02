@@ -880,10 +880,12 @@ cannot both succeed.
 worker that sends at once finds the entry to settle), the copy's
 intent, the copy, the queue entry, the record (a completeness index: the
 entry before the record); a schedule that fails takes the JMAP view
-back. The record keeps the JMAP view as created, and settling adds it
-to the account's records when it is missing there and the change log
-does not show the client destroyed it (a lost view write); an account
-without any records (purged) gets none. Ending (worker, cancel): the
+back. The record keeps the JMAP view as created with the sequence of
+its creation in the account's change log; settling adds the view to the
+account's records when it is missing there, the change log still
+reaches back to that sequence and does not show it destroyed (a lost
+view write). Past the log's reach a missing view counts as destroyed,
+and an account without any records (purged) gets none. Ending (worker, cancel): the
 JMAP view, the copy with its intent, the record, the entry (the record
 before the entry). The entry's position follows from the record: a pending
 submission at its next attempt, one being sent at the end of its
@@ -907,9 +909,14 @@ record is the fence. Entries of partitions it does not hold that are
 overdue by more than a poll are counted
 (`imapceph_jmap_submission_queue_entries{state="unowned"}`) and warned
 about: a partition nobody holds is never sent, so servers ×
-`max_partitions` must reach `partitions`. Before it sends, the worker
-checks the account directory: a submission of an account whose entry is
-gone or `purging` fails instead of being sent.
+`max_partitions` must reach `partitions` — (servers − 1) ×
+`max_partitions` for one server to fail; `max_partitions` 0 (all, the
+default) always does. Before it sends, the worker checks the account
+directory: a submission of an account whose entry is `purging`, or that
+has neither an entry nor a registry (purged), fails instead of being
+sent. An entry alone is no proof: an account older than the directory
+has none until the backfill ran, and its registry shows it is live. A
+directory that cannot be read is a temporary failure (retried).
 
 **Shutdown.** A stopping worker starts no new conversation (also none
 that waited for a slot), waits for the running ones to end — up to the
@@ -920,9 +927,11 @@ pending without counting an attempt. A server killed in the middle
 `sending`: at most once still holds, the submission ends as unknown
 after the sending timeout.
 
-**Purge, scrub, sweep.** A purge removes the records and entries of an
-account's submissions, named by the `sub:` intents of its registry,
-before the namespace goes; the copies go with the namespace, named by
+**Purge, scrub, sweep.** A purge marks the directory entry `purging`
+first — from then on no worker sends for the account — then removes the
+records and entries of its submissions, named by the `sub:` intents of
+its registry, before the namespace goes (a conversation a worker had
+already begun ends as it ends; it is not repeated); the copies go with the namespace, named by
 the same intents ([purge](#purge-without-listing)). A scrub leaves a
 copy alone until its intent expired (seven days after the release time)
 — also a scrub that lists, which otherwise takes a blob without a

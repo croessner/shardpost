@@ -276,6 +276,12 @@ func viewOf(rec *sendqueue.Record) *submission {
 	return s
 }
 
+// covers reports whether the change log still holds the entry of seq
+// (seq 0: unknown, never covered).
+func (b *submissionBook) covers(seq uint64) bool {
+	return seq > 0 && len(b.Log) > 0 && b.Log[0].Seq <= seq && seq <= b.State
+}
+
 // destroyed reports whether the change log records the destruction of
 // id (by the client, or by expiry).
 func (b *submissionBook) destroyed(id string) bool {
@@ -293,10 +299,11 @@ var errNoChange = errors.New("nothing to change")
 
 // Settle implements sendqueue.Book: the submission's undoStatus and
 // deliveryStatus. A submission the client destroyed stays destroyed
-// (RFC 8621 7.5: that does not cancel it); one the records lack without
-// having destroyed it (its record write failed or was lost) is added
-// from the view the queue kept. An account without records (purged) is
-// left alone.
+// (RFC 8621 7.5: that does not cancel it). One the records lack is added
+// from the view the queue kept only while the change log still reaches
+// back to its creation and shows no destruction: the record was lost,
+// not destroyed. Past the log's reach a missing record counts as
+// destroyed, and an account without records (purged) is left alone.
 func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
 	status := undoFinal
 	if rec.State == sendqueue.StateCanceled {
@@ -318,7 +325,7 @@ func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
 		switch {
 		case s == nil:
 			s = viewOf(rec)
-			if s == nil || b.State == 0 || b.destroyed(rec.ID) {
+			if s == nil || !b.covers(rec.ViewSeq) || b.destroyed(rec.ID) {
 				return errNoChange
 			}
 

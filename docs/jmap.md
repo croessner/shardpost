@@ -1297,6 +1297,11 @@ and bounds the delay (see [configuration](configuration.md#delayed-sending)).
   `sendAt` the release time and `deliveryStatus` null, so that a worker
   that sends at once finds it; a submission that cannot be scheduled is
   taken back (`serverFail`).
+- **Purged or purging accounts.** Before it sends, the worker checks the
+  account directory: an account being purged, or one with neither a
+  directory entry nor a registry, gets nothing sent; its submission
+  fails. The purge marks the account before it removes the queue's
+  records.
 - **Canceling.** `EmailSubmission/set` with
   `update: {id: {undoStatus: "canceled"}}` cancels a pending submission
   as long as the worker has not begun to send it; from then on it is
@@ -1328,7 +1333,12 @@ and bounds the delay (see [configuration](configuration.md#delayed-sending)).
 - **Destroying** a pending EmailSubmission removes its record only and
   does not cancel the sending (RFC 8621 7.5); the client cancels with
   `undoStatus`. When the submission ends, nothing brings the destroyed
-  record back.
+  record back. The queue keeps the record as created, with the position
+  of its creation in the change log of the account's submissions, and
+  restores a record that went missing without the log showing it
+  destroyed — but only while that log (the last 256 changes) still
+  reaches back to the creation; beyond it a missing record counts as
+  destroyed.
 - **Changes.** The transition to `final` or `canceled` is an update in
   `EmailSubmission/changes` and the push state, like every other change
   of the record.

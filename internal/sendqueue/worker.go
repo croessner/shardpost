@@ -452,7 +452,10 @@ type outcome struct {
 
 // attempt reads the copy and hands it to the relay.
 func (s *Service) attempt(ctx context.Context, rec *Record) outcome {
-	if reason := s.accountGone(rec.Account); reason != "" {
+	switch reason, err := s.accountGone(rec.Account); {
+	case err != nil:
+		return s.retry(rec, "the account directory could not be read: "+err.Error())
+	case reason != "":
 		return outcome{state: StateFailed, reason: reason, delivery: deliveries(rec.RcptTo, Delivery{Delivered: DeliveredNo})}
 	}
 
@@ -503,18 +506,22 @@ func (s *Service) classify(ctx context.Context, rec *Record, rep *outbound.Repor
 	return out
 }
 
-// accountGone says why an account may not send any more: its directory
-// entry is gone (purged) or it is being purged. A submission's copy
-// registers the account when it is written, so a live account always
-// has an entry. A directory that cannot be read lets the send go on.
-func (s *Service) accountGone(account string) string {
+// accountGone says why an account may not send any more: it is being
+// purged (the purge marks its directory entry before it removes the
+// queue records), or it has neither a directory entry nor a registry
+// (purged). An entry alone is no proof of life or death: an account
+// created before the directory has an entry only once the backfill ran,
+// so an account without entry but with a registry is live. A directory
+// or registry that cannot be read is an error (the caller retries)
+// rather than a send on a guess.
+func (s *Service) accountGone(account string) (string, error) {
 	if s.o.Directory == nil {
-		return ""
+		return "", nil
 	}
 
 	ix, release, err := s.o.Directory.AccountIndex()
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer release()
 
@@ -522,14 +529,23 @@ func (s *Service) accountGone(account string) string {
 
 	switch {
 	case err != nil:
-		return ""
-	case !ok:
-		return "the account no longer exists"
-	case e.State == model.AccountPurging:
-		return "the account is being purged"
+		return "", err
+	case ok && e.State == model.AccountPurging:
+		return "the account is being purged", nil
+	case ok:
+		return "", nil
 	}
 
-	return ""
+	live, err := s.o.Directory.HasRegistry(account)
+
+	switch {
+	case err != nil:
+		return "", err
+	case !live:
+		return "the account no longer exists", nil
+	}
+
+	return "", nil
 }
 
 // readCopy reads the copy of a submission's message.

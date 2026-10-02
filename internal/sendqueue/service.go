@@ -178,6 +178,10 @@ type Spec struct {
 	// that the view can be written when the submission ends even if its
 	// entry is missing (Book.Settle).
 	View []byte
+	// ViewSeq is the sequence of the view's creation in the account's
+	// change log: Settle re-creates a missing view only while the log
+	// still reaches back to it (else it may have been destroyed).
+	ViewSeq uint64
 	// Raw is the message as it is sent (Bcc removed).
 	Raw []byte
 }
@@ -206,7 +210,7 @@ func (s *Service) Schedule(u model.User, sp Spec) (*Record, error) {
 	now := s.o.Now().UTC()
 	rec := &Record{Account: sp.Account, ID: sp.ID, Gen: 1, State: StatePending, Release: sp.Release.UTC(),
 		Due: sp.Release.UTC(), Created: now, GUID: guid, Size: int64(len(sp.Raw)), MailFrom: sp.MailFrom,
-		RcptTo: sp.RcptTo, XClient: sp.XClient, Login: sp.Login, ClientAddr: sp.ClientAddr, View: sp.View}
+		RcptTo: sp.RcptTo, XClient: sp.XClient, Login: sp.Login, ClientAddr: sp.ClientAddr, View: sp.View, ViewSeq: sp.ViewSeq}
 
 	eid, pos := EntryID(sp.Account, sp.ID), rec.position(s.o.SendingTimeout)
 
