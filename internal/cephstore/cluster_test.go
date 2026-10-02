@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -87,10 +88,16 @@ func storeWith(t *testing.T, fn func(*Config)) *Store {
 
 	// The views of the test close in the background (their intent
 	// flushes); shutting the connection down under them aborts in
-	// librados.
+	// librados. A store that does not drain has a view or background
+	// work that never ends: the test fails and the store stays open.
 	t.Cleanup(func() {
 		if !s.Drain(10 * time.Second) {
-			t.Log("views of the store still open after 10 s")
+			var b strings.Builder
+
+			_ = pprof.Lookup("goroutine").WriteTo(&b, 1)
+			t.Errorf("views of the store still open after 10 s; goroutines:\n%s", b.String())
+
+			return
 		}
 
 		s.Close()

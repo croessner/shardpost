@@ -221,3 +221,33 @@ func TestPurgeRestartAfterRegistry(t *testing.T) {
 		t.Fatalf("objects left: %v", left)
 	}
 }
+
+// TestPurgeDrains: the view of a purged account and its background work
+// end promptly although every object of the account is gone (the store
+// drains), and so do the store's own queues the purge used.
+func TestPurgeDrains(t *testing.T) {
+	s := purgeStore(t, false)
+
+	u, err := s.User(testAccount(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	populateAll(t, u)
+
+	if _, err := u.PurgeNamespace(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	u.Close()
+
+	start := time.Now()
+
+	if !s.Drain(10 * time.Second) {
+		t.Fatal("the store did not drain within 10 s after the purge")
+	}
+
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("the store took %v to drain after the purge", d)
+	}
+}

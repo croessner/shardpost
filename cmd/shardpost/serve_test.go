@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,6 +135,60 @@ func TestServeRegistersAndStopsInOrder(t *testing.T) {
 
 	if !slices.Equal(steps, []string{"admin", "registration"}) {
 		t.Errorf("shutdown steps %v, want the admin API before the registration", steps)
+	}
+}
+
+// TestServeLeavesStoreDrained: once serve returned, every view and
+// background worker it opened on the store has ended, so the store
+// drains at once (nothing keeps a reference to the connection the
+// caller then closes).
+func TestServeLeavesStoreDrained(t *testing.T) {
+	if os.Getenv("SHARDPOST_TEST_CEPH_MON") == "" {
+		t.Skip("no test cluster (run through hack/ceph-test-cluster.sh, as make test-docker does)")
+	}
+
+	dir, err := os.MkdirTemp("", "sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	settings := serveConfig(t, dir)
+	store := serveStore(t, settings)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	served := make(chan error, 1)
+
+	go func() {
+		served <- serve(ctx, quietLog(), settings, store, extprograms.New(settings.ExtPrograms), nil)
+	}()
+
+	waitRegistered(t, store, served)
+	cancel()
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("serve did not return after the signal")
+	}
+
+	start := time.Now()
+
+	if !store.Drain(10 * time.Second) {
+		var b strings.Builder
+
+		_ = pprof.Lookup("goroutine").WriteTo(&b, 1)
+		t.Fatalf("the store did not drain within 10 s after serve returned; goroutines:\n%s", b.String())
+	}
+
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("the store took %v to drain after serve returned", d)
 	}
 }
 

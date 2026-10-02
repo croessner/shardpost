@@ -56,7 +56,7 @@ func TestRotateMovesHandles(t *testing.T) {
 	w := &Watch{errs: make(chan error, 1)}
 	h.watches[w] = struct{}{}
 
-	inUse, done := h.get() // a request that runs across the rotation
+	inUse, done, _ := h.get() // a request that runs across the rotation
 	if inUse != old {
 		t.Fatal("get did not return the current view")
 	}
@@ -78,7 +78,7 @@ func TestRotateMovesHandles(t *testing.T) {
 	done()
 	<-rotated
 
-	cur, done2 := h.get()
+	cur, done2, _ := h.get()
 	done2()
 
 	if len(*closed) != 1 || (*closed)[0] != old || cur == old || len(h.watches) != 0 {
@@ -193,7 +193,7 @@ func TestWatchOnSwappedViewFails(t *testing.T) {
 		t.Fatal("watch on the old view not failed")
 	}
 
-	cur, done := h.get()
+	cur, done, _ := h.get()
 	done()
 
 	w2 := &Watch{errs: make(chan error, 1)}

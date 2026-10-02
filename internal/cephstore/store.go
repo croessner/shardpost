@@ -292,14 +292,17 @@ func (s *Store) WithConn(fn func(*rados.Conn) error) error {
 	return fn(r.conn)
 }
 
-// Drain waits until every view and index the store handed out on its
-// current connection has been closed and the background work of the
-// views has finished, at most timeout; it reports whether that
-// happened. A tool calls it before Close, when it opens nothing new any
-// more: shutting the connection down under a view's background work
-// crashes inside librados. The server does not use it (its sessions end
-// with the process).
+// Drain closes the store's own long-lived views (the queues it opens
+// once per process: learning, uploads, reshards) and waits until every
+// view and index the store handed out on its current connection has
+// been closed and the background work of the views has finished, at
+// most timeout; it reports whether that happened. It is called before
+// Close, when nothing uses the store any more: shutting the connection
+// down under a view's background work crashes inside librados. A queue
+// the store returned before fails with ErrHandleClosed afterwards.
 func (s *Store) Drain(timeout time.Duration) bool {
+	s.closeOwnedHandles()
+
 	s.mu.RLock()
 	r := s.cur
 	s.mu.RUnlock()
