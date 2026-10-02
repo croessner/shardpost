@@ -167,8 +167,8 @@ func TestDictScanBundled(t *testing.T) {
 			objects[ix.dictOID(tri)] = true
 		}
 
-		if ix.reads != len(objects) || (d == 1 && ix.reads != 1) {
-			t.Errorf("D=%d: %d reads for %d objects", d, ix.reads, len(objects))
+		if n := int(ix.reads.Load()); n != len(objects) || (d == 1 && n != 1) {
+			t.Errorf("D=%d: %d reads for %d objects", d, n, len(objects))
 		}
 	}
 }

@@ -56,6 +56,12 @@ func TestHotPathOpsLayout3(t *testing.T) {
 			}
 
 			countSessionOps(t, u, msg)
+
+			// due_only reads S + D + H + 1 (one each object and the id map)
+			countOps(t, fmt.Sprintf("layout 3 S=%d: reshard check (due_only)", n), 1, func() {
+				_, _, err := u.FTSLayoutDue()
+				must(t, err)
+			})
 		})
 	}
 }

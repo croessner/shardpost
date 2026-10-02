@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"shardpost/internal/fts"
@@ -23,7 +24,7 @@ type memIndex struct {
 	legacy bool
 	stale  bool // without the version marker
 	// reads counts the reads of scan (one per object and round).
-	reads int
+	reads atomic.Int64
 }
 
 func newMemIndex(nShards int, docs map[string]string) *memIndex {
@@ -100,7 +101,7 @@ func (ix *memIndex) drop(oid, key string) {
 }
 
 func (ix *memIndex) scan(oid string, reqs []*scanReq) error {
-	ix.reads++
+	ix.reads.Add(1)
 
 	for _, q := range reqs {
 		n := uint64(0)
