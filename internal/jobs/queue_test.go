@@ -676,6 +676,14 @@ func TestReadModeEndToEnd(t *testing.T) {
 	alice := []string{ids[0], ids[2]}
 	slices.Sort(alice)
 
+	// The hint index follows the record (the entry is written after it):
+	// wait until both of alice's entries show the end.
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if list, _, err := m.List("alice", StateSucceeded, "", 10); err == nil && len(list) == len(alice) {
+			break
+		}
+	}
+
 	checkList(t, m, "alice", StateSucceeded, "", 1, alice[:1], alice[0])
 	checkList(t, m, "alice", "", alice[0], 10, alice[1:], "")
 	checkList(t, m, "bob", StateQueued, "", 10, nil, "")
