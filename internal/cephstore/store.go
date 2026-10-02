@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ceph/go-ceph/rados"
@@ -156,8 +155,11 @@ type Store struct {
 
 	// ftsMarkSeen is the layout 3 cluster mark as this server last read
 	// it (ftsMarkUnknown, ftsMarkOff, ftsMarkOn): a change is logged once
-	// (noteFTSLayout).
-	ftsMarkSeen atomic.Int32
+	// (noteFTSLayout). ftsMarkMu serializes the read of the mark with
+	// the update, so that concurrent readers cannot leave an older
+	// answer in the log and the gauges (readFTSMark).
+	ftsMarkMu   sync.Mutex
+	ftsMarkSeen int32
 }
 
 // connRef is a reference-counted librados connection.

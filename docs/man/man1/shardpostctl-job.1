@@ -283,7 +283,8 @@ written before 0.35.0. A layout 3 index always has its dictionary (see
 .BR fts_layout ),
 so planning it for a layout 3 account is refused (exit status 65), and a
 run that finds layout 3 or a layout conversion under way, at its start
-or before any batch, writes nothing and reports
+or before any later batch, stops writing (no further batch, no deletion
+of old objects), succeeds and reports
 .B skipped
 in its result.
 .TP

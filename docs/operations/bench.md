@@ -317,8 +317,9 @@ higher `--messages`; to measure a part of many accounts, use
   EXPUNGE per message in a view of its own; `ops_per_call`, the latency
   and the compare-and-swap retries are per expunge. The messages are
   gone afterwards (a later `populate` does not refill them).
-- `convert` (only with `measure --convert`, which needs `--fts-layout
-  3`): runs after the search. The first round converts every probe
+- `convert` (only with `measure --convert`, which needs layout 3:
+  `--fts-layout 3`, or without the flag `fts.layout: 3` of the
+  configuration, the default): runs after the search. The first round converts every probe
   account from layout 2 to layout 3 under its account lock; its latency
   is the lock time, the window of a `fts_layout` job in which the
   account's deliveries answer 451. The second round, the counted one,

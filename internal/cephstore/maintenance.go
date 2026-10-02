@@ -337,7 +337,19 @@ func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)
 	}
 
 	for i := 0; i < u.ftsShards; i++ {
-		if err := u.convertShard(fmt.Sprintf("%s%02d", ftsPrefix, i), &rep, flush); err != nil {
+		err := u.convertShard(fmt.Sprintf("%s%02d", ftsPrefix, i), &rep, flush)
+		if errors.Is(err, errDictLayoutBusy) {
+			// A conversion started during the run: what was written
+			// is harmless (the conversion derives its own dictionary);
+			// nothing more is written and the legacy objects stay.
+			rep.Skipped = model.FTSDictSkippedLayout3
+
+			progress(u.ftsShards, u.ftsShards)
+
+			return rep, nil
+		}
+
+		if err != nil {
 			return rep, err
 		}
 
@@ -361,7 +373,7 @@ func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)
 }
 
 // errDictLayoutBusy stops a dictionary conversion whose account has (or
-// is getting) layout 3.
+// is getting) layout 3; ConvertFTSDict reports it as skipped.
 var errDictLayoutBusy = errors.New("the full-text index has layout 3 or a layout conversion is under way; " +
 	"run the dictionary conversion again only if the account keeps layout 2")
 

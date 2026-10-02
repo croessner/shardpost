@@ -5,6 +5,7 @@ package cephstore
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,4 +166,82 @@ func TestDictConvertLayout3Untouched(t *testing.T) {
 	mustExist(t, u, false, l2.postingOIDs()...)
 	mustExist(t, u, false, l2.dictOIDs()...)
 	mustExist(t, u, false, l2.headerOIDs()...)
+}
+
+// TestDictConvertStopsMidRun: a conversion to layout 3 that starts
+// while fts_dict_convert runs ends the run as skipped, not failed: no
+// layout 2 dictionary object is written after it, and the legacy
+// objects are not deleted by the dictionary run.
+func TestDictConvertStopsMidRun(t *testing.T) {
+	s := layoutStoreOf(t, model.FTSLayout2)
+	setLayoutMark(t, s, true)
+	t.Cleanup(func() { setLayoutMark(t, s, false) })
+
+	u := testUser(t, s)
+	mustMailbox(t, u, "INBOX")
+	deliverDocs(t, u, layoutDocs(30))
+
+	if l := layoutOf(t, u); l != nil {
+		t.Fatalf("layout 2 account has a record %+v", l)
+	}
+
+	converted := false
+	fence := func() error {
+		if !converted {
+			converted = true
+
+			convert(t, u, model.FTSLayoutRequest{Layout: model.FTSLayout3})
+		}
+
+		return nil
+	}
+
+	rep, err := u.ConvertFTSDict(fence, func(int, int) {})
+	if err != nil || rep.Skipped != model.FTSDictSkippedLayout3 || rep.Entries != 0 || rep.LegacyObjects != 0 {
+		t.Fatalf("dictionary run across a conversion: %+v, %v", rep, err)
+	}
+
+	if l := layoutOf(t, u); l == nil || l.F != model.FTSLayout3 {
+		t.Fatalf("record %+v", l)
+	}
+
+	mustExist(t, u, false, layout2Loc(u.ftsShards).dictOIDs()...)
+}
+
+// TestFTSMarkReadsSerialized: concurrent reads of the mark leave the
+// gauge at the answer of the last read (the read and the update happen
+// under one lock); run with -race.
+func TestFTSMarkReadsSerialized(t *testing.T) {
+	s := layoutStoreOf(t, model.FTSLayout3)
+	setLayoutMark(t, s, false)
+	t.Cleanup(func() { setLayoutMark(t, s, false) })
+
+	var wg sync.WaitGroup
+
+	for range 8 {
+		wg.Go(func() {
+			if _, err := s.readFTSMark(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	wg.Wait()
+
+	setLayoutMark(t, s, true)
+
+	if ok, err := s.readFTSMark(); err != nil || !ok {
+		t.Fatalf("mark %v, %v", ok, err)
+	}
+
+	if e := gauge(t, gaugeEffective); e != 3 {
+		t.Errorf("effective layout gauge %v after the mark was read as set", e)
+	}
+
+	s.ftsMarkMu.Lock()
+	defer s.ftsMarkMu.Unlock()
+
+	if s.ftsMarkSeen != ftsMarkOn {
+		t.Errorf("mark seen %d", s.ftsMarkSeen)
+	}
 }

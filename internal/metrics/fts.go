@@ -70,7 +70,8 @@ var (
 	})
 	// FTSLayoutEffective is the layout new indexes of this server get as
 	// of the last read of the cluster mark (at startup and whenever an
-	// index is created): 3 only with fts.layout 3 and the mark set.
+	// index is created): 3 only with fts.layout 3 and the mark set; 0
+	// while a server with fts.layout 3 has not read the mark yet.
 	FTSLayoutEffective = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "layout_effective",
 		Help: "Layout new full-text indexes get: fts.layout combined with the layout 3 cluster mark at its last read.",

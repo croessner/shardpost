@@ -654,14 +654,24 @@ func (u *User) layout3Wanted() (bool, error) {
 		return false, nil
 	}
 
-	ok, err := u.store.FTSLayout3Enabled()
+	return u.store.readFTSMark()
+}
+
+// readFTSMark reads the cluster mark and records the answer
+// (noteFTSLayout), both under ftsMarkMu: of two concurrent reads the
+// later one is also recorded last.
+func (s *Store) readFTSMark() (bool, error) {
+	s.ftsMarkMu.Lock()
+	defer s.ftsMarkMu.Unlock()
+
+	marked, err := s.FTSLayout3Enabled()
 	if err != nil {
 		return false, err
 	}
 
-	u.store.noteFTSLayout(ok)
+	s.noteFTSLayout(marked)
 
-	return ok, nil
+	return marked, nil
 }
 
 // States of Store.ftsMarkSeen.
@@ -675,7 +685,7 @@ const (
 // configured and the effective layout, and the first read and every
 // change of the mark are logged once (configured layout, mark, effective
 // layout), so that the layout new indexes get is visible without
-// reading the admin store.
+// reading the admin store. The caller holds ftsMarkMu.
 func (s *Store) noteFTSLayout(marked bool) {
 	configured := ftsUserConfig(s.cfg.FTS).layout
 	effective := model.EffectiveFTSLayout(configured, marked)
@@ -688,7 +698,9 @@ func (s *Store) noteFTSLayout(marked bool) {
 		state = ftsMarkOn
 	}
 
-	prev := s.ftsMarkSeen.Swap(state)
+	prev := s.ftsMarkSeen
+	s.ftsMarkSeen = state
+
 	if prev == state || s.log == nil {
 		return
 	}
@@ -711,16 +723,18 @@ func (s *Store) noteFTSLayout(marked bool) {
 // fts.layout 3 (the built-in default) and no mark creates layout 2
 // indexes; later index creations read the mark again and log a change.
 func (s *Store) LogFTSLayout() error {
-	metrics.FTSLayoutConfigured.Set(float64(ftsUserConfig(s.cfg.FTS).layout))
+	configured := ftsUserConfig(s.cfg.FTS).layout
 
-	marked, err := s.FTSLayout3Enabled()
-	if err != nil {
-		return err
+	metrics.FTSLayoutConfigured.Set(float64(configured))
+
+	// With fts.layout 2 the effective layout does not depend on the mark.
+	if configured != model.FTSLayout3 {
+		metrics.FTSLayoutEffective.Set(float64(model.FTSLayout2))
 	}
 
-	s.noteFTSLayout(marked)
+	_, err := s.readFTSMark()
 
-	return nil
+	return err
 }
 
 // --- the reshard queue ----------------------------------------------------------

@@ -226,8 +226,11 @@ latency, the compare-and-swap retries and the operations per expunge.
 .PP
 With
 .B \-\-convert
-(and
-.BR "\-\-fts\-layout 3" )
+(and layout 3:
+.B "\-\-fts\-layout 3"
+or, without the flag,
+.I fts.layout
+3 of the configuration, the default)
 the probe accounts' full-text index is converted to layout 3 after the
 search probe, as a
 .B fts_layout
@@ -396,7 +399,11 @@ it does nothing with
 .B \-\-convert
 .BR measure :
 convert the probe accounts to layout 3 and reshard them once more (needs
-.BR "\-\-fts\-layout 3" ).
+layout 3:
+.B "\-\-fts\-layout 3"
+or, without the flag,
+.I fts.layout
+3, the default).
 .TP
 .BI \-\-extrapolate " n"
 Scale the per-account means to

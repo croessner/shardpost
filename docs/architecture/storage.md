@@ -1172,9 +1172,12 @@ downgrade, substring search needs an `fts_rebuild`.
 layout 2 index written before 0.35.0. A layout 3 index (below) always
 has its dictionary, and a conversion to layout 3 derives it from the
 posting lists itself, so planning `fts_dict_convert` for a layout 3
-account is refused (`conflict`), and a run that finds layout 3 or a
-conversion under way, at its start or before any batch, writes nothing
-(no layout 2 object, no change to the layout record).
+account is refused (`conflict`). A run that finds layout 3 or a
+conversion under way ends as succeeded with `skipped` in its result: at
+its start it writes nothing; when the conversion starts during the run,
+it writes no further batch and deletes no old object (what it wrote
+before is harmless, the conversion derives its own dictionary). It never
+changes the layout record.
 
 What is indexed is UTF-8 text, prepared by the `fts` package
 ([body.go](../../internal/fts/body.go), `HeaderValue`, `HeaderText`)

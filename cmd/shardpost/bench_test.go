@@ -3,7 +3,32 @@ package main
 import (
 	"slices"
 	"testing"
+
+	"shardpost/internal/bench/cephbench"
 )
+
+// TestMeasureConvertLayout: --convert needs layout 3, from --fts-layout
+// or, without the flag, from fts.layout of the configuration.
+func TestMeasureConvertLayout(t *testing.T) {
+	cases := []struct {
+		configured, flag int
+		want             bool
+	}{
+		{3, 0, true},
+		{3, 2, false},
+		{2, 0, false},
+		{2, 3, true},
+	}
+
+	for _, c := range cases {
+		o := cephbench.MeasureOptions{Every: 1, Convert: true}
+		f := benchFlags{parallel: 1, ftsLayout: c.flag}
+
+		if got := measureValid(&o, &f, c.configured); got != c.want {
+			t.Errorf("fts.layout %d, --fts-layout %d: valid %v, want %v", c.configured, c.flag, got, c.want)
+		}
+	}
+}
 
 func TestSplitBench(t *testing.T) {
 	pre, args, ok := splitBench([]string{"--config", "x.yaml", "bench", "measure", "--json", "-"})
