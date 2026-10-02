@@ -122,16 +122,20 @@ func TestAdminKVIndex(t *testing.T) {
 }
 
 func TestLearningIndex(t *testing.T) {
+	// read is the default since 0.47.0 (the queue behaves as write until
+	// the backfill marker exists).
 	c, err := Load(configFile(t, "logging:\n  level: info\n"))
-	if err != nil || c.IMAPSieve.Learning.Index != "write" || c.IMAPSieve.Learning.QueueShards != 4 {
+	if err != nil || c.IMAPSieve.Learning.Index != "read" || c.IMAPSieve.Learning.QueueShards != 4 || c.IMAPSieve.Learning.LockRetrySeconds != 20 {
 		t.Fatalf("learning index defaults: %+v %v", c.IMAPSieve.Learning, err)
 	}
 
-	if c, err := Load(configFile(t, "imapsieve:\n  learning:\n    index: read\n")); err != nil || c.IMAPSieve.Learning.Index != "read" {
-		t.Fatalf("learning read mode: %v", err)
+	if c, err := Load(configFile(t, "imapsieve:\n  learning:\n    index: write\n    lock_retry_seconds: 5\n")); err != nil ||
+		c.IMAPSieve.Learning.Index != "write" || c.IMAPSieve.Learning.LockRetrySeconds != 5 {
+		t.Fatalf("learning write mode: %v", err)
 	}
 
-	for _, bad := range []string{"imapsieve:\n  learning:\n    index: on\n", "imapsieve:\n  learning:\n    queue_shards: 9\n"} {
+	for _, bad := range []string{"imapsieve:\n  learning:\n    index: on\n", "imapsieve:\n  learning:\n    queue_shards: 9\n",
+		"imapsieve:\n  learning:\n    lock_retry_seconds: 0\n"} {
 		if _, err := Load(configFile(t, bad)); err == nil {
 			t.Errorf("accepted: %q", bad)
 		}

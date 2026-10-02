@@ -483,13 +483,21 @@ and [Operations](operations/README.md#admin-store-backfill).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `imapsieve.learning.index` | `write` | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
+| `imapsieve.learning.index` | `read` (`write` before 0.47.0) | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
 | `imapsieve.learning.queue_shards` | 4 | shard objects of the due queue (1–8) when its first writer creates it; an existing queue keeps its count |
+| `imapsieve.learning.lock_retry_seconds` | 20 | how often a server that does not hold the learning worker lease tries to take it, with a jitter of ±50 % (1–3600; environment `LEARNING_LOCK_RETRY_SECONDS`). The holder works on once a second and when notified; a lease lost to a key rotation is taken again at once |
 
-Switch to `read` only after `shardpost index backfill learning`
-completed with a start after the last server without the index stopped,
-on every server. Without the completion marker a server in `read` mode
-logs a warning and behaves as in `write` mode until the marker exists.
+`read` takes effect only once `shardpost index backfill learning`
+completed (with a start after the last server without the index
+stopped) or `shardpost system init` wrote the completion marker of the
+empty queue of a new cluster. Without the marker a server in `read`
+mode logs a warning and behaves as in `write` mode until the marker
+exists, so the default `read` changes nothing on a cluster that has not
+run the backfill. A cluster of the size of millions of accounts runs
+with `admin.kv_index: read` and `imapsieve.learning.index: read`: in
+`write` mode the learning worker lists the namespace `~learning` of the
+data pool every second, a walk over every placement group of the
+largest pool.
 See [Storage: learning queue](architecture/storage.md#learning-queue-due-queue-and-owner-index)
 and [Operations](operations/README.md#learning-queue-backfill).
 

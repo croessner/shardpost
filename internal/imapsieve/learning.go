@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -17,8 +18,21 @@ import (
 	"shardpost/internal/model"
 )
 
-var learningResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_learning_total", Help: "Learning queue and delivery outcomes."}, []string{"result"})
+// labelResult is the label of the learning counters.
+const labelResult = "result"
+
+var learningResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_learning_total", Help: "Learning queue and delivery outcomes."}, []string{labelResult})
 var scriptResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_events_total", Help: "IMAPSieve outcomes by bounded phase."}, []string{phaseName})
+
+// learningLockAttempts counts the attempts to take the worker lease by
+// result (taken, busy): a server without the lease tries every
+// imapsieve.learning.lock_retry_seconds (±50 %), not every second.
+var learningLockAttempts = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_learning_lock_attempts_total",
+	Help: "Attempts to take the learning worker lease, by result (taken, busy)."}, []string{labelResult})
+
+// DefaultLockRetry is the interval of the lease attempts of a worker
+// without the lease when the configuration names none.
+const DefaultLockRetry = 20 * time.Second
 
 // learningWakeups counts the worker passes a queue notify started (the
 // once-a-second poll is not counted).
@@ -88,9 +102,17 @@ type LearningWorker struct {
 	Config   config.Learning
 	Queue    Queue
 	Programs Programs
+	// Now is the clock and Jitter the factor of a retry interval, in
+	// [0.5, 1.5) (time.Now and a random one when nil; tests set them).
+	Now    func() time.Time
+	Jitter func() float64
 
 	mu    sync.Mutex
 	lease model.Lease
+	// nextTry is when a worker without the lease tries to take it next:
+	// the lease is one object all servers lock, so they try every
+	// LockRetrySeconds with jitter, not on every pass.
+	nextTry time.Time
 }
 
 // NewLearningWorker builds a worker for queue q.
@@ -173,7 +195,8 @@ func (w *LearningWorker) watch() (<-chan struct{}, <-chan error, func()) {
 
 // holdLease returns the worker lease, taking it when this worker does
 // not hold it (nil: another worker holds it). A lease reported lost is
-// released and taken again.
+// released and taken again at once; a worker that did not get the lease
+// tries again after the retry interval (lockRetry), not on every pass.
 func (w *LearningWorker) holdLease() model.Lease {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -181,18 +204,54 @@ func (w *LearningWorker) holdLease() model.Lease {
 	if w.lease != nil && w.lease.Lost() {
 		w.lease.Release()
 		w.lease = nil
+		w.nextTry = time.Time{}
 	}
 
 	if w.lease == nil {
-		l, err := w.Queue.Lock()
-		if err != nil {
+		now := w.now()
+		if now.Before(w.nextTry) {
 			return nil
 		}
+
+		l, err := w.Queue.Lock()
+		if err != nil {
+			learningLockAttempts.WithLabelValues("busy").Inc()
+
+			w.nextTry = now.Add(w.lockRetry())
+
+			return nil
+		}
+
+		learningLockAttempts.WithLabelValues("taken").Inc()
 
 		w.lease = l
 	}
 
 	return w.lease
+}
+
+func (w *LearningWorker) now() time.Time {
+	if w.Now != nil {
+		return w.Now()
+	}
+
+	return time.Now()
+}
+
+// lockRetry is the wait before the next attempt to take the lease:
+// LockRetrySeconds (DefaultLockRetry when 0) times a jitter of ±50 %.
+func (w *LearningWorker) lockRetry() time.Duration {
+	base := time.Duration(w.Config.LockRetrySeconds) * time.Second
+	if base <= 0 {
+		base = DefaultLockRetry
+	}
+
+	j := 0.5 + rand.Float64() //nolint:gosec // jitter, not a secret
+	if w.Jitter != nil {
+		j = w.Jitter()
+	}
+
+	return time.Duration(float64(base) * j)
 }
 
 // Release gives the worker lease up (shutdown).

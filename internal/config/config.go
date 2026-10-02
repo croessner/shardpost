@@ -334,6 +334,11 @@ func Default(key string) string {
 	return ""
 }
 
+// indexModeRead is the default mode of the admin store's indexes and of
+// the learning queue's (read from them once their backfill marker
+// exists).
+const indexModeRead = "read"
+
 // defaults are the configuration values used when neither the YAML file
 // nor the environment sets a key.
 var defaults = []struct {
@@ -347,7 +352,8 @@ var defaults = []struct {
 	{"imapsieve.max_parallel", 4},
 	{"imapsieve.learning.max_attempts", 5},
 	{"imapsieve.learning.max_message_bytes", 4 << 20},
-	{"imapsieve.learning.index", "write"},
+	{"imapsieve.learning.index", indexModeRead},
+	{"imapsieve.learning.lock_retry_seconds", 20},
 	{"imapsieve.learning.queue_shards", 4},
 	{"extprograms.bin_dir", "/usr/local/lib/shardpost/programs"},
 	{"quota.grace", ""},
@@ -357,7 +363,7 @@ var defaults = []struct {
 	{"admin.tls_key", ""},
 	{"admin.client_ca", ""},
 	{"admin.search_scan_limit", 50000},
-	{"admin.kv_index", "read"},
+	{"admin.kv_index", indexModeRead},
 	{"admin.kv_queue_shards", 4},
 	{"admin.import.lock_ttl_seconds", 900},
 	{"admin.import.max_batch_bytes", 64 << 20},
