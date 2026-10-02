@@ -1,11 +1,21 @@
-# Two RADOS pools. CephBlockPool is Rook's CR for "a plain RADOS pool";
-# nothing here is RBD specific. Deleting the CRs deletes the pools.
+# Three RADOS pools. CephBlockPool is Rook's CR for "a plain RADOS pool";
+# nothing here is RBD specific. Deleting the CRs deletes the pools; set
+# "ceph osd pool set <pool> nodelete true" on all three
+# (docs/operations/README.md, "Pools").
 #
-# shardpost-index: mailbox index objects. Their state lives in omap, and omap is
+# shardpost-index:  mailbox index objects. Their state lives in omap, and omap is
 #             only supported on replicated pools.
-# shardpost-data:  message blobs. Written once with write_full, never modified,
+# shardpost-data:   message blobs. Written once with write_full, never modified,
 #             so an erasure coded pool works without ec_overwrites and
 #             brings the raw overhead down (2+1: 1.5x instead of 3x).
+# shardpost-system: the store-wide state (admin store, account directory,
+#             queues, locks) once ceph.system_pool names it: small, hot,
+#             replicated, on the fast device class. The pool is only
+#             prepared here: no server uses it until "shardpost system
+#             init" (a new cluster) or "shardpost system migrate" (an
+#             existing one) prepared it and ceph.system_pool is set; a
+#             server with ceph.system_pool on an unprepared pool refuses to
+#             start.
 apiVersion: ceph.rook.io/v1
 kind: CephBlockPool
 metadata:
@@ -18,6 +28,23 @@ spec:
     requireSafeReplicaSize: true
   parameters:
     pg_autoscale_mode: "on"
+---
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: shardpost-system
+spec:
+  failureDomain: host
+  deviceClass: hdd # overlays set the fast class
+  replicated:
+    size: 3
+    requireSafeReplicaSize: true
+  parameters:
+    # About 600 hot objects should spread over many primaries: a fixed
+    # minimum instead of what the autoscaler derives from the small size.
+    pg_autoscale_mode: "on"
+    pg_num_min: "32"
+    bulk: "false"
 ---
 apiVersion: ceph.rook.io/v1
 kind: CephBlockPool
