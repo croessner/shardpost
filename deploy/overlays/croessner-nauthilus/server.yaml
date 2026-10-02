@@ -54,6 +54,9 @@ ceph:
   user: "shardpost"
   index_pool: "shardpost-index"
   data_pool: "shardpost-data"
+  # The store-wide namespaces live in the system pool since 2026-10-02
+  # (shardpost system migrate, run 00720635caff).
+  system_pool: "shardpost-system"
 rook:
   namespace: "rook-ceph"
 tls:

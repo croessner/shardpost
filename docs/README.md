@@ -44,6 +44,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [System pool cutover on croessner](reports/2026-10-02-system-pool-cutover.md): store-wide namespaces moved to shardpost-system with 0.48.0, about two minutes of downtime.
 - [ShardPost 0.47.0](reports/2026-10-02-shardpost-0.47.0.md): system pool routing, fence and mark, registration roles, hotspot fixes (stage B11a).
 - [ShardPost 0.46.0](reports/2026-10-02-shardpost-0.46.0.md): full-text layout 3 is the default (with the cluster mark), fts_dict_convert legacy (stage B14c).
 - [ShardPost 0.45.1](reports/2026-10-02-shardpost-0.45.1.md): layout 3 switched on for all accounts; JMAP 503 with Retry-After for locked accounts.
