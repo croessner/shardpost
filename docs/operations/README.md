@@ -662,9 +662,14 @@ steps, and only a cluster mark lets a server create it.
    (`jobs.batch_parallel`), at a quiet time: `shardpostctl plan -all
    -layout 3 fts_layout`, `shardpostctl apply <plan-id>`. Each account
    is locked for its conversion: deliveries into it fail temporarily
-   (LMTP 451, the MTA retries) for the duration of its job, a few
-   seconds for an account of a few thousand messages; measure it with
-   `shardpost bench measure --convert` first ([bench](bench.md)).
+   (LMTP 451, the MTA retries), new IMAP, POP3 and ManageSieve logins
+   are refused and JMAP answers 503 with `Retry-After`, for the
+   duration of its job. The time grows with the account: about 3.5 s
+   for 50–70 messages (bench), about 3.5 minutes for an account of
+   36 000 messages and 1.8 GB (croessner, 2026-10-02). Measure it with
+   `shardpost bench measure --convert` first ([bench](bench.md)) and
+   convert large accounts when their owners are least likely to be
+   online.
 
 From then on the `fts_due` worker (on the server that holds its lease,
 with `fts.auto_reshard`) reshards an account whose objects outgrew

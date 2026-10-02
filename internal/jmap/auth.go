@@ -143,7 +143,17 @@ func (s *Server) authenticated(next func(http.ResponseWriter, *http.Request)) ht
 
 		u, err := s.o.Store.User(res.Account)
 		if err != nil {
-			s.o.Log.Error("jmap: open account", "account", res.Account, "err", err)
+			// An account under an import or maintenance lock (a
+			// full-text conversion, a purge) is a passing state: the
+			// client is told when to come back, the log does not
+			// call it an error.
+			if errors.Is(err, model.ErrImportLocked) {
+				s.o.Log.Info("jmap: account locked", "account", res.Account, "err", err)
+			} else {
+				s.o.Log.Error("jmap: open account", "account", res.Account, "err", err)
+			}
+
+			s.retryAfter(w)
 			writeProblem(w, http.StatusServiceUnavailable, errURNNotRequest, "account unavailable", "")
 
 			return

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"shardpost/internal/auth"
+	"shardpost/internal/model"
 )
 
 func TestLimiterFIFO(t *testing.T) {
@@ -366,5 +367,26 @@ func TestParallelRequestsShareOneLogin(t *testing.T) {
 
 	if got := backend.calls.Load(); got != 1 {
 		t.Fatalf("the api requests asked the backend again: %d calls", got)
+	}
+}
+
+// lockedStore refuses every account as the server's store adapter does
+// while an import or maintenance lock is held.
+type lockedStore struct{}
+
+func (lockedStore) User(string) (model.User, error) { return nil, model.ErrImportLocked }
+
+// TestLockedAccountAnswers503WithRetryAfter: an account under an import
+// or maintenance lock (a full-text conversion) is a passing state; the
+// client gets 503 with Retry-After.
+func TestLockedAccountAnswers503WithRetryAfter(t *testing.T) {
+	s := newTestServer(t, func(o *Options) {
+		o.Store = lockedStore{}
+		o.Load = DefaultLoad
+	})
+
+	w := do(t, s, http.MethodGet, PathSession, "")
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("answered %d, Retry-After %q", w.Code, w.Header().Get("Retry-After"))
 	}
 }

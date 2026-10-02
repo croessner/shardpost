@@ -1804,7 +1804,9 @@ client that fires a batch of requests at once costs one authentication,
 not one per request. A backend that cannot decide is answered 503 with
 `Retry-After` (`jmap.retry_after`), never 401, so the client retries
 rather than asking for a new password. JMAP sends no login attempt
-ordinal: there is no connection to count on.
+ordinal: there is no connection to count on. An account under an import
+or maintenance lock (an import, a purge, a full-text conversion) is
+answered 503 with `Retry-After` as well, and logged at info level.
 
 ## Load
 
