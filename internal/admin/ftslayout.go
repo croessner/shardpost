@@ -340,7 +340,18 @@ func apiLayoutState(st model.FTSLayoutState) adminapi.FTSLayoutState {
 			old = append(old, apiShape(o))
 		}
 
-		out.Old = &old
+		toks, at := append([]string{}, st.OldToks...), make([]string, 0, len(st.OldToks))
+
+		for i := range st.OldToks {
+			var beat string
+			if i < len(st.OldAt) && !st.OldAt[i].IsZero() {
+				beat = st.OldAt[i].UTC().Format(time.RFC3339)
+			}
+
+			at = append(at, beat)
+		}
+
+		out.Old, out.OldToks, out.OldAt = &old, &toks, &at
 	}
 
 	return out

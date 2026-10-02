@@ -2457,8 +2457,23 @@ components:
           description: Last heartbeat of an import reshard run.
         old:
           type: array
+          description: Source generations a conversion switched away from and has not removed yet.
           items:
             $ref: "#/components/schemas/FTSLayoutShape"
+        old_toks:
+          type: array
+          description: The runs that left the `old` generations, in the same order.
+          items:
+            type: string
+        old_at:
+          type: array
+          description: |
+            The last heartbeat of each run of `old_toks` (RFC 3339), in the
+            same order; empty for a job, whose job state tells whether it
+            still runs. An import reshard renews it until it removed its
+            sources.
+          items:
+            type: string
     FTSLayoutClear:
       type: object
       required: [cleared, state]

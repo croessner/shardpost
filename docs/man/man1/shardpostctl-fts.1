@@ -119,7 +119,9 @@ Prints the layout record of an account: the current generation (layout
 .RB ( next ,
 the token of its run and, for an import reshard, its last heartbeat) and
 sources not removed yet
-.RB ( old ).
+.RB ( old ,
+each with the token of the run that left it and, for an import
+reshard, its last heartbeat).
 Role:
 .BR diagnose .
 .SS fts layout clear

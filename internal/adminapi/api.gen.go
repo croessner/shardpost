@@ -728,8 +728,19 @@ type FTSLayoutState struct {
 	NextAt *time.Time `json:"next_at,omitempty"`
 
 	// NextTok The run of the conversion in progress (`job-<id>/<lease generation>` or `<session>/<nonce>`).
-	NextTok *string           `json:"next_tok,omitempty"`
-	Old     *[]FTSLayoutShape `json:"old,omitempty"`
+	NextTok *string `json:"next_tok,omitempty"`
+
+	// Old Source generations a conversion switched away from and has not removed yet.
+	Old *[]FTSLayoutShape `json:"old,omitempty"`
+
+	// OldAt The last heartbeat of each run of `old_toks` (RFC 3339), in the
+	// same order; empty for a job, whose job state tells whether it
+	// still runs. An import reshard renews it until it removed its
+	// sources.
+	OldAt *[]string `json:"old_at,omitempty"`
+
+	// OldToks The runs that left the `old` generations, in the same order.
+	OldToks *[]string `json:"old_toks,omitempty"`
 }
 
 // FlagRequest defines model for FlagRequest.

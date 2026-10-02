@@ -315,12 +315,28 @@ func printLayoutState(stdout io.Writer, st *adminapi.FTSLayoutState) {
 	}
 
 	if st.Old != nil {
-		for _, o := range *st.Old {
-			rows = append(rows, [2]string{"old", shapeText(o)})
+		for i, o := range *st.Old {
+			rows = append(rows, [2]string{"old", shapeText(o) + oldRun(st, i)})
 		}
 	}
 
 	table(stdout, rows)
+}
+
+// oldRun is the run that left old entry i, with its heartbeat for an
+// import reshard (" tok <token> at <time>").
+func oldRun(st *adminapi.FTSLayoutState, i int) string {
+	var text string
+
+	if st.OldToks != nil && i < len(*st.OldToks) {
+		text = " tok " + (*st.OldToks)[i]
+	}
+
+	if st.OldAt != nil && i < len(*st.OldAt) && (*st.OldAt)[i] != "" {
+		text += " at " + (*st.OldAt)[i]
+	}
+
+	return text
 }
 
 // shapeText is a generation as "layout 3 gen 9c1e… S/D/H 1/1/1".
