@@ -186,13 +186,28 @@ func TestFailedPipePreservesOriginal(t *testing.T) {
 	}
 }
 
+// processTimeoutMS is the run deadline for a test that starts a real
+// process: what it checks is the exit status, not the timeout, and a
+// process start can take seconds when the whole suite runs under -race.
+// Half of the time left to the test binary, or two minutes without one.
+func processTimeoutMS(t *testing.T) int64 {
+	t.Helper()
+
+	d := 2 * time.Minute
+	if deadline, ok := t.Deadline(); ok {
+		d = time.Until(deadline) / 2
+	}
+
+	return max(d, 5*time.Second).Milliseconds()
+}
+
 func TestPipeRealProcessAndOwnerBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		exit, actor string
 		deleted     bool
 	}{{"0", "test", true}, {"1", "test", false}, {"0", "guest", false}} {
 		e, u, ev := fixture(t, `require "vnd.dovecot.pipe"; pipe "sink";`)
-		e.Config.TimeoutMS = 5000
+		e.Config.TimeoutMS = processTimeoutMS(t)
 		dir := t.TempDir()
 
 		marker := filepath.Join(dir, "ran")
@@ -200,7 +215,7 @@ func TestPipeRealProcessAndOwnerBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		e.Programs = extprograms.New(config.ExtPrograms{BinDir: dir, Programs: map[string]config.Program{"sink": {Command: "sink", Kinds: []string{"pipe"}}}})
+		e.Programs = extprograms.New(config.ExtPrograms{BinDir: dir, Programs: map[string]config.Program{"sink": {Command: "sink", Kinds: []string{"pipe"}, TimeoutMS: e.Config.TimeoutMS}}})
 
 		ev.Actor = tc.actor
 		if tc.actor != "test" {
