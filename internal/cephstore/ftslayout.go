@@ -106,7 +106,8 @@ type ftsGen struct {
 	// Tok is the run that writes it (next) or removes it (old).
 	Tok string `json:"tok,omitempty"`
 	// At is the last heartbeat of the import reshard endpoint's run
-	// (Unix seconds; 0 for a job).
+	// (Unix seconds; 0 for a job), in "next" and, after the switch, in
+	// "old".
 	At int64 `json:"at,omitempty"`
 }
 
@@ -398,6 +399,13 @@ func layoutState(l *ftsLayout, n int) model.FTSLayoutState {
 	for _, o := range l.Old {
 		st.Old = append(st.Old, genLoc(o, n).shape())
 		st.OldToks = append(st.OldToks, o.Tok)
+
+		var at time.Time
+		if o.At > 0 {
+			at = time.Unix(o.At, 0).UTC()
+		}
+
+		st.OldAt = append(st.OldAt, at)
 	}
 
 	return st

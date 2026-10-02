@@ -224,8 +224,13 @@ func ClearStaleLayout(kv model.AdminKV, u model.User, now time.Time) (string, er
 		}
 	}
 
-	for _, tok := range st.OldToks {
-		ok, err := clearIfEnded(kv, tok, time.Time{}, now, lay.ClearFTSLayoutOld)
+	for i, tok := range st.OldToks {
+		var at time.Time
+		if i < len(st.OldAt) {
+			at = st.OldAt[i]
+		}
+
+		ok, err := clearIfEnded(kv, tok, at, now, lay.ClearFTSLayoutOld)
 		if err != nil {
 			return strings.Join(cleared, ","), err
 		}

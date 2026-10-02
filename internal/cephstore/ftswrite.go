@@ -63,7 +63,12 @@ type ftsWrite struct {
 	// its attempts: a retry in the same generation finds them existing
 	// (or gone) and would not name them again, so the dictionary step
 	// takes them from here. A new generation starts afresh: the
-	// conversion derived its dictionary from the lists it copied.
+	// conversion derived its dictionary from the lists it copied. A
+	// removal's retry that reads one of its emptied lists non-empty again
+	// drops it (its keys must stay). An indexing keeps every term it
+	// created: adding a key that exists is a no-op, and a key whose list
+	// a concurrent removal emptied costs a search one empty read, never
+	// a missed document.
 	changedMu sync.Mutex
 	changed   map[string]bool
 }
@@ -93,6 +98,21 @@ func (w *ftsWrite) note(terms []string) {
 
 	for _, t := range terms {
 		w.changed[t] = true
+	}
+}
+
+// unnote drops terms from what note recorded: a removal that reads a
+// list an earlier attempt of it emptied as non-empty again.
+func (w *ftsWrite) unnote(terms []string) {
+	if len(terms) == 0 {
+		return
+	}
+
+	w.changedMu.Lock()
+	defer w.changedMu.Unlock()
+
+	for _, t := range terms {
+		delete(w.changed, t)
 	}
 }
 
@@ -1167,22 +1187,27 @@ func (u *User) ftsRemoveShard(w *ftsWrite, oid string, terms []string, g []byte,
 		page := terms[:min(len(terms), postingsPerCAS)]
 		terms = terms[len(page):]
 
-		var part []string
+		var part, kept []string
 
 		err := u.casShard(w, oid, page, func(cur map[string][]byte) (shardChange, bool) {
-			part = part[:0]
+			part, kept = part[:0], kept[:0]
 			ch := shardChange{set: map[string][]byte{}}
 
 			for _, t := range page {
 				p := removeFromPosting(cur[t], g, id, hasID)
 
-				if _, had := cur[t]; had && len(p) == 0 {
+				switch _, had := cur[t]; {
+				case had && len(p) == 0:
 					ch.rm = append(ch.rm, t)
 					ch.terms--
 					ch.dict -= int64(dictKeysOf(t))
 					part = append(part, t)
-				} else if len(p) > 0 && string(p) != string(cur[t]) {
-					ch.set[t] = p
+				case len(p) > 0:
+					kept = append(kept, t)
+
+					if string(p) != string(cur[t]) {
+						ch.set[t] = p
+					}
 				}
 			}
 
@@ -1196,6 +1221,10 @@ func (u *User) ftsRemoveShard(w *ftsWrite, oid string, terms []string, g []byte,
 			return fmt.Errorf("fts remove shard %s: %w", oid, err)
 		}
 
+		// A list an earlier attempt emptied that holds ids again (a
+		// delivery during the frozen wait) is not empty any more: its
+		// dictionary keys stay.
+		w.unnote(kept)
 		w.note(part)
 	}
 

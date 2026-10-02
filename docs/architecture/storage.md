@@ -1289,7 +1289,9 @@ nothing (IMAP search is slow but right).
 The **layout record** `L` names the current generation (`f` 3, `g`,
 `s`, `d`, `h`), a conversion in progress (`next`: target generation and
 the token of its run, for the import reshard also its heartbeat `at`),
-sources a conversion has not removed yet (`old`) and whether the layout
+sources a conversion has not removed yet (`old`, each with the token of
+its run and, for the import reshard, the heartbeat `at` it carries over
+from `next` at the switch) and whether the layout
 2 objects are gone (`lg`). Without `L` the account has layout 2.
 Writers read `L` in the id map's compare-and-swap of every indexing (no
 extra read); removals read it with the document id; readers cache it
@@ -1323,7 +1325,9 @@ writing the lists and the counters — then the dictionary keys of the
 new terms blindly, asserting that the object exists. The new terms of
 every attempt in a generation count, also of one that ended at an
 anomaly after some objects were written: a retry finds those terms
-existing and would not name them again. An *anomaly* — a frozen object,
+existing and would not name them again. A removal's retry that reads a
+list an earlier attempt emptied as non-empty again (a delivery during
+the frozen wait) drops that term from the keys it removes. An *anomaly* — a frozen object,
 a missing object, a foreign `!g`, in layout 2 a missing posting object
 while `L` exists — ends the attempt; the writer reads `L` and
 
@@ -1341,16 +1345,21 @@ while `L` exists — ends the attempt; the writer reads `L` and
   it, `fts_rebuild` repairs it); a layout 3 object is never created by a
   writer.
 
-A layout 2 index without `L` is written and read with the operations of
-0.44.0: a missing posting object is created in the writer's
-compare-and-swap (the `L` it read with its ids says no conversion runs),
-and a reader takes a missing one for empty. That is safe because a
-conversion takes the account lock — which refuses new deliveries and
-ends open sessions — and waits `jobs.settle_seconds` before it records
-`L`; only a writer that sleeps through a whole conversion could create
-an object of the removed layout 2 objects afterwards, which the scrub
-reports (`fts_mixed_layout`) and the purge and the sweep remove. With
-`L` present a missing layout 2 posting object is an anomaly as above.
+A layout 2 index without `L` is written with the operations of 0.44.0:
+a missing posting object is created in the writer's compare-and-swap
+(the `L` it read with its ids says no conversion runs). That is safe
+because a conversion takes the account lock — which refuses new
+logins, deliveries and imports, but does not end the IMAP, POP3 or JMAP
+sessions already open — and waits `jobs.settle_seconds` before it
+records `L`; only a writer that sleeps through a whole conversion could
+create an object of the removed layout 2 objects afterwards, which the
+scrub reports (`fts_mixed_layout`) and the purge and the sweep remove.
+With `L` present a missing layout 2 posting object is an anomaly as
+above. A reader of layout 2 that finds a posting object missing reads
+`L` once per search, also when its cached view had none: an idle
+session keeps that view across a whole conversion, and without the
+read its next search would take the removed objects for empty. A
+missing dictionary or header object of layout 2 is empty, as before.
 
 One indexing follows at most two generation changes and waits at most
 once; the posting goroutines report a freeze and the indexing waits
@@ -1433,7 +1442,8 @@ final state of a single-account job, the cancel of a job that ended
 does, anyone who takes the account lock (an exclusive job, a batch per
 account, `OpenImport`) clears any foreign one, and the scrub job clears
 one whose job is not running any more or whose import heartbeat is
-older than 90 seconds (also `shardpostctl fts layout clear`).
+older than 90 seconds (also `shardpostctl fts layout clear`); the same
+rule applies to the `old` entries a run left after its switch.
 
 <a id="full-text-import-reshard"></a>
 **During an import.** The account lock of an import keeps `fts_layout`
@@ -1445,7 +1455,8 @@ under its session: the endpoint reads the counters (S + D + H + 1
 reads) and, when they ask for more objects, reshards under the import
 session with the token `<session>/<nonce>`. The run waits
 `jobs.settle_seconds`, renews the import lock and its heartbeat `at` in
-`L.next` every 30 seconds, and counts as fenced while the last renewal
+`L.next` (after the switch in its `L.old` entry, until P7) every 30
+seconds, and counts as fenced while the last renewal
 worked and its context lives. The request waits up to
 `fts.import_reshard_sync_seconds` and then answers 202; the session's
 batches answer 409 while the reshard runs. The runs of a server are

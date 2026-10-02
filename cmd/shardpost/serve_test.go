@@ -93,12 +93,7 @@ func TestServeRegistersAndStopsInOrder(t *testing.T) {
 	settings := serveConfig(t, dir)
 	log := quietLog()
 
-	store, err := cephstore.Open(cephConfig(settings), log)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(store.Close)
+	store := serveStore(t, settings)
 
 	var (
 		mu    sync.Mutex
@@ -139,6 +134,20 @@ func TestServeRegistersAndStopsInOrder(t *testing.T) {
 	if !slices.Equal(steps, []string{"admin", "registration"}) {
 		t.Errorf("shutdown steps %v, want the admin API before the registration", steps)
 	}
+}
+
+// serveStore opens the store of the test.
+func serveStore(t *testing.T, settings *config.Config) *cephstore.Store {
+	t.Helper()
+
+	store, err := cephstore.Open(cephConfig(settings), quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(store.Close)
+
+	return store
 }
 
 // waitRegistered waits for this server's registration (with jobs

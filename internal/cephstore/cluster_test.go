@@ -85,7 +85,16 @@ func storeWith(t *testing.T, fn func(*Config)) *Store {
 		t.Fatalf("open test cluster: %v", err)
 	}
 
-	t.Cleanup(s.Close)
+	// The views of the test close in the background (their intent
+	// flushes); shutting the connection down under them aborts in
+	// librados.
+	t.Cleanup(func() {
+		if !s.Drain(10 * time.Second) {
+			t.Log("views of the store still open after 10 s")
+		}
+
+		s.Close()
+	})
 
 	return s
 }

@@ -197,9 +197,11 @@ type FTSLayoutState struct {
 	NextTok string    `json:"next_tok,omitempty"`
 	NextAt  time.Time `json:"next_at,omitzero"`
 	// Old are source generations a conversion has not removed yet, OldToks
-	// the runs that left them (the same order).
+	// the runs that left them and OldAt their last heartbeats (zero for a
+	// job), in the same order.
 	Old     []FTSLayoutShape `json:"old,omitempty"`
 	OldToks []string         `json:"old_toks,omitempty"`
+	OldAt   []time.Time      `json:"old_at,omitempty"`
 }
 
 // FTSLayouter is implemented by user views whose full-text index has
@@ -227,8 +229,9 @@ type FTSLayouter interface {
 	// record's "old" entry goes. false when there is none of tok.
 	ClearFTSLayoutOld(tok string) (bool, error)
 	// HeartbeatFTSLayoutNext records a heartbeat of the run tok in its
-	// unfinished conversion (the import reshard endpoint); false when
-	// the record carries another run.
+	// unfinished conversion (the import reshard endpoint), after its
+	// switch in the sources it has still to remove; false when the
+	// record carries no entry of tok.
 	HeartbeatFTSLayoutNext(tok string, at time.Time) (bool, error)
 }
 

@@ -21,6 +21,7 @@ type fakeLayout struct {
 	mu      sync.Mutex
 	gen     string   // current generation
 	old     []string // runs that left sources after their switch
+	oldAt   map[string]time.Time
 	next    string
 	nextAt  time.Time
 	toks    []string // tokens of ConvertFTSLayout
@@ -54,6 +55,10 @@ func (u *layoutUser) FTSLayout() (model.FTSLayoutState, error) {
 	st := model.FTSLayoutState{Current: model.FTSLayoutShape{Layout: 3, Gen: u.f.gen}, OldToks: append([]string(nil), u.f.old...)}
 	if u.f.next != "" {
 		st.Next, st.NextTok, st.NextAt = &model.FTSLayoutShape{Layout: 3}, u.f.next, u.f.nextAt
+	}
+
+	for _, tok := range u.f.old {
+		st.OldAt = append(st.OldAt, u.f.oldAt[tok])
 	}
 
 	return st, nil
@@ -494,5 +499,26 @@ func TestClearStaleLayout(t *testing.T) {
 
 	if len(left) != 1 || left[0] != live {
 		t.Errorf("old entries left %v", left)
+	}
+}
+
+// TestClearStaleLayoutImportOld (review round 2, L2): an import reshard
+// between its switch and P7 renews the heartbeat in its "old" entry: it
+// counts as alive while fresh and is cleared when stale.
+func TestClearStaleLayoutImportOld(t *testing.T) {
+	m, o := layoutManager(t)
+	now := time.Now()
+
+	u, _ := o.User("alice")
+	f := o.fake("alice")
+	beating, gone := "importsession0123456/n3", "importsession0123456/n4"
+
+	f.mu.Lock()
+	f.old = []string{beating, gone}
+	f.oldAt = map[string]time.Time{beating: now.Add(-30 * time.Second), gone: now.Add(-2 * ImportReshardFresh)}
+	f.mu.Unlock()
+
+	if tok, err := ClearStaleLayout(m.st.kv, u, now); err != nil || tok != gone {
+		t.Errorf("import reshard old entries: cleared %q %v", tok, err)
 	}
 }

@@ -1099,7 +1099,8 @@ func switchTo2(cur map[string][]byte) (map[string][]byte, []string) {
 }
 
 // switchTo3 is the switch to a layout 3 target: it becomes current, the
-// source is kept in "old" with the run's token until P7, the version
+// source is kept in "old" with the run's token (and the heartbeat of an
+// import reshard, which goes on renewing it there) until P7, the version
 // marker moves to ftsVersionKey3 (2→3) and the document count is set:
 // what P5 copied and the ids allocated since.
 func switchTo3(cur map[string][]byte, c *ftsLayout, src, target ftsLoc, tok string, st convertStats) (map[string][]byte, []string) {
@@ -1109,6 +1110,10 @@ func switchTo3(cur map[string][]byte, c *ftsLayout, src, target ftsLoc, tok stri
 	}
 
 	old := ftsGen{F: src.f, G: src.g, S: src.s, D: src.d, H: src.h, Tok: tok}
+	if c.Next != nil && c.Next.Tok == tok {
+		old.At = c.Next.At
+	}
+
 	nl := &ftsLayout{F: model.FTSLayout3, G: target.g, S: target.s, D: target.d, H: target.h, Dict: true,
 		LG: c.LG && src.v3(), Old: append(c.Old, old)}
 
@@ -1313,18 +1318,28 @@ func (u *User) casExisting(oid string, keys []string, fn func(cur map[string][]b
 }
 
 // HeartbeatFTSLayoutNext records a heartbeat of the run tok in its
-// "next" (the import reshard endpoint, §4.6); false when the record
-// carries another run.
+// "next" (the import reshard endpoint, §4.6), after the switch in its
+// "old" entry until P7, so that a clear of stale runs does not take a
+// working run for ended; false when the record carries no entry of tok.
 func (u *User) HeartbeatFTSLayoutNext(tok string, at time.Time) (bool, error) {
 	var ok bool
 
 	err := casOmap(u, u.idx, oidFTSMap, []string{ftsLayoutKey}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		c, perr := parseLayout(cur[ftsLayoutKey])
-		if ok = perr == nil && c != nil && c.Next != nil && c.Next.Tok == tok; !ok {
+		if perr != nil || c == nil {
+			ok = false
 			return nil, nil
 		}
 
-		c.Next.At = at.Unix()
+		switch i := oldOf(c, tok); {
+		case c.Next != nil && c.Next.Tok == tok:
+			c.Next.At, ok = at.Unix(), true
+		case i >= 0:
+			c.Old[i].At, ok = at.Unix(), true
+		default:
+			ok = false
+			return nil, nil
+		}
 
 		return map[string][]byte{ftsLayoutKey: c.encode()}, nil
 	})
