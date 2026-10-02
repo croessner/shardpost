@@ -165,7 +165,8 @@ All operations only read (role `diagnose`). A test runs every one of them
 against a store that fails on every write operation.
 
 ```sh
-shardpostctl server status                   # version, pod, start, config fingerprint, store
+shardpostctl server status                   # version, pod, start, config fingerprint, store, placement
+shardpostctl server list                     # registrations: role, version, system pool, running
 shardpostctl account show user@example.org   # Nauthilus resolution, store, quota, import lock, trace
 shardpostctl mailbox list [-limit 100] [-after NAME] [-all] user@example.org
 shardpostctl mailbox show user@example.org INBOX            # name or mailbox ID
@@ -182,7 +183,8 @@ role or scope.
 
 | API | Contents | Cost |
 | --- | --- | --- |
-| `GET /admin/v1/server` | version, instance (pod), start time, `config_fingerprint`, store ping | one ping |
+| `GET /admin/v1/server` | version, instance (pod), start time, `config_fingerprint`, store ping, `placement` (where the store's own namespaces live as this server's last placement check found it: `state` `none`, `native`, `migrated` or `unknown`, and the `system_pool` by id and name) | one ping |
+| `GET /admin/v1/servers` | the process registrations (`servers/<instance>` in the admin store): `role` (`serve`, `push`, `scrub`, `backfill`, `sweep`; none before 0.47.0), version, capabilities, `system_pool`, `started_at`, last heartbeat (`seen`), `stopped_at` after an orderly end, `fresh` (seen within three minutes and not stopped) | a listing of the admin namespace unless `admin.kv_index: read` |
 | `GET /admin/v1/accounts/{account}` | Nauthilus lookup (`canonical`, `alias` with the canonical account, `unknown`, `unavailable`), store present, number of mailboxes, quota, import lock, trace | registry, quota |
 | `GET …/mailboxes?after=&limit=&name=` | mailboxes in name order: ID, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, shard size, subscription, special-use, number of ACL entries; `next` for the following page | one registry excerpt, one header per mailbox |
 | `GET …/mailboxes/{id}` | additionally messages, unseen, marked deleted, size, shards, start of the log (QRESYNC horizon), keywords | reads all index shards of the mailbox |
@@ -948,21 +950,27 @@ servers that do not set `fts.layout: 2` (see
 
 | Endpoint | Role | Effect |
 | --- | --- | --- |
-| `GET /admin/v1/fts/layout3` | `diagnose` | whether the mark is set (when, by whom, for how many pods, `forced`) and the server registrations (`servers/<instance>`: version, capabilities, last heartbeat, `fresh` within three minutes) |
-| `POST /admin/v1/fts/layout3/enable` | `repair` | `{"pods": n, "force": false}`: sets the mark when exactly `n` fresh registrations report `fts_layout3`, otherwise `409 conflict` naming the instances; `force` skips the check (audited, recorded in the mark) |
+| `GET /admin/v1/fts/layout3` | `diagnose` | whether the mark is set (when, by whom, for how many pods, `forced`) and the registrations (`servers/<instance>`: role, version, capabilities, system pool, start, last heartbeat, end, `fresh` within three minutes and not stopped) |
+| `POST /admin/v1/fts/layout3/enable` | `repair` | `{"pods": n, "force": false}`: sets the mark when exactly `n` fresh registrations of servers (role `serve`, or none before 0.47.0) report `fts_layout3`, otherwise `409 conflict` naming the instances; the push worker, scrubs and backfills are not counted; `force` skips the check (audited, recorded in the mark) |
 | `POST /admin/v1/fts/layout3/disable` | `repair` | removes the mark, waits five seconds, and lists the accounts of the presence index `ix.fts_layout` (`accounts`, up to 1000, `more`): a downgrade below 0.45.0 needs it empty |
 | `GET /admin/v1/fts/layout3/accounts` | `diagnose`, scope of all accounts | the presence index a page at a time (`after`, `limit` up to 10000); `verify=true` reads each account's layout record and marks entries without a layout 3 index (`mismatch`) |
 | `GET /admin/v1/accounts/{account}/fts/layout` | `diagnose` | the layout record: `current` (layout 2 without a record), `next` with `next_tok` and `next_at` (a conversion in progress), `old` with `old_toks` and `old_at` (sources a run left after its switch, the runs and their last import heartbeats, empty for a job) |
 | `POST /admin/v1/accounts/{account}/fts/layout/clear` | `repair` | removes the conversion in progress when its run has ended (a job that does not run any more, an import reshard whose heartbeat is older than 90 s): lifts exactly its freeze, deletes its targets; the same for sources an ended run left after its switch (`old`); `cleared` lists the tokens, comma-separated ("" when nothing was cleared) |
 
 Every server since 0.45.0 registers at startup and every minute, also
-without jobs or an admin listener; a registration not renewed for 24
-hours is deleted by the expiry worker of the job system (with
-`admin.kv_index: off` or `jobs.enabled: false` everywhere, only by
-`status` and `enable`). With `admin.kv_index` other than `read`, `status`
-and `enable` list the admin namespace. A pod replaced less than three
-minutes ago leaves the fresh record of its predecessor, so `enable`
-refuses until it aged.
+without jobs or an admin listener; since 0.47.0 so do the push worker
+(`shardpost push`), the scrubs (`shardpost scrub`, `scrub --batch`,
+`scrub --sweep` as role `sweep`) and the backfills (`shardpost index
+backfill …`), each with its role and for its whole runtime, and every
+one records its orderly end (`stopped_at`). A process other than a
+server registers as `<host>-<role>-<random>`, so a tool run in a
+server's pod does not overwrite the server's record. A registration not
+renewed for 24 hours is deleted by the expiry worker of the job system
+(with `admin.kv_index: off` or `jobs.enabled: false` everywhere, only by
+`status`, `enable` and `GET /admin/v1/servers`). With `admin.kv_index`
+other than `read`, they list the admin namespace. A pod that crashed
+leaves a fresh record without `stopped_at` for three minutes, so
+`enable` refuses until it aged; one that ended in order does not.
 
 ## Cluster operation (mTLS)
 

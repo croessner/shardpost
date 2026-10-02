@@ -57,9 +57,9 @@ func splitBench(args []string) ([]string, []string, bool) {
 
 // benchFlags are the options both subcommands share.
 type benchFlags struct {
-	indexPool, dataPool, prefix, jsonOut, sizes string
-	parallel                                    int
-	seed                                        uint64
+	indexPool, dataPool, systemPool, prefix, jsonOut, sizes string
+	parallel                                                int
+	seed                                                    uint64
 	// ftsLayout is the layout of new full-text indexes (0: the
 	// configuration's); 3 sets the cluster mark in the bench pools.
 	ftsLayout int
@@ -68,6 +68,7 @@ type benchFlags struct {
 func (f *benchFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.indexPool, "index-pool", "", "bench index pool (replicated; required, must not be ceph.index_pool or ceph.data_pool)")
 	fs.StringVar(&f.dataPool, "data-pool", "", "bench data pool (erasure coded like production; required, must not be a production pool)")
+	fs.StringVar(&f.systemPool, "system-pool", "", "bench system pool (replicated; optional, must not be a production pool; ceph.system_pool is never taken over)")
 	fs.StringVar(&f.prefix, "prefix", bench.RequiredPrefix, "account name prefix (must start with "+bench.RequiredPrefix+")")
 	fs.IntVar(&f.parallel, "parallel", 4, "accounts worked on at the same time")
 	fs.StringVar(&f.jsonOut, "json", "", "write the report as JSON to this file (- for standard output)")
@@ -107,11 +108,13 @@ func runBench(pre, args []string) int {
 	}
 }
 
-// benchSetup checks the guard and opens the store on the bench pools.
+// benchSetup checks the guard and opens the store on the bench pools, as
+// a tool: the placement is checked once the pools are set up
+// (cephbench.Populate, cephbench.Measure).
 func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, f *benchFlags) (bench.Guard, cephstore.Config, *cephstore.Store, int) {
-	g := bench.Guard{ProdIndex: settings.Ceph.IndexPool, ProdData: settings.Ceph.DataPool,
+	g := bench.Guard{ProdIndex: settings.Ceph.IndexPool, ProdData: settings.Ceph.DataPool, ProdSystem: settings.Ceph.SystemPool,
 		Reserved:   []string{config.Default("ceph.index_pool"), config.Default("ceph.data_pool")},
-		BenchIndex: f.indexPool, BenchData: f.dataPool, Prefix: f.prefix}
+		BenchIndex: f.indexPool, BenchData: f.dataPool, BenchSystem: f.systemPool, Prefix: f.prefix}
 	if err := g.Check(); err != nil {
 		log.Error("bench: refused", "err", err)
 		return g, cephstore.Config{}, nil, benchRefused
@@ -130,8 +133,10 @@ func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, 
 
 	membudget.SetLimit(settings.Server.MemoryBudgetBytes)
 
+	// The production system pool is never taken over: the bench's is
+	// --system-pool or none.
 	cfg := cephConfig(settings)
-	cfg.IndexPool, cfg.DataPool = f.indexPool, f.dataPool
+	cfg.IndexPool, cfg.DataPool, cfg.SystemPool, cfg.PlacementTool = f.indexPool, f.dataPool, f.systemPool, true
 
 	cfg.FTS.Layout = f.effectiveLayout(cfg.FTS.Layout)
 
@@ -149,15 +154,6 @@ func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, 
 
 	if rotate != nil {
 		rotate(store)
-	}
-
-	if cfg.FTS.Layout == 3 {
-		if err := cephbench.MarkLayout3(store); err != nil {
-			log.Error("bench: layout 3 mark", "err", err)
-			cephbench.Close(store)
-
-			return g, cfg, nil, benchFailed
-		}
 	}
 
 	return g, cfg, store, benchOK

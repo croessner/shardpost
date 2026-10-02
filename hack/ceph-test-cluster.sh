@@ -9,7 +9,12 @@
 # SHARDPOST_TEST_CEPH_KEY (a key the client library accepts; the cluster
 # does not check it) and SHARDPOST_TEST_CEPH_INDEX_POOL /
 # SHARDPOST_TEST_CEPH_DATA_POOL. The cephstore tests that need a cluster
-# skip without them. Everything lives under $TMPDIR and goes with the
+# skip without them. Two more pairs of pools serve the system pool
+# (ceph.system_pool): SHARDPOST_TEST_CEPH_SYS_INDEX_POOL /
+# SHARDPOST_TEST_CEPH_SYS_POOL for a second run of the suite with a
+# system pool (make test-docker), and SHARDPOST_TEST_CEPH_MIG_INDEX_POOL /
+# SHARDPOST_TEST_CEPH_MIG_SYSTEM_POOL for the tests of the init and the
+# placement checks, which empty them per test. Everything lives under $TMPDIR and goes with the
 # container; nothing here touches a real cluster.
 set -eu
 
@@ -81,7 +86,8 @@ if [ "$up" != 1 ]; then
 	exit 1
 fi
 
-for pool in shardpost-test-index shardpost-test-data; do
+for pool in shardpost-test-index shardpost-test-data shardpost-test-sys-index shardpost-test-system \
+	shardpost-test-mig-index shardpost-test-mig-system; do
 	ceph osd pool create "$pool" 8 >/dev/null 2>&1
 	ceph osd pool set "$pool" size 1 --yes-i-really-mean-it >/dev/null 2>&1
 done
@@ -102,6 +108,10 @@ export SHARDPOST_TEST_CEPH_MON=v2:127.0.0.1:3300
 export SHARDPOST_TEST_CEPH_KEY="$key"
 export SHARDPOST_TEST_CEPH_INDEX_POOL=shardpost-test-index
 export SHARDPOST_TEST_CEPH_DATA_POOL=shardpost-test-data
+export SHARDPOST_TEST_CEPH_SYS_INDEX_POOL=shardpost-test-sys-index
+export SHARDPOST_TEST_CEPH_SYS_POOL=shardpost-test-system
+export SHARDPOST_TEST_CEPH_MIG_INDEX_POOL=shardpost-test-mig-index
+export SHARDPOST_TEST_CEPH_MIG_SYSTEM_POOL=shardpost-test-mig-system
 
 rc=0
 "$@" || rc=$?

@@ -1,4 +1,4 @@
-.TH SHARDPOST-BENCH 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
+.TH SHARDPOST-BENCH 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
 .SH NAME
 shardpost-bench \- fill separate bench pools with accounts and measure what an account costs in Ceph
 .SH SYNOPSIS
@@ -8,6 +8,8 @@ shardpost-bench \- fill separate bench pools with accounts and measure what an a
 .B bench populate
 .BI \-\-index\-pool " pool"
 .BI \-\-data\-pool " pool"
+.RB [ \-\-system\-pool
+.IR pool ]
 .RI [ options ]
 .br
 .B shardpost
@@ -16,6 +18,8 @@ shardpost-bench \- fill separate bench pools with accounts and measure what an a
 .B bench measure
 .BI \-\-index\-pool " pool"
 .BI \-\-data\-pool " pool"
+.RB [ \-\-system\-pool
+.IR pool ]
 .RI [ options ]
 .SH DESCRIPTION
 The bench is the measurement of the scaling plan's stage R4: objects and
@@ -29,8 +33,9 @@ server nor Nauthilus, and it does not use IMAP or LMTP. It runs in a
 Kubernetes Job of its own with the server's image
 .RB ( hack/bench\-job.yaml ).
 .PP
-The bench writes only into two pools of its own, which the operator
-creates for it and deletes afterwards
+The bench writes only into two pools of its own (three with
+.BR \-\-system\-pool ),
+which the operator creates for it and deletes afterwards
 .RB ( docs/operations/bench.md ).
 It refuses to run (exit status 2):
 .IP \(bu 2
@@ -38,15 +43,16 @@ without
 .B \-\-index\-pool
 and
 .BR \-\-data\-pool ,
-when either names
-.I ceph.index_pool
-or
+when one of the bench pools names
+.IR ceph.index_pool ,
 .I ceph.data_pool
-of the configuration (file or environment) or their built-in defaults
+or
+.I ceph.system_pool
+of the configuration (file or environment) or the built-in defaults
 .B shardpost\-index
 and
 .BR shardpost\-data ,
-or when both name the same pool;
+or when two bench pools are the same pool;
 .IP \(bu 2
 with an account prefix that does not start with
 .BR bench\- ;
@@ -60,11 +66,15 @@ written by the first
 .BR populate );
 .IP \(bu 2
 .B populate
-on a pool without the marker that holds any object, in the index pool
-in particular an account directory
+on a pool without the marker that holds any object, in the index or
+system pool in particular an account directory
 .RB ( ix.accounts/head
 in
-.BR ~accounts ):
+.BR ~accounts ),
+in the index pool also a placement fence
+.RB ( system.moved
+in
+.BR ~admin ):
 a pool somebody uses. The marker is written, pool by pool, only into a
 pool that is empty. The objects
 .B rbd_info
@@ -73,16 +83,44 @@ and
 that
 .B rbd pool init
 leaves in the default namespace do not count (Rook initialises every
-CephBlockPool for RBD).
+CephBlockPool for RBD);
+.IP \(bu 2
+when the placement check of the bench pools fails (below).
 .PP
 Everything the store keeps beside the accounts (the account directory
 in
-.BR ~accounts )
-lands in the bench pools as well;
+.BR ~accounts ,
+the admin store in
+.BR ~admin )
+lands in the bench pools as well: in the bench system pool with
+.BR \-\-system\-pool ,
+otherwise in the bench index pool. The production system pool of
+.I ceph.system_pool
+is never taken over;
 .B ~admin
 and
 .B ~accounts
 of the production pools are never touched.
+.PP
+The bench opens the store as a tool and checks the placement once the
+pools are set up. With
+.BR \-\-system\-pool ,
+.B populate
+initializes the system pool after the markers with the routine of
+.B shardpost system init
+(the fence in the bench index pool, the completion markers of the empty
+indexes, the mark in the bench system pool); a second
+.B populate
+finds it initialized and writes nothing. The init refuses a bench index
+pool that already holds the store's own namespaces: a run with a system
+pool needs fresh bench pools. Then
+.B populate
+and
+.B measure
+check the placement as a server does: a bench index pool with a fence
+and no
+.B \-\-system\-pool
+is refused.
 .SS bench populate
 Creates the accounts
 .IR prefix NNNNNN
@@ -280,9 +318,10 @@ Both subcommands:
 The server configuration (default: the environment variable
 .BR SHARDPOST_CONFIG ).
 Its
-.I ceph.index_pool
-and
+.IR ceph.index_pool ,
 .I ceph.data_pool
+and
+.I ceph.system_pool
 are the production pools the guard compares with; the rest
 .RI ( ceph.user ,
 the Rook secret,
@@ -307,6 +346,14 @@ The bench index pool (replicated; required).
 .TP
 .BI \-\-data\-pool " pool"
 The bench data pool (erasure coded like production; required).
+.TP
+.BI \-\-system\-pool " pool"
+The bench system pool (replicated; optional): the store's own
+namespaces of the run live there, as with
+.IR ceph.system_pool .
+It must not be a production pool nor one of the other bench pools.
+Without it they live in the bench index pool, whatever the
+configuration says.
 .TP
 .BI \-\-prefix " prefix"
 The account name prefix; it must start with
@@ -491,7 +538,10 @@ run populate again to finish them).
 A usage error or a refusal of the guard: no or production pools, a
 prefix outside
 .BR bench\- ,
-pools without the bench marker, or a pool in use.
+pools without the bench marker, a pool in use, or a placement of the
+bench pools that does not match
+.B \-\-system\-pool
+(or a system pool the init refuses).
 .SH EXAMPLES
 Fill 1000 accounts with 50 messages each, then measure:
 .PP
@@ -512,6 +562,20 @@ shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-messages 500
 shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-sample\-every 10
+.RE
+.fi
+.PP
+Fresh bench pools with a system pool of their own, to count the
+operations that reach it:
+.PP
+.nf
+.RS
+shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \e
+    \-\-system\-pool shardpost\-load\-system
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \e
+    \-\-system\-pool shardpost\-load\-system \-\-json /tmp/system.json
 .RE
 .fi
 .PP

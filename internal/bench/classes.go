@@ -26,6 +26,8 @@ const (
 	ClassIx        = "ix"         // ix/<space>/<nn>: front-end indexes
 	ClassPubSeen   = "pubseen"    // pubseen/<id>
 	ClassStoreIx   = "store-ix"   // ix.<name>/... of the store's own namespaces
+	ClassStoreKV   = "store-kv"   // kv.<key>: records of the admin store
+	ClassPlacement = "placement"  // system.*: the placement fence and mark
 	ClassOther     = "other"
 )
 
@@ -40,6 +42,8 @@ var prefixClasses = []struct{ prefix, class string }{
 	{"fts/", ClassFTS},
 	{"ix/", ClassIx},
 	{"ix.", ClassStoreIx},
+	{"kv.", ClassStoreKV},
+	{"system.", ClassPlacement},
 	{"pubseen/", ClassPubSeen},
 }
 

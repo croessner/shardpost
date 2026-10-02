@@ -8,7 +8,11 @@ metadata:
 spec:
   caps:
     mon: "allow r"
-    osd: "allow rwx pool=shardpost-index, allow rwx pool=shardpost-data" # x: object classes (cls_lock for the POP3 maildrop lock)
+    # x: object classes (cls_lock for the POP3 maildrop lock and the
+    # worker locks). shardpost-system: the store-wide state once
+    # ceph.system_pool names it; the caps must allow it before any pod
+    # runs with it (Rook changes them without a new key).
+    osd: "allow rwx pool=shardpost-index, allow rwx pool=shardpost-data, allow rwx pool=shardpost-system"
   security:
     cephx:
       keyType: aes256k

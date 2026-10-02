@@ -17,6 +17,7 @@ import (
 // Read-only diagnosis (role diagnose):
 //
 //	server status
+//	server list
 //	account show <account>
 //	mailbox list [-limit n] [-after name] [-all] <account>
 //	mailbox show <account> <mailbox name or id>
@@ -29,7 +30,7 @@ import (
 //
 // Every command takes --json.
 
-const diagnoseUsage = `usage: shardpostctl server status | account show <account> | mailbox list [-limit n] [-after name] [-all] <account> |
+const diagnoseUsage = `usage: shardpostctl server status | server list | account show <account> | mailbox list [-limit n] [-after name] [-all] <account> |
   mailbox show <account> <mailbox> | acl list <account> <mailbox> | acl explain <account> <mailbox> <principal> |
   quota show <account> | shared list <account> | account directory <account> |
   account list [-limit n] [-after cursor] [-state active|purging] [-all]   (each with --json) |
@@ -127,6 +128,8 @@ func diagCommand(verb string) (diagFunc, int) {
 	switch verb {
 	case cmdServer + " status":
 		return serverStatus, 0
+	case cmdServer + " list":
+		return serverList, 0
 	case "account show":
 		return accountShow, 1
 	case "mailbox list":
@@ -194,8 +197,71 @@ func serverStatus(ctx context.Context, c *adminapi.ClientWithResponses, a diagAr
 		store = "unavailable: " + deref(st.Store.Error)
 	}
 
-	table(stdout, [][2]string{{cmdVersion, st.Version + " (" + st.GoVersion + ")"}, {"instance", st.Instance},
-		{"started", st.StartedAt.Format(time.RFC3339)}, {"config", st.ConfigFingerprint}, {labelStore, store}})
+	rows := [][2]string{{cmdVersion, st.Version + " (" + st.GoVersion + ")"}, {"instance", st.Instance},
+		{"started", st.StartedAt.Format(time.RFC3339)}, {"config", st.ConfigFingerprint}, {labelStore, store}}
+
+	if p := st.Placement; p != nil {
+		rows = append(rows, [2]string{"placement", placementText(p.State, p.SystemPool)})
+	}
+
+	table(stdout, rows)
+
+	return exOK
+}
+
+// placementText renders where the store's own namespaces live.
+func placementText(state string, pool *adminapi.PoolRef) string {
+	if pool == nil {
+		return state + " (index pool)"
+	}
+
+	return fmt.Sprintf("%s (system pool %s, id %d)", state, pool.Name, pool.Id)
+}
+
+// serverList prints the process registrations: one line per instance
+// with its role, version, system pool, whether it runs and when it was
+// seen, started and stopped.
+func serverList(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs, stdout, stderr io.Writer) int {
+	resp, err := c.ListServersWithResponse(ctx)
+	if err != nil {
+		return transportError(stderr, err)
+	}
+
+	if resp.JSON200 == nil {
+		return failure(stderr, resp.JSONDefault, resp.StatusCode())
+	}
+
+	if a.asJSON {
+		return printJSON(stdout, resp.JSON200)
+	}
+
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "INSTANCE\tROLE\tVERSION\tSYSTEM POOL\tRUNNING\tSEEN\tSTARTED\tSTOPPED")
+
+	for _, s := range resp.JSON200.Servers {
+		role := "serve (before 0.47)"
+		if s.Role != nil {
+			role = *s.Role
+		}
+
+		pool := "-"
+		if s.SystemPool != nil {
+			pool = fmt.Sprintf("%s (id %d)", s.SystemPool.Name, s.SystemPool.Id)
+		}
+
+		at := func(t *time.Time) string {
+			if t == nil {
+				return "-"
+			}
+
+			return t.Format(time.RFC3339)
+		}
+
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\t%s\t%s\t%s\n", s.Instance, role, s.Version, pool, s.Fresh,
+			s.Seen.Format(time.RFC3339), at(s.StartedAt), at(s.StoppedAt))
+	}
+
+	_ = tw.Flush()
 
 	return exOK
 }

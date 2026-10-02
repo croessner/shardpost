@@ -92,7 +92,10 @@ type MeasureReport struct {
 	Prefix    string `json:"prefix"`
 	IndexPool string `json:"index_pool"`
 	DataPool  string `json:"data_pool"`
-	FTSShards int    `json:"fts_shards"`
+	// SystemPool is the bench system pool (empty: the store's own
+	// namespaces live in the index pool).
+	SystemPool string `json:"system_pool,omitempty"`
+	FTSShards  int    `json:"fts_shards"`
 	ShardSize uint32 `json:"mbox_shard_size"`
 	ChunkSize int64  `json:"chunk_size"`
 

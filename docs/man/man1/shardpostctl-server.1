@@ -1,13 +1,17 @@
-.TH SHARDPOSTCTL-SERVER 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-SERVER 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
 .SH NAME
-shardpostctl-server \- version and state of a ShardPost server
+shardpostctl-server \- version, state and registrations of ShardPost servers
 .SH SYNOPSIS
 .B shardpostctl version
 .br
 .B shardpostctl server status
 .RB [ \-\-json ]
+.br
+.B shardpostctl server list
+.RB [ \-\-json ]
 .SH DESCRIPTION
-Both commands ask the server about itself. Neither touches an account.
+The commands ask the server about itself and about the processes
+registered in the store. None touches an account.
 .SS version
 Prints the version of the server the client is talking to and the Go
 version it was built with. Use it to check which build answers on this
@@ -35,14 +39,87 @@ configurations, which is almost always a rollout that did not finish.
 .TP
 .B store
 Result of a ping against the RADOS store, plus the pools in use.
+.TP
+.B placement
+Where the store's own namespaces (admin store, account directory,
+queues) live, as the server's last placement check found it:
+.B none
+(the index pool),
+.B native
+or
+.B migrated
+(the system pool of
+.IR ceph.system_pool ,
+initialized there or migrated there, with its name and pool id), or
+.B unknown
+(the last check could not read; the server goes on). A server checks
+it every minute and ends when it reads a placement that contradicts its
+configuration.
 .PP
 Requires the role
+.BR diagnose .
+.SS server list
+Lists the registrations of the processes that use the store, one line
+per instance: every server, the JMAP push worker, scrubs, sweeps and
+backfills register at startup and every minute
+.RB ( servers/<instance>
+in the admin store) and record their orderly end. Columns:
+.TP
+.B INSTANCE
+The pod name for a server;
+.IB host \- role \- random
+for the other processes, which may run in a server's pod.
+.TP
+.B ROLE
+.BR serve ,
+.BR push ,
+.BR scrub ,
+.B backfill
+or
+.BR sweep ;
+.B "serve (before 0.47)"
+for a registration without a role.
+.TP
+.B VERSION
+The version of the process.
+.TP
+.B SYSTEM POOL
+The system pool the process works with, by name and id;
+.B \-
+when the store's own namespaces live in the index pool.
+.TP
+.B RUNNING
+.B true
+while the registration was renewed within three minutes and the
+process has not ended in order. A process that crashed stays
+.B true
+for up to three minutes after its last heartbeat.
+.TP
+.BR SEEN ", " STARTED ", " STOPPED
+The last heartbeat, the start of the process and its orderly end
+.RB ( \-
+while it runs or after a crash).
+.PP
+A registration not renewed for 24 hours is deleted. With
+.I admin.kv_index
+other than
+.B read
+the command lists the admin namespace. Requires the role
 .BR diagnose .
 .SH OPTIONS
 .TP
 .B \-\-json
 Print the answer as JSON instead of a table.
 .SH EXAMPLES
+What runs against the store right now, with which role and system pool?
+.PP
+.nf
+.RS
+shardpostctl server list
+shardpostctl server list \-\-json | jq \-r '.servers[] | select(.fresh) | .instance'
+.RE
+.fi
+.PP
 Which build is live, and do both pods agree on their configuration?
 .PP
 .nf
@@ -76,7 +153,10 @@ shardpostctl server status --json | jq -r '.store.ok, .config_fingerprint'
 The server answered.
 .TP
 .B 75
-The server is not reachable. A server that answers but cannot reach its
+The server is not reachable, or
+.B server list
+asked a server without an admin store (the registrations are not
+available there). A server that answers but cannot reach its
 store is not a failure of the command: it prints
 .I store unavailable
 with the reason and exits 0 — that is the answer you asked for.

@@ -118,6 +118,10 @@ type Options struct {
 	StartedAt         time.Time
 	ConfigFingerprint string
 	StorePing         func() error
+	// Placement reports where the store's own namespaces live (the
+	// state of the last placement check and the system pool; nil:
+	// unknown).
+	Placement func() (string, *model.PoolRef)
 	// Jobs is the maintenance job system (nil: the job operations answer
 	// 403).
 	Jobs *jobs.Manager

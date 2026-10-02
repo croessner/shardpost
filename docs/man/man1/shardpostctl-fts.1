@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-FTS 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-FTS 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accounts with layout 3, the layout record of an account
 .SH SYNOPSIS
@@ -60,8 +60,10 @@ jobs refuse to convert to it. The mark is read whenever an index is
 created. Every server since 0.45.0 registers itself at startup and then
 every minute
 .RB ( servers/<instance>
-in the admin store), also without jobs or an admin listener; a
-registration seen within three minutes is fresh, one not renewed for 24
+in the admin store), also without jobs or an admin listener; since
+0.47.0 the push worker, scrubs and backfills register as well, each with
+its role, and every process records its orderly end. A registration seen
+within three minutes and not ended is fresh, one not renewed for 24
 hours is deleted (by the expiry worker of the job system, and by status
 and enable).
 .PP
@@ -74,8 +76,8 @@ import session, see
 .BR shardpostctl-migrate (1).
 .SS fts layout3 status
 Shows whether the mark is set (when, by whom, for how many pods, whether
-forced) and every registration with its version, capabilities, last
-heartbeat and freshness. With
+forced) and every registration with its role, version, capabilities,
+last heartbeat and freshness. With
 .I admin.kv_index
 other than
 .B read
@@ -84,16 +86,21 @@ it lists the admin namespace. Role:
 .SS fts layout3 enable
 Sets the mark when exactly
 .I n
-fresh registrations report the capability
+fresh registrations of servers report the capability
 .BR fts_layout3 .
-Servers before 0.45.0 do not register, so the number of pods running
-now is the check:
+Only servers count (role
+.BR serve ,
+or no role: a registration before 0.47.0); the push worker, scrubs and
+backfills do not. Servers before 0.45.0 do not register, so the number
+of pods running now is the check:
 .B \-pods
-is required. A pod that was replaced less than three minutes ago leaves
-the fresh record of its predecessor, so the check sees one record too
-many: wait three minutes after a rollout, check
+is required. A pod that crashed less than three minutes ago leaves its
+fresh record (one that ended in order does not), so the check sees one
+record too many: wait three minutes, check
 .BR status ,
-then enable. The refusal names the instances and when they were seen.
+then enable. Enable only after a rollout has completed: a server before
+0.47.0 counts the registrations of the push worker, scrubs and
+backfills as servers. The refusal names the instances and when they were seen.
 .B \-force
 skips the check; the audit log and the mark record it. Role:
 .BR repair .

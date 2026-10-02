@@ -376,6 +376,8 @@ func removeLegacyPosting(p, g []byte) []byte {
 // the object does not exist). The context must not be shared with other
 // concurrent operations; use User.getKeysVer.
 func getOmapKeysVer(ioctx *rados.IOContext, oid string, keys []string) (map[string][]byte, uint64, error) {
+	defer mh.timer("omap_read")()
+
 	op := rados.CreateReadOp()
 	defer op.Release()
 
@@ -468,7 +470,8 @@ func casOmapOpAs(u *User, ioctx *rados.IOContext, oid string, keys []string, ses
 		}
 
 		op := casWriteOp(ver, set, rm, extra)
-		err = op.Operate(ioctx, oid, rados.OperationNoFlag)
+		err = timedOp("omap_cas", func() error { return op.Operate(ioctx, oid, rados.OperationNoFlag) })
+
 		op.Release()
 
 		if err == nil {

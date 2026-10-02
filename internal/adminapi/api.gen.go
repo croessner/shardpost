@@ -1106,6 +1106,18 @@ type MessageSearch struct {
 	To       *string    `json:"to,omitempty"`
 }
 
+// Placement Where the store's own namespaces live, as the last placement check of this server found it.
+type Placement struct {
+	// State `none`: in the index pool; `native`: in the system pool,
+	// initialized there; `migrated`: in the system pool, migrated
+	// there; `unknown`: the last check could not read the fence or
+	// the mark.
+	State string `json:"state"`
+
+	// SystemPool A pool by its id (what placement checks compare) and its name.
+	SystemPool *PoolRef `json:"system_pool,omitempty"`
+}
+
 // Plan defines model for Plan.
 type Plan struct {
 	// Account The account; empty for a batch.
@@ -1142,6 +1154,12 @@ type PlanRequest struct {
 // PlanRequestKind defines model for PlanRequest.Kind.
 type PlanRequestKind string
 
+// PoolRef A pool by its id (what placement checks compare) and its name.
+type PoolRef struct {
+	Id   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
 // QuotaStatus defines model for QuotaStatus.
 type QuotaStatus struct {
 	// LimitBytes 0 is unlimited.
@@ -1175,11 +1193,30 @@ type SearchResult struct {
 type ServerRegistration struct {
 	Caps []string `json:"caps"`
 
-	// Fresh Seen within the last three minutes.
-	Fresh    bool      `json:"fresh"`
-	Instance string    `json:"instance"`
-	Seen     time.Time `json:"seen"`
-	Version  string    `json:"version"`
+	// Fresh Seen within the last three minutes and not stopped.
+	Fresh    bool   `json:"fresh"`
+	Instance string `json:"instance"`
+
+	// Role What the process is: `serve`, `push`, `scrub`, `backfill` or
+	// `sweep`; missing in registrations before 0.47.0, which are
+	// servers.
+	Role *string   `json:"role,omitempty"`
+	Seen time.Time `json:"seen"`
+
+	// StartedAt When the process started (since 0.47.0).
+	StartedAt *time.Time `json:"started_at,omitempty"`
+
+	// StoppedAt When the process ended in order; missing while it runs or after a crash.
+	StoppedAt *time.Time `json:"stopped_at,omitempty"`
+
+	// SystemPool A pool by its id (what placement checks compare) and its name.
+	SystemPool *PoolRef `json:"system_pool,omitempty"`
+	Version    string   `json:"version"`
+}
+
+// ServerRegistrationList defines model for ServerRegistrationList.
+type ServerRegistrationList struct {
+	Servers []ServerRegistration `json:"servers"`
 }
 
 // ServerStatus defines model for ServerStatus.
@@ -1189,7 +1226,10 @@ type ServerStatus struct {
 	GoVersion         string `json:"go_version"`
 
 	// Instance Host name of the answering server (pod).
-	Instance  string      `json:"instance"`
+	Instance string `json:"instance"`
+
+	// Placement Where the store's own namespaces live, as the last placement check of this server found it.
+	Placement *Placement  `json:"placement,omitempty"`
 	StartedAt time.Time   `json:"started_at"`
 	Store     StoreStatus `json:"store"`
 	Version   string      `json:"version"`
@@ -2713,10 +2753,12 @@ type ClientInterface interface {
 	// EnableFTSLayout3WithBody Allow layout 3 in the cluster
 	//
 	// Sets the cluster mark after checking that exactly `pods` fresh
-	// registrations report the capability `fts_layout3`: servers before
-	// 0.45.0 do not register, so the expected number of pods is the
-	// check. A pod replaced less than three minutes ago leaves its
-	// predecessor's record fresh; wait and try again. `force` skips the
+	// registrations of servers (role `serve`, or no role: before
+	// 0.47.0) report the capability `fts_layout3`; the push worker,
+	// scrubs and backfills are not counted. Servers before 0.45.0 do
+	// not register, so the expected number of pods is the check. A pod
+	// replaced less than three minutes ago without recording its end
+	// leaves its predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
 	// servers with `fts.layout: 3` (the default since 0.46.0) create new
 	// indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -2731,10 +2773,12 @@ type ClientInterface interface {
 	// EnableFTSLayout3 Allow layout 3 in the cluster
 	//
 	// Sets the cluster mark after checking that exactly `pods` fresh
-	// registrations report the capability `fts_layout3`: servers before
-	// 0.45.0 do not register, so the expected number of pods is the
-	// check. A pod replaced less than three minutes ago leaves its
-	// predecessor's record fresh; wait and try again. `force` skips the
+	// registrations of servers (role `serve`, or no role: before
+	// 0.47.0) report the capability `fts_layout3`; the push worker,
+	// scrubs and backfills are not counted. Servers before 0.45.0 do
+	// not register, so the expected number of pods is the check. A pod
+	// replaced less than three minutes ago without recording its end
+	// leaves its predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
 	// servers with `fts.layout: 3` (the default since 0.46.0) create new
 	// indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -2904,11 +2948,28 @@ type ClientInterface interface {
 	// GetServerStatus Server status
 	//
 	// Version, instance, start time, a fingerprint of the effective
-	// configuration (secrets excluded) and whether the store answers.
-	// Requires the role `diagnose`.
+	// configuration (secrets excluded), whether the store answers and
+	// where the store's own namespaces live (`placement`: the index
+	// pool, or the system pool of `ceph.system_pool`, as the last
+	// placement check found it). Requires the role `diagnose`.
 	//
 	// Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
 	GetServerStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListServers Process registrations
+	//
+	// The registrations of the processes that use the store: every
+	// server, the JMAP push worker, scrubs, backfills and sweeps
+	// register at startup and then every minute (`servers/<instance>`
+	// in the admin store) with their role and system pool, and record
+	// their orderly end (`stopped_at`). A registration seen within
+	// three minutes and not stopped is fresh; one not renewed for 24
+	// hours is deleted. Reading the registrations lists the admin
+	// namespace when `admin.kv_index` is not `read`. Requires the role
+	// `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/servers (the `ListServers` operationId).
+	ListServers(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListAllSubmissions Every delayed JMAP submission record
 	//
@@ -4585,10 +4646,12 @@ func (c *Client) DisableFTSLayout3(ctx context.Context, reqEditors ...RequestEdi
 // EnableFTSLayout3WithBody Allow layout 3 in the cluster
 //
 // Sets the cluster mark after checking that exactly `pods` fresh
-// registrations report the capability `fts_layout3`: servers before
-// 0.45.0 do not register, so the expected number of pods is the
-// check. A pod replaced less than three minutes ago leaves its
-// predecessor's record fresh; wait and try again. `force` skips the
+// registrations of servers (role `serve`, or no role: before
+// 0.47.0) report the capability `fts_layout3`; the push worker,
+// scrubs and backfills are not counted. Servers before 0.45.0 do
+// not register, so the expected number of pods is the check. A pod
+// replaced less than three minutes ago without recording its end
+// leaves its predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
 // servers with `fts.layout: 3` (the default since 0.46.0) create new
 // indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -4613,10 +4676,12 @@ func (c *Client) EnableFTSLayout3WithBody(ctx context.Context, contentType strin
 // EnableFTSLayout3 Allow layout 3 in the cluster
 //
 // Sets the cluster mark after checking that exactly `pods` fresh
-// registrations report the capability `fts_layout3`: servers before
-// 0.45.0 do not register, so the expected number of pods is the
-// check. A pod replaced less than three minutes ago leaves its
-// predecessor's record fresh; wait and try again. `force` skips the
+// registrations of servers (role `serve`, or no role: before
+// 0.47.0) report the capability `fts_layout3`; the push worker,
+// scrubs and backfills are not counted. Servers before 0.45.0 do
+// not register, so the expected number of pods is the check. A pod
+// replaced less than three minutes ago without recording its end
+// leaves its predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
 // servers with `fts.layout: 3` (the default since 0.46.0) create new
 // indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -4916,12 +4981,39 @@ func (c *Client) GetPlan(ctx context.Context, plan string, reqEditors ...Request
 // GetServerStatus Server status
 //
 // Version, instance, start time, a fingerprint of the effective
-// configuration (secrets excluded) and whether the store answers.
-// Requires the role `diagnose`.
+// configuration (secrets excluded), whether the store answers and
+// where the store's own namespaces live (`placement`: the index
+// pool, or the system pool of `ceph.system_pool`, as the last
+// placement check found it). Requires the role `diagnose`.
 //
 // Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
 func (c *Client) GetServerStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetServerStatusRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListServers Process registrations
+//
+// The registrations of the processes that use the store: every
+// server, the JMAP push worker, scrubs, backfills and sweeps
+// register at startup and then every minute (`servers/<instance>`
+// in the admin store) with their role and system pool, and record
+// their orderly end (`stopped_at`). A registration seen within
+// three minutes and not stopped is fresh; one not renewed for 24
+// hours is deleted. Reading the registrations lists the admin
+// namespace when `admin.kv_index` is not `read`. Requires the role
+// `diagnose`.
+//
+// Corresponds with GET /admin/v1/servers (the `ListServers` operationId).
+func (c *Client) ListServers(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListServersRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -8425,6 +8517,33 @@ func NewGetServerStatusRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewListServersRequest constructs an http.Request for the ListServers method
+func NewListServersRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/servers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListAllSubmissionsRequest constructs an http.Request for the ListAllSubmissions method
 func NewListAllSubmissionsRequest(server string, params *ListAllSubmissionsParams) (*http.Request, error) {
 	var err error
@@ -9531,10 +9650,12 @@ type ClientWithResponsesInterface interface {
 	// EnableFTSLayout3WithBodyWithResponse Allow layout 3 in the cluster
 	//
 	// Sets the cluster mark after checking that exactly `pods` fresh
-	// registrations report the capability `fts_layout3`: servers before
-	// 0.45.0 do not register, so the expected number of pods is the
-	// check. A pod replaced less than three minutes ago leaves its
-	// predecessor's record fresh; wait and try again. `force` skips the
+	// registrations of servers (role `serve`, or no role: before
+	// 0.47.0) report the capability `fts_layout3`; the push worker,
+	// scrubs and backfills are not counted. Servers before 0.45.0 do
+	// not register, so the expected number of pods is the check. A pod
+	// replaced less than three minutes ago without recording its end
+	// leaves its predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
 	// servers with `fts.layout: 3` (the default since 0.46.0) create new
 	// indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -9549,10 +9670,12 @@ type ClientWithResponsesInterface interface {
 	// EnableFTSLayout3WithResponse Allow layout 3 in the cluster
 	//
 	// Sets the cluster mark after checking that exactly `pods` fresh
-	// registrations report the capability `fts_layout3`: servers before
-	// 0.45.0 do not register, so the expected number of pods is the
-	// check. A pod replaced less than three minutes ago leaves its
-	// predecessor's record fresh; wait and try again. `force` skips the
+	// registrations of servers (role `serve`, or no role: before
+	// 0.47.0) report the capability `fts_layout3`; the push worker,
+	// scrubs and backfills are not counted. Servers before 0.45.0 do
+	// not register, so the expected number of pods is the check. A pod
+	// replaced less than three minutes ago without recording its end
+	// leaves its predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
 	// servers with `fts.layout: 3` (the default since 0.46.0) create new
 	// indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -9734,13 +9857,32 @@ type ClientWithResponsesInterface interface {
 	// GetServerStatusWithResponse Server status
 	//
 	// Version, instance, start time, a fingerprint of the effective
-	// configuration (secrets excluded) and whether the store answers.
-	// Requires the role `diagnose`.
+	// configuration (secrets excluded), whether the store answers and
+	// where the store's own namespaces live (`placement`: the index
+	// pool, or the system pool of `ceph.system_pool`, as the last
+	// placement check found it). Requires the role `diagnose`.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with GET /admin/v1/server (the `GetServerStatus` operationId).
 	GetServerStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetServerStatusResponse, error)
+
+	// ListServersWithResponse Process registrations
+	//
+	// The registrations of the processes that use the store: every
+	// server, the JMAP push worker, scrubs, backfills and sweeps
+	// register at startup and then every minute (`servers/<instance>`
+	// in the admin store) with their role and system pool, and record
+	// their orderly end (`stopped_at`). A registration seen within
+	// three minutes and not stopped is fresh; one not renewed for 24
+	// hours is deleted. Reading the registrations lists the admin
+	// namespace when `admin.kv_index` is not `read`. Requires the role
+	// `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/servers (the `ListServers` operationId).
+	ListServersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListServersResponse, error)
 
 	// ListAllSubmissionsWithResponse Every delayed JMAP submission record
 	//
@@ -12943,6 +13085,54 @@ func (r GetServerStatusResponse) ContentType() string {
 	return ""
 }
 
+type ListServersResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ServerRegistrationList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListServersResponse) GetJSON200() *ServerRegistrationList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListServersResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListServersResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListServersResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListServersResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListServersResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListAllSubmissionsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -14458,10 +14648,12 @@ func (c *ClientWithResponses) DisableFTSLayout3WithResponse(ctx context.Context,
 // EnableFTSLayout3WithBodyWithResponse Allow layout 3 in the cluster
 //
 // Sets the cluster mark after checking that exactly `pods` fresh
-// registrations report the capability `fts_layout3`: servers before
-// 0.45.0 do not register, so the expected number of pods is the
-// check. A pod replaced less than three minutes ago leaves its
-// predecessor's record fresh; wait and try again. `force` skips the
+// registrations of servers (role `serve`, or no role: before
+// 0.47.0) report the capability `fts_layout3`; the push worker,
+// scrubs and backfills are not counted. Servers before 0.45.0 do
+// not register, so the expected number of pods is the check. A pod
+// replaced less than three minutes ago without recording its end
+// leaves its predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
 // servers with `fts.layout: 3` (the default since 0.46.0) create new
 // indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -14482,10 +14674,12 @@ func (c *ClientWithResponses) EnableFTSLayout3WithBodyWithResponse(ctx context.C
 // EnableFTSLayout3WithResponse Allow layout 3 in the cluster
 //
 // Sets the cluster mark after checking that exactly `pods` fresh
-// registrations report the capability `fts_layout3`: servers before
-// 0.45.0 do not register, so the expected number of pods is the
-// check. A pod replaced less than three minutes ago leaves its
-// predecessor's record fresh; wait and try again. `force` skips the
+// registrations of servers (role `serve`, or no role: before
+// 0.47.0) report the capability `fts_layout3`; the push worker,
+// scrubs and backfills are not counted. Servers before 0.45.0 do
+// not register, so the expected number of pods is the check. A pod
+// replaced less than three minutes ago without recording its end
+// leaves its predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
 // servers with `fts.layout: 3` (the default since 0.46.0) create new
 // indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -14745,8 +14939,10 @@ func (c *ClientWithResponses) GetPlanWithResponse(ctx context.Context, plan stri
 // GetServerStatusWithResponse Server status
 //
 // Version, instance, start time, a fingerprint of the effective
-// configuration (secrets excluded) and whether the store answers.
-// Requires the role `diagnose`.
+// configuration (secrets excluded), whether the store answers and
+// where the store's own namespaces live (`placement`: the index
+// pool, or the system pool of `ceph.system_pool`, as the last
+// placement check found it). Requires the role `diagnose`.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -14757,6 +14953,29 @@ func (c *ClientWithResponses) GetServerStatusWithResponse(ctx context.Context, r
 		return nil, err
 	}
 	return ParseGetServerStatusResponse(rsp)
+}
+
+// ListServersWithResponse Process registrations
+//
+// The registrations of the processes that use the store: every
+// server, the JMAP push worker, scrubs, backfills and sweeps
+// register at startup and then every minute (`servers/<instance>`
+// in the admin store) with their role and system pool, and record
+// their orderly end (`stopped_at`). A registration seen within
+// three minutes and not stopped is fresh; one not renewed for 24
+// hours is deleted. Reading the registrations lists the admin
+// namespace when `admin.kv_index` is not `read`. Requires the role
+// `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/servers (the `ListServers` operationId).
+func (c *ClientWithResponses) ListServersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListServersResponse, error) {
+	rsp, err := c.ListServers(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListServersResponse(rsp)
 }
 
 // ListAllSubmissionsWithResponse Every delayed JMAP submission record
@@ -17041,6 +17260,39 @@ func ParseGetServerStatusResponse(rsp *http.Response) (*GetServerStatusResponse,
 	return response, nil
 }
 
+// ParseListServersResponse parses an HTTP response from a ListServersWithResponse call
+func ParseListServersResponse(rsp *http.Response) (*ListServersResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListServersResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ServerRegistrationList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListAllSubmissionsResponse parses an HTTP response from a ListAllSubmissionsWithResponse call
 func ParseListAllSubmissionsResponse(rsp *http.Response) (*ListAllSubmissionsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -17307,6 +17559,9 @@ type ServerInterface interface {
 	// GetServerStatus Server status
 	// (GET /admin/v1/server)
 	GetServerStatus(w http.ResponseWriter, r *http.Request)
+	// ListServers Process registrations
+	// (GET /admin/v1/servers)
+	ListServers(w http.ResponseWriter, r *http.Request)
 	// ListAllSubmissions Every delayed JMAP submission record
 	// (GET /admin/v1/submissions)
 	ListAllSubmissions(w http.ResponseWriter, r *http.Request, params ListAllSubmissionsParams)
@@ -20128,6 +20383,20 @@ func (siw *ServerInterfaceWrapper) GetServerStatus(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// ListServers operation middleware
+func (siw *ServerInterfaceWrapper) ListServers(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListServers(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListAllSubmissions operation middleware
 func (siw *ServerInterfaceWrapper) ListAllSubmissions(w http.ResponseWriter, r *http.Request) {
 
@@ -20365,6 +20634,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader}", wrapper.PutImportReader)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/metadata", wrapper.PutImportMetadata)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/sieve", wrapper.PutImportSieve)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/servers", wrapper.ListServers)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3", wrapper.GetFTSLayout3)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/layout3/enable", wrapper.EnableFTSLayout3)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/layout3/disable", wrapper.DisableFTSLayout3)

@@ -49,17 +49,16 @@ func (b *radosOmap) ReadKeys(oid string, keys []string) (map[string][]byte, uint
 	return getOmapKeysVer(b.ioctx, oid, keys)
 }
 
-// indexKey identifies namespace ns of the index pool in the process-wide
-// head cache of sorted indexes.
+// indexKey identifies namespace ns of its index pool (indexPoolOf) in
+// the process-wide head cache of sorted indexes.
 func (s *Store) indexKey(ns string) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	return s.cfg.IndexPool + "/" + ns
+	return s.indexPoolOf(ns) + "/" + ns
 }
 
 // ReadPage implements sortedindex.Backend.
 func (b *radosOmap) ReadPage(oid, startAfter string, limit int) ([]sortedindex.KV, bool, error) {
+	defer mh.timer("index_page")()
+
 	op := rados.CreateReadOp()
 	defer op.Release()
 
@@ -110,7 +109,7 @@ func (b *radosOmap) Write(oid string, ver uint64, set map[string][]byte, rm []st
 		op.RmOmapKeys(rm)
 	}
 
-	err := op.Operate(b.ioctx, oid, rados.OperationNoFlag)
+	err := timedOp("index_write", func() error { return op.Operate(b.ioctx, oid, rados.OperationNoFlag) })
 
 	switch errCode(err) {
 	case 0:
@@ -129,14 +128,22 @@ func (b *radosOmap) Write(oid string, ver uint64, set map[string][]byte, rm []st
 	}
 }
 
-// openIndex opens the sorted index name in namespace ns of the index
-// pool; release closes it.
+// openIndex opens the sorted index name in namespace ns of its index
+// pool (indexPoolOf); release closes it.
 func (s *Store) openIndex(ns, name string, shards int) (*sortedindex.Index, func(), error) {
-	r := s.ref()
+	b, release, err := s.openOmap(ns)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	s.mu.RLock()
-	pool := s.cfg.IndexPool
-	s.mu.RUnlock()
+	return sortedindex.New(b, name, shards), release, nil
+}
+
+// openOmap opens the omap backend of namespace ns of its index pool
+// (indexPoolOf) on a private context; release closes it.
+func (s *Store) openOmap(ns string) (*radosOmap, func(), error) {
+	r := s.ref()
+	pool := s.indexPoolOf(ns)
 
 	ioctx, err := r.conn.OpenIOContext(pool)
 	if err != nil {
@@ -151,7 +158,7 @@ func (s *Store) openIndex(ns, name string, shards int) (*sortedindex.Index, func
 		r.refs.Done()
 	}
 
-	return sortedindex.New(&radosOmap{ioctx: ioctx, key: pool + "/" + ns}, name, shards), release, nil
+	return &radosOmap{ioctx: ioctx, key: pool + "/" + ns}, release, nil
 }
 
 var (
@@ -181,7 +188,9 @@ func (s *Store) HasRegistry(account string) (bool, error) {
 // registry exists and when it was last modified (the backfill takes it
 // as the creation time). It uses one index-pool context, switching its
 // namespace per call, so it must not be shared between goroutines;
-// release closes it.
+// release closes it. Only accounts and the public namespace have a
+// registry; the store's own namespaces are refused (they need not even
+// live in the index pool).
 func (s *Store) RegistryStatter() (func(account string) (time.Time, bool, error), func(), error) {
 	r := s.ref()
 
@@ -203,6 +212,10 @@ func (s *Store) RegistryStatter() (func(account string) (time.Time, bool, error)
 	stat := func(account string) (time.Time, bool, error) {
 		if err := model.CheckNamespace(account); err != nil {
 			return time.Time{}, false, err
+		}
+
+		if !model.InDirectory(account) {
+			return time.Time{}, false, fmt.Errorf("%w: %q has no registry", model.ErrNamespace, account)
 		}
 
 		ioctx.SetNamespace(account)
@@ -253,6 +266,24 @@ func (s *Store) holdLock(ns, oid, name, desc string, ttl time.Duration, onRotate
 		return nil, err
 	}
 
+	return s.holdLockOn(u, oid, name, desc, ttl, onRotate)
+}
+
+// holdLockIn is holdLock on namespace ns of pool, whatever pool
+// indexPoolOf names for ns: the sweep keeps its lock in the index pool
+// while the rest of "~accounts" may live in the system pool.
+func (s *Store) holdLockIn(pool, ns, oid, name, desc string, ttl time.Duration, onRotate bool) (model.Lease, error) {
+	u, err := s.userIn(ns, pool)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.holdLockOn(u, oid, name, desc, ttl, onRotate)
+}
+
+// holdLockOn is holdLock on the index context of view u, which the lease
+// closes when it is released.
+func (s *Store) holdLockOn(u *User, oid, name, desc string, ttl time.Duration, onRotate bool) (model.Lease, error) {
 	cookie := newGUID()
 
 	take := func(flags *byte) error {

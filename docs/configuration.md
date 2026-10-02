@@ -86,6 +86,50 @@ Rook-managed secret and ConfigMap through the Kubernetes API and follows key
 rotations. With `ceph.key` set, `rook` is ignored and no Kubernetes access
 happens; see [running without Kubernetes](operations/README.md#running-without-kubernetes).
 
+### Pools (`ceph`)
+
+| Key | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `ceph.index_pool` | `CEPH_INDEX_POOL` | `shardpost-index` | replicated pool of the accounts' index objects (omap) |
+| `ceph.data_pool` | `CEPH_DATA_POOL` | `shardpost-data` | pool of the message blobs (may be erasure coded) |
+| `ceph.system_pool` | `CEPH_SYSTEM_POOL` | empty | replicated pool of the store-wide state: the index part of the namespaces `~admin`, `~accounts`, `~learning` and `~server` (admin store, account directory, queues, locks, server metadata). Empty keeps them in the index pool, as before 0.47.0. Must differ from both other pools (by name here, by pool id when the store opens) |
+| `ceph.chunk_size` | `CEPH_CHUNK_SIZE` | 4 MiB | chunk size of the message blobs |
+| `ceph.client_options` | – | empty | further librados options of the connection, YAML only, values as strings: `objecter_inflight_ops` and `objecter_inflight_op_bytes` (the client's throttles of operations and bytes in flight; librados defaults 1024 and 100 MiB), `rados_osd_op_timeout` and `rados_mon_op_timeout` (seconds; the server sets 60 and 30). Other options are refused |
+
+`ceph.system_pool` is not a switch to flip: a cluster has one placement,
+and the data says which. A server, the push worker and every other
+`shardpost` command check it when they open the store (two reads, no
+listing):
+
+- without `ceph.system_pool`, a fence in the index pool that says the
+  state has moved refuses the start (`set ceph.system_pool`);
+- with it, the system pool must carry the mark of this index pool and
+  cluster, written by `shardpost system init` (a new cluster) or
+  `shardpost system migrate` (an existing one); otherwise the start is
+  refused with the command to run.
+
+A server and the push worker repeat the check every minute and end
+(after draining) when it reads a placement that contradicts the
+configuration; a check that cannot read logs a warning and goes on (a
+server or push worker that cannot read at startup starts in the state
+`unknown`; a short-lived command does not start). Set the key on the
+server, the push worker and the scrub CronJob together. The Kubernetes
+manifests set `CEPH_SYSTEM_POOL` (empty until the migration), and an
+environment variable that is set wins over the file even when it is
+empty: change it in the manifests, not in `server.yaml`.
+See [Storage: placement](architecture/storage.md#system-pool-and-placement)
+and [Operations](operations/README.md#pools).
+
+```yaml
+ceph:
+  index_pool: shardpost-index
+  data_pool: shardpost-data
+  system_pool: shardpost-system   # only after "shardpost system init" or "migrate"
+  client_options:
+    objecter_inflight_ops: "4096"
+    objecter_inflight_op_bytes: "268435456"
+```
+
 ### Global Sieve scripts
 
 `sieve.global_dir` holds the scripts a user script can pull in with
@@ -483,13 +527,21 @@ and [Operations](operations/README.md#admin-store-backfill).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `imapsieve.learning.index` | `write` | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
+| `imapsieve.learning.index` | `read` (`write` before 0.47.0) | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
 | `imapsieve.learning.queue_shards` | 4 | shard objects of the due queue (1–8) when its first writer creates it; an existing queue keeps its count |
+| `imapsieve.learning.lock_retry_seconds` | 20 | how often a server that does not hold the learning worker lease tries to take it, with a jitter of ±50 % (1–3600; environment `LEARNING_LOCK_RETRY_SECONDS`). The holder works on once a second and when notified; a lease lost to a key rotation is taken again at once |
 
-Switch to `read` only after `shardpost index backfill learning`
-completed with a start after the last server without the index stopped,
-on every server. Without the completion marker a server in `read` mode
-logs a warning and behaves as in `write` mode until the marker exists.
+`read` takes effect only once `shardpost index backfill learning`
+completed (with a start after the last server without the index
+stopped) or `shardpost system init` wrote the completion marker of the
+empty queue of a new cluster. Without the marker a server in `read`
+mode logs a warning and behaves as in `write` mode until the marker
+exists, so the default `read` changes nothing on a cluster that has not
+run the backfill. A cluster of the size of millions of accounts runs
+with `admin.kv_index: read` and `imapsieve.learning.index: read`: in
+`write` mode the learning worker lists the namespace `~learning` of the
+data pool every second, a walk over every placement group of the
+largest pool.
 See [Storage: learning queue](architecture/storage.md#learning-queue-due-queue-and-owner-index)
 and [Operations](operations/README.md#learning-queue-backfill).
 

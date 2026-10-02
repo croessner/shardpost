@@ -132,7 +132,7 @@ func TestHintRuleOrder(t *testing.T) {
 
 	put(t, s, "job/1", map[string]any{"state": "queued", "account": "a", "kind": "k"})
 
-	if (*log)[0] != "record-write job/1" || !strings.HasPrefix((*log)[len(*log)-1], "index-write ix.job/00 set=1") {
+	if (*log)[0] != "record-write job/1" || !strings.HasPrefix((*log)[len(*log)-1], "index-write ix.job/12 set=1") {
 		t.Fatalf("create order: %v", *log)
 	}
 
@@ -150,7 +150,7 @@ func TestHintRuleOrder(t *testing.T) {
 
 	del(t, s, "job/1")
 
-	if !slices.Equal(*log, []string{"index-write ix.job/00 set=0 rm=1", "record-delete job/1"}) {
+	if !slices.Equal(*log, []string{"index-write ix.job/12 set=0 rm=1", "record-delete job/1"}) {
 		t.Fatalf("delete order: %v", *log)
 	}
 

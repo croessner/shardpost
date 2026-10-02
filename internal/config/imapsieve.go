@@ -32,8 +32,14 @@ type Learning struct {
 	// date while the worker, the admin API and the purge list the queue
 	// namespace, read also reads from them. read needs a completed
 	// "shardpost index backfill learning"; without its marker the
-	// server behaves as in write mode.
+	// server behaves as in write mode. Default read since 0.47.0: a
+	// cluster without the marker still lists until the backfill ran,
+	// and "shardpost system init" writes the marker of the empty queue.
 	Index string `mapstructure:"index" env:"LEARNING_INDEX" validate:"oneof=off write read"`
+	// LockRetrySeconds is how often a server that does not hold the
+	// learning worker lease tries to take it, with a jitter of ±50 %
+	// (the holder works on once a second and when notified).
+	LockRetrySeconds int64 `mapstructure:"lock_retry_seconds" env:"LEARNING_LOCK_RETRY_SECONDS" validate:"gte=1,lte=3600"`
 	// QueueShards is the shard count of the due queue when its first
 	// writer creates it; an existing queue keeps the count in its head.
 	QueueShards int `mapstructure:"queue_shards" validate:"gte=1,lte=8"`

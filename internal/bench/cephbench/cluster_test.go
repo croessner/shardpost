@@ -52,7 +52,7 @@ func benchConfig() cephstore.Config {
 	return cephstore.Config{
 		MonHost: os.Getenv("SHARDPOST_TEST_CEPH_MON"), User: "admin", Key: os.Getenv("SHARDPOST_TEST_CEPH_KEY"),
 		IndexPool: benchIndex, DataPool: benchData,
-		ChunkSize: chunkSize, FTSShards: ftsShards, ShardSize: mboxShard,
+		ChunkSize: chunkSize, FTSShards: ftsShards, ShardSize: mboxShard, PlacementTool: true,
 	}
 }
 
@@ -80,7 +80,7 @@ func benchStore(t *testing.T) (*cephstore.Store, cephstore.Config) {
 
 		// Marked before any test writes an account (and with it the
 		// account directory) into them.
-		if err := checkPools(s, benchIndex, benchData, "bench-", true); err != nil {
+		if err := checkPools(s, benchIndex, benchData, "", "bench-", true); err != nil {
 			t.Fatalf("mark bench pools: %v", err)
 		}
 	})
@@ -215,7 +215,7 @@ func TestRefusesPoolInUse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := checkPools(s, "shardpost-bench-test-used", benchData, "bench-", true); !errors.Is(err, ErrNotBenchPool) {
+	if err := checkPools(s, "shardpost-bench-test-used", benchData, "", "bench-", true); !errors.Is(err, ErrNotBenchPool) {
 		t.Fatalf("got %v, want a refusal", err)
 	}
 }
@@ -233,7 +233,7 @@ func TestMarkingPerPool(t *testing.T) {
 
 	foreign(t, s, used, true)
 
-	err := checkPools(s, empty, used, "bench-", true)
+	err := checkPools(s, empty, used, "", "bench-", true)
 	if !errors.Is(err, ErrNotBenchPool) || !strings.Contains(err.Error(), used) {
 		t.Fatalf("got %v, want a refusal of %s", err, used)
 	}
@@ -243,14 +243,14 @@ func TestMarkingPerPool(t *testing.T) {
 	}
 
 	// measure names the pool without marker.
-	if err := checkPools(s, empty, used, "bench-", false); err == nil || !strings.Contains(err.Error(), used) {
+	if err := checkPools(s, empty, used, "", "bench-", false); err == nil || !strings.Contains(err.Error(), used) {
 		t.Fatalf("measure check: %v", err)
 	}
 
 	// Once the other user's object is gone, the pool is marked too.
 	foreign(t, s, used, false)
 
-	if err := checkPools(s, empty, used, "bench-", true); err != nil || !marked(t, s, used) {
+	if err := checkPools(s, empty, used, "", "bench-", true); err != nil || !marked(t, s, used) {
 		t.Fatalf("second populate check: %v", err)
 	}
 }
@@ -266,14 +266,14 @@ func TestRBDInitialisedPool(t *testing.T) {
 	defaultObjects(t, s, index, "rbd_info", "rbd_trash")
 	defaultObjects(t, s, data, "rbd_info", "rbd_trash")
 
-	if err := checkPools(s, index, data, "bench-", true); err != nil || !marked(t, s, index) || !marked(t, s, data) {
+	if err := checkPools(s, index, data, "", "bench-", true); err != nil || !marked(t, s, index) || !marked(t, s, data) {
 		t.Fatalf("RBD-initialised pools: %v", err)
 	}
 
 	// Another object in the default namespace still counts.
 	defaultObjects(t, s, other, "rbd_directory")
 
-	if err := checkPools(s, index, other, "bench-", true); !errors.Is(err, ErrNotBenchPool) {
+	if err := checkPools(s, index, other, "", "bench-", true); !errors.Is(err, ErrNotBenchPool) {
 		t.Fatalf("got %v, want a refusal of %s", err, other)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
+	"shardpost/internal/jobs"
 	"shardpost/internal/model"
 )
 
@@ -52,7 +53,78 @@ func (s *Server) GetServerStatus(w http.ResponseWriter, r *http.Request) {
 		st.Store = adminapi.StoreStatus{Ok: false, Error: &msg}
 	}
 
+	if s.o.Placement != nil {
+		state, pool := s.o.Placement()
+		if state == "" {
+			state = placementUnknown
+		}
+
+		st.Placement = &adminapi.Placement{State: state, SystemPool: poolRef(pool)}
+	}
+
 	writeJSON(w, http.StatusOK, st)
+}
+
+// placementUnknown is the placement state of a server that has not
+// checked it.
+const placementUnknown = "unknown"
+
+// ListServers lists the process registrations.
+func (s *Server) ListServers(w http.ResponseWriter, r *http.Request) {
+	if !require(w, r, RoleDiagnose) {
+		return
+	}
+
+	if s.o.KV == nil {
+		writeError(w, http.StatusServiceUnavailable, adminapi.Temporary, "the registrations are not available (no admin store)")
+		return
+	}
+
+	servers, err := jobs.Servers(s.o.KV, time.Now())
+	if err != nil {
+		s.importError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, adminapi.ServerRegistrationList{Servers: serverRegistrations(servers)})
+}
+
+// serverRegistrations maps the registrations for the API.
+func serverRegistrations(servers []jobs.Server) []adminapi.ServerRegistration {
+	out := make([]adminapi.ServerRegistration, 0, len(servers))
+
+	for _, sv := range servers {
+		reg := adminapi.ServerRegistration{Instance: sv.Instance, Version: sv.Version, Caps: sv.Caps, Seen: sv.Seen, Fresh: sv.Fresh,
+			SystemPool: poolRef(sv.SystemPool)}
+
+		if sv.Role != "" {
+			role := sv.Role
+			reg.Role = &role
+		}
+
+		if !sv.StartedAt.IsZero() {
+			at := sv.StartedAt
+			reg.StartedAt = &at
+		}
+
+		if !sv.StoppedAt.IsZero() {
+			at := sv.StoppedAt
+			reg.StoppedAt = &at
+		}
+
+		out = append(out, reg)
+	}
+
+	return out
+}
+
+// poolRef maps a pool reference for the API (nil stays nil).
+func poolRef(p *model.PoolRef) *adminapi.PoolRef {
+	if p == nil {
+		return nil
+	}
+
+	return &adminapi.PoolRef{Id: p.ID, Name: p.Name}
 }
 
 // lookupState resolves an account through Nauthilus for the diagnosis;

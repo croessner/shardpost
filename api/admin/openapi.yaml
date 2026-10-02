@@ -32,8 +32,10 @@ paths:
       summary: Server status
       description: |
         Version, instance, start time, a fingerprint of the effective
-        configuration (secrets excluded) and whether the store answers.
-        Requires the role `diagnose`.
+        configuration (secrets excluded), whether the store answers and
+        where the store's own namespaces live (`placement`: the index
+        pool, or the system pool of `ceph.system_pool`, as the last
+        placement check found it). Requires the role `diagnose`.
       responses:
         "200":
           description: Status of this server instance.
@@ -1521,6 +1523,29 @@ paths:
           description: Replaced.
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/servers:
+    get:
+      operationId: listServers
+      summary: Process registrations
+      description: |
+        The registrations of the processes that use the store: every
+        server, the JMAP push worker, scrubs, backfills and sweeps
+        register at startup and then every minute (`servers/<instance>`
+        in the admin store) with their role and system pool, and record
+        their orderly end (`stopped_at`). A registration seen within
+        three minutes and not stopped is fresh; one not renewed for 24
+        hours is deleted. Reading the registrations lists the admin
+        namespace when `admin.kv_index` is not `read`. Requires the role
+        `diagnose`.
+      responses:
+        "200":
+          description: The registrations, by instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerRegistrationList"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/fts/layout3:
     get:
       operationId: getFTSLayout3
@@ -1548,10 +1573,12 @@ paths:
       summary: Allow layout 3 in the cluster
       description: |
         Sets the cluster mark after checking that exactly `pods` fresh
-        registrations report the capability `fts_layout3`: servers before
-        0.45.0 do not register, so the expected number of pods is the
-        check. A pod replaced less than three minutes ago leaves its
-        predecessor's record fresh; wait and try again. `force` skips the
+        registrations of servers (role `serve`, or no role: before
+        0.47.0) report the capability `fts_layout3`; the push worker,
+        scrubs and backfills are not counted. Servers before 0.45.0 do
+        not register, so the expected number of pods is the check. A pod
+        replaced less than three minutes ago without recording its end
+        leaves its predecessor's record fresh; wait and try again. `force` skips the
         check (recorded in the audit log and in the mark). With the mark,
         servers with `fts.layout: 3` (the default since 0.46.0) create new
         indexes in layout 3 and `fts_layout` jobs may convert to it.
@@ -2517,7 +2544,55 @@ components:
           format: date-time
         fresh:
           type: boolean
-          description: Seen within the last three minutes.
+          description: Seen within the last three minutes and not stopped.
+        role:
+          type: string
+          description: |
+            What the process is: `serve`, `push`, `scrub`, `backfill` or
+            `sweep`; missing in registrations before 0.47.0, which are
+            servers.
+        system_pool:
+          $ref: "#/components/schemas/PoolRef"
+        started_at:
+          type: string
+          format: date-time
+          description: When the process started (since 0.47.0).
+        stopped_at:
+          type: string
+          format: date-time
+          description: When the process ended in order; missing while it runs or after a crash.
+    ServerRegistrationList:
+      type: object
+      required: [servers]
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServerRegistration"
+    PoolRef:
+      type: object
+      required: [id, name]
+      description: A pool by its id (what placement checks compare) and its name.
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+    Placement:
+      type: object
+      required: [state]
+      description: Where the store's own namespaces live, as the last placement check of this server found it.
+      properties:
+        state:
+          type: string
+          description: |
+            `none`: in the index pool; `native`: in the system pool,
+            initialized there; `migrated`: in the system pool, migrated
+            there; `unknown`: the last check could not read the fence or
+            the mark.
+        system_pool:
+          $ref: "#/components/schemas/PoolRef"
     FTSLayout3Status:
       type: object
       required: [enabled, servers]
@@ -2634,6 +2709,8 @@ components:
           description: SHA-256 over the effective configuration without secret values.
         store:
           $ref: "#/components/schemas/StoreStatus"
+        placement:
+          $ref: "#/components/schemas/Placement"
     StoreStatus:
       type: object
       required: [ok]

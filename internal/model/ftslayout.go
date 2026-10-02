@@ -63,13 +63,59 @@ const (
 	// CapFTSLayout3 is the capability of a server that reads and writes
 	// layout 3.
 	CapFTSLayout3 = "fts_layout3"
+	// CapSystemPool is the capability of a process that knows the system
+	// pool (ceph.system_pool, 0.47.0): it routes the store's own
+	// namespaces by it and checks the placement fence and mark.
+	CapSystemPool = "system_pool"
 )
+
+// Roles of a registration: what the registered process is. Every
+// process that writes the store's own namespaces registers for its
+// whole runtime, so that a migration of the system state can tell that
+// nothing runs any more. Records before 0.47.0 have no role; they are
+// servers. The system tools do not register here: their heartbeat would
+// change the very records a migration copies.
+const (
+	RoleServe    = "serve"
+	RolePush     = "push"
+	RoleScrub    = "scrub"
+	RoleBackfill = "backfill"
+	RoleSweep    = "sweep"
+)
+
+// PoolRef names a pool by its id (what placement checks compare: a pool
+// can be renamed) and by its name (for messages).
+type PoolRef struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
 
 // ServerRecord is the value of a server registration.
 type ServerRecord struct {
 	Version string    `json:"version"`
 	Caps    []string  `json:"caps"`
 	Seen    time.Time `json:"seen"`
+	// Role is what the process is (RoleServe, ...); empty in records
+	// before 0.47.0, which are servers.
+	Role string `json:"role,omitempty"`
+	// SystemPool is the system pool the process works with (nil: the
+	// store's own namespaces live in the index pool).
+	SystemPool *PoolRef `json:"system_pool,omitempty"`
+	// StartedAt is when the process started; StoppedAt when it ended in
+	// order. A process that crashed leaves StoppedAt zero; its record
+	// stops counting as running ServerFresh after its last heartbeat.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	StoppedAt time.Time `json:"stopped_at,omitzero"`
+}
+
+// IsServe reports whether the record is the one of a server ("shardpost
+// serve"): role serve, or no role (a record before 0.47.0).
+func (r ServerRecord) IsServe() bool { return r.Role == "" || r.Role == RoleServe }
+
+// Running reports whether the record counts as a running process at
+// now: seen within ServerFresh and not stopped.
+func (r ServerRecord) Running(now time.Time) bool {
+	return now.Sub(r.Seen) <= ServerFresh && r.StoppedAt.IsZero()
 }
 
 // HasCap reports whether the server registered the capability.
@@ -90,8 +136,12 @@ const (
 	// account is entered before its layout 3 objects are created and
 	// removed after its index went back to layout 2, so an empty index
 	// means that no account needs layout 3 any more.
-	FTSLayoutIndexName   = "fts_layout"
-	FTSLayoutIndexShards = 16
+	FTSLayoutIndexName = "fts_layout"
+	// FTSLayoutIndexShards applies to a presence index its first writer
+	// creates; an existing one keeps the count of its head. 256 since
+	// 0.47.0 (16 before): a million accounts with layout 3 are about
+	// 4000 keys per shard.
+	FTSLayoutIndexShards = 256
 	// FTSDueQueue holds the accounts whose index outgrew its shard target
 	// ("ix.fts_due"): id the account, gen FTSDueGen of the generation
 	// that outgrew it. The fts_due worker alone removes entries.

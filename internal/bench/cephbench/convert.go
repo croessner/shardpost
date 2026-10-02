@@ -26,13 +26,17 @@ func MarkLayout3(s *cephstore.Store) error {
 	}
 	defer kv.Close()
 
-	mark, err := json.Marshal(model.FTSLayoutMark{EnabledAt: time.Now().UTC(), Principal: "bench", Pods: 1, Forced: true})
+	mark, err := json.Marshal(model.FTSLayoutMark{EnabledAt: time.Now().UTC(), Principal: benchPrincipal, Pods: 1, Forced: true})
 	if err != nil {
 		return err
 	}
 
 	return kv.Update(model.FTSLayoutMarkKey, func([]byte) ([]byte, error) { return mark, nil })
 }
+
+// benchPrincipal is who the bench records in what it marks: the layout 3
+// mark and its system pool init.
+const benchPrincipal = "bench"
 
 // convertSession is the lock session of the bench's conversions.
 const convertSession = "benchconvert0000"

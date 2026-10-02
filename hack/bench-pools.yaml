@@ -12,8 +12,11 @@
 # ServiceAccount shardpost-bench, which may read exactly that client's
 # Rook secret and the mon endpoints.
 #
+# shardpost-load-system is the bench system pool (bench --system-pool):
+# replicated like the index pool; unused unless the Job passes it.
+#
 #   kubectl --context croessner apply -f hack/bench-pools.yaml
-#   kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data
+#   kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data shardpost-load-system
 #   kubectl --context croessner -n rook-ceph get cephclient shardpost-bench
 #
 # Deleting the resources deletes the pools, everything the bench wrote and
@@ -38,6 +41,22 @@ spec:
     pg_autoscale_mode: "warn"
     pg_num: "32"
     pg_num_min: "32"
+---
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: shardpost-load-system
+  namespace: rook-ceph
+spec:
+  failureDomain: host
+  deviceClass: rgw
+  replicated:
+    size: 3
+    requireSafeReplicaSize: true
+  parameters:
+    pg_autoscale_mode: "warn"
+    pg_num: "16"
+    pg_num_min: "16"
 ---
 apiVersion: ceph.rook.io/v1
 kind: CephBlockPool
@@ -67,7 +86,7 @@ metadata:
 spec:
   caps:
     mon: "allow r"
-    osd: "allow rwx pool=shardpost-load-index, allow rwx pool=shardpost-load-data"
+    osd: "allow rwx pool=shardpost-load-index, allow rwx pool=shardpost-load-data, allow rwx pool=shardpost-load-system"
 ---
 apiVersion: v1
 kind: ServiceAccount

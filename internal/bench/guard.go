@@ -31,15 +31,19 @@ var ErrGuard = errors.New("bench guard")
 // explicitly and different from the production pools of the
 // configuration, and an account prefix starting with RequiredPrefix.
 type Guard struct {
-	// ProdIndex and ProdData are ceph.index_pool and ceph.data_pool of
-	// the configuration (the production pools).
-	ProdIndex, ProdData string
+	// ProdIndex, ProdData and ProdSystem are ceph.index_pool,
+	// ceph.data_pool and ceph.system_pool of the configuration (the
+	// production pools; ProdSystem may be empty).
+	ProdIndex, ProdData, ProdSystem string
 	// Reserved are further pools the bench never uses: the built-in
 	// defaults of ceph.index_pool and ceph.data_pool, which a server
 	// uses when its configuration names none.
 	Reserved []string
-	// BenchIndex and BenchData are the pools given on the command line.
-	BenchIndex, BenchData string
+	// BenchIndex and BenchData are the pools given on the command line,
+	// BenchSystem the bench system pool (--system-pool, may be empty: the
+	// store's own namespaces then live in the bench index pool). The
+	// production system pool is never taken over.
+	BenchIndex, BenchData, BenchSystem string
 	// Prefix is the account name prefix.
 	Prefix string
 }
@@ -52,8 +56,16 @@ func (g Guard) Check() error {
 	}
 
 	prod := append([]string{g.ProdIndex, g.ProdData}, g.Reserved...)
+	if g.ProdSystem != "" {
+		prod = append(prod, g.ProdSystem)
+	}
 
-	for _, bench := range []string{g.BenchIndex, g.BenchData} {
+	benches := []string{g.BenchIndex, g.BenchData}
+	if g.BenchSystem != "" {
+		benches = append(benches, g.BenchSystem)
+	}
+
+	for _, bench := range benches {
 		if slices.Contains(prod, bench) {
 			return fmt.Errorf("%w: pool %q is a production pool (configured or the default)", ErrGuard, bench)
 		}
@@ -61,6 +73,10 @@ func (g Guard) Check() error {
 
 	if g.BenchIndex == g.BenchData {
 		return fmt.Errorf("%w: the index and the data pool must differ (omap needs a replicated pool, the data pool is erasure coded in production)", ErrGuard)
+	}
+
+	if g.BenchSystem != "" && (g.BenchSystem == g.BenchIndex || g.BenchSystem == g.BenchData) {
+		return fmt.Errorf("%w: the system pool must differ from the index and the data pool", ErrGuard)
 	}
 
 	return CheckPrefix(g.Prefix)

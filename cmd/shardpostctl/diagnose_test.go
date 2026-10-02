@@ -20,6 +20,17 @@ import (
 	"shardpost/internal/model"
 )
 
+// registrations is an admin store with the registrations of a server
+// and of a push worker that ended, both with a system pool.
+func registrations() (*memstore.AdminKV, *model.PoolRef) {
+	regs := memstore.NewAdminKV()
+	pool := &model.PoolRef{ID: 7, Name: "shardpost-system"}
+	_ = jobs.Register(regs, jobs.Registration{Instance: "pod-1", Version: "0.47.0", Role: model.RoleServe, SystemPool: pool, StartedAt: time.Now()}, time.Now())
+	_ = jobs.Deregister(regs, jobs.Registration{Instance: "push-1", Version: "0.47.0", Role: model.RolePush, SystemPool: pool, StartedAt: time.Now()}, time.Now())
+
+	return regs, pool
+}
+
 // serveFilled is an admin socket over a memstore where alice has INBOX
 // (two messages), A, B and "Shared" (bob lr).
 func serveFilled(t *testing.T, roles ...string) string {
@@ -55,11 +66,14 @@ func serveFilled(t *testing.T, roles ...string) string {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := jobs.NewManager(memstore.NewAdminKV(), &jobs.Env{Accounts: store, Directory: store, Log: log},
 		jobs.Config{Poll: 10 * time.Millisecond, LeaseTTL: time.Second}, "pod-1", jobs.Kinds(time.Hour)...)
+
+	regs, pool := registrations()
+
 	s := admin.New(admin.Options{Delivery: &delivery.Service{Store: store, Log: log}, Auth: auth.Static{"alice": "pw", "bob": "pw", "carol": "pw"},
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
-		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Directory: store,
+		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Directory: store, KV: regs,
 		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000,
-		SharedPrefix: "Shared/", PublicPrefix: "Public/"})
+		SharedPrefix: "Shared/", PublicPrefix: "Public/", Placement: func() (string, *model.PoolRef) { return "native", pool }})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ended := make(chan struct{})
@@ -91,7 +105,8 @@ func TestDiagnoseCommands(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{[]string{"server", "status"}, []string{"pod-1", "abc", "ok"}},
+		{[]string{"server", "status"}, []string{"pod-1", "abc", "ok", "native (system pool shardpost-system, id 7)"}},
+		{[]string{"server", "list"}, []string{"pod-1", "serve", "push-1", "push", "shardpost-system (id 7)", "true", "false"}},
 		{[]string{"account", "show", "alice"}, []string{"canonical alice", "true, 4 mailboxes", "2 / unlimited messages"}},
 		{[]string{"mailbox", "list", "-limit", "2", "-all", "alice"}, []string{"INBOX", "Shared", "UIDNEXT"}},
 		{[]string{"mailbox", "list", "-limit", "2", "alice"}, []string{"more: -after \"B\""}},

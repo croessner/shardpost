@@ -53,3 +53,17 @@ patches:
         enableCrushUpdates: false
         parameters:
           crush_rule: shardpost-index-200gb
+  # The system pool on the OSDs of the index pool: this cluster tests the
+  # mechanism, not a separation of the hardware. Prepared only; the
+  # servers keep CEPH_SYSTEM_POOL empty until the migration.
+  - patch: |
+      apiVersion: ceph.rook.io/v1
+      kind: CephBlockPool
+      metadata:
+        name: shardpost-system
+      spec:
+        deviceClass: rgw
+        enableCrushUpdates: false
+        parameters:
+          crush_rule: shardpost-index-200gb
+          pg_num_min: "16"

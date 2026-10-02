@@ -44,6 +44,13 @@ spec:
               value: shardpost-index
             - name: CEPH_DATA_POOL
               value: shardpost-data
+            # ceph.system_pool: empty keeps the store's own namespaces in the
+            # index pool. Set it on the server, the push worker and the scrub
+            # CronJob together, and only after "shardpost system init" or
+            # "shardpost system migrate"; a process whose setting does not match
+            # the cluster refuses to start.
+            - name: CEPH_SYSTEM_POOL
+              value: ""
             - name: ROOK_NAMESPACE
               value: rook-ceph
             - name: HTTP_ADDR

@@ -113,7 +113,7 @@ func adminOptions(log *slog.Logger, settings *config.Config, authn auth.Authenti
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
 		ClientScopes:         scopes, AllAccountsClients: all, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
-		StorePing: store.Ping, Jobs: jobsMgr, Directory: store, Learning: learning, Submissions: submissionAdmin(sendq), SearchScanLimit: c.SearchScanLimit,
+		StorePing: store.Ping, Placement: store.Placement, Jobs: jobsMgr, Directory: store, Learning: learning, Submissions: submissionAdmin(sendq), SearchScanLimit: c.SearchScanLimit,
 		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices,
 		KV: kv, FTSLayouts: store, ImportReshardSettle: time.Duration(settings.Jobs.SettleSeconds) * time.Second,
 		ImportReshardSync: time.Duration(settings.FTS.ImportReshardSyncSeconds) * time.Second}

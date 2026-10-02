@@ -114,8 +114,14 @@ test-static-cluster:
 
 # Full test suite including the librados packages, in the lint image. The
 # cephstore tests that need a cluster run against a throwaway single-node
-# cluster that hack/ceph-test-cluster.sh starts inside the container.
+# cluster that hack/ceph-test-cluster.sh starts inside the container. The
+# packages that use the cluster then run a second time with the store's
+# own namespaces in a system pool (ceph.system_pool), on pools of their
+# own: the store first (its tests initialize the system pool), then the
+# server.
 test-docker: lint-image
 	docker run --rm --platform linux/amd64 --user $$(id -u):$$(id -g) \
 		-v $(CURDIR):/src -v shardpost-lint-cache:/cache -w /src --entrypoint sh \
-		$(LINT_IMAGE) hack/ceph-test-cluster.sh go test -race -tags tentacle ./...
+		$(LINT_IMAGE) hack/ceph-test-cluster.sh sh -c 'go test -race -tags tentacle ./... && \
+		export SHARDPOST_TEST_CEPH_INDEX_POOL=$$SHARDPOST_TEST_CEPH_SYS_INDEX_POOL SHARDPOST_TEST_CEPH_SYSTEM_POOL=$$SHARDPOST_TEST_CEPH_SYS_POOL && \
+		go test -race -tags tentacle -count=1 ./internal/cephstore/ && go test -race -tags tentacle -count=1 ./cmd/shardpost/'

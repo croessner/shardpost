@@ -146,8 +146,11 @@ const capabilityEnabled = "yes"
 func run(log *slog.Logger, settings *config.Config, command string) error {
 	log.Info("logging configured", "event", "logging_configured", "log_level", settings.Logging.Level)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	shutdownTracing := telemetry.Setup(ctx, settings.Telemetry.ServiceName, log, settings.Telemetry)
 	defer func() { _ = shutdownTracing(context.Background()) }()
@@ -176,6 +179,8 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		return err
 	}
 
+	lost := watchPlacement(&cfg, command, cancel)
+
 	store, err := cephstore.Open(cfg, log)
 	if err != nil {
 		return err
@@ -186,22 +191,85 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		rotate(store)
 	}
 
+	err = dispatch(ctx, log, settings, command, store, programs, quotaSvc)
+
+	select {
+	case lerr := <-lost:
+		return fmt.Errorf("system placement lost, the store must not be used any more: %w", lerr)
+	default:
+		return err
+	}
+}
+
+// watchPlacement makes a server and the push worker check the placement
+// of the store's own namespaces every minute: a contradiction read
+// positively (a migration began, the system pool was withdrawn) turns
+// readiness off, cancels the run (the server drains) and is reported on
+// the returned channel, so that the process ends with an error. The
+// short-lived commands check it once, when the store opens.
+func watchPlacement(cfg *cephstore.Config, command string, cancel func()) <-chan error {
+	lost := make(chan error, 1)
+
+	if command != commandServe && command != commandPush {
+		return lost
+	}
+
+	cfg.OnPlacementLost = func(err error) {
+		draining.Store(true)
+
+		select {
+		case lost <- err:
+		default:
+		}
+
+		cancel()
+	}
+
+	return lost
+}
+
+// dispatch runs the command on the opened store. Every command that
+// writes the store's own namespaces is registered for its runtime with
+// its role; "index show" only reads.
+func dispatch(ctx context.Context, log *slog.Logger, settings *config.Config, command string, store *cephstore.Store,
+	programs *extprograms.Runner, quotaSvc *quota.Service,
+) error {
 	if run, ok := scrubCommand(ctx, command); ok {
-		return run(store, log, settings)
+		role := model.RoleScrub
+		if strings.HasPrefix(command, commandScrubSweep) {
+			role = model.RoleSweep
+		}
+
+		return registered(ctx, log, store, role, func() error { return run(store, log, settings) })
 	}
 
 	if backfill, ok := backfillCommand(command); ok {
-		return backfill(store, log, settings)
+		if strings.HasPrefix(command, "index show") {
+			return backfill(store, log, settings)
+		}
+
+		return registered(ctx, log, store, model.RoleBackfill, func() error { return backfill(store, log, settings) })
 	}
 
 	// "shardpost push" runs the JMAP push worker.
 	if command == commandPush {
-		return runPush(ctx, log, settings, store)
+		return registered(ctx, log, store, model.RolePush, func() error { return runPush(ctx, log, settings, store) })
 	}
 
 	logFTSLayout(log, settings, store)
 
 	return serve(ctx, log, settings, store, programs, quotaSvc)
+}
+
+// registered runs fn while the process is registered with role.
+func registered(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string, fn func() error) error {
+	_, stop, err := startRegistration(ctx, log, store, role)
+	if err != nil {
+		return err
+	}
+	defer stop()
+
+	return fn()
 }
 
 // textSettings applies the text preparation settings. Load validated
@@ -226,13 +294,15 @@ func textSettings(log *slog.Logger, settings *config.Config) error {
 // cephConfig maps the configuration onto the RADOS store settings.
 func cephConfig(settings *config.Config) cephstore.Config {
 	return cephstore.Config{
-		User:      settings.Ceph.User,
-		Key:       settings.Ceph.Key,
-		MonHost:   settings.Ceph.MonHost,
-		IndexPool: settings.Ceph.IndexPool,
-		DataPool:  settings.Ceph.DataPool,
-		ChunkSize: settings.Ceph.ChunkSize,
-		FTSShards: int(settings.Server.FtsShards),
+		User:          settings.Ceph.User,
+		Key:           settings.Ceph.Key,
+		MonHost:       settings.Ceph.MonHost,
+		IndexPool:     settings.Ceph.IndexPool,
+		DataPool:      settings.Ceph.DataPool,
+		SystemPool:    settings.Ceph.SystemPool,
+		ClientOptions: settings.Ceph.ClientOptions,
+		ChunkSize:     settings.Ceph.ChunkSize,
+		FTSShards:     int(settings.Server.FtsShards),
 		FTS: cephstore.FTSConfig{Layout: settings.FTS.Layout, ShardsMin: settings.FTS.ShardsMin, ShardsMax: settings.FTS.ShardsMax,
 			ShardTargetKeys: settings.FTS.ShardTargetKeys, AutoReshard: settings.FTS.AutoReshard,
 			FrozenWait: time.Duration(settings.FTS.FrozenWaitSeconds) * time.Second},
@@ -565,25 +635,49 @@ func scrubCommand(ctx context.Context, command string) (func(*cephstore.Store, *
 	return nil, false
 }
 
-// startRegistration opens the server's own admin store and registers the
-// server in it (servers/<instance>) now and every model.ServerHeartbeat,
-// whether or not this server runs jobs or an admin listener (N8, F8d).
-// The returned function stops the heartbeat and closes the admin store;
-// serve defers it, so both happen before the store closes.
-func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store) (*cephstore.AdminKV, func(), error) {
+// processStart is when the process started (the registration's
+// started_at).
+var processStart = time.Now()
+
+// registrationInstance is the name of the registration: the host name
+// for a server (the pod), the host name with the role and a random part
+// for every other process, which may run in the pod of a server.
+func registrationInstance(role string) string {
+	host, _ := os.Hostname()
+	if role == model.RoleServe {
+		return host
+	}
+
+	return host + "-" + role + "-" + randomSuffix()
+}
+
+// startRegistration opens an admin store of its own and registers the
+// process in it (servers/<instance>, with its role and system pool)
+// now and every model.ServerHeartbeat, whether or not a server runs jobs
+// or an admin listener (N8, F8d). The returned function stops the
+// heartbeat, records the orderly end and closes the admin store; serve
+// defers it, so all of it happens before the store closes.
+func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string) (*cephstore.AdminKV, func(), error) {
+	pool, err := store.SystemPool()
+	if err != nil {
+		return nil, nil, fmt.Errorf("registration: %w", err)
+	}
+
 	kv, err := store.AdminKV()
 	if err != nil {
 		return nil, nil, fmt.Errorf("admin store: %w", err)
 	}
 
-	instance, _ := os.Hostname()
-	ctx, cancel := context.WithCancel(ctx)
+	reg := jobs.Registration{Instance: registrationInstance(role), Version: version.Version, Role: role, SystemPool: pool, StartedAt: processStart}
+	// The heartbeat goes on until the returned function is called, not
+	// until the signal: a server that drains still writes.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
 
-		jobs.RunRegistration(ctx, kv, instance, version.Version, model.ServerHeartbeat, log.With("component", "registration"))
+		jobs.RunRegistration(ctx, kv, reg, model.ServerHeartbeat, log.With("component", "registration", "role", role))
 	}()
 
 	return kv, func() {

@@ -47,6 +47,7 @@ ceph:
   mon_host: "` + os.Getenv("SHARDPOST_TEST_CEPH_MON") + `"
   index_pool: "` + os.Getenv("SHARDPOST_TEST_CEPH_INDEX_POOL") + `"
   data_pool: "` + os.Getenv("SHARDPOST_TEST_CEPH_DATA_POOL") + `"
+  system_pool: "` + os.Getenv("SHARDPOST_TEST_CEPH_SYSTEM_POOL") + `"
 `
 
 	path := filepath.Join(dir, "shardpost.yaml")
@@ -196,6 +197,8 @@ func TestServeLeavesStoreDrained(t *testing.T) {
 func serveStore(t *testing.T, settings *config.Config) *cephstore.Store {
 	t.Helper()
 
+	initSystemPool(t, settings)
+
 	store, err := cephstore.Open(cephConfig(settings), quietLog())
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +207,34 @@ func serveStore(t *testing.T, settings *config.Config) *cephstore.Store {
 	t.Cleanup(store.Close)
 
 	return store
+}
+
+// initSystemPool initializes the system pool of the configuration, if
+// it names one (a no-op on a pool that is initialized already), so that
+// the package also runs with a system pool on its own.
+func initSystemPool(t *testing.T, settings *config.Config) {
+	t.Helper()
+
+	cfg := cephConfig(settings)
+	if cfg.SystemPool == "" {
+		return
+	}
+
+	cfg.PlacementTool = true
+
+	tool, err := cephstore.Open(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		tool.Drain(10 * time.Second)
+		tool.Close()
+	}()
+
+	if _, err := tool.InitSystem(cephstore.InitOptions{By: "serve tests", Wait: true}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // waitRegistered waits for this server's registration (with jobs
