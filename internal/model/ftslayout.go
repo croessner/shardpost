@@ -231,6 +231,13 @@ type FTSLayoutMarked interface {
 	FTSLayout3Enabled() (bool, error)
 }
 
+// ErrIndexUnavailable is wrapped by the errors of a full-text index
+// that cannot be used now: an object of the generation its layout record
+// names is missing (repair: fts_rebuild), a conversion holds it frozen
+// longer than fts.frozen_wait_seconds, its generation changed too often.
+// IMAP answers NO [UNAVAILABLE], LMTP a temporary failure.
+var ErrIndexUnavailable = errors.New("full-text index temporarily unavailable")
+
 // ErrFTSLayoutMark refuses a conversion to layout 3 without the cluster
 // mark.
 var ErrFTSLayoutMark = errors.New("layout 3 is not enabled in this cluster (shardpostctl fts layout3 enable)")

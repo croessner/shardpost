@@ -1355,7 +1355,7 @@ orphans do not wait for a frozen index.
 **Reading.** A search reads over the generation the view cached. A
 missing object or a foreign `!g` makes it read `L` again: in another
 generation it starts over (at most twice), in the same one it fails
-(IMAP `NO`, JMAP `serverFail`). A frozen object of the generation `L`
+(IMAP `NO [UNAVAILABLE]`, JMAP `serverFail`). A frozen object of the generation `L`
 still names is read on — its state is complete. The dictionary ranges
 of the trigrams that fall into one object are read in one operation per
 round, so with D = 1 a substring lookup costs one read per round.

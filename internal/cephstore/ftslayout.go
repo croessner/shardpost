@@ -86,13 +86,13 @@ var (
 	// errFTSShardMissing: an object of the generation the layout record
 	// names is missing (or carries another generation); the scrub reports
 	// it, fts_rebuild repairs it.
-	errFTSShardMissing = errors.New("full-text index object missing, repair with fts_rebuild")
+	errFTSShardMissing = fmt.Errorf("%w: object missing, repair with fts_rebuild", model.ErrIndexUnavailable)
 	// errFTSFrozen: a conversion holds the account's posting objects
 	// frozen longer than fts.frozen_wait_seconds.
-	errFTSFrozen = errors.New("the full-text index is being converted, try again later")
+	errFTSFrozen = fmt.Errorf("%w: it is being converted, try again later", model.ErrIndexUnavailable)
 	// errFTSRetries: the index generation changed more often than one
 	// operation follows it.
-	errFTSRetries = errors.New("the full-text index generation changed too often, try again later")
+	errFTSRetries = fmt.Errorf("%w: its generation changed too often, try again later", model.ErrIndexUnavailable)
 )
 
 // ftsGen is one generation in the layout record: the current one, a
