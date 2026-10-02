@@ -44,6 +44,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [Scaling stage R4 measurement](reports/2026-10-02-r4-measurement.md): what an account costs in Ceph (bench of 1000 accounts); the full-text index makes 92 % of the operations per delivery.
 - [ShardPost 0.43.0](reports/2026-10-02-shardpost-0.43.0.md): delayed JMAP send (scaling stage R5), bench tool for stage R4.
 - [ShardPost 0.42.0](reports/2026-10-02-shardpost-0.42.0.md): intents, scrub and purge without per-account listings, sweep (scaling stage R3).
 - [ShardPost 0.41.0](reports/2026-10-01-shardpost-0.41.0.md): auth cache with cluster-wide flush, configurable Nauthilus client, JMAP wait queue and limits.
