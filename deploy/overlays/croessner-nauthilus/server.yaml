@@ -223,3 +223,7 @@ jmap:
     # server runs the worker over the one partition.
     delayed:
       max_delay_seconds: 604800
+fts:
+  # Full-text layout 3 (0.45.0): the cluster mark was set on 2026-10-02
+  # with both servers on 0.45.0; new indexes are created in layout 3.
+  layout: 3
