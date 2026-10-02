@@ -4,8 +4,8 @@
 # operations. Same image and Ceph credentials as the server; nothing goes
 # through IMAP, LMTP or Nauthilus.
 #
-# Before: the bench pools exist (hack/bench-pools.yaml) and the CephClient
-# shardpost may use them (docs/operations/bench.md, "Ceph permissions").
+# Before: the bench pools and the bench credentials exist
+# (hack/bench-pools.yaml; docs/operations/bench.md, "Ceph permissions").
 # CEPH_INDEX_POOL and CEPH_DATA_POOL below are the PRODUCTION pools: the
 # bench refuses to run when --index-pool or --data-pool names one of them.
 #
@@ -34,7 +34,7 @@ spec:
         app.kubernetes.io/name: shardpost-bench
     spec:
       restartPolicy: Never
-      serviceAccountName: shardpost-server # reads the Rook secret of client.shardpost
+      serviceAccountName: shardpost-bench # reads the Rook secret of client.shardpost-bench
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -50,7 +50,7 @@ spec:
                  "--prefix", "bench-", "--accounts", "1000", "--messages", "50", "--parallel", "16"]
           env: &env
             - name: CEPH_USER
-              value: shardpost
+              value: shardpost-bench # caps on the bench pools only
             - name: CEPH_INDEX_POOL
               value: shardpost-index # production: the guard compares with it
             - name: CEPH_DATA_POOL

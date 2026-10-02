@@ -1,16 +1,25 @@
-# Bench pools for "shardpost bench" (scaling plan, stage R4; see
-# docs/operations/bench.md). They mirror deploy/base/ceph/pools.yaml: the
-# index pool replicated (size 3, failure domain host, HDD), the data pool
-# erasure coded 2+1, so the measurement sees the production layout.
-# Rook creates a CRUSH rule per pool with the same failure domain and
-# device class as for the production pools.
+# Bench pools and credentials for "shardpost bench" (scaling plan, stage
+# R4; see docs/operations/bench.md). The pools mirror the production
+# layout of the croessner overlay: the index pool replicated (size 3), the
+# data pool erasure coded 2+1, failure domain host, both on the device
+# class rgw (OSD 3/4/5), where the production CRUSH rules
+# shardpost-index-200gb and shardpost-data-200gb place the production
+# pools. Rook creates a rule per pool with that class and failure domain.
 #
-#   kubectl --context croessner -n rook-ceph apply -f hack/bench-pools.yaml
+# The bench gets a cephx user of its own, client.shardpost-bench, whose
+# caps name the bench pools only: it cannot reach the production pools,
+# and the production client keeps its caps. The Job runs under the
+# ServiceAccount shardpost-bench, which may read exactly that client's
+# Rook secret and the mon endpoints.
+#
+#   kubectl --context croessner apply -f hack/bench-pools.yaml
 #   kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data
+#   kubectl --context croessner -n rook-ceph get cephclient shardpost-bench
 #
-# Deleting the CRs deletes the pools and everything the bench wrote:
+# Deleting the resources deletes the pools, everything the bench wrote and
+# the bench credentials:
 #
-#   kubectl --context croessner -n rook-ceph delete -f hack/bench-pools.yaml
+#   kubectl --context croessner delete -f hack/bench-pools.yaml
 apiVersion: ceph.rook.io/v1
 kind: CephBlockPool
 metadata:
@@ -18,7 +27,7 @@ metadata:
   namespace: rook-ceph
 spec:
   failureDomain: host
-  deviceClass: hdd
+  deviceClass: rgw
   replicated:
     size: 3
     requireSafeReplicaSize: true
@@ -32,9 +41,55 @@ metadata:
   namespace: rook-ceph
 spec:
   failureDomain: host
-  deviceClass: hdd
+  deviceClass: rgw
   erasureCoded:
     dataChunks: 2
     codingChunks: 1
   parameters:
     pg_autoscale_mode: "on"
+---
+# x for the object classes (cls_lock), mon r for the pool statistics.
+apiVersion: ceph.rook.io/v1
+kind: CephClient
+metadata:
+  name: shardpost-bench
+  namespace: rook-ceph
+spec:
+  caps:
+    mon: "allow r"
+    osd: "allow rwx pool=shardpost-load-index, allow rwx pool=shardpost-load-data"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shardpost-bench
+  namespace: shardpost
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shardpost-bench-credentials-reader
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rook-ceph-client-shardpost-bench"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["rook-ceph-mon-endpoints"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shardpost-bench-credentials-reader
+  namespace: rook-ceph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: shardpost-bench-credentials-reader
+subjects:
+  - kind: ServiceAccount
+    name: shardpost-bench
+    namespace: shardpost

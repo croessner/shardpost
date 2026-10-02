@@ -50,14 +50,17 @@ done.
 
 ## Bench pools
 
-The pools mirror the production pools of
-[`deploy/base/ceph/pools.yaml`](../../deploy/base/ceph/pools.yaml): the
+The pools mirror the production layout of the croessner overlay: the
 index pool replicated with size 3, the data pool erasure coded 2+1, both
-on HDD with failure domain host. Rook creates a CRUSH rule for each pool
-with that failure domain and device class, as it does for production.
+with failure domain host on the device class `rgw` (OSD 3/4/5), where the
+production CRUSH rules `shardpost-index-200gb` and
+`shardpost-data-200gb` place the production pools. Rook creates a CRUSH
+rule for each bench pool with that failure domain and device class.
+[`hack/bench-pools.yaml`](../../hack/bench-pools.yaml) holds the pools
+and the bench credentials (below):
 
 ```bash
-kubectl --context croessner -n rook-ceph apply -f hack/bench-pools.yaml
+kubectl --context croessner apply -f hack/bench-pools.yaml
 kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data
 ```
 
@@ -75,10 +78,11 @@ ceph osd pool application enable shardpost-load-index shardpost
 ceph osd pool application enable shardpost-load-data shardpost
 ```
 
-Delete them afterwards, with everything the bench wrote:
+Delete them afterwards, with everything the bench wrote and the bench
+credentials:
 
 ```bash
-kubectl --context croessner -n rook-ceph delete -f hack/bench-pools.yaml
+kubectl --context croessner delete -f hack/bench-pools.yaml
 # without Rook (needs mon_allow_pool_delete):
 ceph osd pool rm shardpost-load-index shardpost-load-index --yes-i-really-really-mean-it
 ceph osd pool rm shardpost-load-data shardpost-load-data --yes-i-really-really-mean-it
@@ -86,42 +90,23 @@ ceph osd pool rm shardpost-load-data shardpost-load-data --yes-i-really-really-m
 
 ## Ceph permissions
 
-The Job uses the server's cephx user `client.shardpost`, read from the
-Rook secret `rook-ceph-client-shardpost` through the ServiceAccount
-`shardpost-server`, as the server and the scrub CronJob do. Its caps
-cover the production pools only; for the bench they need the two bench
-pools as well:
+The bench runs as a cephx user of its own, `client.shardpost-bench`,
+whose caps name the bench pools only, so the bench cannot reach the
+production pools at all and the production client keeps its caps:
 
 ```
 mon 'allow r'
-osd 'allow rwx pool=shardpost-index, allow rwx pool=shardpost-data,
-     allow rwx pool=shardpost-load-index, allow rwx pool=shardpost-load-data'
+osd 'allow rwx pool=shardpost-load-index, allow rwx pool=shardpost-load-data'
 ```
 
 `x` is needed for the object classes (`cls_lock`); `mon 'allow r'` for
-the pool statistics. Extend the CephClient for the run; Rook updates the
-caps of the existing key, the servers keep working:
-
-```bash
-kubectl --context croessner -n rook-ceph patch cephclient shardpost --type merge -p \
-  '{"spec":{"caps":{"osd":"allow rwx pool=shardpost-index, allow rwx pool=shardpost-data, allow rwx pool=shardpost-load-index, allow rwx pool=shardpost-load-data"}}}'
-kubectl --context croessner -n rook-ceph get cephclient shardpost -o jsonpath='{.spec.caps.osd}'
-```
-
-and set them back afterwards (`deploy/base/ceph/cephclient.yaml` holds
-the original caps; the next deploy of the overlay restores them as
-well):
-
-```bash
-kubectl --context croessner -n rook-ceph patch cephclient shardpost --type merge -p \
-  '{"spec":{"caps":{"osd":"allow rwx pool=shardpost-index, allow rwx pool=shardpost-data"}}}'
-```
-
-A stricter variant is a CephClient of its own (say `shardpost-bench`)
-whose caps name the bench pools only, so the bench cannot reach the
-production pools at all. It then needs a Role that lets a ServiceAccount
-of the Job read `rook-ceph-client-shardpost-bench`, and in the Job
-`CEPH_USER=shardpost-bench` and `ROOK_CLIENT_SECRET=rook-ceph-client-shardpost-bench`.
+the pool statistics. Rook creates the key from the CephClient
+`shardpost-bench` and stores it in the Secret
+`rook-ceph-client-shardpost-bench`. The Job runs under the ServiceAccount
+`shardpost-bench`, whose Role may read exactly that Secret and the
+ConfigMap `rook-ceph-mon-endpoints`; with `CEPH_USER=shardpost-bench` the
+server derives the Secret's name. All of it is in
+`hack/bench-pools.yaml`.
 
 ## Running the Job
 
