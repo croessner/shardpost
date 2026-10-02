@@ -216,6 +216,83 @@ func TestRefusesPoolInUse(t *testing.T) {
 	}
 }
 
+// TestMarkingPerPool: an empty pool is marked, a pool with any object and
+// no marker is refused, and the error names the pool.
+func TestMarkingPerPool(t *testing.T) {
+	s, _ := benchStore(t)
+
+	const empty, used = "shardpost-bench-test-p1", "shardpost-bench-test-p2"
+
+	if err := s.WithConn(func(conn *rados.Conn) error { return createPools(conn, empty, used) }); err != nil {
+		t.Fatal(err)
+	}
+
+	foreign(t, s, used, true)
+
+	err := checkPools(s, empty, used, "bench-", true)
+	if !errors.Is(err, ErrNotBenchPool) || !strings.Contains(err.Error(), used) {
+		t.Fatalf("got %v, want a refusal of %s", err, used)
+	}
+
+	if !marked(t, s, empty) || marked(t, s, used) {
+		t.Fatalf("markers: %s %v, %s %v", empty, marked(t, s, empty), used, marked(t, s, used))
+	}
+
+	// measure names the pool without marker.
+	if err := checkPools(s, empty, used, "bench-", false); err == nil || !strings.Contains(err.Error(), used) {
+		t.Fatalf("measure check: %v", err)
+	}
+
+	// Once the other user's object is gone, the pool is marked too.
+	foreign(t, s, used, false)
+
+	if err := checkPools(s, empty, used, "bench-", true); err != nil || !marked(t, s, used) {
+		t.Fatalf("second populate check: %v", err)
+	}
+}
+
+// foreign writes (or removes) an object of somebody else in a pool.
+func foreign(t *testing.T, s *cephstore.Store, pool string, write bool) {
+	t.Helper()
+
+	err := s.WithConn(func(conn *rados.Conn) error {
+		ioctx, err := openNS(conn, pool, "someone")
+		if err != nil {
+			return err
+		}
+		defer ioctx.Destroy()
+
+		if write {
+			return ioctx.WriteFull("data", []byte("x"))
+		}
+
+		return ioctx.Delete("data")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// marked reports whether a pool carries the bench marker.
+func marked(t *testing.T, s *cephstore.Store, pool string) bool {
+	t.Helper()
+
+	var ok bool
+
+	err := s.WithConn(func(conn *rados.Conn) error {
+		var err error
+
+		ok, err = hasMarker(conn, pool)
+
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return ok
+}
+
 // TestObjecterLogFormat checks that the client library writes the
 // objecter log in the format ParseObjecterLog reads.
 func TestObjecterLogFormat(t *testing.T) {
@@ -263,9 +340,9 @@ func TestObjecterLogFormat(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	c, err := bench.ParseObjecterLog(f, ids, func(ns string) bool { return ns == account })
-	if err != nil {
-		t.Fatal(err)
+	c, unparsed, err := bench.ParseObjecterLog(f, ids, func(ns string) bool { return ns == account })
+	if err != nil || unparsed != 0 {
+		t.Fatalf("%d lines of an unknown format, %v", unparsed, err)
 	}
 
 	if reg := c[benchIndex][bench.ClassRegistry]; reg == nil || reg.Writes == 0 {

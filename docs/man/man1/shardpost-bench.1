@@ -42,8 +42,11 @@ when either names
 .I ceph.index_pool
 or
 .I ceph.data_pool
-of the configuration, when both name the same pool, or when the
-configuration names no production pools to compare with;
+of the configuration (file or environment) or their built-in defaults
+.B shardpost\-index
+and
+.BR shardpost\-data ,
+or when both name the same pool;
 .IP \(bu 2
 with an account prefix that does not start with
 .BR bench\- ;
@@ -57,11 +60,13 @@ written by the first
 .BR populate );
 .IP \(bu 2
 .B populate
-on an index pool without the marker that holds an account directory
+on a pool without the marker that holds any object, in the index pool
+in particular an account directory
 .RB ( ix.accounts/head
 in
 .BR ~accounts ):
-a pool some server uses.
+a pool somebody uses. The marker is written, pool by pool, only into a
+pool that is empty.
 .PP
 Everything the store keeps beside the accounts (the account directory
 in
@@ -169,6 +174,8 @@ The objecter log
 10, one line per operation) is written to
 .B \-\-trace\-dir
 and parsed when the round ends; it holds about 2.5 KB per operation.
+Lines of a format the parser does not know are not counted; the report
+says how many there were.
 .SS RocksDB and onode caches
 The OSD's caches come from Ceph itself; the bench does not ask for
 them. While the bench pools are filled, on a host with the admin key
@@ -227,7 +234,8 @@ The account name prefix; it must start with
 .BI \-\-parallel " n"
 Accounts worked on at the same time; for
 .BR measure ,
-the inventory's readers (16).
+the inventory's readers (4). Run it off-peak: the bench pools share
+the OSDs with production.
 .TP
 .BI \-\-sizes " dist"
 The message size distribution,
@@ -310,9 +318,16 @@ The cephx user of the configuration needs
 .B osd 'allow rwx pool=<bench index pool>, allow rwx pool=<bench data pool>'
 and
 .B mon 'allow r'.
-No admin API role is involved. In Kubernetes the Job reads the key the
-way the server does (the Rook secret through the ServiceAccount
-.BR shardpost\-server ).
+and nothing on the production pools. No admin API role is involved. In
+Kubernetes the bench runs as
+.B client.shardpost\-bench
+(the CephClient in
+.BR hack/bench\-pools.yaml ,
+caps on the bench pools only) and reads its key the way the server does,
+from the Rook secret
+.BR rook\-ceph\-client\-shardpost\-bench ,
+through the ServiceAccount
+.BR shardpost\-bench .
 .SH OUTPUT
 A table on standard output (standard error with
 .BR "\-\-json \-" ),

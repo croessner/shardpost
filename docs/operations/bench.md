@@ -34,14 +34,21 @@ The bench writes into the bench pools only, and it refuses to start
 (exit status 2) when
 
 - `--index-pool` or `--data-pool` is missing, names `ceph.index_pool` or
-  `ceph.data_pool` of the configuration, or both name the same pool, or
-  the configuration names no production pools;
+  `ceph.data_pool` of the configuration (file or environment) or their
+  built-in defaults `shardpost-index` and `shardpost-data`, or both name
+  the same pool;
 - the account prefix does not start with `bench-`;
-- `measure` finds no bench marker (`~bench/marker`, written by the first
-  `populate`) in the pools;
-- `populate` finds an index pool without the marker that holds an
-  account directory (`~accounts/ix.accounts/head`), that is a pool a
-  server uses.
+- `measure` finds a pool without the bench marker (`~bench/marker`,
+  written by the first `populate`);
+- `populate` finds a pool without the marker that holds any object, in
+  the index pool in particular an account directory
+  (`~accounts/ix.accounts/head`): a pool somebody uses. A missing marker
+  is written only into a pool that is empty, pool by pool.
+
+The name comparison is only as good as the configuration the bench is
+given; the marker check does not depend on it. The Job sets the
+production names in its environment, so check them against the server's
+configuration before the run ([below](#before-the-run)).
 
 The store's own objects (the account directory in `~accounts`) are
 written into the bench pools; `~admin` and `~accounts` of the production
@@ -64,6 +71,34 @@ kubectl --context croessner apply -f hack/bench-pools.yaml
 kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data
 ```
 
+### PG count
+
+The bench pools get a fixed PG count from the start (`pg_num` and
+`pg_num_min` 32, autoscaler on `warn`). With the autoscaler alone a new
+pool starts with few PGs and is split while `populate` fills it; the
+splits move data and RocksDB contents around and distort the latency and
+cache figures. 32 PGs per pool on the three `rgw` OSDs put 32 PG shards
+of each pool on every OSD (replica size 3, and 2+1 chunks), 64 for both:
+enough to spread the load, and well below `mon_max_pg_per_osd` (250)
+together with the production and RGW pools there. Check the headroom and
+the result:
+
+```bash
+ceph osd df tree | awk 'NR==1 || /rgw/'          # column PGS per OSD
+ceph config get mon mon_max_pg_per_osd
+ceph osd pool get shardpost-load-index pg_num
+ceph osd pool get shardpost-load-data pg_num
+```
+
+With more headroom, 64 per pool gives a finer spread; keep both pools
+the same for comparable numbers. In production the PG count belongs to
+the scale: the scaling plan expects 4096 to 16384 PGs per pool for
+millions of accounts (spread over correspondingly many OSDs, at about
+100 to 200 PG shards per OSD). The bench's objects per account and the
+OSD count give `pg_num` for a target size; set it with `pg_num_min` (or
+`bulk true`) so that the autoscaler does not start small and split under
+load.
+
 Without Rook, in a shell with the admin key, take the rule and the
 profile of the production pools:
 
@@ -72,8 +107,12 @@ ceph osd pool get shardpost-index crush_rule
 ceph osd pool get shardpost-data erasure_code_profile
 ceph osd pool get shardpost-data crush_rule
 ceph osd pool create shardpost-load-index 32 32 replicated <index rule>
+ceph osd pool set shardpost-load-index pg_autoscale_mode warn
+ceph osd pool set shardpost-load-index pg_num_min 32
 ceph osd pool set shardpost-load-index size 3
 ceph osd pool create shardpost-load-data 32 32 erasure <profile> <data rule>
+ceph osd pool set shardpost-load-data pg_autoscale_mode warn
+ceph osd pool set shardpost-load-data pg_num_min 32
 ceph osd pool application enable shardpost-load-index shardpost
 ceph osd pool application enable shardpost-load-data shardpost
 ```
@@ -108,6 +147,73 @@ ConfigMap `rook-ceph-mon-endpoints`; with `CEPH_USER=shardpost-bench` the
 server derives the Secret's name. All of it is in
 `hack/bench-pools.yaml`.
 
+## Before the run
+
+The bench pools sit on the same `rgw` OSDs as production, so the run
+competes with the mail service for them.
+
+- **Off-peak.** Start it when the mail load is low; `populate` with the
+  Job's `--parallel 4` (the default) keeps four deliveries in flight.
+- **Three hosts.** Failure domain host needs the `rgw` OSDs on three
+  different hosts, or the PGs of the bench pools stay undersized:
+
+  ```bash
+  ceph osd tree | grep -E 'host|rgw'
+  ceph osd crush rule dump shardpost-load-index | jq '.steps'
+  ```
+
+- **Production pool names.** The server reads its pools from
+  `server.yaml` in the generated ConfigMap `shardpost-server-config-<hash>`;
+  its name changes with every edit, so the Job cannot reference it and
+  sets the names itself. Compare them:
+
+  ```bash
+  cm=$(kubectl --context croessner -n shardpost get deployment shardpost-server \
+    -o jsonpath='{.spec.template.spec.volumes[?(@.name=="server-config")].configMap.name}')
+  kubectl --context croessner -n shardpost get configmap "$cm" -o jsonpath='{.data.server\.yaml}' \
+    | sed -n '/^ceph:/,/^[a-z]/p'
+  grep -A1 -E 'CEPH_(INDEX|DATA)_POOL' hack/bench-job.yaml
+  ```
+
+  Whatever the names, the bench refuses a pool that holds objects but
+  no bench marker, and its cephx user can reach the bench pools only.
+- **Network.** The NetworkPolicies of the overlay
+  (`shardpost-server-ingress`, `shardpost-admin-ingress`) select
+  `app.kubernetes.io/name: shardpost-server` and restrict ingress only;
+  nothing in `deploy/` limits egress, so the bench pod
+  (`app.kubernetes.io/name: shardpost-bench`) reaches the monitors, the
+  OSDs and the Kubernetes API (for the Rook secret) as the scrub
+  CronJob does. Check for policies from outside the repository before
+  the run:
+
+  ```bash
+  kubectl --context croessner -n shardpost get networkpolicy
+  kubectl --context croessner get globalnetworkpolicies.crd.projectcalico.org 2>/dev/null
+  ```
+
+## Watching and stopping
+
+While it runs, watch the cluster and the OSD latency:
+
+```bash
+watch -n 10 'ceph -s; ceph osd perf | sort -k3 -n | tail -5'
+ceph osd pool stats shardpost-load-index
+ceph osd pool stats shardpost-load-data
+```
+
+Stop it when commit/apply latencies of the `rgw` OSDs climb well above
+their usual values, `ceph -s` reports slow ops, or the mail service
+slows down:
+
+```bash
+kubectl --context croessner -n shardpost delete job shardpost-bench
+```
+
+The pod gets SIGTERM; `populate` stops after the deliveries in flight,
+and a later run continues where it stopped. A smaller `--parallel` lowers
+the load of the next run. The Job's `activeDeadlineSeconds` (4 hours)
+ends a run that goes on too long the same way.
+
 ## Running the Job
 
 [`hack/bench-job.yaml`](../../hack/bench-job.yaml) runs `populate` as an
@@ -129,7 +235,9 @@ kubectl --context croessner -n shardpost delete job shardpost-bench
 
 `populate` resumes where it stopped: delete the Job and apply it again;
 complete accounts are skipped. Several Jobs with disjoint `--first`
-ranges fill in parallel. To grow the accounts, run it again with a
+ranges fill in parallel; each needs a Job name of its own (copy the
+manifest and change `metadata.name`, say `shardpost-bench-2`), and
+together they multiply the load. To grow the accounts, run it again with a
 higher `--messages`; to measure a part of many accounts, use
 `measure --sample-every 10`.
 

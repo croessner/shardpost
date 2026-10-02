@@ -15,14 +15,14 @@ import (
 )
 
 func TestGuard(t *testing.T) {
-	ok := Guard{ProdIndex: "shardpost-index", ProdData: "shardpost-data",
+	ok := Guard{ProdIndex: "shardpost-index", ProdData: "shardpost-data", Reserved: []string{"shardpost-default-data"},
 		BenchIndex: "shardpost-load-index", BenchData: "shardpost-load-data", Prefix: "bench-"}
 	if err := ok.Check(); err != nil {
 		t.Fatalf("valid guard refused: %v", err)
 	}
 
 	cases := map[string]func(g *Guard){
-		"no production pools":      func(g *Guard) { g.ProdIndex = "" },
+		"reserved default":         func(g *Guard) { g.BenchData = "shardpost-default-data" },
 		"no bench index pool":      func(g *Guard) { g.BenchIndex = "" },
 		"no bench data pool":       func(g *Guard) { g.BenchData = "" },
 		"index is production":      func(g *Guard) { g.BenchIndex = "shardpost-index" },
@@ -215,9 +215,9 @@ const objecterSample = `2026-10-02T05:02:28.905+0000 7f41263ca040 10 client.4122
 func TestParseObjecterLog(t *testing.T) {
 	pools := map[int64]string{1: "idx", 2: "data"}
 
-	c, err := ParseObjecterLog(strings.NewReader(objecterSample), pools, nil)
-	if err != nil {
-		t.Fatal(err)
+	c, unparsed, err := ParseObjecterLog(strings.NewReader(objecterSample), pools, nil)
+	if err != nil || unparsed != 0 {
+		t.Fatal(unparsed, err)
 	}
 
 	if got := *c["idx"][ClassMbox]; got != (OpCount{Ops: 2, Reads: 1, Writes: 1}) {
@@ -236,18 +236,27 @@ func TestParseObjecterLog(t *testing.T) {
 		t.Errorf("total %+v (pool 3 must be skipped)", got)
 	}
 
-	only, err := ParseObjecterLog(strings.NewReader(objecterSample), pools, func(ns string) bool { return IsAccount(ns, "bench-") })
+	rates, total := Rates(c, 5)
+	if total.Ops != 1 || rates["idx"][ClassMbox].Ops != 0.4 {
+		t.Errorf("rates %+v %+v", rates, total)
+	}
+}
+
+func TestParseObjecterLogFilterAndUnknownLines(t *testing.T) {
+	pools := map[int64]string{1: "idx", 2: "data"}
+
+	only, _, err := ParseObjecterLog(strings.NewReader(objecterSample), pools, func(ns string) bool { return IsAccount(ns, "bench-") })
 	if err != nil || only.Total().Ops != 4 || only["idx"][ClassStoreIx] != nil {
 		t.Errorf("namespace filter: %+v %v", only.Total(), err)
 	}
 
-	if _, err := ParseObjecterLog(strings.NewReader("x _op_submit oid broken\n"), pools, nil); err == nil {
-		t.Error("an unexpected line was accepted")
-	}
+	// A line of an unknown format is counted, not taken, and does not
+	// stop the rest.
+	broken := "x _op_submit oid broken\n" + objecterSample
 
-	rates, total := Rates(c, 5)
-	if total.Ops != 1 || rates["idx"][ClassMbox].Ops != 0.4 {
-		t.Errorf("rates %+v %+v", rates, total)
+	all, unparsed, err := ParseObjecterLog(strings.NewReader(broken), pools, nil)
+	if err != nil || unparsed != 1 || all.Total().Ops != 5 {
+		t.Errorf("unknown line: %d unparsed, %+v, %v", unparsed, all.Total(), err)
 	}
 }
 

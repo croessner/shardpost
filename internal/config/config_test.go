@@ -44,6 +44,16 @@ func TestFileEnvDefaults(t *testing.T) {
 
 // TestUserAttributesOptIn: personal span attributes are off unless the
 // operator switches them on.
+func TestDefault(t *testing.T) {
+	if Default("ceph.index_pool") != "shardpost-index" || Default("ceph.data_pool") != "shardpost-data" {
+		t.Errorf("pool defaults %q %q", Default("ceph.index_pool"), Default("ceph.data_pool"))
+	}
+
+	if Default("server.fts_shards") != "" || Default("no.such.key") != "" {
+		t.Error("a key without a string default returned one")
+	}
+}
+
 func TestUserAttributesOptIn(t *testing.T) {
 	p := configFile(t, "server:\n  imap_addr: ':2143'\n")
 

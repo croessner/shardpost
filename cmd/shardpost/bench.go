@@ -66,7 +66,7 @@ func (f *benchFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.indexPool, "index-pool", "", "bench index pool (replicated; required, must not be ceph.index_pool or ceph.data_pool)")
 	fs.StringVar(&f.dataPool, "data-pool", "", "bench data pool (erasure coded like production; required, must not be a production pool)")
 	fs.StringVar(&f.prefix, "prefix", bench.RequiredPrefix, "account name prefix (must start with "+bench.RequiredPrefix+")")
-	fs.IntVar(&f.parallel, "parallel", 16, "accounts worked on at the same time")
+	fs.IntVar(&f.parallel, "parallel", 4, "accounts worked on at the same time")
 	fs.StringVar(&f.jsonOut, "json", "", "write the report as JSON to this file (- for standard output)")
 	fs.StringVar(&f.sizes, "sizes", bench.DefaultSizes, "message size distribution <weight>:<min>-<max>,...")
 	fs.Uint64Var(&f.seed, "seed", 1, "seed of the message generator")
@@ -106,6 +106,7 @@ func runBench(pre, args []string) int {
 // benchSetup checks the guard and opens the store on the bench pools.
 func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, f *benchFlags) (bench.Guard, cephstore.Config, *cephstore.Store, int) {
 	g := bench.Guard{ProdIndex: settings.Ceph.IndexPool, ProdData: settings.Ceph.DataPool,
+		Reserved:   []string{config.Default("ceph.index_pool"), config.Default("ceph.data_pool")},
 		BenchIndex: f.indexPool, BenchData: f.dataPool, Prefix: f.prefix}
 	if err := g.Check(); err != nil {
 		log.Error("bench: refused", "err", err)

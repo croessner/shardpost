@@ -32,7 +32,12 @@ spec:
     size: 3
     requireSafeReplicaSize: true
   parameters:
-    pg_autoscale_mode: "on"
+    # A fixed PG count from the start: with the autoscaler the pools would
+    # start with few PGs and split while populate runs, which disturbs the
+    # latency and RocksDB figures (docs/operations/bench.md, "PG count").
+    pg_autoscale_mode: "warn"
+    pg_num: "32"
+    pg_num_min: "32"
 ---
 apiVersion: ceph.rook.io/v1
 kind: CephBlockPool
@@ -46,7 +51,12 @@ spec:
     dataChunks: 2
     codingChunks: 1
   parameters:
-    pg_autoscale_mode: "on"
+    # A fixed PG count from the start: with the autoscaler the pools would
+    # start with few PGs and split while populate runs, which disturbs the
+    # latency and RocksDB figures (docs/operations/bench.md, "PG count").
+    pg_autoscale_mode: "warn"
+    pg_num: "32"
+    pg_num_min: "32"
 ---
 # x for the object classes (cls_lock), mon r for the pool statistics.
 apiVersion: ceph.rook.io/v1

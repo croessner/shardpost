@@ -7,7 +7,17 @@
 # Before: the bench pools and the bench credentials exist
 # (hack/bench-pools.yaml; docs/operations/bench.md, "Ceph permissions").
 # CEPH_INDEX_POOL and CEPH_DATA_POOL below are the PRODUCTION pools: the
-# bench refuses to run when --index-pool or --data-pool names one of them.
+# bench refuses to run when --index-pool or --data-pool names one of them
+# (or the built-in names shardpost-index/shardpost-data). The server reads
+# them from server.yaml in the generated ConfigMap
+# shardpost-server-config-<hash>, which has no fixed name a Job could
+# reference; check that they agree before the run (docs/operations/bench.md,
+# "Before the run"). Independently of the names, the bench refuses any
+# pool that holds objects but no bench marker.
+#
+# Run it off-peak and watch the cluster (ceph -s, ceph osd perf); stop it
+# with "kubectl delete job shardpost-bench" (populate ends on SIGTERM and
+# resumes when the Job is applied again).
 #
 #   kubectl --context croessner -n shardpost apply -f hack/bench-job.yaml
 #   kubectl --context croessner -n shardpost logs -f job/shardpost-bench -c populate
@@ -26,7 +36,7 @@ metadata:
     app.kubernetes.io/name: shardpost-bench
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 43200
+  activeDeadlineSeconds: 14400 # 4 h; populate resumes when applied again
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -47,7 +57,7 @@ spec:
           image: docker.io/chrroessner/shardpost:0.43.0 # pin the digest of the release
           args: ["bench", "populate",
                  "--index-pool", "shardpost-load-index", "--data-pool", "shardpost-load-data",
-                 "--prefix", "bench-", "--accounts", "1000", "--messages", "50", "--parallel", "16"]
+                 "--prefix", "bench-", "--accounts", "1000", "--messages", "50", "--parallel", "4"]
           env: &env
             - name: CEPH_USER
               value: shardpost-bench # caps on the bench pools only

@@ -43,3 +43,22 @@ func TestBenchRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestBenchRefusesDefaultPools: the built-in pool names are refused even
+// when the configuration names other production pools.
+func TestBenchRefusesDefaultPools(t *testing.T) {
+	t.Setenv("SHARDPOST_CONFIG", "")
+	t.Setenv("IMAP_CONFIG", "")
+	t.Setenv("CEPH_INDEX_POOL", "prod-index")
+	t.Setenv("CEPH_DATA_POOL", "prod-data")
+
+	for _, args := range [][]string{
+		{"populate", "--index-pool", "shardpost-index", "--data-pool", "load-data"},
+		{"measure", "--index-pool", "load-index", "--data-pool", "shardpost-data"},
+		{"populate", "--index-pool", "prod-index", "--data-pool", "load-data"},
+	} {
+		if code := runBench(nil, args); code != benchRefused {
+			t.Errorf("%v: exit %d, want %d", args, code, benchRefused)
+		}
+	}
+}

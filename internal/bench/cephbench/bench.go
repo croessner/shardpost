@@ -217,6 +217,10 @@ func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accoun
 
 	r.SessionOpen, err = m.open(ctx, "Store.User(), ListMailboxes(), Info(INBOX), Close()", openSession)
 
+	if m.unparsed > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("%d objecter log lines had an unknown format and were not counted; the operation counts are too low", m.unparsed))
+	}
+
 	return err
 }
 
@@ -225,6 +229,8 @@ type measurer struct {
 	o        MeasureOptions
 	accounts []string
 	traces   int
+	// unparsed counts the objecter log lines of an unknown format.
+	unparsed int
 }
 
 // round runs fn once per account (and unit) on the untraced store,
@@ -324,7 +330,10 @@ func (m *measurer) traced(ctx context.Context, units int, fn func(s *cephstore.S
 	}
 	defer func() { _ = f.Close() }()
 
-	return bench.ParseObjecterLog(f, ids, nil)
+	ops, unparsed, err := bench.ParseObjecterLog(f, ids, nil)
+	m.unparsed += unparsed
+
+	return ops, err
 }
 
 // deliveries runs the two delivery rounds.

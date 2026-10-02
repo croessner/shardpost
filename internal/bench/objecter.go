@@ -2,7 +2,6 @@ package bench
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"regexp"
 	"strconv"
@@ -110,9 +109,12 @@ func (o OpCounts) Total() OpCount {
 
 // ParseObjecterLog counts the operations of an objecter log by pool and
 // class. pools maps pool ids to names (other pools are skipped); keep
-// selects namespaces (nil: all).
-func ParseObjecterLog(r io.Reader, pools map[int64]string, keep func(ns string) bool) (OpCounts, error) {
+// selects namespaces (nil: all). It also returns the number of
+// submissions it could not read (a format the parser does not know);
+// they are not counted, and the caller reports them.
+func ParseObjecterLog(r io.Reader, pools map[int64]string, keep func(ns string) bool) (OpCounts, int, error) {
 	counts := OpCounts{}
+	unparsed := 0
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 
@@ -124,7 +126,8 @@ func ParseObjecterLog(r io.Reader, pools map[int64]string, keep func(ns string) 
 
 		m := opSubmit.FindStringSubmatch(line)
 		if m == nil {
-			return nil, fmt.Errorf("objecter log: unexpected line %q", line)
+			unparsed++
+			continue
 		}
 
 		id, _ := strconv.ParseInt(m[2], 10, 64)
@@ -137,7 +140,7 @@ func ParseObjecterLog(r io.Reader, pools map[int64]string, keep func(ns string) 
 		counts.add(pool, Classify(m[1]), classifySteps(m[4]))
 	}
 
-	return counts, sc.Err()
+	return counts, unparsed, sc.Err()
 }
 
 // classifySteps counts one operation from its step list.

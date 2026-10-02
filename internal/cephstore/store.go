@@ -277,10 +277,13 @@ func (s *Store) Drain(timeout time.Duration) bool {
 		close(done)
 	}()
 
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+
 	select {
 	case <-done:
 		return true
-	case <-time.After(timeout):
+	case <-t.C:
 		return false
 	}
 }

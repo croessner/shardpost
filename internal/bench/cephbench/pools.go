@@ -16,17 +16,21 @@ import (
 
 	"shardpost/internal/bench"
 	"shardpost/internal/cephstore"
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 )
 
 // The marker: an object in a namespace of its own in both bench pools,
-// written by the first populate. measure refuses pools without it, and
-// populate refuses an index pool without it that holds an account
-// directory (a pool some server uses).
+// written by the first populate into each pool that is still empty.
+// measure refuses pools without it, and populate refuses a pool without
+// it that holds anything (a pool some server uses).
 const (
 	MarkerNamespace = "~bench"
 	markerOID       = "marker"
 	directoryHead   = "ix.accounts/head"
+	// guardSite labels the guard's listing (one object at most) in
+	// imapceph_rados_listings_total.
+	guardSite = "bench_guard"
 )
 
 // ErrNotBenchPool is returned for a pool without the bench marker.
@@ -47,42 +51,78 @@ func checkConfig(g bench.Guard, cfg cephstore.Config) error {
 	return nil
 }
 
-// checkPools verifies that both pools exist and carry the marker. With
-// create a missing marker is written, unless the index pool holds an
-// account directory without one.
+// checkPools verifies that both pools exist and carry the marker, pool
+// by pool. With create a missing marker is written into a pool that is
+// empty; a pool without marker that holds any object (an index pool
+// with an account directory in particular) is refused: some server or
+// other tool uses it.
 func checkPools(s *cephstore.Store, index, data, prefix string, create bool) error {
 	return s.WithConn(func(conn *rados.Conn) error {
-		marked := 0
-
 		for _, pool := range []string{index, data} {
-			ok, err := hasMarker(conn, pool)
-			if err != nil {
+			if err := checkPool(conn, pool, pool == index, prefix, create); err != nil {
 				return err
 			}
-
-			if ok {
-				marked++
-			}
 		}
 
-		if marked == 2 {
-			return nil
-		}
+		return nil
+	})
+}
 
-		if !create {
-			return fmt.Errorf("%w: %s/%s carry no bench marker (run bench populate first)", ErrNotBenchPool, index, data)
-		}
+// checkPool checks (and with create marks) one pool.
+func checkPool(conn *rados.Conn, pool string, index bool, prefix string, create bool) error {
+	ok, err := hasMarker(conn, pool)
+	if err != nil || ok {
+		return err
+	}
 
-		if used, err := hasDirectory(conn, index); err != nil || used {
+	if !create {
+		return fmt.Errorf("%w: %s carries no bench marker (run bench populate first)", ErrNotBenchPool, pool)
+	}
+
+	if index {
+		if used, err := hasDirectory(conn, pool); err != nil || used {
 			if err == nil {
-				err = fmt.Errorf("%w: %s holds an account directory but no bench marker; it is in use", ErrNotBenchPool, index)
+				err = fmt.Errorf("%w: %s holds an account directory but no bench marker; it is in use", ErrNotBenchPool, pool)
 			}
 
 			return err
 		}
+	}
 
-		return writeMarkers(conn, prefix, index, data)
-	})
+	if used, err := hasObjects(conn, pool); err != nil || used {
+		if err == nil {
+			err = fmt.Errorf("%w: %s holds objects but no bench marker; it is in use", ErrNotBenchPool, pool)
+		}
+
+		return err
+	}
+
+	return writeMarkers(conn, prefix, pool)
+}
+
+// hasObjects reports whether a pool holds any object, in any namespace.
+// The listing stops at the first object, so it is cheap for a pool in
+// use as well as for an empty one (whose placement groups are empty).
+// The cluster's pool statistics would lag behind a pool that was just
+// written to.
+func hasObjects(conn *rados.Conn, pool string) (bool, error) {
+	ioctx, err := openNS(conn, pool, rados.AllNamespaces)
+	if err != nil {
+		return false, err
+	}
+	defer ioctx.Destroy()
+
+	metrics.RadosListings.WithLabelValues(guardSite).Inc()
+
+	it, err := ioctx.Iter()
+	if err != nil {
+		return false, fmt.Errorf("list pool %q: %w", pool, err)
+	}
+	defer it.Close()
+
+	found := it.Next()
+
+	return found, it.Err()
 }
 
 func openNS(conn *rados.Conn, pool, ns string) (*rados.IOContext, error) {

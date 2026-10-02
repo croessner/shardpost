@@ -13,6 +13,7 @@ package bench
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"shardpost/internal/model"
@@ -33,6 +34,10 @@ type Guard struct {
 	// ProdIndex and ProdData are ceph.index_pool and ceph.data_pool of
 	// the configuration (the production pools).
 	ProdIndex, ProdData string
+	// Reserved are further pools the bench never uses: the built-in
+	// defaults of ceph.index_pool and ceph.data_pool, which a server
+	// uses when its configuration names none.
+	Reserved []string
 	// BenchIndex and BenchData are the pools given on the command line.
 	BenchIndex, BenchData string
 	// Prefix is the account name prefix.
@@ -42,17 +47,15 @@ type Guard struct {
 // Check returns nil when the bench may run, else an error wrapping
 // ErrGuard that says why not.
 func (g Guard) Check() error {
-	if g.ProdIndex == "" || g.ProdData == "" {
-		return fmt.Errorf("%w: the configuration names no production pools (ceph.index_pool, ceph.data_pool) to compare with", ErrGuard)
-	}
-
 	if g.BenchIndex == "" || g.BenchData == "" {
 		return fmt.Errorf("%w: the bench pools must be given explicitly (--index-pool, --data-pool)", ErrGuard)
 	}
 
+	prod := append([]string{g.ProdIndex, g.ProdData}, g.Reserved...)
+
 	for _, bench := range []string{g.BenchIndex, g.BenchData} {
-		if bench == g.ProdIndex || bench == g.ProdData {
-			return fmt.Errorf("%w: pool %q is a production pool of the configuration", ErrGuard, bench)
+		if slices.Contains(prod, bench) {
+			return fmt.Errorf("%w: pool %q is a production pool (configured or the default)", ErrGuard, bench)
 		}
 	}
 
