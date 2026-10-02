@@ -28,6 +28,9 @@ const (
 	MarkerNamespace = "~bench"
 	markerOID       = "marker"
 	directoryHead   = "ix.accounts/head"
+	// fenceOID is the placement fence of an index pool whose system
+	// state lives in a system pool (cephstore.FenceOID).
+	fenceOID = cephstore.FenceOID
 	// guardSite labels the guard's listing (one object at most) in
 	// imapceph_rados_listings_total.
 	guardSite = "bench_guard"
@@ -37,29 +40,54 @@ const (
 var ErrNotBenchPool = errors.New("not a bench pool")
 
 // checkConfig verifies the guard and that the store configuration uses
-// exactly the pools the guard checked.
+// exactly the pools the guard checked, and that the store was opened as
+// a tool (it checks the placement itself, once the pools are set up).
 func checkConfig(g bench.Guard, cfg cephstore.Config) error {
 	if err := g.Check(); err != nil {
 		return err
 	}
 
-	if cfg.IndexPool != g.BenchIndex || cfg.DataPool != g.BenchData {
-		return fmt.Errorf("%w: the store is configured for %q/%q, not for the bench pools %q/%q",
-			bench.ErrGuard, cfg.IndexPool, cfg.DataPool, g.BenchIndex, g.BenchData)
+	if cfg.IndexPool != g.BenchIndex || cfg.DataPool != g.BenchData || cfg.SystemPool != g.BenchSystem {
+		return fmt.Errorf("%w: the store is configured for %q/%q/%q, not for the bench pools %q/%q/%q",
+			bench.ErrGuard, cfg.IndexPool, cfg.DataPool, cfg.SystemPool, g.BenchIndex, g.BenchData, g.BenchSystem)
+	}
+
+	if !cfg.PlacementTool {
+		return fmt.Errorf("%w: the bench store must be opened in tool mode", bench.ErrGuard)
 	}
 
 	return nil
 }
 
-// checkPools verifies that both pools exist and carry the marker, pool
-// by pool. With create a missing marker is written into a pool that is
-// empty; a pool without marker that holds any object (an index pool
-// with an account directory in particular) is refused: some server or
-// other tool uses it.
-func checkPools(s *cephstore.Store, index, data, prefix string, create bool) error {
+// Pool kinds of checkPool.
+const (
+	poolIndex = iota
+	poolData
+	poolSystem
+)
+
+// checkPools verifies that the pools exist and carry the marker, pool
+// by pool (the system pool only when one is given). With create a
+// missing marker is written into a pool that is empty; a pool without
+// marker that holds any object (an index or system pool with an account
+// directory or a placement fence in particular) is refused: some server
+// or other tool uses it.
+func checkPools(s *cephstore.Store, index, data, system, prefix string, create bool) error {
 	return s.WithConn(func(conn *rados.Conn) error {
-		for _, pool := range []string{index, data} {
-			if err := checkPool(conn, pool, pool == index, prefix, create); err != nil {
+		pools := []struct {
+			name string
+			kind int
+		}{{index, poolIndex}, {data, poolData}}
+
+		if system != "" {
+			pools = append(pools, struct {
+				name string
+				kind int
+			}{system, poolSystem})
+		}
+
+		for _, p := range pools {
+			if err := checkPool(conn, p.name, p.kind, prefix, create); err != nil {
 				return err
 			}
 		}
@@ -69,7 +97,7 @@ func checkPools(s *cephstore.Store, index, data, prefix string, create bool) err
 }
 
 // checkPool checks (and with create marks) one pool.
-func checkPool(conn *rados.Conn, pool string, index bool, prefix string, create bool) error {
+func checkPool(conn *rados.Conn, pool string, kind int, prefix string, create bool) error {
 	ok, err := hasMarker(conn, pool)
 	if err != nil || ok {
 		return err
@@ -79,10 +107,10 @@ func checkPool(conn *rados.Conn, pool string, index bool, prefix string, create 
 		return fmt.Errorf("%w: %s carries no bench marker (run bench populate first)", ErrNotBenchPool, pool)
 	}
 
-	if index {
-		if used, err := hasDirectory(conn, pool); err != nil || used {
+	if kind != poolData {
+		if used, err := hasDirectory(conn, pool, kind); err != nil || used {
 			if err == nil {
-				err = fmt.Errorf("%w: %s holds an account directory but no bench marker; it is in use", ErrNotBenchPool, pool)
+				err = fmt.Errorf("%w: %s holds an account directory or a placement fence but no bench marker; it is in use", ErrNotBenchPool, pool)
 			}
 
 			return err
@@ -103,6 +131,8 @@ func checkPool(conn *rados.Conn, pool string, index bool, prefix string, create 
 // rbdInitObjects are the objects "rbd pool init" leaves in the default
 // namespace of a new pool; Rook runs it for every CephBlockPool whose
 // application is rbd (the default). They do not make a pool one in use.
+// The objects of the store's own namespaces do: a pool that holds them
+// without the bench marker belongs to a server.
 var rbdInitObjects = map[string]bool{"rbd_info": true, "rbd_trash": true}
 
 // hasObjects reports whether a pool holds any object, in any namespace,
@@ -169,8 +199,16 @@ func hasMarker(conn *rados.Conn, pool string) (bool, error) {
 	return exists(conn, pool, MarkerNamespace, markerOID)
 }
 
-func hasDirectory(conn *rados.Conn, pool string) (bool, error) {
-	return exists(conn, pool, model.AccountsNamespace, directoryHead)
+// hasDirectory reports whether a pool shows that a server uses it: an
+// account directory (index or system pool) or a placement fence (an
+// index pool whose system state lives in a system pool).
+func hasDirectory(conn *rados.Conn, pool string, kind int) (bool, error) {
+	ok, err := exists(conn, pool, model.AccountsNamespace, directoryHead)
+	if err != nil || ok || kind != poolIndex {
+		return ok, err
+	}
+
+	return exists(conn, pool, model.AdminNamespace, fenceOID)
 }
 
 func writeMarkers(conn *rados.Conn, prefix string, pools ...string) error {

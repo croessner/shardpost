@@ -2,7 +2,9 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -175,30 +177,123 @@ func readyLater(t *testing.T, kv *memstore.AdminKV, now time.Time) {
 }
 
 // TestRunRegistration (N8): the registration runs on its own (no job
-// system needed) until its context ends.
+// system needed) until its context ends, renews "seen" at every beat
+// and records its orderly end.
 func TestRunRegistration(t *testing.T) {
+	for _, role := range []string{model.RoleServe, model.RolePush, model.RoleScrub, model.RoleBackfill, model.RoleSweep} {
+		t.Run(role, func(t *testing.T) { runRegistration(t, role) })
+	}
+}
+
+func runRegistration(t *testing.T, role string) {
 	kv := memstore.NewAdminKVMode(model.KVIndexOff)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	started := time.Now().Add(-time.Hour)
+	reg := Registration{Instance: "pod-a", Version: "0.47.0", Role: role,
+		SystemPool: &model.PoolRef{ID: 7, Name: "shardpost-system"}, StartedAt: started}
 
 	go func() {
-		RunRegistration(ctx, kv, "pod-a", "0.45.0", 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		RunRegistration(ctx, kv, reg, 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		close(done)
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := kv.Get(model.ServersPrefix + "pod-a"); err == nil {
-			break
-		}
+	first := waitBeats(t, kv)
 
-		time.Sleep(5 * time.Millisecond)
+	if rec, _ := readRecord(t, kv, "pod-a"); !rec.Seen.After(first) || !sameRegistration(rec, reg) || !rec.Running(time.Now()) {
+		t.Fatalf("no heartbeat or wrong record: %+v", rec)
 	}
 
 	cancel()
 	<-done
 
-	if _, err := kv.Get(model.ServersPrefix + "pod-a"); err != nil {
-		t.Errorf("not registered: %v", err)
+	if rec, _ := readRecord(t, kv, "pod-a"); rec.StoppedAt.IsZero() || rec.Running(time.Now()) {
+		t.Errorf("orderly end not recorded: %+v", rec)
+	}
+
+	servers, err := Servers(kv, time.Now())
+	if err != nil || len(servers) != 1 || servers[0].Fresh {
+		t.Errorf("a stopped process is listed as fresh: %+v %v", servers, err)
+	}
+}
+
+// sameRegistration reports whether rec holds what reg registers.
+func sameRegistration(rec model.ServerRecord, reg Registration) bool {
+	return rec.Role == reg.Role && rec.SystemPool != nil && *rec.SystemPool == *reg.SystemPool &&
+		rec.StartedAt.Equal(reg.StartedAt.UTC()) && rec.HasCap(model.CapSystemPool)
+}
+
+// waitBeats waits for two heartbeats of pod-a and returns the first.
+func waitBeats(t *testing.T, kv model.AdminKV) time.Time {
+	t.Helper()
+
+	var first time.Time
+
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		rec, ok := readRecord(t, kv, "pod-a")
+
+		switch {
+		case !ok:
+		case first.IsZero():
+			first = rec.Seen
+		case rec.Seen.After(first):
+			return first
+		}
+	}
+
+	return first
+}
+
+func readRecord(t *testing.T, kv model.AdminKV, instance string) (model.ServerRecord, bool) {
+	t.Helper()
+
+	b, err := kv.Get(model.ServersPrefix + instance)
+	if err != nil {
+		return model.ServerRecord{}, false
+	}
+
+	var rec model.ServerRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+
+	return rec, true
+}
+
+// TestLayout3ReadyCountsServers: the push worker, scrubs and backfills
+// register too; only servers (role serve, or none before 0.47.0) count
+// for "fts layout3 enable --pods".
+func TestLayout3ReadyCountsServers(t *testing.T) {
+	kv := memstore.NewAdminKVMode(model.KVIndexOff)
+	now := time.Now()
+
+	if err := RegisterServer(kv, "pod-a", "0.47.0", now); err != nil {
+		t.Fatal(err)
+	}
+
+	// A record before 0.47.0: no role.
+	old, _ := json.Marshal(model.ServerRecord{Version: "0.46.0", Caps: []string{model.CapFTSLayout3}, Seen: now.UTC()})
+
+	if err := kv.Update(model.ServersPrefix+"pod-b", func([]byte) ([]byte, error) { return old, nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	for i, role := range []string{model.RolePush, model.RoleScrub, model.RoleBackfill, model.RoleSweep} {
+		if err := Register(kv, Registration{Instance: fmt.Sprintf("tool-%d", i), Version: "0.47.0", Role: role, StartedAt: now}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	servers, err := Servers(kv, now)
+	if err != nil || len(servers) != 6 {
+		t.Fatalf("%d registrations, %v", len(servers), err)
+	}
+
+	if err := Layout3Ready(servers, 2); err != nil {
+		t.Errorf("two servers and four other processes: %v", err)
+	}
+
+	if err := Layout3Ready(servers, 6); !errors.Is(err, ErrNotReady) {
+		t.Errorf("the other roles were counted: %v", err)
 	}
 }

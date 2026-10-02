@@ -37,18 +37,47 @@ var (
 
 // testConfig is the store configuration of the cluster tests: small
 // chunks and index shards, so that a few messages already span several
-// of each.
+// of each. With SHARDPOST_TEST_CEPH_SYSTEM_POOL (the second run of make
+// test-docker) the store's own namespaces live in a system pool, which
+// testStore initializes first.
 func testConfig() Config {
 	return Config{
-		MonHost:   os.Getenv("SHARDPOST_TEST_CEPH_MON"),
-		User:      "admin",
-		Key:       os.Getenv("SHARDPOST_TEST_CEPH_KEY"),
-		IndexPool: os.Getenv("SHARDPOST_TEST_CEPH_INDEX_POOL"),
-		DataPool:  os.Getenv("SHARDPOST_TEST_CEPH_DATA_POOL"),
-		ChunkSize: 1024,
-		FTSShards: 4,
-		ShardSize: 4,
+		MonHost:    os.Getenv("SHARDPOST_TEST_CEPH_MON"),
+		User:       "admin",
+		Key:        os.Getenv("SHARDPOST_TEST_CEPH_KEY"),
+		IndexPool:  os.Getenv("SHARDPOST_TEST_CEPH_INDEX_POOL"),
+		DataPool:   os.Getenv("SHARDPOST_TEST_CEPH_DATA_POOL"),
+		SystemPool: os.Getenv("SHARDPOST_TEST_CEPH_SYSTEM_POOL"),
+		ChunkSize:  1024,
+		FTSShards:  4,
+		ShardSize:  4,
 	}
+}
+
+// initTestSystemPool initializes the system pool of the test
+// configuration (a no-op without one, and on a pool initialized by an
+// earlier run of the package).
+func initTestSystemPool() error {
+	cfg := testConfig()
+	if cfg.SystemPool == "" {
+		return nil
+	}
+
+	cfg.PlacementTool = true
+
+	s, err := Open(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		s.Drain(10 * time.Second)
+		s.Close()
+	}()
+
+	_, err = s.InitSystem(InitOptions{By: "cephstore tests"})
+
+	return err
 }
 
 // clusterStore returns the store of the test cluster (shared by the
@@ -61,6 +90,10 @@ func testStore(t *testing.T) *Store {
 	}
 
 	clusterOnce.Do(func() {
+		if clusterErr = initTestSystemPool(); clusterErr != nil {
+			return
+		}
+
 		clusterStore, clusterErr = Open(testConfig(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	})
 

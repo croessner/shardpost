@@ -231,10 +231,46 @@ var (
 		Namespace: namespace, Subsystem: subsystemJMAP, Name: "limit_total",
 		Help: "JMAP requests that met a full limit, by limit and outcome (waited, rejected).",
 	}, []string{labelLimit, labelOutcome})
+	// SystemPlacement is 1 for the placement of the store's own
+	// namespaces the process found at its last check (none: index pool,
+	// native or migrated: system pool, unknown: the last check could not
+	// read the fence or the mark) and 0 for the others.
+	SystemPlacement = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "system_placement",
+		Help: "Placement of the store's own namespaces at the last check (1 for the current state: none, native, migrated, unknown).",
+	}, []string{labelState})
+	// RadosInflight is the number of timed RADOS operations (those of
+	// RadosOps) that have started and not finished.
+	RadosInflight = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemRados, Name: "inflight_ops",
+		Help: "Timed RADOS operations (those of imapceph_rados_op_seconds) in flight.",
+	})
 )
 
-// Timer measures one RADOS operation.
+// Placement states of SystemPlacement.
+var placementStates = []string{"none", "native", "migrated", "unknown"}
+
+// SetSystemPlacement sets SystemPlacement to state.
+func SetSystemPlacement(state string) {
+	for _, s := range placementStates {
+		v := 0.0
+		if s == state {
+			v = 1
+		}
+
+		SystemPlacement.WithLabelValues(s).Set(v)
+	}
+}
+
+// Timer measures one RADOS operation; it is counted in RadosInflight
+// until the returned function is called.
 func Timer(op string) func() {
 	start := time.Now()
-	return func() { RadosOps.WithLabelValues(op).Observe(time.Since(start).Seconds()) }
+
+	RadosInflight.Inc()
+
+	return func() {
+		RadosInflight.Dec()
+		RadosOps.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	}
 }

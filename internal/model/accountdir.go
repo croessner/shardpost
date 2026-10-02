@@ -96,6 +96,25 @@ func CheckNamespace(name string) error {
 	}
 }
 
+// SystemNamespace reports whether ns is one of the namespaces of the
+// store-wide state that ceph.system_pool moves out of the index pool:
+// the admin store, the account directory with its indexes and queues,
+// the indexes of the learning queue and the server metadata. The public
+// namespace is an account and stays in the index pool.
+func SystemNamespace(ns string) bool {
+	switch ns {
+	case AdminNamespace, AccountsNamespace, LearningNamespace, ServerNamespace:
+		return true
+	default:
+		return false
+	}
+}
+
+// SystemNamespaces are the namespaces SystemNamespace reports.
+func SystemNamespaces() []string {
+	return []string{AdminNamespace, AccountsNamespace, LearningNamespace, ServerNamespace}
+}
+
 // InDirectory reports whether name is registered in the account
 // directory once it has a registry: accounts and the public namespace,
 // never the store's own namespaces.

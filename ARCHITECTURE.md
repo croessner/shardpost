@@ -61,6 +61,16 @@ a PodDisruptionBudget, network rules and a scrub CronJob. All replicas
 use the same pools. Topology spreading improves placement, but is no
 guarantee against correlated failures.
 
+The pools are an index pool (the accounts' omap state, replicated), a
+data pool (message blobs, erasure coded) and, optionally, a system pool
+(`ceph.system_pool`): the small, hot store-wide state of admin store,
+account directory, queues and locks on fast OSDs, apart from the
+accounts. A fence in the index pool and a mark in the system pool say
+which placement the cluster has; every process checks it when it opens
+the store, and servers every minute, so pods with different placements
+never run side by side
+([placement](docs/architecture/storage.md#system-pool-and-placement)).
+
 | Service port | Listener in the container | Use |
 |---|---|---|
 | 143 | 1143 | IMAP, optional STARTTLS |

@@ -90,3 +90,24 @@ func TestBenchRefusesDefaultPools(t *testing.T) {
 		}
 	}
 }
+
+// TestBenchRefusesProductionSystemPool: --system-pool must not name the
+// production system pool (ceph.system_pool), nor a bench pool of another
+// kind; the production system pool is never taken over by default.
+func TestBenchRefusesProductionSystemPool(t *testing.T) {
+	t.Setenv("SHARDPOST_CONFIG", "")
+	t.Setenv("IMAP_CONFIG", "")
+	t.Setenv("CEPH_SYSTEM_POOL", "prod-system")
+
+	for _, args := range [][]string{
+		{"populate", "--index-pool", "load-index", "--data-pool", "load-data", "--system-pool", "prod-system"},
+		{"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--system-pool", "prod-system"},
+		{"populate", "--index-pool", "prod-system", "--data-pool", "load-data"},
+		{"populate", "--index-pool", "load-index", "--data-pool", "load-data", "--system-pool", "load-index"},
+		{"populate", "--index-pool", "load-index", "--data-pool", "load-data", "--system-pool", "shardpost-index"},
+	} {
+		if code := runBench(nil, args); code != benchRefused {
+			t.Errorf("%v: exit %d, want %d", args, code, benchRefused)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,8 +52,10 @@ func (s DeliveryStore) User(name string) (model.User, error) {
 	return u, nil
 }
 
-// Populate checks the guard and the pools (marking them on first use)
-// and fills the accounts (bench.Populate).
+// Populate checks the guard and the pools (marking them on first use),
+// initializes the bench system pool (when one is given; a second
+// populate finds it initialized), checks the placement and fills the
+// accounts (bench.Populate).
 func Populate(ctx context.Context, g bench.Guard, s *cephstore.Store, cfg cephstore.Config, d bench.Deliverer, o bench.PopulateOptions) (*bench.PopulateReport, error) {
 	if err := checkConfig(g, cfg); err != nil {
 		return nil, err
@@ -62,11 +65,38 @@ func Populate(ctx context.Context, g bench.Guard, s *cephstore.Store, cfg cephst
 		return nil, fmt.Errorf("%w: prefix %q is not the guarded %q", bench.ErrGuard, o.Prefix, g.Prefix)
 	}
 
-	if err := checkPools(s, cfg.IndexPool, cfg.DataPool, o.Prefix, true); err != nil {
+	if err := checkPools(s, cfg.IndexPool, cfg.DataPool, cfg.SystemPool, o.Prefix, true); err != nil {
+		return nil, err
+	}
+
+	if cfg.SystemPool != "" {
+		if _, err := s.InitSystem(cephstore.InitOptions{By: benchPrincipal, Log: o.Log}); err != nil {
+			return nil, fmt.Errorf("bench system pool: %w", err)
+		}
+	}
+
+	if err := setUp(s, cfg); err != nil {
 		return nil, err
 	}
 
 	return bench.Populate(ctx, o, DeliveryStore{s}, d)
+}
+
+// setUp checks the placement of the bench pools as a server would (a
+// bench index pool with a fence and no system pool is refused) and sets
+// the layout 3 mark when the bench runs with layout 3.
+func setUp(s *cephstore.Store, cfg cephstore.Config) error {
+	if err := s.CheckPlacement(); err != nil {
+		return fmt.Errorf("%w: %w", ErrNotBenchPool, err)
+	}
+
+	if cfg.FTS.Layout == model.FTSLayout3 {
+		if err := MarkLayout3(s); err != nil {
+			return fmt.Errorf("layout 3 mark: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // MeasureOptions describe a measurement.
@@ -123,11 +153,15 @@ func Measure(ctx context.Context, o MeasureOptions) (*bench.MeasureReport, error
 	}
 
 	cfg := o.Config
-	if err := checkPools(o.Store, cfg.IndexPool, cfg.DataPool, o.Guard.Prefix, false); err != nil {
+	if err := checkPools(o.Store, cfg.IndexPool, cfg.DataPool, cfg.SystemPool, o.Guard.Prefix, false); err != nil {
 		return nil, err
 	}
 
-	r := &bench.MeasureReport{Prefix: o.Guard.Prefix, IndexPool: cfg.IndexPool, DataPool: cfg.DataPool,
+	if err := setUp(o.Store, cfg); err != nil {
+		return nil, err
+	}
+
+	r := &bench.MeasureReport{Prefix: o.Guard.Prefix, IndexPool: cfg.IndexPool, DataPool: cfg.DataPool, SystemPool: cfg.SystemPool,
 		FTSShards: orInt(cfg.FTSShards, cephstore.DefaultFTSShards), ShardSize: cfg.ShardSize, ChunkSize: cfg.ChunkSize}
 
 	inv, err := inventoryOf(o)
@@ -149,12 +183,22 @@ func Measure(ctx context.Context, o MeasureOptions) (*bench.MeasureReport, error
 	err = o.Store.WithConn(func(conn *rados.Conn) error {
 		var err error
 
-		r.Pools, err = poolStats(conn, cfg.IndexPool, cfg.DataPool)
+		r.Pools, err = poolStats(conn, pools(cfg)...)
 
 		return err
 	})
 
 	return r, err
+}
+
+// pools are the bench pools of cfg: index, data and, when given, system.
+func pools(cfg cephstore.Config) []string {
+	out := []string{cfg.IndexPool, cfg.DataPool}
+	if cfg.SystemPool != "" {
+		out = append(out, cfg.SystemPool)
+	}
+
+	return out
 }
 
 func orInt(v, def int) int {
@@ -173,7 +217,7 @@ func inventoryOf(o MeasureOptions) (*InventoryResult, error) {
 	err := o.Store.WithConn(func(conn *rados.Conn) error {
 		var err error
 
-		inv, err = takeInventory(conn, o.Config.IndexPool, o.Config.DataPool, o.Guard.Prefix, o.Every, o.Parallel, o.EC)
+		inv, err = takeInventory(conn, o.Config.IndexPool, o.Config.DataPool, o.Config.SystemPool, o.Guard.Prefix, o.Every, o.Parallel, o.EC)
 
 		return err
 	})
@@ -420,7 +464,13 @@ func (m *measurer) traced(ctx context.Context, units, p int, fn func(s *cephstor
 	path := filepath.Join(m.o.TraceDir, fmt.Sprintf("objecter-%d-%d.log", os.Getpid(), m.traces))
 
 	cfg := m.o.Config
-	cfg.ClientOptions = bench.ObjecterOptions(path)
+	cfg.ClientOptions = maps.Clone(cfg.ClientOptions)
+
+	if cfg.ClientOptions == nil {
+		cfg.ClientOptions = map[string]string{}
+	}
+
+	maps.Copy(cfg.ClientOptions, bench.ObjecterOptions(path))
 
 	s, err := cephstore.Open(cfg, m.o.Log)
 	if err != nil {
@@ -435,7 +485,7 @@ func (m *measurer) traced(ctx context.Context, units, p int, fn func(s *cephstor
 		err = s.WithConn(func(conn *rados.Conn) error {
 			var err error
 
-			ids, err = poolIDs(conn, cfg.IndexPool, cfg.DataPool)
+			ids, err = poolIDs(conn, pools(cfg)...)
 
 			return err
 		})

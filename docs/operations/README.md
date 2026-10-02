@@ -93,7 +93,11 @@ Do not rename or recreate pools and namespaces when rebranding.
 Going back behind 0.43.0 needs an empty delayed submission queue (see
 [Delayed submissions](#delayed-submissions)). Going back behind 0.45.0
 needs every account back on layout 2 of the full-text index (see
-[Full-text layout 3](#full-text-layout-3)).
+[Full-text layout 3](#full-text-layout-3)). Going back behind 0.47.0 is
+safe while `ceph.system_pool` is empty and no system init or migration
+ran; after one, no image before 0.47.0 may run against the cluster (it
+neither knows the fence nor the system pool), and the way back is a
+revert of the placement (see [Pools](#pools)).
 
 A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
@@ -747,12 +751,98 @@ little): export `shardpostctl fts layout3 list`, run `fts_rebuild` for
 those accounts under the older version, and let the sweep remove the
 layout 3 objects later under 0.45.0 or newer.
 
+## Pools
+
+Three pools (`deploy/base/ceph/pools.yaml`):
+
+| Pool | Holds | Type |
+|---|---|---|
+| `shardpost-index` | the accounts' index objects (omap) | replicated |
+| `shardpost-data` | message blobs, learning copies | erasure coded or replicated |
+| `shardpost-system` | the store-wide state once `ceph.system_pool` names it: admin store, account directory, queues, locks, server metadata | replicated |
+
+Deleting a `CephBlockPool` deletes the pool and everything in it. Protect
+all three against that:
+
+```bash
+for p in shardpost-index shardpost-data shardpost-system; do
+  ceph osd pool set "$p" nodelete true
+done
+```
+
+The system pool is prepared by the manifests but not used while
+`ceph.system_pool` is empty (the default; the store-wide state then
+stays in the index pool as before 0.47.0). The cephx caps of the
+`CephClient` include it already: they must allow the pool before any
+process runs with `ceph.system_pool`. A cluster is switched only with
+the system tools, which follow in the next release: `shardpost system
+init --pool <pool>` for a new cluster, `shardpost system migrate --to
+<pool>` (in a maintenance window) for an existing one. Until then a
+system pool is used by the bench alone (`--system-pool`, see
+[Bench](bench.md)).
+
+What a process says about the placement (see
+[Storage: placement](../architecture/storage.md#system-pool-and-placement)):
+
+| Message | Meaning, what to do |
+|---|---|
+| `the fence in the index pool … says it lives in pool …; set ceph.system_pool` | the state moved to a system pool; this process has an old configuration |
+| `system pool … is not initialized and the index pool holds no system state` | a new cluster: run `shardpost system init --pool <pool>` |
+| `… holds the system state of an existing cluster: run "shardpost system migrate --to …"` | an existing cluster: migrate it in a maintenance window |
+| `the initialization of system pool … is incomplete` | an init stopped: run it again |
+| `a migration of the system state … is under way` | wait for the migration |
+| `inconsistent placement: …` | fence and mark disagree: look at both before anything else |
+| `… was withdrawn (mark retired …)` | the placement was reverted: clear `ceph.system_pool` |
+| log `event=system_placement_lost` | a running server or push worker read a contradiction and ends after draining; it will not start again until the configuration matches |
+| log `event=system_placement_unknown`, `imapceph_system_placement{state="unknown"} 1` | the check could not read; the process goes on. A Ceph problem, not a placement one |
+
+Set `ceph.system_pool` on the server, the push worker and the scrub
+CronJob together: a process whose setting does not match refuses to
+start instead of writing beside the others.
+
+### Pool sizes for a large cluster
+
+For a cluster of about a million accounts and some hundred server pods
+(data on HDD, index and system pool on NVMe or SSD), under these
+assumptions, to be confirmed before production: about 300 HDD OSDs with
+NVMe DB/WAL for the data, about 48 NVMe OSDs for index and system, at
+least three racks, 100–200 PG replicas per OSD.
+
+| Pool | Type | Device class | Failure domain | `pg_num` | Autoscaler |
+|---|---|---|---|---|---|
+| `shardpost-system` | replicated 3, `min_size` 2 | nvme | rack (else host) | 128 | either `pg_autoscale_mode on` with `pg_num_min 128` and `bulk false`, or `off` with `pg_num 128` |
+| `shardpost-index` | replicated 3, `min_size` 2 | nvme | rack | 2048–4096 | `bulk true` |
+| `shardpost-data` | EC 4+2 (at least six failure domains) or 8+3 | hdd (with NVMe DB) | host or rack | 8192–16384 | `bulk true` |
+
+- **System pool:** at most about 5 GB of data at a million accounts.
+  The roughly 600 hot objects (queue heads, leases, the auth flush log)
+  should spread over many primaries: 128 PGs × 3 replicas on 48 OSDs are
+  about 8 more per OSD; the autoscaler alone would give a pool this
+  small very few. A CRUSH rule of its own (`replicated_nvme_rack`). No
+  pool quota; alert at 50 GiB used.
+- **Index pool:** layout 3 of the full-text index has about 10–40
+  objects per account, about 3 × 10⁷ objects and 2–20 TB of omap;
+  2048 × 3 / 48 is about 128 replicas per OSD.
+- **Data pool:** EC 4+2 with 8192 PGs is about 164 shards per OSD on
+  300 OSDs.
+
+Such a cluster runs with `admin.kv_index: read` and
+`imapsieve.learning.index: read` (the defaults); a new one gets the
+backfill markers of its empty indexes from `shardpost system init`, so
+nothing lists from the first start.
+
+`ceph.client_options` sets the client's objecter throttles
+(`objecter_inflight_ops`, default 1024; `objecter_inflight_op_bytes`,
+default 100 MiB): a pod that is full waits in its own client, unseen by
+Ceph. `imapceph_rados_inflight_ops` shows the timed operations in flight
+of a process.
+
 ## Measuring the cost per account
 
-`shardpost bench` fills two bench pools of its own with accounts and
-messages and reports objects, bytes and RADOS operations per account
-and per delivery (scaling plan, stage R4). It refuses the production
-pools. How to create and delete the bench pools, the cephx caps it
+`shardpost bench` fills two bench pools of its own (three with
+`--system-pool`) with accounts and messages and reports objects, bytes
+and RADOS operations per account and per delivery (scaling plan, stage
+R4). It refuses the production pools, the system pool included. How to create and delete the bench pools, the cephx caps it
 needs and the Job are in [Bench](bench.md); the options in the
 [manual page](../man/man1/shardpost-bench.1).
 
@@ -792,15 +882,21 @@ with the steps below.
 
 The index pool must be replicated, because the mailbox state lives in
 omap. The data pool holds write-once blobs and can be erasure coded
-without `allow_ec_overwrites`. The equivalent of `deploy/base/ceph/pools.yaml`:
+without `allow_ec_overwrites`. The system pool (optional, see
+[Pools](#pools)) is replicated as well. The equivalent of
+`deploy/base/ceph/pools.yaml`:
 
 ```bash
 ceph osd pool create shardpost-index replicated
 ceph osd pool set shardpost-index size 3
 ceph osd erasure-code-profile set shardpost-ec21 k=2 m=1 crush-failure-domain=host
 ceph osd pool create shardpost-data erasure shardpost-ec21
-ceph osd pool application enable shardpost-index shardpost
-ceph osd pool application enable shardpost-data shardpost
+ceph osd pool create shardpost-system replicated
+ceph osd pool set shardpost-system size 3
+for p in shardpost-index shardpost-data shardpost-system; do
+  ceph osd pool application enable "$p" shardpost
+  ceph osd pool set "$p" nodelete true
+done
 ```
 
 The cephx identity needs the same capabilities as the `CephClient` in
@@ -810,11 +906,12 @@ classes (`cls_lock` for the POP3 maildrop lock):
 ```bash
 ceph auth get-or-create client.shardpost \
   mon 'allow r' \
-  osd 'allow rwx pool=shardpost-index, allow rwx pool=shardpost-data'
+  osd 'allow rwx pool=shardpost-index, allow rwx pool=shardpost-data, allow rwx pool=shardpost-system'
 ```
 
 The printed key is the value for `ceph.key`. Pool names and the user are
-configurable (`ceph.index_pool`, `ceph.data_pool`, `ceph.user`).
+configurable (`ceph.index_pool`, `ceph.data_pool`, `ceph.system_pool`,
+`ceph.user`).
 
 ### Host side
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"syscall"
+
+	"shardpost/internal/model"
 )
 
 // METADATA (RFC 5464). The annotations of a namespace live on one object
@@ -40,8 +42,33 @@ func (u *User) annotPrefix(mailbox, accessor string) (string, error) {
 }
 
 // GetMetadata returns the shared entries of the mailbox and the private
-// entries of accessor.
+// entries of accessor. The server metadata (the shared entries of the
+// namespace "~server") comes from the store's cache: every IMAPSieve
+// event without a mailbox script reads it (model.ServerMetadataTTL).
 func (u *User) GetMetadata(mailbox, accessor string) (map[string]string, error) {
+	if u.serverMetadata(mailbox, accessor) {
+		return u.store.serverMeta.Get(func() (map[string]string, error) { return u.readMetadata(mailbox, accessor) })
+	}
+
+	return u.readMetadata(mailbox, accessor)
+}
+
+// serverMetadata reports whether a read or a change of the mailbox's
+// entries is one of the cached server metadata.
+func (u *User) serverMetadata(mailbox, accessor string) bool {
+	return u.store != nil && u.name == model.ServerNamespace && mailbox == "" && accessor == ""
+}
+
+// invalidateServerMetadata drops the cached server metadata after a
+// change of the namespace "~server" through this process.
+func (u *User) invalidateServerMetadata() {
+	if u.store != nil && u.name == model.ServerNamespace {
+		u.store.serverMeta.Invalidate()
+	}
+}
+
+// readMetadata reads what GetMetadata returns.
+func (u *User) readMetadata(mailbox, accessor string) (map[string]string, error) {
 	out := map[string]string{}
 
 	for _, acc := range []string{"", accessor} {
@@ -101,6 +128,8 @@ func (u *User) SetMetadata(mailbox, accessor string, entries map[string]*string)
 		return err
 	}
 
+	defer u.invalidateServerMetadata()
+
 	return casOmap(u, u.idx, oidMetadata, nil, func(_ map[string][]byte) (map[string][]byte, []string) {
 		return set, rm
 	})
@@ -125,6 +154,8 @@ func (u *User) SwapMetadata(mailbox, accessor, entry, old string, next *string) 
 
 	key := prefix + entry
 	swapped := false
+
+	defer u.invalidateServerMetadata()
 
 	if next != nil {
 		if err := u.checkMetadataRoom(map[string][]byte{key: nil}, nil, map[string]string{key: entry}); err != nil {

@@ -22,6 +22,14 @@ func (metricsHooks) casRetry(kind, class string) {
 func (metricsHooks) timer(op string) func() { return metrics.Timer(op) }
 func (metricsHooks) listing(site string)    { metrics.RadosListings.WithLabelValues(site).Inc() }
 
+// timedOp runs fn as the timed operation op (imapceph_rados_op_seconds,
+// imapceph_rados_inflight_ops).
+func timedOp(op string, fn func() error) error {
+	defer mh.timer(op)()
+
+	return fn()
+}
+
 // Object classes of imapceph_rados_cas_retries_total (label "class"): a
 // small fixed set, so that the label never grows with accounts or
 // mailboxes.

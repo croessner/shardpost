@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ceph/go-ceph/rados"
@@ -44,6 +45,26 @@ type Config struct {
 	IndexPool string
 	// DataPool holds message blobs. May be erasure coded.
 	DataPool string
+	// SystemPool holds the index part of the store's own namespaces
+	// (model.SystemNamespace: the admin store, the account directory,
+	// the learning queue's indexes, the server metadata) instead of
+	// IndexPool; "" keeps them in IndexPool (the behaviour before
+	// 0.47.0). Must be replicated. A store opened with it starts only
+	// on a system pool that "shardpost system init" or "shardpost
+	// system migrate" prepared (placement.go).
+	SystemPool string
+	// PlacementTool opens the store without the placement check and its
+	// periodic repetition: for the tools that read and write the fence
+	// and the mark themselves (the system tools, the bench).
+	PlacementTool bool
+	// OnPlacementLost, if set, starts the periodic placement check of a
+	// long-running process: it is called once, when a check reads a
+	// placement that contradicts the configuration (a read error is no
+	// contradiction). The process must stop using the store and end.
+	OnPlacementLost func(error)
+	// PlacementEvery is the interval of the periodic check
+	// (model.ServerHeartbeat when 0).
+	PlacementEvery time.Duration
 	// ChunkSize is the blob chunk size in bytes (default 4 MiB).
 	ChunkSize int64
 	// FTSShards is the number of full-text index shard objects per user
@@ -96,8 +117,9 @@ type Config struct {
 	// data model names; see purge.go.
 	PurgeListing bool
 	// ClientOptions are further librados options, set on the connection
-	// after the store's own (the bench turns the objecter log on with
-	// them to count operations); nil for the server.
+	// after the store's own: ceph.client_options of the configuration
+	// (objecter throttles and op timeouts), and the bench turns the
+	// objecter log on with them to count operations.
 	ClientOptions map[string]string
 }
 
@@ -153,6 +175,14 @@ type Store struct {
 	ftsDueErr  error
 	ftsDueSeen ftsDueMemo
 
+	// place is the periodic placement check and placeState the state of
+	// the last check (placement.go).
+	place      placementWatch
+	placeState atomic.Pointer[string]
+
+	// serverMeta caches the server metadata (GetMetadata of "~server").
+	serverMeta model.ServerMetadataCache
+
 	// ftsMarkSeen is the layout 3 cluster mark as this server last read
 	// it (ftsMarkUnknown, ftsMarkOff, ftsMarkOn): a change is logged once
 	// (noteFTSLayout). ftsMarkMu serializes the read of the mark with
@@ -171,6 +201,12 @@ type connRef struct {
 
 // Open connects to the Ceph cluster. The connection is shared by all
 // sessions of this process; librados multiplexes requests internally.
+//
+// Unless cfg.PlacementTool is set, Open checks where the store's own
+// namespaces live (placement.go) and refuses a configuration that does
+// not match the cluster: a fence in the index pool without
+// cfg.SystemPool, a system pool without its mark. The check reads two
+// objects and, only to word a refusal, stats a few more; it never lists.
 func Open(cfg Config, log *slog.Logger) (*Store, error) {
 	conn, err := connect(cfg, log)
 	if err != nil {
@@ -179,7 +215,22 @@ func Open(cfg Config, log *slog.Logger) (*Store, error) {
 
 	fsid, _ := conn.GetFSID()
 
-	return &Store{cur: &connRef{conn: conn}, cfg: cfg, log: log, fsid: fsid}, nil
+	s := &Store{cur: &connRef{conn: conn}, cfg: cfg, log: log, fsid: fsid}
+
+	if cfg.PlacementTool {
+		return s, nil
+	}
+
+	if _, err := s.checkPlacement(true); err != nil {
+		conn.Shutdown()
+		return nil, err
+	}
+
+	if cfg.OnPlacementLost != nil {
+		s.startPlacementWatch(orDefault(cfg.PlacementEvery, model.ServerHeartbeat), cfg.OnPlacementLost)
+	}
+
+	return s, nil
 }
 
 // Rotate replaces the cephx key (and optionally the mon list) by opening a
@@ -301,6 +352,7 @@ func (s *Store) WithConn(fn func(*rados.Conn) error) error {
 // down under a view's background work crashes inside librados. A queue
 // the store returned before fails with ErrHandleClosed afterwards.
 func (s *Store) Drain(timeout time.Duration) bool {
+	s.stopPlacementWatch()
 	s.closeOwnedHandles()
 
 	s.mu.RLock()
@@ -325,8 +377,11 @@ func (s *Store) Drain(timeout time.Duration) bool {
 	}
 }
 
-// Close shuts the librados connection down.
+// Close ends the periodic placement check and shuts the librados
+// connection down.
 func (s *Store) Close() {
+	s.stopPlacementWatch()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -348,8 +403,15 @@ func (s *Store) Ping() error {
 // into another user's data by accident. The empty name and reserved
 // names other than the store's own namespaces are refused
 // (model.CheckNamespace): a registry in the default namespace would
-// belong to nobody.
+// belong to nobody. The index context is on the namespace's index pool
+// (indexPoolOf: the system pool for the store's own namespaces when one
+// is configured).
 func (s *Store) User(name string) (*User, error) {
+	return s.userIn(name, s.indexPoolOf(name))
+}
+
+// userIn is User with the index context on idxPool.
+func (s *Store) userIn(name, idxPool string) (*User, error) {
 	if err := model.CheckNamespace(name); err != nil {
 		return nil, err
 	}
@@ -359,10 +421,10 @@ func (s *Store) User(name string) (*User, error) {
 	scfg := s.cfg
 	s.mu.RUnlock()
 
-	idx, err := r.conn.OpenIOContext(scfg.IndexPool)
+	idx, err := r.conn.OpenIOContext(idxPool)
 	if err != nil {
 		r.refs.Done()
-		return nil, fmt.Errorf("open index pool %q: %w", scfg.IndexPool, err)
+		return nil, fmt.Errorf("open index pool %q: %w", idxPool, err)
 	}
 
 	data, err := r.conn.OpenIOContext(scfg.DataPool)
@@ -396,13 +458,34 @@ func (s *Store) User(name string) (*User, error) {
 	}
 
 	return &User{name: name, store: s, idx: idx, data: data, log: s.log.With("user", name), release: r.refs.Done,
-		idxPool: newVerPool(open(cfg.IndexPool)), dataPool: newVerPool(open(cfg.DataPool)),
+		idxPool: newVerPool(open(idxPool)), dataPool: newVerPool(open(cfg.DataPool)),
 		chunkSize: cfg.ChunkSize, ftsShards: cfg.FTSShards, shardSize: cfg.ShardSize, limit: limit,
 		acctRetention: acctRetention(cfg.AccountLogRetention),
 		limits:        cfg.Limits,
 		uploadTTL:     orDefault(cfg.UploadTTL, DefaultUploadTTL),
 		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange,
 		ftsCfg: ftsUserConfig(cfg.FTS)}, nil
+}
+
+// indexPoolOf is the pool of the index part of namespace ns: SystemPool
+// for the store's own namespaces when it is set, IndexPool for every
+// other namespace. The data part of a namespace is always in DataPool.
+// Code that has to reach the index pool whatever the namespace (the
+// sweep, the placement fence) opens IndexPool itself.
+func (c Config) indexPoolOf(ns string) string {
+	if c.SystemPool != "" && model.SystemNamespace(ns) {
+		return c.SystemPool
+	}
+
+	return c.IndexPool
+}
+
+// indexPoolOf is Config.indexPoolOf of the current configuration.
+func (s *Store) indexPoolOf(ns string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.cfg.indexPoolOf(ns)
 }
 
 // orDefault is d unless d is zero, then def.

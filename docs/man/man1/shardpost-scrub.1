@@ -1,4 +1,4 @@
-.TH SHARDPOST-SCRUB 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
+.TH SHARDPOST-SCRUB 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
 .SH NAME
 shardpost-scrub \- scrub accounts, submit the nightly batch scrub, sweep the pools for debris
 .SH SYNOPSIS
@@ -25,6 +25,21 @@ they talk to the Ceph cluster directly, with the server's configuration
 and Ceph credentials, and need neither a running server nor the admin
 socket. They run in the scrub CronJob or in a Kubernetes Job of their
 own, with the server's image.
+.PP
+Each of them registers in the admin store for as long as it runs
+.RB ( servers/<host>\-<role>\-<random> ,
+role
+.B scrub
+or, for the sweep,
+.BR sweep ),
+renews the registration every minute and records its orderly end; see
+.BR shardpostctl-server (1).
+Like every command of the server binary they check where the store's
+own namespaces live before they start, and refuse a configuration that
+does not match the cluster
+.RI ( ceph.system_pool ,
+see
+.BR docs/configuration.md ).
 .SS scrub
 Scrubs accounts in this process and exits: the accounts of
 .IR scrub.users ,
@@ -149,6 +164,14 @@ time (a lock on
 .B sweep/lock
 in
 .BR ~accounts ).
+Lock, state and spill objects stay in the index pool when the rest of
+.B ~accounts
+lives in a system pool
+.RI ( ceph.system_pool );
+the account directory is read where it is. The store's own namespaces
+and every other reserved
+.B ~
+namespace are never swept.
 .PP
 The report goes to standard output as one line of JSON after the log
 lines: the run, the objects listed per pool, the namespaces looked at,

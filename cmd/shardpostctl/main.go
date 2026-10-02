@@ -6,7 +6,7 @@
 //	shardpostctl [connection flags] deliver -d <recipient> [-f <sender>] [-m <mailbox>] [--no-sieve] [--no-enforce-quota] < message
 //	shardpostctl [connection flags] migrate [flags] <account>
 //	shardpostctl [connection flags] trace on [-for 30m] | off | status <account>
-//	shardpostctl [connection flags] server status | account show | mailbox list|show | acl list|explain | quota show | shared list
+//	shardpostctl [connection flags] server status | server list | account show | mailbox list|show | acl list|explain | quota show | shared list
 //	shardpostctl [connection flags] plan <kind> <account> | apply <plan> | check <account> | job list|show|wait|cancel
 //	shardpostctl [connection flags] messages | search | message show|export | flags | copy | move | sieve ... | learning ...
 //	shardpostctl [connection flags] export -o file.tar <account> | archive verify <file> | restore [-account A] <file>

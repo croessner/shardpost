@@ -72,8 +72,9 @@ func (inv *inventory) selected(ns string) bool {
 }
 
 // takeInventory measures the bench accounts of prefix (every every-th
-// by number) and the store's own namespaces in both pools.
-func takeInventory(conn *rados.Conn, index, data, prefix string, every, parallel int, ec bench.ECEstimate) (*InventoryResult, error) {
+// by number) and the store's own namespaces in the pools (the system
+// pool only when one is given).
+func takeInventory(conn *rados.Conn, index, data, system, prefix string, every, parallel int, ec bench.ECEstimate) (*InventoryResult, error) {
 	inv := &inventory{prefix: prefix, every: max(every, 1), accounts: map[string]*bench.AccountUsage{},
 		storeWide: map[string]bench.PoolUsage{}, ec: ec, skipped: map[string]bool{}}
 	jobs := make(chan inventoryJob, 1024)
@@ -87,6 +88,10 @@ func takeInventory(conn *rados.Conn, index, data, prefix string, every, parallel
 	err := inv.list(conn, jobs, index, true)
 	if err == nil {
 		err = inv.list(conn, jobs, data, false)
+	}
+
+	if err == nil && system != "" {
+		err = inv.list(conn, jobs, system, true)
 	}
 
 	close(jobs)

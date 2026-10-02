@@ -23,18 +23,64 @@ import (
 // moves the entry on. The hint index "ix.servers" carries version and
 // capabilities only, so a heartbeat (which changes "seen") does not
 // write the index.
+//
+// Since 0.47.0 every process that writes the store's own namespaces
+// registers for its whole runtime with its role (serve, push, scrub,
+// backfill, sweep), its system pool and its start time, and records
+// its orderly end (stopped_at): a migration of the system state checks
+// that nothing runs. A process that crashed stops counting as running
+// model.ServerFresh after its last heartbeat.
 
 // Server is a registration as the admin API shows it.
 type Server struct {
 	Instance string `json:"instance"`
 	model.ServerRecord
-	// Fresh: seen within model.ServerFresh.
+	// Fresh: running (model.ServerRecord.Running): seen within
+	// model.ServerFresh and not stopped.
 	Fresh bool `json:"fresh"`
 }
 
-// RegisterServer writes the registration of instance. A new record gets
-// its expiry entry first (completeness: the entry before the record).
+// Registration is what a process registers.
+type Registration struct {
+	Instance string
+	Version  string
+	// Role is model.RoleServe, model.RolePush, ...
+	Role string
+	// SystemPool is the system pool the process works with (nil: none).
+	SystemPool *model.PoolRef
+	// StartedAt is when the process started.
+	StartedAt time.Time
+}
+
+// record is the value of the registration at now.
+func (r Registration) record(now time.Time) model.ServerRecord {
+	return model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool}, Seen: now.UTC(),
+		Role: r.Role, SystemPool: r.SystemPool, StartedAt: r.StartedAt.UTC()}
+}
+
+// RegisterServer writes the registration of a server (role serve) that
+// started at now.
 func RegisterServer(kv model.AdminKV, instance, version string, now time.Time) error {
+	return Register(kv, Registration{Instance: instance, Version: version, Role: model.RoleServe, StartedAt: now}, now)
+}
+
+// Register writes the registration of r, seen at now. A new record gets
+// its expiry entry first (completeness: the entry before the record).
+func Register(kv model.AdminKV, r Registration, now time.Time) error {
+	return writeRegistration(kv, r.Instance, r.record(now), now)
+}
+
+// Deregister records the orderly end of the process at now: its record
+// stays (and ages out like any other) with stopped_at set, so it no
+// longer counts as running.
+func Deregister(kv model.AdminKV, r Registration, now time.Time) error {
+	rec := r.record(now)
+	rec.StoppedAt = now.UTC()
+
+	return writeRegistration(kv, r.Instance, rec, now)
+}
+
+func writeRegistration(kv model.AdminKV, instance string, rec model.ServerRecord, now time.Time) error {
 	key := model.ServersPrefix + instance
 
 	if _, err := kv.Get(key); errors.Is(err, model.ErrNotFound) {
@@ -45,18 +91,18 @@ func RegisterServer(kv model.AdminKV, instance, version string, now time.Time) e
 		return err
 	}
 
-	rec, err := json.Marshal(model.ServerRecord{Version: version, Caps: []string{model.CapFTSLayout3}, Seen: now.UTC()})
+	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 
-	return kv.Update(key, func([]byte) ([]byte, error) { return rec, nil })
+	return kv.Update(key, func([]byte) ([]byte, error) { return b, nil })
 }
 
-// RunRegistration registers the server now and then every interval
-// until ctx ends (the heartbeat of the registration). Errors are logged;
-// the next beat tries again.
-func RunRegistration(ctx context.Context, kv model.AdminKV, instance, version string, interval time.Duration, log interface {
+// RunRegistration registers the process now and then every interval
+// until ctx ends (the heartbeat of the registration), and then records
+// its end (Deregister). Errors are logged; the next beat tries again.
+func RunRegistration(ctx context.Context, kv model.AdminKV, r Registration, interval time.Duration, log interface {
 	Warn(string, ...any)
 },
 ) {
@@ -64,12 +110,16 @@ func RunRegistration(ctx context.Context, kv model.AdminKV, instance, version st
 	defer tick.Stop()
 
 	for {
-		if err := RegisterServer(kv, instance, version, time.Now()); err != nil {
-			log.Warn("server registration not written", "instance", instance, "err", err)
+		if err := Register(kv, r, time.Now()); err != nil {
+			log.Warn("server registration not written", "instance", r.Instance, "role", r.Role, "err", err)
 		}
 
 		select {
 		case <-ctx.Done():
+			if err := Deregister(kv, r, time.Now()); err != nil {
+				log.Warn("end of the registration not written", "instance", r.Instance, "role", r.Role, "err", err)
+			}
+
 			return
 		case <-tick.C:
 		}
@@ -119,7 +169,7 @@ func Servers(kv model.AdminKV, now time.Time) ([]Server, error) {
 		}
 
 		out = append(out, Server{Instance: strings.TrimPrefix(r.Key, model.ServersPrefix), ServerRecord: rec,
-			Fresh: now.Sub(rec.Seen) <= model.ServerFresh})
+			Fresh: rec.Running(now)})
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Instance < out[j].Instance })
@@ -168,16 +218,18 @@ func (m *Manager) expireServer(e model.DueEntry, now time.Time) error {
 var ErrNotReady = errors.New("the cluster is not ready for layout 3")
 
 // Layout3Ready checks the registrations for "fts layout3 enable --pods
-// n": exactly n fresh registrations, each with the layout 3 capability.
-// A pod replaced within model.ServerFresh still has its predecessor's
-// fresh record: wait until it is older (F12).
+// n": exactly n fresh registrations of servers (role serve, or none:
+// before 0.47.0), each with the layout 3 capability. The push worker,
+// scrubs and backfills register too and are not counted. A pod replaced
+// within model.ServerFresh that did not record its end still has its
+// predecessor's fresh record: wait until it is older (F12).
 func Layout3Ready(servers []Server, pods int) error {
 	var fresh []string
 
 	capable := 0
 
 	for _, s := range servers {
-		if !s.Fresh {
+		if !s.Fresh || !s.IsServe() {
 			continue
 		}
 

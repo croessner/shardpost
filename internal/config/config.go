@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -76,7 +77,40 @@ type Ceph struct {
 	MonHost   string `mapstructure:"mon_host" env:"CEPH_MON_HOST"`
 	IndexPool string `mapstructure:"index_pool" env:"CEPH_INDEX_POOL"`
 	DataPool  string `mapstructure:"data_pool" env:"CEPH_DATA_POOL"`
-	ChunkSize int64  `mapstructure:"chunk_size" env:"CEPH_CHUNK_SIZE" validate:"gte=0"`
+	// SystemPool holds the store's own namespaces (admin store, account
+	// directory, queues, locks) instead of the index pool; "" keeps them
+	// in the index pool. A server with it starts only on a pool that
+	// "shardpost system init" or "shardpost system migrate" prepared.
+	SystemPool string `mapstructure:"system_pool" env:"CEPH_SYSTEM_POOL"`
+	ChunkSize  int64  `mapstructure:"chunk_size" env:"CEPH_CHUNK_SIZE" validate:"gte=0"`
+	// ClientOptions are librados options of the connection, limited to
+	// ClientOptionNames (the objecter throttles and the op timeouts).
+	ClientOptions map[string]string `mapstructure:"client_options"`
+}
+
+// ClientOptionNames are the librados options ceph.client_options may
+// set: the objecter's throttles of the operations and bytes in flight
+// per client, and the timeouts of OSD and monitor operations (seconds).
+var ClientOptionNames = []string{"objecter_inflight_ops", "objecter_inflight_op_bytes", "rados_osd_op_timeout", "rados_mon_op_timeout"}
+
+// checkCeph validates the pools and the client options.
+func (c *Config) checkCeph() error {
+	if p := c.Ceph.SystemPool; p != "" && (p == c.Ceph.IndexPool || p == c.Ceph.DataPool) {
+		return fmt.Errorf("ceph.system_pool must differ from ceph.index_pool and ceph.data_pool")
+	}
+
+	for k, v := range c.Ceph.ClientOptions {
+		if !slices.Contains(ClientOptionNames, k) {
+			return fmt.Errorf("ceph.client_options: %q is not one of %s", k, strings.Join(ClientOptionNames, ", "))
+		}
+
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 || (n == 0 && strings.HasPrefix(k, "objecter_")) {
+			return fmt.Errorf("ceph.client_options: %s must be a non-negative integer (the objecter throttles positive)", k)
+		}
+	}
+
+	return nil
 }
 
 // Server configures listeners, limits, authentication and storage tuning.
@@ -419,6 +453,7 @@ var defaults = []struct {
 	{"ceph.mon_host", ""},
 	{"ceph.index_pool", "shardpost-index"},
 	{"ceph.data_pool", "shardpost-data"},
+	{"ceph.system_pool", ""},
 	{"ceph.chunk_size", 4 << 20},
 	{"server.fts_shards", 16},
 	{"server.quota_bytes", 0},
@@ -678,6 +713,10 @@ func (c *Config) checkServer() error {
 
 	if !c.sizesInRange() {
 		return fmt.Errorf("storage sizes and polling interval must be positive and within range")
+	}
+
+	if err := c.checkCeph(); err != nil {
+		return err
 	}
 
 	for _, addr := range []string{c.Server.ImapAddr, c.Server.ImapsAddr, c.Server.Pop3Addr, c.Server.Pop3SAddr, c.Server.LmtpAddr, c.Server.HTTPAddr, c.Sieve.Addr} {

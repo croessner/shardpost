@@ -15,10 +15,17 @@ import (
 )
 
 func TestGuard(t *testing.T) {
-	ok := Guard{ProdIndex: "shardpost-index", ProdData: "shardpost-data", Reserved: []string{"shardpost-default-data"},
-		BenchIndex: "shardpost-load-index", BenchData: "shardpost-load-data", Prefix: "bench-"}
+	ok := Guard{ProdIndex: "shardpost-index", ProdData: "shardpost-data", ProdSystem: "shardpost-system", Reserved: []string{"shardpost-default-data"},
+		BenchIndex: "shardpost-load-index", BenchData: "shardpost-load-data", BenchSystem: "shardpost-load-system", Prefix: "bench-"}
 	if err := ok.Check(); err != nil {
 		t.Fatalf("valid guard refused: %v", err)
+	}
+
+	without := ok
+	without.BenchSystem, without.ProdSystem = "", ""
+
+	if err := without.Check(); err != nil {
+		t.Fatalf("a bench without system pool refused: %v", err)
 	}
 
 	cases := map[string]func(g *Guard){
@@ -30,6 +37,12 @@ func TestGuard(t *testing.T) {
 		"index is production data": func(g *Guard) { g.BenchIndex = "shardpost-data" },
 		"data is production index": func(g *Guard) { g.BenchData = "shardpost-index" },
 		"one pool for both":        func(g *Guard) { g.BenchData = g.BenchIndex },
+		"system is production":     func(g *Guard) { g.BenchSystem = "shardpost-system" },
+		"index is prod system":     func(g *Guard) { g.BenchIndex = "shardpost-system" },
+		"data is prod system":      func(g *Guard) { g.BenchData = "shardpost-system" },
+		"system is prod index":     func(g *Guard) { g.BenchSystem = "shardpost-index" },
+		"system is bench index":    func(g *Guard) { g.BenchSystem = g.BenchIndex },
+		"system is bench data":     func(g *Guard) { g.BenchSystem = g.BenchData },
 		"prefix without bench-":    func(g *Guard) { g.Prefix = "load" },
 		"empty prefix":             func(g *Guard) { g.Prefix = "" },
 		"prefix with slash":        func(g *Guard) { g.Prefix = "bench-a/b" },

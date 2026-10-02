@@ -25,13 +25,16 @@ user namespaces.
 | Script/metadata objects | Sieve texts, the active script, private/shared metadata | [scripts.go](../../internal/cephstore/scripts.go), [metadata.go](../../internal/cephstore/metadata.go) |
 | `scrub` | Candidates and repair state | [scrub.go](../../internal/cephstore/scrub.go) |
 | `pubseen/<id>` | Private `\Seen` marks of the public folder `<id>` (registry key `ps:<id>`) | [acl.go](../../internal/cephstore/acl.go) |
-| `~accounts` / `ix.uploads/…` in the index pool | Due queue of the JMAP uploads, by expiry | [uploads.go](../../internal/cephstore/uploads.go) |
-| `~accounts` / `ix.purged/…` in the index pool | Accounts a purge deleted, for the sweep to clean after (removed by a repairing sweep) | [purged.go](../../internal/cephstore/purged.go) |
-| `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`) | [sweep.go](../../internal/cephstore/sweep.go) |
+| `~accounts` / `ix.uploads/…` in the index or [system](#system-pool-and-placement) pool | Due queue of the JMAP uploads, by expiry | [uploads.go](../../internal/cephstore/uploads.go) |
+| `~accounts` / `ix.purged/…` in the index or [system](#system-pool-and-placement) pool | Accounts a purge deleted, for the sweep to clean after (removed by a repairing sweep) | [purged.go](../../internal/cephstore/purged.go) |
+| `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`); always in the index pool, also with a system pool | [sweep.go](../../internal/cephstore/sweep.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
-| `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
-| `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
-| `~accounts` / `ix.fts_layout/…`, `ix.fts_due/…` in the index pool | Presence index of the accounts with a layout 3 full-text index; reshard queue of the `fts_due` worker | [ftslayout.go](../../internal/cephstore/ftslayout.go), [ftsdue.go](../../internal/jobs/ftsdue.go) |
+| `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index or [system](#system-pool-and-placement) pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
+| `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index or [system](#system-pool-and-placement) pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
+| `~accounts` / `ix.fts_layout/…`, `ix.fts_due/…` in the index or [system](#system-pool-and-placement) pool | Presence index of the accounts with a layout 3 full-text index; reshard queue of the `fts_due` worker | [ftslayout.go](../../internal/cephstore/ftslayout.go), [ftsdue.go](../../internal/jobs/ftsdue.go) |
+| `~admin` / `kv.<key>`, `ix.…`, `auth-flush` in the index or [system](#system-pool-and-placement) pool | The admin store (jobs, plans, push subscriptions, registrations, …) with its hint indexes and due queues, the auth flush log | [adminkv.go](../../internal/cephstore/adminkv.go) |
+| `~server` / `metadata` in the index or [system](#system-pool-and-placement) pool | The shared server METADATA entries | [metadata.go](../../internal/cephstore/metadata.go) |
+| `~admin` / `system.moved` in the index pool, `system.pool` in the system pool | The placement fence and mark | [placement.go](../../internal/cephstore/placement.go) |
 
 The index pool is replicated because its omap structures require it.
 The data pool is EC 2+1 in the existing manifest. That is one concrete
@@ -46,6 +49,125 @@ The mailbox shard size, by contrast, is stored in the mailbox header and is
 fixed at creation time. For a UID, `shard = (uid - 1) / shardSize`.
 Stable mailbox IDs decouple RENAME from the payload objects; names are
 registry keys, not reliable physical object paths.
+
+## System pool and placement
+
+The store's own namespaces hold the state of the whole cluster: the
+admin store (`~admin`: jobs, plans, push subscriptions, server
+registrations, the auth flush log, the queues of the job system), the
+account directory with its indexes and queues (`~accounts`), the indexes
+of the learning queue (`~learning`) and the server METADATA (`~server`).
+Their index part is small (well under 5 GB at a million accounts) and
+hot: a few hundred objects that every server polls, watches or locks.
+With `ceph.system_pool` it lives in a replicated pool of its own, on
+fast OSDs, apart from the index pool of the accounts
+([placement.go](../../internal/cephstore/placement.go)):
+
+| Namespace | Index pool | System pool |
+|---|---|---|
+| `~admin` | the fence `system.moved` | everything else |
+| `~accounts` | the sweep's `sweep/*` (its spill holds a name per object of both pools) | the directory, `ix.purged`, `ix.fts_layout`, the queues |
+| `~learning` | — | due queue, owner index, the worker lock `mbox/learning-worker` |
+| `~server` | — | `metadata` |
+| `~public` and the accounts | everything | — |
+
+The data part of `~learning` (the learning copies `learning/<id>`)
+stays in the data pool. Without `ceph.system_pool` everything stays in
+the index pool, as before 0.47.0. One function decides
+(`Store.indexPoolOf`): the store's view of a namespace, its sorted
+indexes and its locks follow it, and the long-lived views (the admin
+store, the queues) follow it across key rotations. The sweep, the bench
+and the placement tools reach the pools themselves.
+
+**One placement per cluster.** Which pool holds the state is decided by
+data, not by configuration discipline. Two omap objects in `~admin`,
+outside `kv.` and `ix.` (no server reads them as records or indexes):
+
+| Object | Pool | Values |
+|---|---|---|
+| fence `system.moved` | index | `state` (`leased`, `initializing`, `migrating`, `done`, `native`, `reverted`), the system pool (`to_id`, `to_name`), `index_id`, `fsid`, `run`, `at`, `by`, the tool lease (`tool_instance`, `tool_epoch`, `tool_seen`) |
+| mark `system.pool` | system | `format` 1, `state` (`active`, `retired`), `origin` (`native`, `migrated`), the ids and names of the index, data and system pool, `fsid`, `run`, `at` |
+
+Pools are compared by id and cluster fsid; the names are for messages
+(a pool can be renamed). The fence is the only arbiter: a tool creates
+it before anything else, writes the mark as its commit and only then
+the final state.
+
+**The check.** Opening the store (every `shardpost` command but the
+system tools and the bench, which check it themselves) reads the fence
+and, with a system pool, the mark, and decides:
+
+| `ceph.system_pool` | Fence | Mark | Result |
+|---|---|---|---|
+| empty | none, `reverted` or `leased` | – | start (`none`) |
+| empty | any other | – | refused: set `ceph.system_pool` |
+| X | none, `reverted` or `leased` | active | refused: a mark without a fence |
+| X | none, `reverted` or `leased` | none | refused: run `shardpost system init --pool X` (no system state in the index pool) or `shardpost system migrate --to X` (an existing cluster; a few stats tell which) |
+| X | `initializing` for X | any | refused: run the init again |
+| X | `migrating` for X | any | refused: a migration runs |
+| X | `done`/`native` for X | active, of this index pool and cluster | start (`migrated`/`native`) |
+| X | `done`/`native` for X | none | refused: a fence without a mark |
+| X | for another pool | any | refused |
+| X | any | `retired`, or of another index pool or cluster | refused |
+
+The check never lists and never writes. A server and the push worker
+repeat it every minute: a placement read positively that contradicts
+the configuration (a migration began, the mark was retired, a fence
+appeared) logs `event=system_placement_lost` and ends the process after
+draining; a read that fails is a warning and
+`imapceph_system_placement{state="unknown"}`, never an exit, so that a
+Ceph outage does not become a crash loop. The check stops in
+`Store.Drain` and `Store.Close`.
+
+**Init.** A new cluster gets its system pool from `shardpost system
+init`; the routine ([system.go](../../internal/cephstore/system.go)) is
+the one the bench uses for its own pools:
+
+1. Nothing to do when the fence is `native`/`done` for the pool and the
+   mark is active for this index pool and cluster (it only reads then).
+2. The tool lease is taken (below); an absent or reverted fence becomes
+   `leased`, which the servers treat as no fence.
+3. The index pool must hold nothing of the four namespaces but the fence
+   and the sweep's objects (else the cluster exists: migrate it), the
+   system pool nothing but the index heads of this same run, or a
+   retired mark of an earlier run with its copies, which are deleted
+   when that run is confirmed (after the fence is set).
+4. A probe object with omap is written and removed (an erasure coded pool
+   fails here).
+5. The fence becomes `initializing` with a new run, by compare-and-swap.
+6. The completion markers of the backfills are written into the heads of
+   the empty indexes (`backfill.kv` in `~admin/ix.job`,
+   `backfill.accounts` in `~accounts/ix.accounts`, `backfill.learning`
+   in `~learning/ix.learning`), as the JSON report the gates read, so
+   that `admin.kv_index` and `imapsieve.learning.index` in `read` mode
+   read from the first start without a listing.
+7. The mark is created exclusively: the commit.
+8. The fence becomes `native` and the lease is given up.
+
+A refusal gives the lease up and leaves the fence as it was. A crash
+between 5 and 8 leaves `initializing`: servers refuse until the init
+has run again, which takes the stale lease over and completes it.
+
+**The tool lease.** Every write of the fence is a compare-and-swap on
+its version, renewals and state changes alike, through one writer per
+process. A free lease is taken at once; one held by another instance
+only after its `tool_instance` and `tool_epoch` were seen unchanged for
+three minutes of the taker's own monotonic clock (a `tool_seen` more
+than 30 s ahead of it is refused). The holder renews every 30 s and
+trusts the lease only for 90 s after it sent its last successful write;
+then it stops writing and ends (running the tool again continues). A
+tool needs an OSD operation timeout of at most 60 s and throttles that
+let its operations start; it refuses `ceph.client_options` that do not
+allow that.
+
+**Heads of a newer format.** `Index.Head()` refuses a head whose format
+is newer than the server knows, as reads and writes always did. A gate
+(the backfill markers) therefore never takes the markers of a head that
+moved away; it reports the error once and behaves as in `write` mode.
+
+**Shard counts.** New heads get 16 shards for `ix.job` and `ix.plan`
+(1 before 0.47.0) and 256 for `ix.fts_layout` (16 before); an existing
+head keeps its count.
 
 ## Do not confuse identities
 
@@ -384,7 +506,12 @@ runs as a one-off, not as a routine.
   that predate the intents are adopted: their `ps:` key is written.
 
 One sweep runs at a time (a cls_lock on `sweep/lock`); the report is
-printed as JSON and logged.
+printed as JSON and logged. Lock, checkpoint and spill stay in the index
+pool when the rest of `~accounts` lives in the
+[system pool](#system-pool-and-placement); the account directory and
+`ix.purged` are read where they are. The store's own namespaces and any
+other reserved one (a `~` name, such as the quarantine of a migration)
+are never swept.
 
 ## The account change log
 

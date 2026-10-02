@@ -86,6 +86,45 @@ Rook-managed secret and ConfigMap through the Kubernetes API and follows key
 rotations. With `ceph.key` set, `rook` is ignored and no Kubernetes access
 happens; see [running without Kubernetes](operations/README.md#running-without-kubernetes).
 
+### Pools (`ceph`)
+
+| Key | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `ceph.index_pool` | `CEPH_INDEX_POOL` | `shardpost-index` | replicated pool of the accounts' index objects (omap) |
+| `ceph.data_pool` | `CEPH_DATA_POOL` | `shardpost-data` | pool of the message blobs (may be erasure coded) |
+| `ceph.system_pool` | `CEPH_SYSTEM_POOL` | empty | replicated pool of the store-wide state: the index part of the namespaces `~admin`, `~accounts`, `~learning` and `~server` (admin store, account directory, queues, locks, server metadata). Empty keeps them in the index pool, as before 0.47.0. Must differ from both other pools (by name here, by pool id when the store opens) |
+| `ceph.chunk_size` | `CEPH_CHUNK_SIZE` | 4 MiB | chunk size of the message blobs |
+| `ceph.client_options` | – | empty | further librados options of the connection, YAML only, values as strings: `objecter_inflight_ops` and `objecter_inflight_op_bytes` (the client's throttles of operations and bytes in flight; librados defaults 1024 and 100 MiB), `rados_osd_op_timeout` and `rados_mon_op_timeout` (seconds; the server sets 60 and 30). Other options are refused |
+
+`ceph.system_pool` is not a switch to flip: a cluster has one placement,
+and the data says which. A server, the push worker and every other
+`shardpost` command check it when they open the store (two reads, no
+listing):
+
+- without `ceph.system_pool`, a fence in the index pool that says the
+  state has moved refuses the start (`set ceph.system_pool`);
+- with it, the system pool must carry the mark of this index pool and
+  cluster, written by `shardpost system init` (a new cluster) or
+  `shardpost system migrate` (an existing one); otherwise the start is
+  refused with the command to run.
+
+A server and the push worker repeat the check every minute and end
+(after draining) when it reads a placement that contradicts the
+configuration; a check that cannot read logs a warning and goes on. Set
+the key on the server, the push worker and the scrub CronJob together.
+See [Storage: placement](architecture/storage.md#system-pool-and-placement)
+and [Operations](operations/README.md#pools).
+
+```yaml
+ceph:
+  index_pool: shardpost-index
+  data_pool: shardpost-data
+  system_pool: shardpost-system   # only after "shardpost system init" or "migrate"
+  client_options:
+    objecter_inflight_ops: "4096"
+    objecter_inflight_op_bytes: "268435456"
+```
+
 ### Global Sieve scripts
 
 `sieve.global_dir` holds the scripts a user script can pull in with

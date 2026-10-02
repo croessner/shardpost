@@ -46,19 +46,37 @@ called in the process.
 The bench writes into the bench pools only, and it refuses to start
 (exit status 2) when
 
-- `--index-pool` or `--data-pool` is missing, names `ceph.index_pool` or
-  `ceph.data_pool` of the configuration (file or environment) or their
-  built-in defaults `shardpost-index` and `shardpost-data`, or both name
-  the same pool;
+- `--index-pool` or `--data-pool` is missing, names `ceph.index_pool`,
+  `ceph.data_pool` or `ceph.system_pool` of the configuration (file or
+  environment) or the built-in defaults `shardpost-index` and
+  `shardpost-data`, or both name the same pool;
+- `--system-pool` (optional) names one of those production pools or one
+  of the other two bench pools;
 - the account prefix does not start with `bench-`;
 - `measure` finds a pool without the bench marker (`~bench/marker`,
   written by the first `populate`);
 - `populate` finds a pool without the marker that holds any object, in
-  the index pool in particular an account directory
-  (`~accounts/ix.accounts/head`): a pool somebody uses. A missing marker
-  is written only into a pool that is empty, pool by pool. The objects
-  `rbd_info` and `rbd_trash` that `rbd pool init` leaves in the default
-  namespace do not count: Rook initialises every CephBlockPool for RBD.
+  the index and the system pool in particular an account directory
+  (`~accounts/ix.accounts/head`), in the index pool also a placement
+  fence (`~admin/system.moved`, the mark of a production index pool whose
+  store-wide state lives in a system pool): a pool somebody uses. A
+  missing marker is written only into a pool that is empty, pool by pool.
+  The objects `rbd_info` and `rbd_trash` that `rbd pool init` leaves in
+  the default namespace do not count: Rook initialises every
+  CephBlockPool for RBD; the objects of the store's own namespaces do;
+- the placement check of the bench pools fails (below).
+
+The bench never takes the production system pool over: its store-wide
+state lives in `--system-pool` when given and otherwise in the bench
+index pool. It opens the store as a tool and checks the placement itself
+once the pools are set up: with `--system-pool`, `populate` initializes
+it after the markers with the routine of `shardpost system init` (a
+second `populate` finds it initialized and writes nothing; the init
+refuses a bench index pool that already holds the store's own
+namespaces, so use fresh pools for a run with a system pool), and then
+`populate` and `measure` always check the placement as a server does: a
+bench index pool with a fence and no `--system-pool` is refused. The
+layout 3 mark is set after that check.
 
 The name comparison is only as good as the configuration the bench is
 given; the marker check does not depend on it. The Job sets the
@@ -66,9 +84,11 @@ production names in its environment, so check them against the server's
 configuration before the run ([below](#before-the-run)).
 
 The store's own objects (the account directory in `~accounts`) are
-written into the bench pools; `~admin` and `~accounts` of the production
-pools are not touched. Delete the bench pools when the measurement is
-done.
+written into the bench pools (into the bench system pool with
+`--system-pool`); `~admin` and `~accounts` of the production pools are
+not touched. The inventory lists the system pool as well, and counts its
+objects store-wide (classes `store-ix`, `store-kv` and `placement`).
+Delete the bench pools when the measurement is done.
 
 ## Bench pools
 
@@ -83,8 +103,12 @@ and the bench credentials (below):
 
 ```bash
 kubectl --context croessner apply -f hack/bench-pools.yaml
-kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data
+kubectl --context croessner -n rook-ceph get cephblockpool shardpost-load-index shardpost-load-data shardpost-load-system
 ```
+
+`shardpost-load-system` is the bench system pool, replicated like the
+index pool; the Job uses it only when both containers get
+`--system-pool shardpost-load-system` (on fresh bench pools).
 
 ### PG count
 

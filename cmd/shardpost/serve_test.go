@@ -47,6 +47,7 @@ ceph:
   mon_host: "` + os.Getenv("SHARDPOST_TEST_CEPH_MON") + `"
   index_pool: "` + os.Getenv("SHARDPOST_TEST_CEPH_INDEX_POOL") + `"
   data_pool: "` + os.Getenv("SHARDPOST_TEST_CEPH_DATA_POOL") + `"
+  system_pool: "` + os.Getenv("SHARDPOST_TEST_CEPH_SYSTEM_POOL") + `"
 `
 
 	path := filepath.Join(dir, "shardpost.yaml")

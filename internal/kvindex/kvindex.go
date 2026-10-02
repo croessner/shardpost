@@ -46,10 +46,14 @@ type Collection struct {
 // Prefix is the key prefix of the collection.
 func (c *Collection) Prefix() string { return c.Name + "/" }
 
-// The indexed collections and their shard counts (plan B3).
+// The indexed collections and their shard counts (plan B3). A count
+// applies to an index its first writer creates; an existing index keeps
+// the count of its head. job and plan have 16 shards since 0.47.0 (1
+// before), so that runners which end at the same time do not meet in
+// one compare-and-swap object.
 var collections = []*Collection{
-	{Name: "job", Shards: 1, Value: jobValue},
-	{Name: "plan", Shards: 1, Value: planValue},
+	{Name: "job", Shards: 16, Value: jobValue},
+	{Name: "plan", Shards: 16, Value: planValue},
 	{Name: "idem", Shards: 16, Value: idemValue},
 	{Name: "jmap/push/acct", Shards: 64, Value: pushValue},
 	{Name: "servers", Shards: 1, Value: serverValue},
@@ -391,7 +395,11 @@ func (s *Store) Reindex(key string) error { return s.refresh(key) }
 
 // MarkerIndex is the index whose head carries the backfill markers of
 // the admin store (the job hint index).
-func (s *Store) MarkerIndex() model.SortedIndex { return s.Index(collections[0]) }
+func (s *Store) MarkerIndex() model.SortedIndex { return s.Index(MarkerCollection()) }
+
+// MarkerCollection is the collection whose index head carries the
+// backfill markers (the job hint index).
+func MarkerCollection() *Collection { return collections[0] }
 
 func (s *Store) refresh(key string) error {
 	c, id, ok := CollectionOf(key)

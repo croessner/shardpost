@@ -46,7 +46,13 @@ import (
 // "ps:" key (written before 0.42.0) are adopted: the key is written.
 //
 // The state ("sweep/state") and a cls_lock ("sweep/lock") live in
-// "~accounts" as well; one sweep runs at a time.
+// "~accounts" as well; one sweep runs at a time. Lock, state and spill
+// stay in the index pool when the rest of "~accounts" lives in the
+// system pool (ceph.system_pool): the spill holds a name per object of
+// both pools and does not belong on a small pool. The account
+// directory and the purged index are read where they are. The store's
+// own namespaces, and the quarantine of a system pool migration
+// ("~<namespace>.moved/<run>"), are reserved and never swept.
 
 // DefaultSweepSpillShards is the number of spill objects per pool.
 const DefaultSweepSpillShards = 256
@@ -217,7 +223,11 @@ var errSweepStopped = errors.New("sweep stopped; run it again to continue")
 
 // Sweep runs (or continues) the sweep; see the comment at the top.
 func (s *Store) Sweep(ctx context.Context, o SweepOptions) (*SweepReport, error) {
-	lease, err := s.holdLock(model.AccountsNamespace, sweepLockOID, "sweep", "scrub sweep", sweepLockTTL, true)
+	s.mu.RLock()
+	index := s.cfg.IndexPool
+	s.mu.RUnlock()
+
+	lease, err := s.holdLockIn(index, model.AccountsNamespace, sweepLockOID, "sweep", "scrub sweep", sweepLockTTL, true)
 	if err != nil {
 		return nil, fmt.Errorf("sweep lock: %w", err)
 	}

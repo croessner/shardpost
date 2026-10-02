@@ -83,10 +83,7 @@ func (s *Server) layout3Status(now time.Time) (adminapi.FTSLayout3Status, error)
 		return st, err
 	}
 
-	for _, sv := range servers {
-		st.Servers = append(st.Servers, adminapi.ServerRegistration{Instance: sv.Instance, Version: sv.Version, Caps: sv.Caps,
-			Seen: sv.Seen, Fresh: sv.Fresh})
-	}
+	st.Servers = serverRegistrations(servers)
 
 	return st, nil
 }
