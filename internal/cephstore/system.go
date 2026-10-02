@@ -33,11 +33,13 @@ import (
 //  1. the index pool holds nothing of the store's own namespaces (else
 //     the cluster exists and needs a migration), the system pool at most
 //     the index heads of this same run, or a retired mark of an earlier
-//     run with its copies (InitOptions.Confirm names that run);
+//     run with its copies, or the run state of an earlier migration that
+//     stopped before its commit (InitOptions.Confirm names that run);
 //  2. a probe object with omap in the system pool (an erasure coded
 //     pool fails here);
 //  3. the fence to "initializing" by compare-and-swap, with a new run;
-//     only now are the confirmed copies of a retired run deleted;
+//     only now are the confirmed copies of an earlier run deleted, and
+//     its quarantine in the index pool;
 //  4. the completion markers of the backfills in the heads of the empty
 //     indexes (admin store, account directory, learning queue), so that
 //     admin.kv_index and imapsieve.learning.index in read mode read from
@@ -423,11 +425,44 @@ func (in *initRun) checkSystemPool(f Fence, m Mark) (wipe bool, err error) {
 		return false, fmt.Errorf("%w: system pool %q carries a mark (state %s, run %s) that no init of it left unfinished",
 			ErrInitRefused, in.cfg.SystemPool, m.State, m.Run)
 	case len(foreign) > 0:
-		return false, fmt.Errorf("%w: system pool %q is not empty: %d objects in the store's namespaces, first %s",
-			ErrInitRefused, in.cfg.SystemPool, len(foreign), foreign[0])
+		return in.earlierRun(foreign)
 	}
 
 	return false, nil
+}
+
+// earlierRun allows the deletion of the copies of an earlier migration
+// without a retired mark (one that stopped before its commit and was
+// aborted) when InitOptions.Confirm names the run of its run state;
+// else the system pool is not empty.
+func (in *initRun) earlierRun(foreign []string) (bool, error) {
+	vals, _, err := readObjectOmap(in.conn, in.cfg.SystemPool, model.AdminNamespace, runStateOID, []string{pkRun})
+	if err != nil {
+		return false, fmt.Errorf("read the run state: %w", err)
+	}
+
+	run := string(vals[pkRun])
+
+	switch {
+	case run != "" && in.o.Confirm == run:
+		return true, nil
+	case run != "":
+		return false, fmt.Errorf("%w: system pool %q holds the copies of the earlier run %s (%d objects); confirm that run to delete them",
+			ErrInitRefused, in.cfg.SystemPool, run, len(foreign))
+	case in.o.Confirm != "":
+		// The heads of an init that was aborted before its commit carry
+		// the run in their markers.
+		rest, err := in.foreignObjects(in.o.Confirm)
+		if err == nil && len(rest) > 0 {
+			err = fmt.Errorf("%w: system pool %q holds objects that do not belong to run %s, first %s",
+				ErrInitRefused, in.cfg.SystemPool, in.o.Confirm, rest[0])
+		}
+
+		return err == nil, err
+	default:
+		return false, fmt.Errorf("%w: system pool %q is not empty: %d objects in the store's namespaces, first %s",
+			ErrInitRefused, in.cfg.SystemPool, len(foreign), foreign[0])
+	}
 }
 
 // retiredRun allows the deletion of a retired run's mark and copies when
@@ -503,7 +538,7 @@ func (in *initRun) foreignObjects(run string) ([]string, error) {
 
 // headKeys are the keys of an index head besides its markers
 // (sortedindex).
-var headKeys = map[string]bool{"shards": true, pkFormat: true, "phase": true}
+var headKeys = map[string]bool{"shards": true, pkFormat: true, headKeyPhase: true}
 
 // ownHead reports whether oid is an index head the init run wrote: only
 // the head keys and backfill markers of that run.
@@ -544,71 +579,44 @@ func (in *initRun) ownHead(ns, oid, run string) bool {
 // clearSystemPool deletes everything in the store's namespaces of the
 // system pool (a confirmed retired run), under the lease.
 func (in *initRun) clearSystemPool() (int, error) {
-	ioctx, err := in.conn.OpenIOContext(in.cfg.SystemPool)
-	if err != nil {
-		return 0, fmt.Errorf("open pool %q: %w", in.cfg.SystemPool, err)
-	}
-	defer ioctx.Destroy()
-
-	n := 0
-
-	for _, ns := range model.SystemNamespaces() {
-		oids, err := listNamespace(in.conn, in.cfg.SystemPool, ns)
-		if err != nil {
-			return n, err
-		}
-
-		ioctx.SetNamespace(ns)
-
-		for _, oid := range oids {
-			if err := in.lease.check(); err != nil {
-				return n, err
-			}
-
-			if err := ioctx.Delete(oid); err != nil && errCode(err) != syscall.ENOENT {
-				return n, fmt.Errorf("delete %s/%s: %w", ns, oid, err)
-			}
-
-			n++
-		}
-	}
+	n, err := clearRun(in.conn, in.cfg.IndexPool, in.cfg.SystemPool, in.o.Confirm, in.lease.check)
 
 	in.log.Info("retired system pool content deleted", pkRun, in.o.Confirm, pkObjects, n)
 
-	return n, nil
+	return n, err
 }
 
 // probe writes and removes an object with omap in the system pool.
 func (in *initRun) probe() error {
-	if err := in.lease.check(); err != nil {
-		return err
-	}
+	return probeSystemPool(in.conn, in.cfg.SystemPool, in.lease.check, ErrInitRefused)
+}
 
-	ioctx, err := in.conn.OpenIOContext(in.cfg.SystemPool)
+// probeSystemPool writes and removes an object with omap in pool after
+// guard; a pool without omap (erasure coded) is refused with refused.
+func probeSystemPool(conn *rados.Conn, pool string, guard func() error, refused error) error {
+	ioctx, err := conn.OpenIOContext(pool)
 	if err != nil {
-		return fmt.Errorf("open pool %q: %w", in.cfg.SystemPool, err)
+		return fmt.Errorf("open pool %q: %w", pool, err)
 	}
 	defer ioctx.Destroy()
 
 	ioctx.SetNamespace(model.AdminNamespace)
 
-	op := rados.CreateWriteOp()
-	defer op.Release()
-
-	op.Create(rados.CreateIdempotent)
-	op.SetOmap(map[string][]byte{"probe": []byte(time.Now().UTC().Format(time.RFC3339))})
-
-	if err := op.Operate(ioctx, probeOID, rados.OperationNoFlag); err != nil {
-		if errCode(err) == syscall.EOPNOTSUPP {
-			return fmt.Errorf("%w: pool %q does not keep omap (an erasure coded pool?); the system pool must be replicated",
-				ErrInitRefused, in.cfg.SystemPool)
-		}
-
-		return fmt.Errorf("probe pool %q: %w", in.cfg.SystemPool, err)
+	err = operate(ioctx, probeOID, guard, func(op *rados.WriteOp) {
+		op.Create(rados.CreateIdempotent)
+		op.SetOmap(map[string][]byte{"probe": []byte(time.Now().UTC().Format(time.RFC3339))})
+	})
+	if errCode(err) == syscall.EOPNOTSUPP {
+		return fmt.Errorf("%w: pool %q does not keep omap (an erasure coded pool?); the system pool must be replicated", refused, pool)
 	}
 
-	if err := ioctx.Delete(probeOID); err != nil && errCode(err) != syscall.ENOENT {
-		return fmt.Errorf("probe pool %q: %w", in.cfg.SystemPool, err)
+	if err != nil {
+		return fmt.Errorf("probe pool %q: %w", pool, err)
+	}
+
+	err = operate(ioctx, probeOID, guard, func(op *rados.WriteOp) { op.Remove() })
+	if err != nil && errCode(err) != syscall.ENOENT {
+		return fmt.Errorf("probe pool %q: %w", pool, err)
 	}
 
 	return nil

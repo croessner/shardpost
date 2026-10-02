@@ -85,8 +85,10 @@ outside `kv.` and `ix.` (no server reads them as records or indexes):
 
 | Object | Pool | Values |
 |---|---|---|
-| fence `system.moved` | index | `state` (`leased` for a fence a tool created only to hold its lease, `initializing`, `migrating`, `done`, `native`, `reverted`), the system pool (`to_id`, `to_name`), `index_id`, `fsid`, `run`, `at`, `by`, the tool lease (`tool_instance`, `tool_epoch`, `tool_seen`) |
-| mark `system.pool` | system | `format` 1, `state` (`active`, `retired`), `origin` (`native`, `migrated`), the ids and names of the index, data and system pool, `fsid`, `run`, `at` |
+| fence `system.moved` | index | `state` (`leased` for a fence a tool created only to hold its lease, `initializing`, `migrating`, `done`, `native`, `reverted`), the system pool (`to_id`, `to_name`), `index_id`, `fsid`, `run`, `at`, `by`, the tool lease (`tool_instance`, `tool_epoch`, `tool_seen`); after a migration `direction` (`migrate`, `revert`), `fenced_digest`, `heads`, `cleaned_at` |
+| mark `system.pool` | system | `format` 1, `state` (`active`, `retired`), `origin` (`native`, `migrated`), the ids and names of the index, data and system pool, `fsid`, `run`, `at`, `objects`, `digest` |
+| run state `system.migrate` | system | `run`, `phase` (`M1` to `M7`, `abort`, `revert`), `abort_from`, `digest_shards`, `m4_digest`, `fenced_digest`, `heads`, the original values of every poisoned head (`head:<ns>/<object>`), the report |
+| digests `system.migrate/<ns>/<nnn>` | system | the digest of every object a migration copied, by object name; `nnn` is the name's hash modulo `digest_shards` (about 40 000 names per object, at most 256 objects per namespace) |
 
 Pools are compared by id and cluster fsid; the names are for messages
 (a pool can be renamed). The fence is the only arbiter: a tool creates
@@ -133,11 +135,15 @@ the one the bench uses for its own pools:
    `leased`, which the servers treat as no fence.
 3. The index pool must hold nothing of the four namespaces but the fence
    and the sweep's objects (else the cluster exists: migrate it), the
-   system pool nothing but the index heads of this same run, or a
-   retired mark of an earlier run with its copies, which are deleted
-   when that run is confirmed and the objects belong to it (the run
-   state `system.migrate` of its migration names it, or every object is
-   an index head of that run), after the fence is set.
+   system pool nothing but the index heads of this same run, or the
+   content of an earlier run (a retired mark with its copies, the run
+   state of a migration that was aborted, the heads of an aborted init),
+   which is deleted when that run is confirmed and the objects belong to
+   it (the run state `system.migrate` of its migration names it, or
+   every object is an index head of that run), after the fence is set,
+   together with that run's quarantine in the index pool (its run state
+   and mark last, so that a deletion that stopped is taken up by
+   confirming the run again).
 4. A probe object with omap is written and removed (an erasure coded pool
    fails here).
 5. The fence becomes `initializing` with a new run, by compare-and-swap.
@@ -179,6 +185,57 @@ moved away; it reports the error once and behaves as in `write` mode.
 **Shard counts.** New heads get 16 shards for `ix.job` and `ix.plan`
 (1 before 0.47.0) and 256 for `ix.fts_layout` (16 before); an existing
 head keeps its count.
+
+**Migration.** An existing cluster moves its state with `shardpost
+system migrate` ([migrate.go](../../internal/cephstore/migrate.go),
+[shardpost-system(1)](../man/man1/shardpost-system.1)), in a maintenance
+window with every process stopped; the run state records the phase
+reached, and every run continues where the last one stopped:
+
+| Phase | What happens |
+|---|---|
+| M0 | Under the tool lease: the target is a replicated pool of its own and holds nothing but this run's work (or, confirmed, an earlier run's copies); no registration of a running process, no valid lease of the push worker or a job, no held lock, no watcher on `auth-flush`, `ix.jobs/claimable/00`, `ix.learning/00`, `ix.submission/00` (a notify with a 2 s timeout) |
+| M1 | The fence becomes `migrating`: servers refuse to start, running ones end within a minute |
+| M2 | One listing of the index pool: the source (from M5 on, the old place and the quarantine together) |
+| M3 | The copy, records first, then index shards, then index heads; with a digest per object |
+| M4 | The target holds exactly the source, and both match the digests; `m4_digest` per namespace and in total |
+| M5 | The quarantine: every old object is copied to `<ns>.moved/<run>` in the index pool (for example `~admin.moved/<run>`), the copy checked, then the original deleted; every old index head is copied there, its values saved in the run state, and then poisoned: `format` 1000 and `phase` `moved:<pool id>`. `fenced_digest` is the digest of the poisoned heads |
+| M6 | The mark: the commit |
+| M7 | The fence becomes `done` with `fenced_digest` and the list of the heads |
+
+The copy reads an object whole: a stat, the data in chunks of 4 MiB, a
+second stat (the size did not change), the xattrs without the cls_lock
+state `lock.*`, the omap in pages of 1000 keys. It writes the first
+chunk, the xattrs and the first omap page in one exclusive create, the
+rest with the object asserted to exist. The digest is a SHA-256 over
+the name, the size, the data, the sorted xattrs and the sorted omap,
+each field with its length. Not copied: the object version (no stored
+value of the store names a version of these objects; compare-and-swap
+reads it anew in every round), the mtime (only account objects use it),
+the omap header (the store writes none) and the lock state (a held lock
+refuses the migration; an empty lock object is copied as an empty
+object). Processes cache index heads under the pool's name, so the
+copies need every process restarted, which the window does anyway.
+
+**Why a quarantine.** After M5 nothing is left at the old place that a
+process could read: a server before 0.47.0 finds no records, no flush
+log, no directory, and fails on the poisoned heads (directory hook,
+queues, hint indexes) instead of reading an empty index. A gate of the
+backfill markers falls back to `write` mode and would write plain
+records at the old place; `shardpost system verify --source-only` finds
+every such object. Poisoning the records themselves instead is no
+option: the push worker of such a version takes an unreadable lease as
+free.
+
+**The old place after the migration** holds the fence, the poisoned
+heads (for good), the sweep's objects under `~accounts/sweep/` and,
+until `shardpost system cleanup` deletes it after seven days, the
+quarantine. `abort` takes a migration back before the servers use the
+system pool (from the quarantine and the saved heads, checked against
+`m4_digest`; the quarantine stays), `revert` after (from the system
+pool, which is the truth then; the quarantine goes). Both, and `cleanup`,
+continue when run again after a stop; the operations guide has the
+runbook ([Moving the store-wide state](../operations/README.md#moving-the-store-wide-state)).
 
 ## Do not confuse identities
 
