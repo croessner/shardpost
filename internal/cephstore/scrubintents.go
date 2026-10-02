@@ -24,7 +24,7 @@ import (
 // will not finish any more. What it names is settled against the index
 // scan of the run:
 //
-//   - a blob (bi:, bimp:, up: once expired, the blob of an r:, every blob
+//   - a blob (bi:, bimp:, up: and sub: once expired, the blob of an r:, every blob
 //     of a deleted mailbox's entries) that an entry references is fine
 //     and the intent goes; one that nothing references is an orphan and
 //     is deleted (reference count set to 0 under the version read, then
@@ -185,8 +185,8 @@ func (u *User) intentGrace() time.Duration {
 func (sr *scrubRun) gatherIntents() (*intentScan, error) {
 	in := sr.intents
 
-	reg, err := sr.u.readIntents(regBlobPrefix, regImportBlobPrefix, regUploadPrefix, regCreatePrefix, regDeletePrefix,
-		regPubSeenPrefix, regDeliveryPrefix)
+	reg, err := sr.u.readIntents(regBlobPrefix, regImportBlobPrefix, regUploadPrefix, regSubmissionPrefix, regCreatePrefix,
+		regDeletePrefix, regPubSeenPrefix, regDeliveryPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -255,12 +255,16 @@ func (sr *scrubRun) gatherBlobIntents() {
 		}
 	}
 
-	for guid, v := range in.reg[regUploadPrefix] {
-		var up blobIntent
+	// An upload and a submission copy are due when they expired; until
+	// then they are no orphans (the submission worker deletes a copy
+	// when its submission ends).
+	for _, prefix := range []string{regUploadPrefix, regSubmissionPrefix} {
+		for guid, v := range in.reg[prefix] {
+			var up blobIntent
 
-		_ = json.Unmarshal(v, &up)
-		// An upload is due when it expired; until then it is no orphan.
-		in.blob(guid, up.Size, up.Chunks, up.Expires < now.Unix() && sr.oldIntent(time.Unix(up.Expires, 0)), false)
+			_ = json.Unmarshal(v, &up)
+			in.blob(guid, up.Size, up.Chunks, up.Expires < now.Unix() && sr.oldIntent(time.Unix(up.Expires, 0)), false)
+		}
 	}
 
 	// The blobs of delivery intents are covered by their bi: (and rolled
@@ -601,7 +605,7 @@ func (sr *scrubRun) settleCreations(act bool) {
 	}
 }
 
-// settleBlobKeys drops the old blob intents (bi:, bimp:, up:, r:) whose
+// settleBlobKeys drops the old blob intents (bi:, bimp:, up:, sub:, r:) whose
 // blobs are all settled.
 func (sr *scrubRun) settleBlobKeys() {
 	in := sr.intents
@@ -612,6 +616,10 @@ func (sr *scrubRun) settleBlobKeys() {
 
 	for guid := range in.reg[regUploadPrefix] {
 		sr.settleKey(oidRegistry, uploadKey(guid), in.blobs[guid])
+	}
+
+	for guid := range in.reg[regSubmissionPrefix] {
+		sr.settleKey(oidRegistry, submissionKey(guid), in.blobs[guid])
 	}
 
 	for batch, v := range in.reg[regImportBlobPrefix] {

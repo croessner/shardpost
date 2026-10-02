@@ -124,6 +124,9 @@ type User struct {
 	usedNames map[string]bool
 	// registered: the user has a registry (directory.go).
 	registered atomic.Bool
+	// subCopies are the intents of submission copies (the "sub:" keys of
+	// the RADOS registry), by GUID; the copies are in blobs.
+	subCopies map[string]model.SubmissionCopy
 }
 
 // Close is a no-op; a memstore user holds no resources.

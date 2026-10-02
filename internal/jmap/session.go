@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"shardpost/internal/provision"
 )
@@ -95,7 +97,7 @@ func (s *Server) session(sess *session, base string, shared bool) *Session {
 	}
 
 	if s.o.Submission != nil {
-		out.Capabilities[CapSubmission] = mustRaw(submissionCapability())
+		out.Capabilities[CapSubmission] = mustRaw(submissionCapability(s.o.Submission, time.Now()))
 		out.PrimaryAccounts[CapSubmission] = id
 	}
 
@@ -222,7 +224,7 @@ func (s *Server) account(name string) Account {
 	a.AccountCapabilities[CapMailShare] = json.RawMessage(`{}`)
 
 	if s.o.Submission != nil {
-		a.AccountCapabilities[CapSubmission] = mustRaw(submissionCapability())
+		a.AccountCapabilities[CapSubmission] = mustRaw(submissionCapability(s.o.Submission, time.Now()))
 	}
 
 	if s.o.VacationResponse {
@@ -244,9 +246,41 @@ func ownerCapability(login, owner string) map[string]string {
 }
 
 // submissionCapability is the value of the submission capability (RFC
-// 8621 1.3.2). Delayed sending is not offered.
-func submissionCapability() map[string]any {
-	return map[string]any{"maxDelayedSend": 0, "submissionExtensions": map[string][]string{}}
+// 8621 1.3.2). With delayed sending it names the longest delay and
+// FUTURERELEASE with its two EHLO arguments (RFC 4865 3): the longest
+// interval and the latest release time. The time is rounded down (to
+// the day for delays of two days and more, else to the hour or the
+// minute), so that the session state, a hash of the session object,
+// does not change with every request; a client that keeps to it stays
+// within what the server accepts.
+// The properties of the submission capability.
+const (
+	capMaxDelayedSend       = "maxDelayedSend"
+	capSubmissionExtensions = "submissionExtensions"
+)
+
+func submissionCapability(o *SubmissionOptions, now time.Time) map[string]any {
+	d := o.delayed()
+	if d == nil {
+		return map[string]any{capMaxDelayedSend: 0, capSubmissionExtensions: map[string][]string{}}
+	}
+
+	secs := int64(d.MaxDelay / time.Second)
+
+	step := time.Minute
+
+	switch {
+	case d.MaxDelay >= 48*time.Hour:
+		step = 24 * time.Hour
+	case d.MaxDelay >= 2*time.Hour:
+		step = time.Hour
+	}
+
+	latest := now.UTC().Add(d.MaxDelay).Truncate(step)
+
+	return map[string]any{capMaxDelayedSend: secs, capSubmissionExtensions: map[string][]string{
+		extFutureRelease: {strconv.FormatInt(secs, 10), latest.Format(time.RFC3339)},
+	}}
 }
 
 // accountID is the id an account is addressed by in URLs and arguments.

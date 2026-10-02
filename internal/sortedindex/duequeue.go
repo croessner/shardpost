@@ -96,6 +96,12 @@ func (q *Queue) Move(id string, from []model.DueKey, to *model.DueKey) (err erro
 // Due implements model.DueQueue: it reads the first limit keys of every
 // shard (one read each) and merges them. An unreadable key is skipped.
 func (q *Queue) Due(now time.Time, limit int) (out []model.DueEntry, err error) {
+	return q.DueAfter(now, "", limit)
+}
+
+// DueAfter implements model.DueQueue: Due from the key after on (one
+// read per shard).
+func (q *Queue) DueAfter(now time.Time, after string, limit int) (out []model.DueEntry, err error) {
 	defer func() { q.count(opDue, err) }()
 
 	limit = max(limit, 1)
@@ -110,7 +116,7 @@ func (q *Queue) Due(now time.Time, limit int) (out []model.DueEntry, err error) 
 	var keys []string
 
 	for shard := range h.Shards {
-		page, _, err := q.ix.b.ReadPage(ShardOID(q.ix.name, shard), "", limit)
+		page, _, err := q.ix.b.ReadPage(ShardOID(q.ix.name, shard), after, limit)
 		if err != nil {
 			return nil, err
 		}

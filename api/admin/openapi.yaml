@@ -451,6 +451,88 @@ paths:
                 $ref: "#/components/schemas/DirectoryRepair"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/submissions:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: listSubmissions
+      summary: The account's delayed JMAP submissions
+      description: |
+        The delayed submissions (JMAP EmailSubmission with HOLDFOR or
+        HOLDUNTIL) the account still holds a message copy for: pending,
+        being sent, or ended and not yet cleaned up. Read from the
+        account's intents and one record per submission, no listing; the
+        account is not resolved through Nauthilus. Requires the role
+        `diagnose`.
+      responses:
+        "200":
+          description: The submissions, by release time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionList"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/submissions:
+    get:
+      operationId: listAllSubmissions
+      summary: Every delayed JMAP submission record
+      description: |
+        The records of the delayed submission queue of every account, in
+        key order, a page at a time. Unlike the per-account list it lists
+        the admin namespace (one listing per page, visiting every
+        placement group of the pool): a tool for diagnosis and for the
+        check that the queue is empty before a rollback, not for
+        routine use. It also finds a record whose message copy and queue
+        entry are lost. Requires the role `diagnose` and the scope of
+        all accounts.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: One page of records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionList"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/submissions/{submission}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+      - $ref: "#/components/parameters/SubmissionID"
+    post:
+      operationId: cancelSubmission
+      summary: Cancel a pending delayed submission
+      description: |
+        Cancels a pending delayed submission as a JMAP client would
+        (undoStatus canceled): the message is not sent, its copy is
+        deleted, and the account's EmailSubmission shows `canceled`.
+        Once the worker has begun to send it the cancel is refused with
+        `conflict`; a submission that has ended and been cleaned up is
+        `no_such_submission`. Requires the role `support`.
+      responses:
+        "200":
+          description: The canceled submission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Submission"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/plans:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -1504,6 +1586,14 @@ components:
         type: string
         minLength: 1
         maxLength: 320
+    SubmissionID:
+      name: submission
+      in: path
+      required: true
+      description: Id of a JMAP EmailSubmission.
+      schema:
+        type: string
+        pattern: "^S[0-9a-f]{1,63}$"
     MailboxID:
       name: id
       in: path
@@ -1606,7 +1696,7 @@ components:
         `limit_exceeded` (409, the change would take the account beyond
         one of its configured limits, see `limits` in the configuration),
         `no_such_job` (404, job, plan or learning job), `no_such_message`
-        (404), `no_such_script` (404).
+        (404), `no_such_script` (404), `no_such_submission` (404).
       content:
         application/json:
           schema:
@@ -1618,8 +1708,72 @@ components:
       properties:
         code:
           type: string
-          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, account_purging, not_locked, precondition_failed, no_such_job, limit_exceeded]
+          enum: [bad_request, unauthenticated, forbidden, no_such_user, no_such_mailbox, no_such_message, no_such_script, too_large, rejected, over_quota, temporary, internal, conflict, import_locked, account_purging, not_locked, precondition_failed, no_such_job, limit_exceeded, no_such_submission]
         message:
+          type: string
+    SubmissionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Submission"
+        next:
+          type: string
+          description: Pass as `after` for the next page (listAllSubmissions only); absent at the end.
+    Submission:
+      type: object
+      description: |
+        A delayed JMAP submission as the submission queue keeps it. The
+        state `failed` and an `unknown` result show in JMAP as
+        undoStatus `final`.
+      required: [id, account, state, release, due, created, attempts, size, mail_from, rcpt_to]
+      properties:
+        id:
+          type: string
+        account:
+          type: string
+        state:
+          type: string
+          enum: [pending, sending, final, canceled, failed]
+          x-enum-varnames: [SubmissionPending, SubmissionSending, SubmissionFinal, SubmissionCanceled, SubmissionFailed]
+        release:
+          type: string
+          format: date-time
+          description: The release time the client asked for (sendAt).
+        due:
+          type: string
+          format: date-time
+          description: When a pending submission is tried next (later than `release` after a temporary failure).
+        created:
+          type: string
+          format: date-time
+        sending_since:
+          type: string
+          format: date-time
+          description: Start of the current attempt (state `sending`).
+        finished:
+          type: string
+          format: date-time
+        attempts:
+          type: integer
+        size:
+          type: integer
+          format: int64
+        mail_from:
+          type: string
+        rcpt_to:
+          type: array
+          items:
+            type: string
+        unknown:
+          type: boolean
+          description: The sending was interrupted; the message may or may not have been relayed and is not sent again.
+        reason:
+          type: string
+          description: Why it failed or its result is unknown, or why the last attempt was retried.
+        canceled_by:
           type: string
     Version:
       type: object

@@ -19,6 +19,7 @@ import (
 	"shardpost/internal/learnindex"
 
 	"shardpost/internal/model"
+	"shardpost/internal/sendqueue"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/version"
 )
@@ -39,7 +40,7 @@ type adminServers struct {
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
 func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store,
-	notices *sharenotice.Recorder, flushLog *auth.FlushLog,
+	notices *sharenotice.Recorder, flushLog *auth.FlushLog, sendq *sendqueue.Service,
 ) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
@@ -58,7 +59,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	}
 
 	if settings.Jobs.Enabled {
-		if err := a.newJobs(log, settings, store, importer, instance, learning); err != nil {
+		if err := a.newJobs(log, settings, store, importer, instance, learning, sendq); err != nil {
 			return nil, err
 		}
 	}
@@ -77,7 +78,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		TraceDefaultDuration: time.Duration(settings.Trace.DefaultDurationSeconds) * time.Second,
 		TraceMaxDuration:     time.Duration(settings.Trace.MaxDurationSeconds) * time.Second,
 		ClientScopes:         scopes, AllAccountsClients: all, Instance: instance, StartedAt: time.Now(), ConfigFingerprint: settings.Fingerprint(),
-		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: learning, SearchScanLimit: c.SearchScanLimit,
+		StorePing: store.Ping, Jobs: a.jobs, Directory: store, Learning: learning, Submissions: submissionAdmin(sendq), SearchScanLimit: c.SearchScanLimit,
 		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices})
 
 	if c.Addr != "" {
@@ -99,6 +100,16 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	}
 
 	return a, nil
+}
+
+// submissionAdmin is the queue as the admin API's interface (nil, not a
+// typed nil, without one).
+func submissionAdmin(q *sendqueue.Service) admin.SubmissionAdmin {
+	if q == nil {
+		return nil
+	}
+
+	return q
 }
 
 // adminClients maps the configured client identities to their roles and,
@@ -124,7 +135,7 @@ func adminClients(cs []config.AdminClient) (clients, scopes map[string][]string,
 
 // newJobs builds the maintenance job system (roadmap 8c).
 func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store *cephstore.Store, importer importStore, instance string,
-	learning *learnindex.Queue,
+	learning *learnindex.Queue, sendq *sendqueue.Service,
 ) error {
 	kv, err := store.AdminKV()
 	if err != nil {
@@ -134,6 +145,10 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
 	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store}
+
+	if sendq != nil {
+		env.Submissions = sendq
+	}
 
 	a.jobsKV = kv
 	a.jobs = jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),

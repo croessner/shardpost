@@ -29,11 +29,11 @@ type JMAP struct { //nolint:dupl // a configuration section is a list of tagged 
 	InsecureAuth bool `mapstructure:"insecure_auth" env:"JMAP_INSECURE_AUTH"`
 	// The limits the session resource advertises and the server
 	// enforces; 0 takes the built-in default.
-	MaxSizeUpload         int64 `mapstructure:"max_size_upload" env:"JMAP_MAX_SIZE_UPLOAD" validate:"gte=0"`
+	MaxSizeUpload int64 `mapstructure:"max_size_upload" env:"JMAP_MAX_SIZE_UPLOAD" validate:"gte=0"`
 	// UploadTTLSeconds is how long an uploaded blob is kept (RFC 8620
 	// 6.1 asks for at least an hour); the upload expiry worker deletes it
 	// then.
-	UploadTTLSeconds int64 `mapstructure:"upload_ttl_seconds" env:"JMAP_UPLOAD_TTL_SECONDS" validate:"gte=3600,lte=2592000"`
+	UploadTTLSeconds      int64 `mapstructure:"upload_ttl_seconds" env:"JMAP_UPLOAD_TTL_SECONDS" validate:"gte=3600,lte=2592000"`
 	MaxSizeRequest        int64 `mapstructure:"max_size_request" env:"JMAP_MAX_SIZE_REQUEST" validate:"gte=0"`
 	MaxConcurrentUpload   int64 `mapstructure:"max_concurrent_upload" env:"JMAP_MAX_CONCURRENT_UPLOAD" validate:"gte=0"`
 	MaxConcurrentRequests int64 `mapstructure:"max_concurrent_requests" env:"JMAP_MAX_CONCURRENT_REQUESTS" validate:"gte=0"`
@@ -153,7 +153,45 @@ type JMAPSubmission struct {
 	MaxSize          int64 `mapstructure:"max_size" env:"JMAP_SUBMISSION_MAX_SIZE" validate:"gte=0"`
 	RetentionSeconds int64 `mapstructure:"retention_seconds" env:"JMAP_SUBMISSION_RETENTION_SECONDS" validate:"gte=0"`
 	MaxKept          int64 `mapstructure:"max_kept" env:"JMAP_SUBMISSION_MAX_KEPT" validate:"gte=0"`
+	// Delayed configures delayed sending (FUTURERELEASE, scaling plan
+	// B10) and its worker.
+	Delayed JMAPDelayedSend `mapstructure:"delayed"`
 }
+
+// JMAPDelayedSend configures delayed sending: EmailSubmission with
+// HOLDFOR or HOLDUNTIL (RFC 4865, RFC 8621 7), kept in the submission
+// queue of the admin store and sent by a partitioned worker.
+type JMAPDelayedSend struct {
+	// MaxDelaySeconds is the longest delay a client may ask for
+	// (maxDelayedSend); 0, the default, offers no delayed sending.
+	MaxDelaySeconds int64 `mapstructure:"max_delay_seconds" env:"JMAP_SUBMISSION_DELAYED_MAX_DELAY_SECONDS" validate:"gte=0,lte=31536000"`
+	// Worker runs the worker in this server (needs relay_addr). It keeps
+	// running when max_delay_seconds is 0, so that a queue left behind
+	// is still sent.
+	Worker bool `mapstructure:"worker" env:"JMAP_SUBMISSION_DELAYED_WORKER"`
+	// Partitions splits the accounts among the workers (by hash), each
+	// partition with a lease of its own; MaxPartitions bounds how many
+	// one server holds (0: all).
+	Partitions    int64 `mapstructure:"partitions" env:"JMAP_SUBMISSION_DELAYED_PARTITIONS" validate:"gte=1,lte=64"`
+	MaxPartitions int64 `mapstructure:"max_partitions" env:"JMAP_SUBMISSION_DELAYED_MAX_PARTITIONS" validate:"gte=0,lte=64"`
+	// PollSeconds is how often a worker looks at the queue without a
+	// notification.
+	PollSeconds int64 `mapstructure:"poll_seconds" env:"JMAP_SUBMISSION_DELAYED_POLL_SECONDS" validate:"gte=1,lte=3600"`
+	// SendingTimeoutSeconds is how long a submission may stay in
+	// "sending" before it counts as final with an unknown result (it is
+	// never sent again). It has to exceed the longest conversation with
+	// the relay.
+	SendingTimeoutSeconds int64 `mapstructure:"sending_timeout_seconds" env:"JMAP_SUBMISSION_DELAYED_SENDING_TIMEOUT_SECONDS" validate:"gte=1800,lte=86400"`
+	// Concurrency bounds the conversations with the relay one worker
+	// holds at once.
+	Concurrency int64 `mapstructure:"concurrency" env:"JMAP_SUBMISSION_DELAYED_CONCURRENCY" validate:"gte=1,lte=64"`
+	// RetryAttempts bounds the attempts of a submission whose relay
+	// failed temporarily before the message was transferred.
+	RetryAttempts int64 `mapstructure:"retry_attempts" env:"JMAP_SUBMISSION_DELAYED_RETRY_ATTEMPTS" validate:"gte=1,lte=20"`
+}
+
+// Enabled reports whether delayed sending is offered.
+func (d JMAPDelayedSend) Enabled() bool { return d.MaxDelaySeconds > 0 }
 
 // Enabled reports whether submission is configured.
 func (s JMAPSubmission) Enabled() bool { return s.RelayAddr != "" }
@@ -172,6 +210,10 @@ func (s JMAPSubmission) Validate() error {
 
 	if !s.XClient && !s.CheckSender {
 		return fmt.Errorf("jmap.submission: with xclient off, check_sender has to be on")
+	}
+
+	if s.Delayed.MaxPartitions > s.Delayed.Partitions {
+		return fmt.Errorf("jmap.submission.delayed.max_partitions must not exceed partitions")
 	}
 
 	return nil

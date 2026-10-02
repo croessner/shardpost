@@ -18,7 +18,7 @@ example](jmap-examples.md) shows a recorded send and receive as JSON.
 | 2 | `Mailbox/*` | built |
 | 3 | `Email/get`, `Email/changes`, `Thread/*` | built |
 | 4 | `Email/query`, `Email/queryChanges`, `Email/set`, `Email/import`, `Email/parse`, `Email/copy` | built |
-| 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending prepared, not offered |
+| 5 | Push (EventSource and Web Push), `Identity/*`, `EmailSubmission/*` | built; delayed sending (`FUTURERELEASE`) since 0.43.0 |
 | 6 | `Quota/*`, `VacationResponse/*` | built |
 | 6 | `Blob/*`, `SieveScript/*` | built |
 | 6c-1 | Sharing of mail: shared mailboxes and public folders as accounts, `Email/copy` between them | built |
@@ -1233,8 +1233,11 @@ combination without it.
   `max_recipients` (100, `tooManyRecipients`), each an address
   (`invalidRecipients`). The message is at most `max_size`
   (`max_size_upload`, `tooLarge`).
-- No SMTP parameters: `submissionExtensions` is empty, so an envelope
-  that carries any is `invalidProperties`.
+- No SMTP parameters but the hold of delayed sending: without
+  `jmap.submission.delayed.max_delay_seconds` `submissionExtensions` is
+  empty and an envelope that carries any parameter is
+  `invalidProperties`; with it, `HOLDFOR` or `HOLDUNTIL` of `mailFrom`
+  is the only one (see Delayed sending).
 
 Without an envelope the server derives one as RFC 8621 7 says: the
 Sender, else the From, else the identity's address, and the recipients
@@ -1260,11 +1263,98 @@ response, under the same call id — the usual way a client moves the
 sent draft to *Sent*. A client can create the draft and send it in one
 request, naming it by its creation id.
 
-**Delayed sending is prepared, not offered.** `maxDelayedSend` is 0, a
-`HOLDFOR`/`HOLDUNTIL` parameter is refused, and every submission is
-`final` once the relay has it, so a cancellation is `cannotUnsend`. The
-record already carries `sendAt` and `undoStatus`, so a queue can be
-added without changing what is stored.
+### Delayed sending
+
+Since 0.43.0 a client can ask for a message to be released later
+(RFC 8621 7 with RFC 4865 `FUTURERELEASE`, scaling plan B10). It is off
+by default; `jmap.submission.delayed.max_delay_seconds` switches it on
+and bounds the delay (see [configuration](configuration.md#delayed-sending)).
+
+- **Capability.** `maxDelayedSend` is the configured delay in seconds,
+  and `submissionExtensions` names `FUTURERELEASE` with the two EHLO
+  arguments of RFC 4865: the longest interval in seconds and the latest
+  release time. The latest time is rounded down (to the day for delays
+  of two days and more, else to the hour or the minute), so that the
+  session state does not change with every request.
+- **Asking for it.** The envelope's `mailFrom` carries exactly one of
+  `HOLDFOR` (1 to 999999999 seconds as RFC 4865 3 writes it, at most
+  `maxDelayedSend`) or `HOLDUNTIL` (an RFC 3339 date-time in UTC, ending
+  in `Z`, at most `maxDelayedSend` ahead, with a minute of slack for the
+  client's clock); names are case-insensitive. Anything else — a value
+  that does not parse, `HOLDFOR=0`, a `HOLDUNTIL` with an offset, a hold
+  beyond the limit, two hold parameters, any other parameter, a
+  parameter of a recipient — is `invalidProperties` on `envelope`, and
+  nothing is scheduled. A `HOLDUNTIL` that has passed sends at once.
+  `sendAt` is server-set (RFC 8621 7) and refused in a creation, as
+  before.
+- **What is kept.** All checks of an immediate submission run at
+  creation (identity, sender, recipients, size). The message is then
+  copied, without its Bcc field, into a blob of the account's own (it
+  does not reference the message in the mailbox), and the submission
+  waits in the submission queue of the admin store
+  ([storage](architecture/storage.md#delayed-submissions)). The
+  EmailSubmission is recorded first, with `undoStatus` `pending`,
+  `sendAt` the release time and `deliveryStatus` null, so that a worker
+  that sends at once finds it; a submission that cannot be scheduled is
+  taken back (`serverFail`).
+- **Purged or purging accounts.** Before it sends, the worker checks the
+  account directory: an account being purged, or one with neither a
+  directory entry nor a registry, gets nothing sent; its submission
+  fails. The purge marks the account before it removes the queue's
+  records.
+- **Canceling.** `EmailSubmission/set` with
+  `update: {id: {undoStatus: "canceled"}}` cancels a pending submission
+  as long as the worker has not begun to send it; from then on it is
+  `cannotUnsend`. The cancel and the worker's start compete by a
+  compare-and-swap on one record, so exactly one of them wins. Setting
+  `canceled` on a canceled submission again succeeds without effect.
+- **Sending.** A worker sends the copy at the release time with the
+  envelope and the XCLIENT data (login, client address) of the creation,
+  and writes `undoStatus` `final` with `deliveryStatus` (`queued` with
+  the relay's reply; `no` with the replies of a refusal). A relay that
+  cannot be reached or refuses temporarily is tried again with a
+  backoff (one minute, doubling, at most 30 minutes) up to
+  `retry_attempts` times, then the submission is `final` with
+  `delivered` `no` — but only for errors before the message was
+  transferred.
+- **At most once.** A submission is never sent twice. When the
+  conversation broke while the message was transferred, or the server
+  stopped while it was sending, the submission is `final` with
+  `delivered` `unknown`: the relay may or may not have taken it, and it
+  is not sent again. A submission stays in this state for at most
+  `sending_timeout_seconds` (one hour) after its attempt began.
+- **onSuccessUpdateEmail and onSuccessDestroyEmail** are carried out
+  when the `EmailSubmission/set` succeeds, as for an immediate
+  submission: RFC 8621 7.5 ties them to the success of the create,
+  update or destroy, not to the delivery. A client that moves the draft
+  to *Sent* does so at creation; the queue sends the copy, so destroying
+  or changing the Email afterwards does not change what is sent (RFC
+  8621 7.5). They also apply to a successful cancel (an update).
+- **Destroying** a pending EmailSubmission removes its record only and
+  does not cancel the sending (RFC 8621 7.5); the client cancels with
+  `undoStatus`. When the submission ends, nothing brings the destroyed
+  record back. The queue keeps the record as created, with the position
+  of its creation in the change log of the account's submissions, and
+  restores a record that went missing without the log showing it
+  destroyed — but only while that log (the last 256 changes) still
+  reaches back to the creation, and only in the same incarnation of the
+  account (a name purged and used again starts records of a new epoch);
+  beyond that, and for a submission that failed because its account or
+  copy is gone, a missing record counts as destroyed.
+- **Changes.** The transition to `final` or `canceled` is an update in
+  `EmailSubmission/changes` and the push state, like every other change
+  of the record.
+- **Admin.** `shardpostctl submission list|cancel` (and the admin API)
+  shows an account's pending submissions and cancels one for the user
+  ([manual page](man/man1/shardpostctl-submission.1)).
+- **Mixed versions.** A server before 0.43.0 refuses `HOLDFOR` and
+  `HOLDUNTIL` with `invalidProperties` and advertises `maxDelayedSend`
+  0; during a rolling update a client that read the capability from a
+  new server may meet an old one and get that refusal (nothing is sent).
+  An old server shows a pending submission as `pending` and answers a
+  cancel with `cannotUnsend`; it does not send queued submissions. Going
+  back to a release before 0.43.0 needs an empty queue (see
+  [operations](operations/README.md#delayed-submissions)).
 
 **Records.** The submissions of an account are one record in the admin
 store, with a state and a change log of the last 256 changes behind
@@ -1884,6 +1974,15 @@ jmap:
     max_recipients: 100
     retention_seconds: 604800
     max_kept: 500
+    delayed:                     # delayed sending (FUTURERELEASE), off with 0
+      max_delay_seconds: 604800  # maxDelayedSend
+      worker: true               # this server sends what is due
+      partitions: 1
+      max_partitions: 0          # 0: all
+      poll_seconds: 30
+      sending_timeout_seconds: 3600
+      concurrency: 4
+      retry_attempts: 5
 ```
 
 The relay side: a Postfix listener of its own that relays only for
@@ -1956,7 +2055,9 @@ authentication backend, and the relay learns the account from
   way it encodes the start of a group. `header:*:asAddresses` parses the
   header itself and has neither deviation.
 - `EmailSubmission` hands messages to the relay and does not evaluate
-  DSNs or MDNs, and delayed sending is not offered (see Sending).
+  DSNs or MDNs; delayed sending is off unless configured, and a
+  submission whose sending was interrupted is `final` with `delivered`
+  `unknown`, never sent again (see Delayed sending).
 - A message that is not kept — discarded, or only forwarded
   (`redirect` without `:copy` or `keep`) — gets no vacation reply, from
   the JMAP vacation or from a vacation in the user's script: the reply

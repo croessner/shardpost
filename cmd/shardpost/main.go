@@ -39,6 +39,7 @@ import (
 	"shardpost/internal/provision"
 	"shardpost/internal/quota"
 	"shardpost/internal/rookcreds"
+	"shardpost/internal/sendqueue"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/sieve"
 	"shardpost/internal/telemetry"
@@ -439,6 +440,9 @@ type servers struct {
 	// notices writes the share notifications (RFC 9670 3) of every ACL
 	// change: IMAP SETACL, the admin API and JMAP shareWith.
 	notices *sharenotice.Recorder
+	// sendq is the delayed submission queue (nil without the admin store
+	// indexes).
+	sendq *sendqueue.Service
 }
 
 // serve starts all listeners and blocks until a signal or a fatal listener
@@ -469,15 +473,15 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 		return err
 	}
 
-	imapSieve, stopWorker, err := newIMAPSieve(ctx, log, settings, store, programs, sieveCfg)
+	bg, err := startBackground(ctx, log, settings, store, programs, sieveCfg)
 	if err != nil {
 		return err
 	}
-	defer stopWorker()
+	defer bg.stop()
 
-	defer startUploadExpiry(ctx, store)()
+	srv := newServers(log, settings, store, authn, tlsCfg, bg.imapSieve, programs, sieveCfg)
+	srv.sendq = bg.sendq
 
-	srv := newServers(log, settings, store, authn, tlsCfg, imapSieve, programs, sieveCfg)
 	logRelay(log, settings)
 
 	defer srv.closeJMAP() // before the caller closes the store, which the fills read

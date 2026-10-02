@@ -30,6 +30,11 @@ type Env struct {
 	// Directory is the account directory a batch walks (nil: no
 	// batches).
 	Directory model.AccountDirectory
+	// Submissions removes the delayed JMAP submissions of an account
+	// (purge, scaling plan B10); nil skips.
+	Submissions interface {
+		PurgeAccount(u model.User, account string) (int, error)
+	}
 }
 
 // Kind is one job kind.

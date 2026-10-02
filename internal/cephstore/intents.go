@@ -27,6 +27,8 @@ import (
 //	  "bimp:<batch>"    the blobs of an import step, removed after the
 //	                    header write of the step
 //	  "up:<guid>"       a JMAP upload, removed when it expires
+//	  "sub:<guid>"      the message copy of a delayed JMAP submission,
+//	                    removed when the submission ends (subcopies.go)
 //	  "ci:<id>"         a mailbox object being created, removed in the CAS
 //	                    that registers its name
 //	  "dm:<id>"         a mailbox being deleted (tombstone with its range),
@@ -362,8 +364,8 @@ func (u *User) anyKey(oid string, prefixes ...string) (string, error) {
 }
 
 // intentPrefixes are the registry prefixes of intents a scrub has to look
-// at (ps: is not one: it stays while the marks exist; up: only once it
-// expired, see expiredUpload).
+// at (ps: is not one: it stays while the marks exist; up: and sub: only
+// once they expired, see expiredUpload).
 var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPrefix, regCreatePrefix, regDeletePrefix}
 
 // uploadPage bounds the upload intents ScrubPending reads: an account with
@@ -371,14 +373,14 @@ var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPre
 // removes them when they are due either way; the scrub is the fallback).
 const uploadPage = 64
 
-// expiredUpload reports whether the first uploadPage upload intents hold
-// one the scrub would act on: expired longer ago than the intent grace
-// (the threshold gatherBlobIntents uses). A live upload keeps no account
-// from being idle.
-func (u *User) expiredUpload(now time.Time) (bool, error) {
+// expiredUpload reports whether the first uploadPage intents with the
+// prefix (up: or sub:) hold one the scrub would act on: expired longer
+// ago than the intent grace (the threshold gatherBlobIntents uses). A
+// live upload or submission copy keeps no account from being idle.
+func (u *User) expiredUpload(prefix string, now time.Time) (bool, error) {
 	cut := now.Add(-u.intentGrace()).Unix()
 
-	vals, err := u.idx.GetOmapValues(oidRegistry, "", regUploadPrefix, uploadPage)
+	vals, err := u.idx.GetOmapValues(oidRegistry, "", prefix, uploadPage)
 	if err != nil {
 		if errCode(err) == syscall.ENOENT {
 			return false, nil

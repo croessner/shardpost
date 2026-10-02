@@ -32,6 +32,11 @@ type DueQueue interface {
 	// Due returns up to limit entries due at or before now, earliest
 	// first.
 	Due(now time.Time, limit int) ([]DueEntry, error)
+	// DueAfter is Due for the entries whose keys sort after the key
+	// after (DueEntry.Key of the last entry of the previous page): a
+	// reader that skips entries (a partitioned worker) pages through
+	// everything that is due.
+	DueAfter(now time.Time, after string, limit int) ([]DueEntry, error)
 	// Head returns the head of the queue (shard count, markers).
 	Head() (IndexHead, error)
 	// Watch watches the queue's shard 0, which writers Notify when an
@@ -73,6 +78,12 @@ const (
 	// UploadsQueue holds every JMAP upload (namespace "~accounts" of the
 	// index pool) at the time it expires; the id is "<account>/<guid>".
 	UploadsQueue = "uploads"
+	// SubmissionQueue holds every delayed JMAP submission (namespace
+	// "~admin" of the index pool) at the time its record has to be
+	// visited next: a pending one at its release time, one being sent at
+	// the end of its sending timeout, a finished one at once (its
+	// clean-up); the id is "<account>/<submission id>".
+	SubmissionQueue = "submission"
 
 	// DefaultQueueShards and MaxQueueShards bound the shards of a queue.
 	DefaultQueueShards = 4

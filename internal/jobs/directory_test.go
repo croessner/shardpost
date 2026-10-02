@@ -9,6 +9,7 @@ import (
 
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
+	"shardpost/internal/sendqueue"
 )
 
 func dirEntry(t *testing.T, store *memstore.Store, account string) (model.AccountEntry, bool) {
@@ -269,4 +270,74 @@ func TestPurgeRunning(t *testing.T) {
 			t.Errorf("%q: %v %v", session, got, err)
 		}
 	}
+}
+
+// TestPurgeRemovesSubmissions: a purge removes the account's delayed
+// submissions (record, queue entry, copy) and leaves other accounts'.
+func TestPurgeRemovesSubmissions(t *testing.T) {
+	m, store := kindsSetup(t)
+
+	q, err := sendqueue.New(sendqueue.Options{KV: memstore.NewAdminKV(), Accounts: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.env.Submissions = &purgeOrder{q: q, store: store}
+
+	ids := map[string]string{"alice": "S0a", "bob": "S0b"}
+
+	for account, id := range ids {
+		u, _ := store.User(account)
+
+		if _, err := q.Schedule(u, sendqueue.Spec{Account: account, ID: id, Release: time.Now().Add(time.Hour),
+			MailFrom: account, RcptTo: []string{"x@example.net"}, Raw: []byte("x\r\n")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	planAndApply(t, m, KindPurge, "alice", nil)
+
+	if _, err := q.Get("alice", ids["alice"]); !errors.Is(err, sendqueue.ErrNotFound) {
+		t.Errorf("alice's submission left: %v", err)
+	}
+
+	if po := m.env.Submissions.(*purgeOrder); po.state != model.AccountPurging {
+		t.Errorf("the queue records were removed while the directory entry was %q, not purging", po.state)
+	}
+
+	if list, err := q.List("bob"); err != nil || len(list) != 1 {
+		t.Errorf("bob's submissions %d %v", len(list), err)
+	}
+
+	u, _ := store.User("alice")
+	if copies, _ := u.(model.SubmissionCopies).SubmissionCopies(); len(copies) != 0 {
+		t.Errorf("alice's copies left: %d", len(copies))
+	}
+}
+
+// purgeOrder records the directory state of the account when the purge
+// removes its delayed submissions.
+type purgeOrder struct {
+	q     *sendqueue.Service
+	store *memstore.Store
+	state string
+}
+
+func (p *purgeOrder) PurgeAccount(u model.User, account string) (int, error) {
+	ix, release, err := p.store.AccountIndex()
+	if err != nil {
+		return 0, err
+	}
+
+	e, _, err := model.GetAccountEntry(ix, account)
+
+	release()
+
+	if err != nil {
+		return 0, err
+	}
+
+	p.state = e.State
+
+	return p.q.PurgeAccount(u, account)
 }

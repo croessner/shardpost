@@ -14,7 +14,7 @@ user namespaces.
 
 | Object/structure | Meaning | Primary source |
 |---|---|---|
-| `mailboxes` | Registry of names and stable mailbox IDs; quota, delivery intents and the intents of the scrub (`bi:`, `bimp:`, `up:`, `ci:`, `dm:`, `ps:`) | [user.go](../../internal/cephstore/user.go), [intents.go](../../internal/cephstore/intents.go) |
+| `mailboxes` | Registry of names and stable mailbox IDs; quota, delivery intents and the intents of the scrub (`bi:`, `bimp:`, `up:`, `sub:`, `ci:`, `dm:`, `ps:`) | [user.go](../../internal/cephstore/user.go), [intents.go](../../internal/cephstore/intents.go) |
 | `account` | Account-wide change counter and change log (JMAP state); watched by JMAP push | [account.go](../../internal/cephstore/account.go), [watch.go](../../internal/cephstore/watch.go) |
 | `ix/<space>/<nn>` | Front-end indexes derived from the rest (JMAP locator), 32 shards | [index.go](../../internal/cephstore/index.go) |
 | `mbox/<id>` | Header, UID counter, MODSEQ, change/vanished log and the first UID shard | [user.go](../../internal/cephstore/user.go) |
@@ -130,6 +130,7 @@ and removes it once the write is complete
 | `bi:<guid>` | registry | in the reservation CAS of `DeliverGUID` (delivery, APPEND, CATENATE, REPLACE, Sieve `fileinto`, COPY into another account), before the blob is written | once the entry is linked or the blob deleted again; batched, see below |
 | `bimp:<batch>` | registry | in the reservation CAS of an import step: each message's GUID and a salt from which its two fallback GUIDs follow (about 35 bytes per message, 350 KiB for the largest step of 10 000 messages) | after the header write of the step |
 | `up:<guid>` | registry | before a JMAP upload's blob is written, after its entry in the uploads due queue | when the upload expires (`jmap.upload_ttl_seconds`) |
+| `sub:<guid>` | registry | before the message copy of a delayed JMAP submission is written, with the submission id and an expiry seven days after the release time | when the submission ends (sent, canceled, failed), by the submission worker or the cancel; see [Delayed submissions](#delayed-submissions) |
 | `ci:<id>` | registry | in a CAS of its own before `mbox/<id>` is created | in the CAS that registers the name (or an import replacement's swap) |
 | `dm:<id>` | registry | in the CAS that unregisters a mailbox, with its UIDNEXT and shard size | after the blobs are released and the shards deleted (highest first, shard 0 last) |
 | `ps:<id>` | registry | before the first private `\Seen` mark of the public folder `<id>` is written | when the scrub removes the marks of a folder that is gone |
@@ -289,7 +290,7 @@ account's namespace in both pools
   shard 0 (retired or not) or the tombstone, and the shards above that
   range that exist (entries of an import step that stopped);
 - the blobs of their entries, of the removal and MOVE intents on shard
-  0, of `bi:`, `bimp:`, `up:` and `d:` in the registry and of the orphan
+  0, of `bi:`, `bimp:`, `up:`, `sub:` and `d:` in the registry and of the orphan
   candidates in the `scrub` object; a blob whose chunk count is not
   recorded is sized from its length attribute;
 - the fixed objects: the full-text index (`fts/`, `ftst/`, `ftsh/`,
@@ -679,6 +680,9 @@ pool).
 | `ix.jobs/expiry/…` | due queue of the jobs, plans and idempotency keys that expire |
 | `ix.jobs/expiry/lock` | cls_lock of the expiry worker |
 | `ix.kv/lock` | cls_lock of `shardpost index backfill kv` |
+| `kv.jmap/sendq/<account>/<id>` | the record of a delayed JMAP submission ([below](#delayed-submissions)) |
+| `ix.submission/…` | due queue of the delayed JMAP submissions |
+| `ix.submission/p<n>/lock` | cls_lock of partition `n` of the submission worker |
 
 The head of `ix.job` carries the backfill markers `backfill.kv` (the
 report of the last completed backfill, with its start time) and
@@ -840,6 +844,111 @@ record only gains the field `idem_key`. A job that an older server ends
 leaves its queue entries behind; the readers of this version remove
 them (claimable: the record has ended; expiry: the record is gone or is
 rescheduled to its real expiry).
+
+## Delayed submissions
+
+A JMAP EmailSubmission with `HOLDFOR` or `HOLDUNTIL` (0.43.0, scaling
+plan B10, [JMAP](../jmap.md#delayed-sending)) waits in the admin store
+until its release time ([sendqueue](../../internal/sendqueue/record.go)):
+
+| Object | Content |
+|---|---|
+| `kv.jmap/sendq/<account>/<id>` (`~admin`) | the record: state, generation, release and next attempt, envelope, XCLIENT data, the GUID of the copy, attempts, the outcome per recipient |
+| `ix.submission/head`, `ix.submission/<nn>` (`~admin`) | completeness queue, keys `<due>/<account>/<id>/<gen>`, shard by the id |
+| `ix.submission/p<n>/lock` (`~admin`) | cls_lock of worker partition `n` (accounts by hash) |
+| `sub:<guid>` in the account's registry | the intent of the message copy: submission id, size, chunks, expiry |
+| `msg/<guid>/<n>` in the account's data pool | the message copy (Bcc removed), one reference, never linked to an entry |
+
+The JMAP view of the submission (`undoStatus`, `deliveryStatus`, the
+change log) stays the account's record `jmap/submission/<account>`;
+the worker writes the outcome there when the submission ends.
+
+**States.** The record moves by compare-and-swap, each write raising its
+generation: `pending → sending → final | failed`, `pending → canceled`,
+`sending → pending` (a temporary failure before the message was
+transferred, while retries are left — one budget of `retry_attempts`
+for relay errors and for an account directory, registry or message copy
+that could not be read), and `sending → final` with an
+unknown result once `sending_timeout_seconds` has passed since the
+attempt began. Only the compare-and-swap `pending → sending` starts a
+conversation with the relay, and only the worker that made it returns
+the record to `pending`, and only for an error that happened before the
+message was transferred: a submission is sent at most once, whatever
+the leases, the clocks or the timeout say. A cancel is the
+compare-and-swap `pending → canceled`; a cancel and the start of a send
+cannot both succeed.
+
+**Order of the writes.** Creating: the JMAP view (`pending`, so that a
+worker that sends at once finds the entry to settle), the copy's
+intent, the copy, the queue entry, the record (a completeness index: the
+entry before the record); a schedule that fails takes the JMAP view
+back. The record keeps the JMAP view as created with the sequence of
+its creation in the account's change log; settling adds the view to the
+account's records when it is missing there, the change log still
+reaches back to that sequence and does not show it destroyed (a lost
+view write). The records carry a random epoch set when they are first
+written, and the queue record the epoch it was created in: a name that
+was purged and used again has records of another epoch, which never get
+an old submission's view. Past the log's reach, in another epoch, or for
+a submission that failed because its account or copy is gone, a missing
+view counts as destroyed, and an account without any records (purged)
+gets none. Ending (worker, cancel): the
+JMAP view, the copy with its intent, the record, the entry (the record
+before the entry). The entry's position follows from the record: a pending
+submission at its next attempt, one being sent at the end of its
+sending timeout, an ended one at once (its clean-up is due). A reader
+that finds an entry elsewhere moves it to the record's position; an
+entry without record, or with a newer generation, is removed after ten
+minutes (`model.DueQueueGrace`), since its writer may still be between
+the two writes. A crash anywhere is finished from the entry.
+
+**Worker.** Every server with a relay and
+`jmap.submission.delayed.worker` runs it. The accounts are split into
+`partitions` by hash, each with a renewed cls_lock; a server holds up to
+`max_partitions`. The holder pages through the due entries of the
+queue (from the key it read last, so entries of other partitions do not
+hide its own) and sends up to `concurrency` at once. It wakes on a
+notify on shard 0 of the queue (each new submission sends one), when
+the earliest entry it saw becomes due, and every `poll_seconds`; free
+partitions it tries to take only on the poll, so a notify costs no lock
+operations. The leases spread the work; the compare-and-swap on the
+record is the fence. Entries of partitions it does not hold that are
+overdue by more than a poll are counted
+(`imapceph_jmap_submission_queue_entries{state="unowned"}`) and warned
+about: a partition nobody holds is never sent, so servers ×
+`max_partitions` must reach `partitions` — (servers − 1) ×
+`max_partitions` for one server to fail; `max_partitions` 0 (all, the
+default) always does. Before it sends, the worker checks the account
+directory: a submission of an account whose entry is `purging`, or that
+has neither an entry nor a registry (purged), fails instead of being
+sent. An entry alone is no proof: an account older than the directory
+has none until the backfill ran, and its registry shows it is live. A
+directory that cannot be read is a temporary failure (retried).
+
+**Shutdown.** A stopping worker starts no new conversation (also none
+that waited for a slot), waits for the running ones to end — up to the
+relay's timeouts, ten minutes for the answer to a message — and gives
+its leases back. A dial the shutdown canceled leaves the submission
+pending without counting an attempt. A server killed in the middle
+(SIGKILL, the pod's grace period ran out) leaves the record in
+`sending`: at most once still holds, the submission ends as unknown
+after the sending timeout.
+
+**Purge, scrub, sweep.** A purge marks the directory entry `purging`
+first — from then on no worker sends for the account — then removes the
+records and entries of its submissions, named by the `sub:` intents of
+its registry, before the namespace goes (a conversation a worker had
+already begun ends as it ends; it is not repeated); the copies go with the namespace, named by
+the same intents ([purge](#purge-without-listing)). A scrub leaves a
+copy alone until its intent expired (seven days after the release time)
+— also a scrub that lists, which otherwise takes a blob without a
+reference for an orphan — and then deletes it with its intent. The
+sweep names the copies through the data model like every other blob.
+
+**Rollback.** Servers before 0.43.0 do not know the queue: they refuse
+new delayed submissions, do not send queued ones, and leave their
+records, entries and copies. Going back behind 0.43.0 therefore needs an
+empty queue (see [Operations](../operations/README.md#delayed-submissions)).
 
 ## Learning queue: due queue and owner index
 

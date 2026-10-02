@@ -67,6 +67,14 @@ func (r *Report) Temporary() bool {
 	return false
 }
 
+// ErrInData marks a transport error after the relay accepted DATA: the
+// message was on its way, and whether the relay took it cannot be told.
+// A sender that must not send twice (the delayed submission worker)
+// takes such a submission as sent with an unknown result instead of
+// trying again. Every other error of Submit happened before the message
+// was transferred.
+var ErrInData = errors.New("the connection failed while the message was transferred")
+
 // ErrNoXClient is returned when the relay does not offer XCLIENT to this
 // host.
 var ErrNoXClient = errors.New("the relay does not offer XCLIENT to this host")
@@ -75,7 +83,8 @@ var ErrNoXClient = errors.New("the relay does not offer XCLIENT to this host")
 // the relay with XCLIENT and no AUTH is made; without it, the relay's
 // configured credentials are used. The transaction is all or nothing: a
 // refused recipient ends it before DATA, and the report says which. An
-// error means the relay could not be talked to at all.
+// error means the relay could not be talked to, before the message was
+// transferred unless it wraps ErrInData.
 func (r *Relay) Submit(ctx context.Context, as *XClient, from string, to []string, raw []byte) (*Report, error) {
 	if !r.Enabled() {
 		return nil, ErrNoRelay
@@ -184,17 +193,22 @@ func (s *session) data(rep *Report, raw []byte) (*Report, error) {
 
 	w := s.c.Text.DotWriter()
 	if _, err := w.Write(raw); err != nil {
-		return nil, fmt.Errorf("relay DATA: %w", err)
+		return nil, fmt.Errorf("relay DATA: %w: %w", ErrInData, err)
 	}
 
 	if err := w.Close(); err != nil {
-		return nil, fmt.Errorf("relay DATA: %w", err)
+		return nil, fmt.Errorf("relay DATA: %w: %w", ErrInData, err)
 	}
 
 	s.step(s.dataTimeout)
 
-	code, msg, err := s.c.Text.ReadResponse(250)
+	code, msg, err := s.c.Text.ReadResponse(2) // any 2xx takes the message
 	if err != nil {
+		var te *textproto.Error
+		if !errors.As(err, &te) {
+			return nil, fmt.Errorf("relay DATA: %w: %w", ErrInData, err)
+		}
+
 		return refusal(rep, "DATA", err)
 	}
 

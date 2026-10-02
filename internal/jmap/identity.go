@@ -12,6 +12,7 @@ import (
 
 	"shardpost/internal/auth"
 	"shardpost/internal/model"
+	"shardpost/internal/sendqueue"
 )
 
 // Identity (RFC 8621 6). The addresses an account may send from are the
@@ -56,6 +57,25 @@ type SubmissionOptions struct {
 	// Retention and MaxKept bound the submission records an account keeps.
 	Retention time.Duration
 	MaxKept   int
+	// Delayed, when set, offers delayed sending (FUTURERELEASE, scaling
+	// plan B10).
+	Delayed *DelayedOptions
+}
+
+// DelayedOptions configure delayed sending: the queue the submissions
+// wait in and the longest delay a client may ask for.
+type DelayedOptions struct {
+	Queue    *sendqueue.Service
+	MaxDelay time.Duration
+}
+
+// delayed is the delayed sending configuration, nil when it is off.
+func (o *SubmissionOptions) delayed() *DelayedOptions {
+	if o == nil || o.Delayed == nil || o.Delayed.Queue == nil || o.Delayed.MaxDelay < time.Second {
+		return nil
+	}
+
+	return o.Delayed
 }
 
 // DefaultSubmission are the bounds a configuration that says nothing gets.

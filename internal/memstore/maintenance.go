@@ -157,7 +157,7 @@ func (u *User) PurgeNamespace(fence func() error) (int, error) {
 	u.scripts, u.active, u.shared = nil, "", map[string]*model.SharedRef{}
 	u.usage, u.limit, u.imp, u.trace = model.Quota{}, model.Quota{}, nil, model.TraceState{}
 	u.annot, u.vacSeen, u.subMiss, u.pubSubs, u.pubSeen = nil, nil, nil, nil, nil
-	u.indexes, u.usedNames, u.intents = nil, nil, 0
+	u.indexes, u.usedNames, u.intents, u.subCopies = nil, nil, 0, nil
 	u.acct.entries, u.acct.seq, u.acct.logStart = nil, 0, 0
 	u.registered.Store(false) // the registry goes last
 

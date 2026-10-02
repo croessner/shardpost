@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL 1 "2026-10-01" "ShardPost 0.41.0" "ShardPost Manual"
+.TH SHARDPOSTCTL 1 "2026-10-02" "ShardPost 0.43.0" "ShardPost Manual"
 .SH NAME
 shardpostctl \- administrative client for a ShardPost mail server
 .SH SYNOPSIS
@@ -103,6 +103,9 @@ Switch on a protocol trace for one account.
 .TP
 .BR shardpostctl-auth (1)
 Flush the auth cache of every server, for one account or for all.
+.TP
+.BR shardpostctl-submission (1)
+List and cancel the delayed JMAP submissions of an account.
 .SH CONNECTION FLAGS
 These flags come before the command. They select the listener and apply
 to every command.
@@ -155,7 +158,8 @@ account scope
 .TP
 .B diagnose
 Read-only: server state, accounts, mailboxes, ACLs, quota, job and
-learning-queue status. Sees metadata, never message content.
+learning-queue status, delayed submissions. Sees metadata, never message
+content.
 .TP
 .B deliver
 Local delivery. With
@@ -182,7 +186,8 @@ Delete mailboxes and messages, and purge accounts.
 Read message content: search, headers, export, Sieve script text.
 .TP
 .B support
-Change messages (flags, copy, move) and Sieve scripts.
+Change messages (flags, copy, move) and Sieve scripts; cancel delayed
+submissions.
 .TP
 .B export
 Export whole accounts.
@@ -304,6 +309,7 @@ Default admin socket inside the server pod.
 .BR shardpostctl-migrate (1),
 .BR shardpostctl-server (1),
 .BR shardpostctl-sieve (1),
+.BR shardpostctl-submission (1),
 .BR shardpostctl-trace (1)
 .PP
 The admin API itself is documented in

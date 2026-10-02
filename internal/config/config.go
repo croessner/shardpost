@@ -450,6 +450,14 @@ var defaults = []struct {
 	{"jmap.submission.max_size", 0},
 	{"jmap.submission.retention_seconds", 0},
 	{"jmap.submission.max_kept", 0},
+	{"jmap.submission.delayed.max_delay_seconds", 0},
+	{"jmap.submission.delayed.worker", true},
+	{"jmap.submission.delayed.partitions", 1},
+	{"jmap.submission.delayed.max_partitions", 0},
+	{"jmap.submission.delayed.poll_seconds", 30},
+	{"jmap.submission.delayed.sending_timeout_seconds", 3600},
+	{"jmap.submission.delayed.concurrency", 4},
+	{"jmap.submission.delayed.retry_attempts", 5},
 	{"jmap.push.scan_seconds", 0},
 	{"jmap.push.poll_seconds", 0},
 	{"jmap.push.timeout_seconds", 0},
@@ -654,7 +662,7 @@ func (c *Config) checkServer() error {
 		return err
 	}
 
-	if err := c.JMAP.Validate(c.TLS); err != nil {
+	if err := c.checkJMAP(); err != nil {
 		return err
 	}
 
@@ -676,6 +684,20 @@ func (c *Config) checkServer() error {
 	}
 
 	c.Server.ProxyProtocolTrustedCidrs = cidrs
+
+	return nil
+}
+
+// checkJMAP validates the JMAP settings and what they need of others:
+// delayed sending needs a relay and the admin store's queues.
+func (c *Config) checkJMAP() error {
+	if err := c.JMAP.Validate(c.TLS); err != nil {
+		return err
+	}
+
+	if d := c.JMAP.Submission.Delayed; d.Enabled() && (!c.JMAP.Submission.Enabled() || c.Admin.KVIndex == "off") {
+		return fmt.Errorf("jmap.submission.delayed.max_delay_seconds needs jmap.submission.relay_addr and admin.kv_index write or read")
+	}
 
 	return nil
 }

@@ -37,6 +37,7 @@ const (
 	labelScope   = "scope"
 	labelSource  = "source"
 	labelLimit   = "limit"
+	labelState   = "state"
 )
 
 var (
@@ -127,6 +128,24 @@ var (
 		Namespace: namespace, Name: "queue_stale_entries_total",
 		Help: "Queue entries that did not match their record, by queue and action.",
 	}, []string{labelQueue, labelAction})
+	// Submissions counts what happened to delayed JMAP submissions
+	// (scaling plan B10), by outcome: scheduled, sent (the relay took
+	// it), canceled, failed (refused, or given up after the retries),
+	// unknown (the sending was interrupted and is not repeated: at most
+	// once), retried (a temporary failure before the message was
+	// transferred), and conflict (a worker's write after sending found
+	// the record changed, see the sending timeout).
+	Submissions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemJMAP, Name: "delayed_submissions_total",
+		Help: "Delayed JMAP submissions by outcome.",
+	}, []string{labelOutcome})
+	// SubmissionQueue is the number of entries of the submission queue
+	// (counted by the holder of partition 0 at most once per poll, up to
+	// a bound), by state: all entries and the ones due.
+	SubmissionQueue = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemJMAP, Name: "submission_queue_entries",
+		Help: "Entries of the delayed submission queue (all, due).",
+	}, []string{labelState})
 	// KVIndexErrors counts failed writes of an admin store hint index
 	// (the record was written; the backfill repairs the entry).
 	KVIndexErrors = promauto.NewCounterVec(prometheus.CounterOpts{
