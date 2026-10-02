@@ -66,7 +66,14 @@ in particular an account directory
 in
 .BR ~accounts ):
 a pool somebody uses. The marker is written, pool by pool, only into a
-pool that is empty.
+pool that is empty. The objects
+.B rbd_info
+and
+.B rbd_trash
+that
+.B rbd pool init
+leaves in the default namespace do not count (Rook initialises every
+CephBlockPool for RBD).
 .PP
 Everything the store keeps beside the accounts (the account directory
 in

@@ -100,11 +100,16 @@ func checkPool(conn *rados.Conn, pool string, index bool, prefix string, create 
 	return writeMarkers(conn, prefix, pool)
 }
 
-// hasObjects reports whether a pool holds any object, in any namespace.
-// The listing stops at the first object, so it is cheap for a pool in
-// use as well as for an empty one (whose placement groups are empty).
-// The cluster's pool statistics would lag behind a pool that was just
-// written to.
+// rbdInitObjects are the objects "rbd pool init" leaves in the default
+// namespace of a new pool; Rook runs it for every CephBlockPool whose
+// application is rbd (the default). They do not make a pool one in use.
+var rbdInitObjects = map[string]bool{"rbd_info": true, "rbd_trash": true}
+
+// hasObjects reports whether a pool holds any object, in any namespace,
+// other than the objects of an RBD pool initialisation. The listing stops
+// at the first such object, so it is cheap for a pool in use as well as
+// for an empty one (whose placement groups are empty). The cluster's pool
+// statistics would lag behind a pool that was just written to.
 func hasObjects(conn *rados.Conn, pool string) (bool, error) {
 	ioctx, err := openNS(conn, pool, rados.AllNamespaces)
 	if err != nil {
@@ -120,9 +125,15 @@ func hasObjects(conn *rados.Conn, pool string) (bool, error) {
 	}
 	defer it.Close()
 
-	found := it.Next()
+	for it.Next() {
+		if it.Namespace() == "" && rbdInitObjects[it.Value()] {
+			continue
+		}
 
-	return found, it.Err()
+		return true, nil
+	}
+
+	return false, it.Err()
 }
 
 func openNS(conn *rados.Conn, pool, ns string) (*rados.IOContext, error) {

@@ -43,7 +43,9 @@ The bench writes into the bench pools only, and it refuses to start
 - `populate` finds a pool without the marker that holds any object, in
   the index pool in particular an account directory
   (`~accounts/ix.accounts/head`): a pool somebody uses. A missing marker
-  is written only into a pool that is empty, pool by pool.
+  is written only into a pool that is empty, pool by pool. The objects
+  `rbd_info` and `rbd_trash` that `rbd pool init` leaves in the default
+  namespace do not count: Rook initialises every CephBlockPool for RBD.
 
 The name comparison is only as good as the configuration the bench is
 given; the marker check does not depend on it. The Job sets the

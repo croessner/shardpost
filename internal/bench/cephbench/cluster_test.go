@@ -251,6 +251,58 @@ func TestMarkingPerPool(t *testing.T) {
 	}
 }
 
+// TestRBDInitialisedPool: the objects "rbd pool init" leaves in a new
+// pool (Rook initialises every CephBlockPool for RBD) do not make it a
+// pool in use; any other object in the default namespace does.
+func TestRBDInitialisedPool(t *testing.T) {
+	s, _ := benchStore(t)
+
+	const index, data, other = "shardpost-bench-test-r1", "shardpost-bench-test-r2", "shardpost-bench-test-r3"
+
+	defaultObjects(t, s, index, "rbd_info", "rbd_trash")
+	defaultObjects(t, s, data, "rbd_info", "rbd_trash")
+
+	if err := checkPools(s, index, data, "bench-", true); err != nil || !marked(t, s, index) || !marked(t, s, data) {
+		t.Fatalf("RBD-initialised pools: %v", err)
+	}
+
+	// Another object in the default namespace still counts.
+	defaultObjects(t, s, other, "rbd_directory")
+
+	if err := checkPools(s, index, other, "bench-", true); !errors.Is(err, ErrNotBenchPool) {
+		t.Fatalf("got %v, want a refusal of %s", err, other)
+	}
+}
+
+// defaultObjects creates a pool if needed and writes objects into its
+// default namespace.
+func defaultObjects(t *testing.T, s *cephstore.Store, pool string, oids ...string) {
+	t.Helper()
+
+	err := s.WithConn(func(conn *rados.Conn) error {
+		if err := createPools(conn, pool); err != nil {
+			return err
+		}
+
+		ioctx, err := openNS(conn, pool, "")
+		if err != nil {
+			return err
+		}
+		defer ioctx.Destroy()
+
+		for _, oid := range oids {
+			if err := ioctx.WriteFull(oid, []byte("x")); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // foreign writes (or removes) an object of somebody else in a pool.
 func foreign(t *testing.T, s *cephstore.Store, pool string, write bool) {
 	t.Helper()
