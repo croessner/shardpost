@@ -44,8 +44,10 @@ func (u *User) ScrubState() (model.ScrubState, error) {
 
 // ScrubPending implements model.ScrubProber: any key of the scrub object
 // (orphan candidates "o:", the quota count), an intent in the registry
-// (d:, bi:, bimp:, up:, sub:, ci:, dm:; one read op), or a MOVE or removal
-// intent on a mailbox (i:, r:; one read op per mailbox, no listing).
+// (d:, bi:, bimp:, up:, sub:, ci:, dm:; one read op), an unfinished
+// full-text conversion (the layout record's "next" or "old"; one read),
+// or a MOVE or removal intent on a mailbox (i:, r:; one read op per
+// mailbox, no listing).
 func (u *User) ScrubPending() (string, error) {
 	switch n, err := u.firstKeys(oidScrub, ""); {
 	case err != nil:
@@ -59,6 +61,15 @@ func (u *User) ScrubPending() (string, error) {
 		return "", fmt.Errorf("read intents: %w", err)
 	case p != "":
 		return "intents " + p, nil
+	}
+
+	// An unfinished full-text conversion: the jobs scrub clears it when
+	// its run has ended (§4.6), so the batch must not skip the account.
+	switch l, err := u.readLayout(); {
+	case err != nil:
+		return "", err
+	case l != nil && (l.Next != nil || len(l.Old) > 0):
+		return "fts conversion", nil
 	}
 
 	for _, prefix := range []string{regUploadPrefix, regSubmissionPrefix} {

@@ -144,10 +144,21 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
-	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store}
+	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store}
 
 	if sendq != nil {
 		env.Submissions = sendq
+	}
+
+	// The fts_due worker reshards the accounts the writers queued.
+	if settings.FTS.AutoReshard {
+		q, lock, err := store.FTSDueQueue()
+		if err != nil {
+			kv.Close()
+			return fmt.Errorf("fts reshard queue: %w", err)
+		}
+
+		env.FTSDue = &jobs.FTSDue{Queue: q, Lock: lock}
 	}
 
 	a.jobsKV = kv

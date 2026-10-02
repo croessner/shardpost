@@ -35,6 +35,12 @@ type Env struct {
 	Submissions interface {
 		PurgeAccount(u model.User, account string) (int, error)
 	}
+	// Layout3 reads the cluster mark of full-text layout 3 (nil: layout
+	// 3 is refused).
+	Layout3 model.FTSLayoutMarked
+	// FTSDue is the reshard queue of the full-text index (nil: the
+	// fts_due worker does not run, fts.auto_reshard false).
+	FTSDue *FTSDue
 }
 
 // Kind is one job kind.
@@ -498,6 +504,29 @@ func (m *Manager) List(account, state, after string, limit int) (out []Job, next
 // Cancel asks a job to stop: a queued job is cancelled at once, a
 // running one stops at its next safe point.
 func (m *Manager) Cancel(id string) (*Job, error) {
+	j, err := m.cancel(id)
+	if err == nil && j.Terminal() && j.Kind == KindFTSLayout && j.Account != "" {
+		m.clearCancelled(j)
+	}
+
+	return j, err
+}
+
+// clearCancelled removes an unfinished conversion of a job whose final
+// state the cancel stored (the admin path, after the final state).
+func (m *Manager) clearCancelled(j *Job) {
+	u, err := m.env.Accounts.User(j.Account)
+	if err == nil {
+		err = clearJobLayout(u, j.ID)
+		u.Close()
+	}
+
+	if err != nil {
+		m.env.Log.Warn("fts layout: conversion of a cancelled job not cleared", "job", j.ID, "err", err)
+	}
+}
+
+func (m *Manager) cancel(id string) (*Job, error) {
 	return m.updateJob(id, nil, func(j *Job) error {
 		switch j.State {
 		case StateQueued:

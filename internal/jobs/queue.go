@@ -350,6 +350,12 @@ func (m *Manager) watchClaimable() (<-chan struct{}, <-chan error, func()) {
 // is due every Config.ExpiryPoll. A lease reported lost (renewal failed,
 // or given up at a key rotation) is dropped and taken again.
 func (m *Manager) runExpiry(ctx context.Context) {
+	m.leaseLoop(ctx, m.takeExpiryLease, m.expireDue)
+}
+
+// leaseLoop runs work every Config.ExpiryPoll while this server holds
+// the worker lease take returns (nil: not now), until ctx ends.
+func (m *Manager) leaseLoop(ctx context.Context, take func() model.Lease, work func(ctx context.Context, lost func() bool)) {
 	var lease model.Lease
 
 	defer func() {
@@ -368,11 +374,11 @@ func (m *Manager) runExpiry(ctx context.Context) {
 		}
 
 		if lease == nil {
-			lease = m.takeExpiryLease()
+			lease = take()
 		}
 
 		if lease != nil {
-			m.expireDue(ctx, lease.Lost)
+			work(ctx, lease.Lost)
 		}
 
 		select {

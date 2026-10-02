@@ -34,6 +34,8 @@ type Store struct {
 	users  map[string]*User
 	ix     indexes
 	limits model.Limits // see SetLimits
+	// dueLocks is the worker lease of the reshard queue (FTSDueQueue).
+	dueLocks *memLocks
 }
 
 func (s *Store) user(name string) *User {

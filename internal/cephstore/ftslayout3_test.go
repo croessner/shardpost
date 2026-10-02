@@ -681,6 +681,11 @@ func TestLayoutAbortAfterP3(t *testing.T) {
 	ftsLayoutHook = nil
 	next := layoutOf(t, u).Next
 
+	// the batch scrub must not skip the account (N11)
+	if p, err := u.ScrubPending(); err != nil || p != "fts conversion" {
+		t.Errorf("scrub pending %q %v", p, err)
+	}
+
 	// crashed: frozen, a delivery fails after its wait
 	start := time.Now()
 

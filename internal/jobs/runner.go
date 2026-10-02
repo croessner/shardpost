@@ -156,6 +156,16 @@ func (m *Manager) Run(ctx context.Context) {
 		}()
 	}
 
+	if m.env.FTSDue != nil {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			m.runFTSDue(ctx)
+		}()
+	}
+
 	tick := time.NewTicker(m.cfg.Poll)
 	defer tick.Stop()
 
@@ -331,9 +341,26 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 	}
 
 	// The lock is released only by the server that stored the final
-	// state: after a takeover it belongs to the successor.
+	// state: after a takeover it belongs to the successor. Before, a
+	// conversion the run left unfinished goes (the fallback of the kind's
+	// own clean-up; single-account jobs only, a batch clears per account).
 	if m.finish(run, j, gen, result, err, log) && kind.Exclusive() {
+		m.clearFinished(run, log)
 		unlockAccount(run.User, j.ID)
+	}
+}
+
+// clearFinished removes the unfinished full-text conversion of a run
+// whose final state is stored (exactly its token).
+func (m *Manager) clearFinished(run *Run, log interface{ Warn(string, ...any) }) {
+	if run.Job.Kind != KindFTSLayout || run.User == nil {
+		return
+	}
+
+	if lay, ok := run.User.(model.FTSLayouter); ok {
+		if _, err := lay.ClearFTSLayoutNext(run.layoutToken()); err != nil {
+			log.Warn("fts layout: unfinished conversion not cleared", "err", err)
+		}
 	}
 }
 
@@ -371,6 +398,7 @@ func (m *Manager) lock(run *Run, j *Job, gen uint64, log *slog.Logger) bool {
 
 	switch {
 	case err == nil:
+		clearForeignLayout(run.User, run.layoutToken(), log)
 		return true
 	case j.State == StateCancelRequested:
 		err = context.Canceled

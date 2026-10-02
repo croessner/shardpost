@@ -171,18 +171,8 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 
 	membudget.SetLimit(settings.Server.MemoryBudgetBytes)
 
-	// Load validated both; they are package settings because the index,
-	// IMAP SEARCH and the preview share one text preparation.
-	if err := charset.SetFallback(settings.FTS.FallbackCharset); err != nil {
+	if err := textSettings(log, settings); err != nil {
 		return err
-	}
-
-	if err := fts.SetHTMLMode(settings.FTS.HTML); err != nil {
-		return err
-	}
-
-	if w := settings.FTS.ShardTargetWarning(); w != "" {
-		log.Warn(w)
 	}
 
 	store, err := cephstore.Open(cfg, log)
@@ -209,6 +199,25 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	}
 
 	return serve(ctx, log, settings, store, programs, quotaSvc)
+}
+
+// textSettings applies the text preparation settings. Load validated
+// them; they are package settings because the index, IMAP SEARCH and the
+// preview share one text preparation.
+func textSettings(log *slog.Logger, settings *config.Config) error {
+	if err := charset.SetFallback(settings.FTS.FallbackCharset); err != nil {
+		return err
+	}
+
+	if err := fts.SetHTMLMode(settings.FTS.HTML); err != nil {
+		return err
+	}
+
+	if w := settings.FTS.ShardTargetWarning(); w != "" {
+		log.Warn(w)
+	}
+
+	return nil
 }
 
 // cephConfig maps the configuration onto the RADOS store settings.

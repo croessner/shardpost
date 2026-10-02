@@ -114,6 +114,26 @@ type FTSDueRecord struct {
 	// NoopAt is when the planned job found nothing to do: the worker
 	// leaves the account alone for FTSDueNoopBackoff after it.
 	NoopAt time.Time `json:"noop_at,omitzero"`
+	// Waits counts the times the worker postponed the entry for this job
+	// (the backoff doubles with each).
+	Waits int `json:"waits,omitempty"`
+}
+
+// FTSDueBackoff is the first backoff of the fts_due worker; it doubles
+// with every look up to FTSDueNoopBackoff.
+const FTSDueBackoff = 5 * time.Minute
+
+// FTSDueBackoffAfter is the backoff after n looks.
+func FTSDueBackoffAfter(n int) time.Duration {
+	d := FTSDueBackoff
+	for range min(max(n, 0), 16) {
+		d *= 2
+		if d >= FTSDueNoopBackoff {
+			return FTSDueNoopBackoff
+		}
+	}
+
+	return d
 }
 
 // FTSDueNoopBackoff is how long the worker waits after a reshard that
