@@ -263,8 +263,10 @@ delivery's reservation on the same registry object. In 0.44 a posting
 shard costs one read instead of two and the id map no read of its own
 (see [full-text write path](#full-text-write-path)): one read less per
 full-text shard and one per LMTP delivery, 16 + 1 with the default
-sixteen shards (245.6 → an expected 228.6 operations per delivery in
-the R4 bench setup, calculated, not measured). The full-text index dominates a delivery either way.
+sixteen shards. Measured in the R4 bench setup: 245.6 → 226.4
+operations per delivery (`fts` 48 → 32, `ftsmap` 3 → 2; the trigram
+dictionary still writes about 174 objects). The full-text index
+dominates a delivery either way.
 
 **The uploads.** A JMAP upload is a blob that nothing points at, so it
 costs an entry in the due queue `ix.uploads` (namespace `~accounts`), the
