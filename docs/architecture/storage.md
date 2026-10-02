@@ -1168,6 +1168,14 @@ lists and deleted the old objects; `fts_rebuild` does the same from the
 messages. A server older than 0.35.0 does not read `ftst/`: after a
 downgrade, substring search needs an `fts_rebuild`.
 
+`fts_dict_convert` is a legacy job since 0.46.0: it matters only for a
+layout 2 index written before 0.35.0. A layout 3 index (below) always
+has its dictionary, and a conversion to layout 3 derives it from the
+posting lists itself, so planning `fts_dict_convert` for a layout 3
+account is refused (`conflict`), and a run that finds layout 3 or a
+conversion under way, at its start or before any batch, writes nothing
+(no layout 2 object, no change to the layout record).
+
 What is indexed is UTF-8 text, prepared by the `fts` package
 ([body.go](../../internal/fts/body.go), `HeaderValue`, `HeaderText`)
 for the index, for IMAP `SEARCH` keys checked against the message and
@@ -1301,9 +1309,12 @@ per view, with the trust markers, and check the markers of every object
 they read in the same operation.
 
 **Creating an index.** A fresh index (no `n`, no `L`, no layout 2
-posting object) gets layout 3 when `fts.layout` is 3 and the cluster
-mark `fts/layout3` exists in the admin store, read at that moment
-without a cache. The account is entered in the presence index
+posting object) gets layout 3 when `fts.layout` is 3 (the default since
+0.46.0) and the cluster mark `fts/layout3` exists in the admin store,
+read at that moment without a cache; otherwise it gets layout 2. The
+server logs the layout new indexes get at startup and whenever a read
+of the mark differs from the one before, and keeps it in the gauge
+`imapceph_fts_layout_effective`. The account is entered in the presence index
 `ix.fts_layout` (in `~accounts`; account → `since`) first, then the S +
 D + H objects are created exclusively with their markers, then the
 compare-and-swap that allocates the first document ids writes `L`, `V`
@@ -1495,9 +1506,10 @@ do not register and cannot read layout 3, so
 the cluster mark is set by `shardpostctl fts layout3 enable --pods n`
 only when exactly `n` fresh registrations report the capability
 (`--force` skips that, audited). Without the mark no layout 3 index is
-created whatever `fts.layout` says. The way back:
+created whatever `fts.layout` says; this is what makes the default `3`
+safe for a cluster that has not switched. The way back:
 
-1. `fts.layout: 2` on every server;
+1. `fts.layout: 2` on every server (explicitly: the default is `3`);
 2. `shardpostctl plan -all -layout 2 fts_layout` and apply it;
 3. `shardpostctl fts layout3 disable` — it removes the mark, waits five
    seconds and succeeds only when the presence index is empty;

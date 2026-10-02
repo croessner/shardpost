@@ -226,4 +226,6 @@ jmap:
 fts:
   # Full-text layout 3 (0.45.0): the cluster mark was set on 2026-10-02
   # with both servers on 0.45.0; new indexes are created in layout 3.
+  # 3 is the default since 0.46.0; it stays explicit so that an image
+  # rolled back to 0.45.x (default 2) keeps creating layout 3 indexes.
   layout: 3

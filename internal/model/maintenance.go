@@ -57,7 +57,15 @@ type FTSDictReport struct {
 	Entries int64 `json:"entries"`
 	// LegacyObjects is the number of objects of the old layout removed.
 	LegacyObjects int `json:"legacy_objects"`
+	// Skipped says why nothing was converted (the index has layout 3 or
+	// a layout conversion is under way).
+	Skipped string `json:"skipped,omitempty"`
 }
+
+// FTSDictSkippedLayout3 is FTSDictReport.Skipped of an account whose
+// index has layout 3 (or is being converted): it has no layout 2
+// dictionary to convert.
+const FTSDictSkippedLayout3 = "the index has layout 3 or a layout conversion is under way: no layout 2 dictionary to convert"
 
 // FTSDictConverter is implemented by user views whose substring
 // dictionary has an older layout to convert from. LegacyFTSDict reports

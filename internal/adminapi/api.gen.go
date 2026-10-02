@@ -2367,9 +2367,12 @@ type ClientInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-	// that changes other accounts (ACL repairs, purge) needs them in the
-	// client scope. The account must be canonical.
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// legacy kind for layout 2 indexes written before 0.35.0; for an
+	// account whose index has layout 3 it is refused with `conflict`
+	// (409). A plan that changes other accounts (ACL repairs, purge)
+	// needs them in the client scope. The account must be canonical.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -2384,9 +2387,12 @@ type ClientInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-	// that changes other accounts (ACL repairs, purge) needs them in the
-	// client scope. The account must be canonical.
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// legacy kind for layout 2 indexes written before 0.35.0; for an
+	// account whose index has layout 3 it is refused with `conflict`
+	// (409). A plan that changes other accounts (ACL repairs, purge)
+	// needs them in the client scope. The account must be canonical.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2712,8 +2718,9 @@ type ClientInterface interface {
 	// check. A pod replaced less than three minutes ago leaves its
 	// predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
-	// servers with `fts.layout: 3` create new indexes in layout 3 and
-	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// servers with `fts.layout: 3` (the default since 0.46.0) create new
+	// indexes in layout 3 and `fts_layout` jobs may convert to it.
+	// Refused with `conflict` (409)
 	// when the registrations do not match. Requires the role `repair`.
 	//
 	// Takes any type of body and a specified content type.
@@ -2729,8 +2736,9 @@ type ClientInterface interface {
 	// check. A pod replaced less than three minutes ago leaves its
 	// predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
-	// servers with `fts.layout: 3` create new indexes in layout 3 and
-	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// servers with `fts.layout: 3` (the default since 0.46.0) create new
+	// indexes in layout 3 and `fts_layout` jobs may convert to it.
+	// Refused with `conflict` (409)
 	// when the registrations do not match. Requires the role `repair`.
 	//
 	// Takes a body of the `application/json` content type.
@@ -3961,9 +3969,12 @@ func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxI
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-// that changes other accounts (ACL repairs, purge) needs them in the
-// client scope. The account must be canonical.
+// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// legacy kind for layout 2 indexes written before 0.35.0; for an
+// account whose index has layout 3 it is refused with `conflict`
+// (409). A plan that changes other accounts (ACL repairs, purge)
+// needs them in the client scope. The account must be canonical.
 //
 // Takes any type of body and a specified content type.
 //
@@ -3988,9 +3999,12 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-// that changes other accounts (ACL repairs, purge) needs them in the
-// client scope. The account must be canonical.
+// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// legacy kind for layout 2 indexes written before 0.35.0; for an
+// account whose index has layout 3 it is refused with `conflict`
+// (409). A plan that changes other accounts (ACL repairs, purge)
+// needs them in the client scope. The account must be canonical.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -4576,8 +4590,9 @@ func (c *Client) DisableFTSLayout3(ctx context.Context, reqEditors ...RequestEdi
 // check. A pod replaced less than three minutes ago leaves its
 // predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
-// servers with `fts.layout: 3` create new indexes in layout 3 and
-// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// servers with `fts.layout: 3` (the default since 0.46.0) create new
+// indexes in layout 3 and `fts_layout` jobs may convert to it.
+// Refused with `conflict` (409)
 // when the registrations do not match. Requires the role `repair`.
 //
 // Takes any type of body and a specified content type.
@@ -4603,8 +4618,9 @@ func (c *Client) EnableFTSLayout3WithBody(ctx context.Context, contentType strin
 // check. A pod replaced less than three minutes ago leaves its
 // predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
-// servers with `fts.layout: 3` create new indexes in layout 3 and
-// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// servers with `fts.layout: 3` (the default since 0.46.0) create new
+// indexes in layout 3 and `fts_layout` jobs may convert to it.
+// Refused with `conflict` (409)
 // when the registrations do not match. Requires the role `repair`.
 //
 // Takes a body of the `application/json` content type.
@@ -9145,9 +9161,12 @@ type ClientWithResponsesInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-	// that changes other accounts (ACL repairs, purge) needs them in the
-	// client scope. The account must be canonical.
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// legacy kind for layout 2 indexes written before 0.35.0; for an
+	// account whose index has layout 3 it is refused with `conflict`
+	// (409). A plan that changes other accounts (ACL repairs, purge)
+	// needs them in the client scope. The account must be canonical.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -9162,9 +9181,12 @@ type ClientWithResponsesInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-	// that changes other accounts (ACL repairs, purge) needs them in the
-	// client scope. The account must be canonical.
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// legacy kind for layout 2 indexes written before 0.35.0; for an
+	// account whose index has layout 3 it is refused with `conflict`
+	// (409). A plan that changes other accounts (ACL repairs, purge)
+	// needs them in the client scope. The account must be canonical.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -9514,8 +9536,9 @@ type ClientWithResponsesInterface interface {
 	// check. A pod replaced less than three minutes ago leaves its
 	// predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
-	// servers with `fts.layout: 3` create new indexes in layout 3 and
-	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// servers with `fts.layout: 3` (the default since 0.46.0) create new
+	// indexes in layout 3 and `fts_layout` jobs may convert to it.
+	// Refused with `conflict` (409)
 	// when the registrations do not match. Requires the role `repair`.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -9531,8 +9554,9 @@ type ClientWithResponsesInterface interface {
 	// check. A pod replaced less than three minutes ago leaves its
 	// predecessor's record fresh; wait and try again. `force` skips the
 	// check (recorded in the audit log and in the mark). With the mark,
-	// servers with `fts.layout: 3` create new indexes in layout 3 and
-	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// servers with `fts.layout: 3` (the default since 0.46.0) create new
+	// indexes in layout 3 and `fts_layout` jobs may convert to it.
+	// Refused with `conflict` (409)
 	// when the registrations do not match. Requires the role `repair`.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -13902,9 +13926,12 @@ func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, acc
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-// that changes other accounts (ACL repairs, purge) needs them in the
-// client scope. The account must be canonical.
+// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// legacy kind for layout 2 indexes written before 0.35.0; for an
+// account whose index has layout 3 it is refused with `conflict`
+// (409). A plan that changes other accounts (ACL repairs, purge)
+// needs them in the client scope. The account must be canonical.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -13925,9 +13952,12 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
-// that changes other accounts (ACL repairs, purge) needs them in the
-// client scope. The account must be canonical.
+// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
+// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// legacy kind for layout 2 indexes written before 0.35.0; for an
+// account whose index has layout 3 it is refused with `conflict`
+// (409). A plan that changes other accounts (ACL repairs, purge)
+// needs them in the client scope. The account must be canonical.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -14433,8 +14463,9 @@ func (c *ClientWithResponses) DisableFTSLayout3WithResponse(ctx context.Context,
 // check. A pod replaced less than three minutes ago leaves its
 // predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
-// servers with `fts.layout: 3` create new indexes in layout 3 and
-// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// servers with `fts.layout: 3` (the default since 0.46.0) create new
+// indexes in layout 3 and `fts_layout` jobs may convert to it.
+// Refused with `conflict` (409)
 // when the registrations do not match. Requires the role `repair`.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -14456,8 +14487,9 @@ func (c *ClientWithResponses) EnableFTSLayout3WithBodyWithResponse(ctx context.C
 // check. A pod replaced less than three minutes ago leaves its
 // predecessor's record fresh; wait and try again. `force` skips the
 // check (recorded in the audit log and in the mark). With the mark,
-// servers with `fts.layout: 3` create new indexes in layout 3 and
-// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// servers with `fts.layout: 3` (the default since 0.46.0) create new
+// indexes in layout 3 and `fts_layout` jobs may convert to it.
+// Refused with `conflict` (409)
 // when the registrations do not match. Requires the role `repair`.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).

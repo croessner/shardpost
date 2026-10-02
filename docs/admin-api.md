@@ -299,7 +299,7 @@ shardpostctl plan scrub -classes refs,orphans user@example.org
 shardpostctl plan quota_recalc user@example.org
 shardpostctl plan acl_reconcile user@example.org
 shardpostctl plan fts_rebuild user@example.org
-shardpostctl plan fts_dict_convert user@example.org        # dictionary layout of 0.35.0
+shardpostctl plan fts_dict_convert user@example.org        # legacy: layout 2 indexes from before 0.35.0
 shardpostctl plan -layout 3 fts_layout user@example.org    # full-text layout 3 (needs the cluster mark)
 shardpostctl plan mailbox_name_convert user@example.org    # modified UTF-7 names of 0.35.2 and earlier
 shardpostctl plan attachment_backfill user@example.org     # JMAP hasAttachment of older messages
@@ -328,7 +328,7 @@ only the repairs that were planned and are still needed.
 | `quota_recalc` | `repair` | yes | recount the usage from the index and set it |
 | `acl_reconcile` | `repair` | no | write missing pointers for recipients, remove own pointers that carry no rights |
 | `fts_rebuild` | `repair` | yes | delete the full-text index (with the header store) and rebuild it from all messages; when it completes it sets the index version marker that IMAP substring search needs to narrow fully, see [configuration](configuration.md#full-text-index-fts) |
-| `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account; does nothing on a layout 3 index |
+| `fts_dict_convert` | `repair` | no | write the substring dictionary of the full-text index again from the posting lists and delete the objects of the layout before 0.35.0; reads no message, may be repeated, stops when an import or another job locks the account. A legacy kind since 0.46.0: it matters only for layout 2 indexes written before 0.35.0. Planning it for a layout 3 account is refused with `conflict` (409); a run that finds layout 3 or a layout conversion under way writes nothing and reports `skipped` |
 | `fts_layout` | `repair` | yes | convert the full-text index between layout 2 and layout 3 or reshard a layout 3 index (see [storage](architecture/storage.md#full-text-conversion)); `params`: `layout` (2 or 3; omitted: the account's), `shards` (forced object counts of a layout 3 target, 1–4096; omitted: from the key counts and `fts.shard_target_keys`), `due_only` (no change while the counts ask for the shape the index has; how the `fts_due` worker plans it). `layout: 3` needs the cluster mark (`POST /admin/v1/fts/layout3/enable`), read when the job is planned and when it starts. The plan shows the layout record and, for layout 3, the shape the counts ask for; the result names source and target generations and counts terms, dictionary keys, header texts and documents (`noop` when nothing changed). A job that fails or is cancelled clears its unfinished conversion itself |
 | `mailbox_name_convert` | `repair` | yes | rename mailboxes stored under a modified UTF-7 name to their UTF-8 name (children move with the parent) and rewrite subscriptions without a mailbox the same way; a rename whose target exists is a conflict (with its children) and is skipped; names that are not valid UTF-8 are reported (see [Upgrade: modified UTF-7 names](#upgrade-modified-utf-7-mailbox-names)) |
 | `attachment_backfill` | `repair` | no | read every message whose index record does not carry `hasAttachment` (stored before the record had the field) and remember the answer in the JMAP locator (`a:<guid>`, see [JMAP: hasAttachment](jmap.md#hasattachment)); changes no message and no index record, may be repeated and then reads only what is left, stops when an import or another job locks the account; a mailbox that cannot be listed and a message that cannot be read are skipped and counted (`skipped_mailboxes`, `failed`, the first errors in `errors`); the plan counts such messages and the ones already remembered |
@@ -942,6 +942,9 @@ shardpostctl fts layout clear user@example.org     # remove a conversion whose r
 
 Layout 3 of the full-text index ([storage](architecture/storage.md#full-text-index-layout-3))
 needs a cluster mark, because servers before 0.45.0 cannot read it.
+`fts.layout` defaults to `3` since 0.46.0, so the mark alone switches the
+servers that do not set `fts.layout: 2` (see
+[Operations: Full-text layout 3](operations/README.md#full-text-layout-3)).
 
 | Endpoint | Role | Effect |
 | --- | --- | --- |

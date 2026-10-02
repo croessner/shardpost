@@ -654,7 +654,73 @@ func (u *User) layout3Wanted() (bool, error) {
 		return false, nil
 	}
 
-	return u.store.FTSLayout3Enabled()
+	ok, err := u.store.FTSLayout3Enabled()
+	if err != nil {
+		return false, err
+	}
+
+	u.store.noteFTSLayout(ok)
+
+	return ok, nil
+}
+
+// States of Store.ftsMarkSeen.
+const (
+	ftsMarkUnknown int32 = iota
+	ftsMarkOff
+	ftsMarkOn
+)
+
+// noteFTSLayout records a read of the cluster mark: the gauges show the
+// configured and the effective layout, and the first read and every
+// change of the mark are logged once (configured layout, mark, effective
+// layout), so that the layout new indexes get is visible without
+// reading the admin store.
+func (s *Store) noteFTSLayout(marked bool) {
+	configured := ftsUserConfig(s.cfg.FTS).layout
+	effective := model.EffectiveFTSLayout(configured, marked)
+
+	metrics.FTSLayoutConfigured.Set(float64(configured))
+	metrics.FTSLayoutEffective.Set(float64(effective))
+
+	state := ftsMarkOff
+	if marked {
+		state = ftsMarkOn
+	}
+
+	prev := s.ftsMarkSeen.Swap(state)
+	if prev == state || s.log == nil {
+		return
+	}
+
+	msg := "full-text layout of new indexes"
+
+	switch {
+	case prev == ftsMarkUnknown:
+	case marked:
+		msg = "full-text layout of new indexes changed: the layout 3 mark was set"
+	default:
+		msg = "full-text layout of new indexes changed: the layout 3 mark was removed"
+	}
+
+	s.log.Info(msg, "event", "fts_layout", "configured", configured, "layout3_mark", marked, "effective", effective)
+}
+
+// LogFTSLayout reads the cluster mark once and logs the layout new
+// indexes of this server get (called at startup). A server with
+// fts.layout 3 (the built-in default) and no mark creates layout 2
+// indexes; later index creations read the mark again and log a change.
+func (s *Store) LogFTSLayout() error {
+	metrics.FTSLayoutConfigured.Set(float64(ftsUserConfig(s.cfg.FTS).layout))
+
+	marked, err := s.FTSLayout3Enabled()
+	if err != nil {
+		return err
+	}
+
+	s.noteFTSLayout(marked)
+
+	return nil
 }
 
 // --- the reshard queue ----------------------------------------------------------

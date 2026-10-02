@@ -640,7 +640,29 @@ and parallel JMAP requests get no 429 or 503.
 Layout 3 of the full-text index ([storage](../architecture/storage.md#full-text-index-layout-3))
 writes a handful of objects per delivery instead of nearly all 288 of
 layout 2. Servers before 0.45.0 cannot read it, so it is switched on in
-steps, and only a cluster mark lets a server create it.
+steps, and only a cluster mark lets a server create it. Since 0.46.0
+`fts.layout` defaults to `3`: a server creates layout 3 indexes as soon
+as the mark is set, and layout 2 indexes as long as it is not. Each
+server logs the result at startup and whenever it sees the mark change
+(`full-text layout of new indexes`, with `configured`, `layout3_mark`
+and `effective`); the gauges `imapceph_fts_layout_configured` and
+`imapceph_fts_layout_effective` show the same.
+
+**A new installation (0.46.0 or later).** Every server already has
+layout 3 configured (the default), so:
+
+1. Roll out every server and wait three minutes (see step 2 below).
+2. `shardpostctl fts layout3 enable -pods <number of running pods>`.
+
+That is all: every index created from then on has layout 3, and there
+are no layout 2 accounts to convert. Accounts migrated in later get
+layout 3 as well, sized by the import (`shardpostctl migrate`).
+
+**An existing installation.** A cluster that runs a version before
+0.45.0, or has layout 2 accounts, goes the steps below. A cluster that
+has the mark set but should keep creating layout 2 indexes sets
+`fts.layout: 2` explicitly before it rolls out 0.46.0: until then the
+default `2` did that, from 0.46.0 on the mark alone decides.
 
 **Switching it on.**
 
@@ -656,8 +678,10 @@ steps, and only a cluster mark lets a server create it.
    refuses when the fresh registrations are not exactly that many and
    names them. `-force` skips the check (audited) — only when you are
    sure no older server runs.
-5. Set `fts.layout: 3` in the overlay and roll it out: new accounts get
-   layout 3 from now on.
+5. From 0.46.0 on nothing to do: the default `fts.layout` is `3`, and
+   new accounts get layout 3 from the moment the mark is set. Before
+   0.46.0 (or with an explicit `fts.layout: 2`), set `fts.layout: 3` in
+   the overlay and roll it out.
 6. Convert the existing accounts, with little parallelism
    (`jobs.batch_parallel`), at a quiet time: `shardpostctl plan -all
    -layout 3 fts_layout`, `shardpostctl apply <plan-id>`. Each account
@@ -709,7 +733,8 @@ by an operator).
 
 **Going back.** In order:
 
-1. `fts.layout: 2` on every server (new indexes in layout 2);
+1. `fts.layout: 2` on every server (new indexes in layout 2); since
+   0.46.0 this has to be set explicitly, because the default is `3`;
 2. `shardpostctl plan -all -layout 2 fts_layout` and apply it;
 3. `shardpostctl fts layout3 disable` — it removes the mark, waits five
    seconds and exits 0 only when no account has layout 3 any more

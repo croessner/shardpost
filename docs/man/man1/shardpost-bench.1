@@ -294,7 +294,8 @@ applies to the bench as to a server.
 The layout of full-text indexes the run creates: 2 or 3 (0, the
 default:
 .I fts.layout
-of the configuration). With 3 the bench sets the layout 3 mark in the
+of the configuration, which is 3 unless the configuration sets it). With
+3 the bench sets the layout 3 mark in the
 admin namespace of the bench pools (never in production pools: the
 guard checks them first).
 .TP

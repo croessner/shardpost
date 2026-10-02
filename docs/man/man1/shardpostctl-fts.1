@@ -51,7 +51,10 @@ results in both layouts.
 Servers before 0.45.0 cannot read layout 3. A cluster mark therefore
 allows it: without the mark no layout 3 index is created, whatever
 .I fts.layout
-says, and
+says (its default is 3 since 0.46.0, so the mark alone switches every
+server that does not set
+.IR "fts.layout: 2" ),
+and
 .B fts_layout
 jobs refuse to convert to it. The mark is read whenever an index is
 created. Every server since 0.45.0 registers itself at startup and then
@@ -174,10 +177,13 @@ shardpostctl fts layout3 enable -pods 3
 .RE
 .fi
 .PP
-Then set
+From then on new accounts get layout 3 (before 0.46.0, or with an
+explicit
+.IR "fts.layout: 2" ,
+set
 .I fts.layout: 3
-in the configuration (new accounts get layout 3) and convert existing
-accounts, for example in a batch with small parallelism:
+in the configuration first). Convert existing accounts, for example in
+a batch with small parallelism:
 .PP
 .nf
 .RS
@@ -196,7 +202,8 @@ shardpostctl fts layout clear user@example.org
 .fi
 .PP
 Going back to a release before 0.45.0: set
-.I fts.layout: 2 ,
+.I fts.layout: 2
+explicitly (the default is 3),
 convert every account back, remove the mark (exit status 0 only when no
 account has layout 3 any more), then roll the image back:
 .PP

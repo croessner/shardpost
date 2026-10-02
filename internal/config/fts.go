@@ -31,8 +31,10 @@ type FTS struct {
 	// Layout is the object layout of indexes created from now on: 2 the
 	// fixed shards "fts/", "ftst/", "ftsh/" of every version before 0.45.0,
 	// 3 the adaptive generations "ftx/<gen>/…". Layout 3 is used only
-	// while the cluster mark ("shardpostctl fts layout3 enable") is set;
-	// the layout of an existing index is the one its id map records.
+	// while the cluster mark ("shardpostctl fts layout3 enable") is set:
+	// the default 3 (since 0.46.0) creates layout 2 indexes in a cluster
+	// without the mark, and 2 keeps layout 2 even with the mark. The
+	// layout of an existing index is the one its id map records.
 	Layout int `mapstructure:"layout" validate:"oneof=2 3"`
 	// ShardsMin is the number of posting, dictionary and header objects
 	// of a fresh layout 3 index without a size hint; ShardsMax bounds

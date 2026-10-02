@@ -20,9 +20,11 @@ reports per account and per delivery:
   into one account;
 - with `measure --search K` and `--expunge N`, the cost of a search query
   and of an expunge, and a fingerprint of the search results;
-- with `--fts-layout 3` (`populate` and `measure`) new accounts get
-  layout 3 of the full-text index (the bench sets the layout 3 mark in
-  its own pools), and with `measure --convert` the probe accounts are
+- with `--fts-layout 3` (`populate` and `measure`; also without the
+  flag when the configuration leaves `fts.layout` at its default `3`)
+  new accounts get layout 3 of the full-text index (the bench sets the
+  layout 3 mark in its own pools; `--fts-layout 2` measures layout 2),
+  and with `measure --convert` the probe accounts are
   converted to it as a `fts_layout` job would do: the time each account
   is locked (the window in which its deliveries fail temporarily), the
   operations of a reshard, and the search fingerprints before and after;

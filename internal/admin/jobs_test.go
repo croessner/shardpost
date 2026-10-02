@@ -2,13 +2,17 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/jobs"
 	"shardpost/internal/memstore"
+	"shardpost/internal/model"
 )
 
 // waitJob polls the API until the job ends.
@@ -127,5 +131,21 @@ func TestJobRolesAndErrors(t *testing.T) {
 
 	if bad, _ := c.SubmitJobWithResponse(ctx, nil, adminapi.JobRequest{}); bad.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("empty request: %d", bad.StatusCode())
+	}
+}
+
+// TestJobErrorLayoutRefusals: a plan refused for the layout (fts_layout 3
+// without the cluster mark, fts_dict_convert on a layout 3 account) is a
+// conflict the caller can act on, not a temporary failure.
+func TestJobErrorLayoutRefusals(t *testing.T) {
+	s := &Server{}
+
+	for _, err := range []error{model.ErrFTSLayoutMark, fmt.Errorf("plan: %w", model.ErrFTSDictLayout3)} {
+		rec := httptest.NewRecorder()
+		s.jobError(rec, httptest.NewRequest(http.MethodPost, "/admin/v1/accounts/alice/plans", nil), err)
+
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), string(adminapi.Conflict)) {
+			t.Errorf("%v: %d %s", err, rec.Code, rec.Body.String())
+		}
 	}
 }

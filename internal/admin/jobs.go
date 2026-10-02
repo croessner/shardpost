@@ -7,6 +7,7 @@ import (
 
 	"shardpost/internal/adminapi"
 	"shardpost/internal/jobs"
+	"shardpost/internal/model"
 )
 
 // Maintenance jobs (roadmap 8c): plans, jobs, status, cancel.
@@ -49,7 +50,7 @@ func (s *Server) jobError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, err.Error())
 	case errors.Is(err, errScope):
 		writeError(w, http.StatusForbidden, adminapi.Forbidden, err.Error())
-	case errors.Is(err, jobs.ErrDirectoryNotReady):
+	case errors.Is(err, jobs.ErrDirectoryNotReady), errors.Is(err, model.ErrFTSLayoutMark), errors.Is(err, model.ErrFTSDictLayout3):
 		writeError(w, http.StatusConflict, adminapi.Conflict, err.Error())
 	default:
 		s.importError(w, r, err)
