@@ -263,8 +263,8 @@ delivery's reservation on the same registry object. In 0.44 a posting
 shard costs one read instead of two and the id map no read of its own
 (see [full-text write path](#full-text-write-path)): one read less per
 full-text shard and one per LMTP delivery, 16 + 1 with the default
-sixteen shards (245.6 → about 228.6 operations per delivery in the R4
-bench setup). The full-text index dominates a delivery either way.
+sixteen shards (245.6 → an expected 228.6 operations per delivery in
+the R4 bench setup, calculated, not measured). The full-text index dominates a delivery either way.
 
 **The uploads.** A JMAP upload is a blob that nothing points at, so it
 costs an entry in the due queue `ix.uploads` (namespace `~accounts`), the
@@ -1103,7 +1103,8 @@ an account with document IDs thus costs one read and one write on
 `ftsmap` and one read and one write per posting shard it touches.
 
 An omap compare-and-swap of the account's objects (`casOmap`: posting
-shards, id map, registry, account; not the mailbox header) that loses
+shards, id map, registry, account, mailbox UID shards and the other omap
+objects of the account; not the mailbox header, `casHeader`) that loses
 against another writer (the object version changed between its read
 and its write) waits at random 1 to 10 ms, times the number of rounds
 it lost so far, before it reads again, so that writers of the same

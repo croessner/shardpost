@@ -18,6 +18,8 @@ reports per account and per delivery:
   kind and by object class;
 - with `measure --contention P`, the same for `P` deliveries at a time
   into one account;
+- with `measure --search K` and `--expunge N`, the cost of a search query
+  and of an expunge, and a fingerprint of the search results;
 - the cost of `Store.User()` and of opening a session.
 
 The per-account values are then extrapolated (default: to one million
@@ -276,10 +278,33 @@ higher `--messages`; to measure a part of many accounts, use
   (`registry`, `mbox`, `ftsmap`, `fts`, …) and `ops_per_delivery`
   includes the reads and writes of the lost rounds; a lost round of the
   omap compare-and-swap (`kind` `omap`: registry, account, id map,
-  posting shards) waits 1 to 10 ms times the rounds it lost before it
+  posting shards, mailbox UID shards; not the mailbox header) waits 1 to 10 ms times the rounds it lost before it
   reads again. Compare `deliveries_per_second` and the latency with the
   `delivery` rounds. `--contention` is not `--parallel`, which only sets
   how many accounts the inventory and `populate` work on at once.
+- `search` (only with `measure --search K`): runs first, before any
+  delivery. Every probe account answers `K` queries from a fixed set
+  drawn from the generator's vocabulary (whole words, word starts and
+  inner parts of 3 to 6 characters; frequent and rare words; `TEXT`,
+  `BODY`, `SUBJECT`, `FROM`), each in a view of its own: the candidates
+  of the IMAP substring search (`SearchCandidates`, `TEXT` as header
+  and body) and the word search (`SearchFields`). `ops_per_call` and
+  the latency are per query, the view's first check of the index
+  included. `queries[]` gives per query the messages found
+  (`candidates`, `words`, `not_narrowed` for accounts where the index
+  cannot narrow) and a SHA-256 `fingerprint` of the results (account,
+  field set, GUID); `fingerprint` covers all queries. A run with
+  `--probe-messages 0` and without `--expunge` leaves the accounts as
+  they were, so two such runs on the same accounts, one before and one
+  after a change of the index (a conversion, a new layout), must report
+  the same `fingerprint`; where they differ, `queries[]` shows which
+  query. `mismatch` says that the two rounds of one run found different
+  messages.
+- `expunge` (only with `measure --expunge N`): runs last. Every probe
+  account loses its `N` oldest INBOX messages in each of two rounds, one
+  EXPUNGE per message in a view of its own; `ops_per_call`, the latency
+  and the compare-and-swap retries are per expunge. The messages are
+  gone afterwards (a later `populate` does not refill them).
 - `user_open`, `session_open`: `Store.User()` opens two I/O contexts and
   sends nothing to an OSD; a session adds the registry and INBOX reads.
   `heap_bytes_per_view` is the Go heap of an open view (the client

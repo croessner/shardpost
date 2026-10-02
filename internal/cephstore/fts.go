@@ -251,7 +251,7 @@ func (u *User) addPostings(oid string, terms []string, docsOf map[string][]uint6
 func (u *User) addPostingsPage(oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
 	var fresh []string
 
-	err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool) {
+	err := u.casPostings(oid, terms, func(cur map[string][]byte, conv func([]byte) []byte) (map[string][]byte, []string) {
 		fresh = fresh[:0]
 		set := map[string][]byte{}
 
@@ -261,14 +261,10 @@ func (u *User) addPostingsPage(oid string, terms []string, docsOf map[string][]u
 				fresh = append(fresh, t)
 			}
 
-			if p, ok = conv(p); !ok {
-				return nil, nil, false
-			}
-
-			set[t] = postings.AddAll(p, docsOf[t])
+			set[t] = postings.AddAll(conv(p), docsOf[t])
 		}
 
-		return set, nil, true
+		return set, nil
 	})
 
 	return fresh, err
@@ -319,47 +315,37 @@ func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []stri
 // compare-and-swap reads anyway: when they hold GUIDs without a known id,
 // the round ends without a write, the ids are allocated and the
 // compare-and-swap starts again with them (a list that gained further
-// GUIDs in between repeats this). fn returning ok=false repeats the
-// round as well.
-func (u *User) casPostings(oid string, terms []string, fn func(cur map[string][]byte, conv func([]byte) ([]byte, bool)) (map[string][]byte, []string, bool)) error {
+// GUIDs in between repeats this). fn is called only when every GUID of
+// cur has an id, so conv always converts completely.
+func (u *User) casPostings(oid string, terms []string, fn func(cur map[string][]byte, conv func([]byte) []byte) (map[string][]byte, []string)) error {
 	known := map[string]uint64{}
 	conv := legacyConverter(known)
 
 	for attempt := 0; attempt < casRetries; attempt++ {
 		var need []string
 
-		retry := false
-
 		err := casOmap(u, u.idx, oid, terms, func(cur map[string][]byte) (map[string][]byte, []string) {
 			if need = legacyGUIDsNeeded(cur, known); len(need) > 0 {
 				return nil, nil
 			}
 
-			set, rm, ok := fn(cur, conv)
-			if !ok {
-				retry = true
-				return nil, nil
-			}
-
-			return set, rm
+			return fn(cur, conv)
 		})
 		if err != nil {
 			return err
 		}
 
-		if len(need) == 0 && !retry {
+		if len(need) == 0 {
 			return nil
 		}
 
-		if len(need) > 0 {
-			ids, err := u.ensureDocIDs(need)
-			if err != nil {
-				return err
-			}
+		ids, err := u.ensureDocIDs(need)
+		if err != nil {
+			return err
+		}
 
-			for g, id := range ids {
-				known[g] = id
-			}
+		for g, id := range ids {
+			known[g] = id
 		}
 	}
 
@@ -389,26 +375,24 @@ func legacyGUIDsNeeded(cur map[string][]byte, known map[string]uint64) []string 
 }
 
 // legacyConverter returns the converter casPostings hands to its fn: it
-// turns a legacy GUID list into the id encoding using known, and reports
-// false if a GUID has no id in known.
-func legacyConverter(known map[string]uint64) func([]byte) ([]byte, bool) {
-	return func(p []byte) ([]byte, bool) {
+// turns a legacy GUID list into the id encoding using known. casPostings
+// calls fn only after legacyGUIDsNeeded found every GUID of the lists in
+// known, so a GUID without an id does not occur there.
+func legacyConverter(known map[string]uint64) func([]byte) []byte {
+	return func(p []byte) []byte {
 		if len(p) == 0 || !postings.IsLegacy(p) {
-			return p, true
+			return p
 		}
 
 		var ids []uint64
 
 		for _, g := range postings.LegacyGUIDs(p) {
-			id, ok := known[hex.EncodeToString(g)]
-			if !ok {
-				return nil, false
+			if id, ok := known[hex.EncodeToString(g)]; ok {
+				ids = append(ids, id)
 			}
-
-			ids = append(ids, id)
 		}
 
-		return postings.Encode(ids), true
+		return postings.Encode(ids)
 	}
 }
 
@@ -1395,7 +1379,10 @@ func casOmapOpAs(u *User, ioctx *rados.IOContext, oid string, keys []string, ses
 		switch errCode(err) {
 		case syscall.ERANGE, syscall.EOVERFLOW, syscall.EEXIST:
 			mh.casRetry("omap", casClass(oid))
-			time.Sleep(casBackoff(attempt))
+
+			if attempt+1 < casRetries {
+				time.Sleep(casBackoff(attempt))
+			}
 
 			continue
 		}

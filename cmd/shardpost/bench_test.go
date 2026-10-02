@@ -38,6 +38,8 @@ func TestBenchRefusals(t *testing.T) {
 		"bad inbox share":     {"populate", "--index-pool", "load-index", "--data-pool", "load-data", "--inbox-share", "2"},
 		"bad sample interval": {"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--sample-every", "0"},
 		"negative contention": {"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--contention", "-1"},
+		"negative search":     {"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--search", "-1"},
+		"negative expunge":    {"measure", "--index-pool", "load-index", "--data-pool", "load-data", "--expunge", "-1"},
 	} {
 		if code := runBench(nil, args); code != benchRefused {
 			t.Errorf("%s: exit %d, want %d", name, code, benchRefused)

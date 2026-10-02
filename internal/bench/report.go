@@ -34,6 +34,35 @@ type ProbeReport struct {
 	Total OpRate                       `json:"ops_per_delivery_total"`
 }
 
+// RoundReport is the cost of one kind of call into the probe accounts
+// (an expunge, a search query).
+type RoundReport struct {
+	What     string `json:"what"`
+	Accounts int    `json:"accounts"`
+	// Count is the calls of one round.
+	Count int64 `json:"count"`
+	// Latency and CASRetries (per_delivery: per call) are of the round
+	// without the objecter log.
+	Latency    LatencySummary               `json:"latency"`
+	CASRetries CASSummary                   `json:"cas_retries"`
+	Ops        map[string]map[string]OpRate `json:"ops_per_call"`
+	Total      OpRate                       `json:"ops_per_call_total"`
+}
+
+// SearchReport is the search probe: its cost per query and what every
+// query found.
+type SearchReport struct {
+	RoundReport
+
+	Queries []SearchQueryResult `json:"queries"`
+	// Fingerprint covers the results of all queries in all probe
+	// accounts; two runs on unchanged accounts give the same one.
+	Fingerprint string `json:"fingerprint"`
+	// Mismatch is set when the traced round found something else than
+	// the first round (the accounts changed in between).
+	Mismatch bool `json:"mismatch,omitempty"`
+}
+
 // OpenReport is the cost of opening an account.
 type OpenReport struct {
 	What    string                       `json:"what"`
@@ -77,10 +106,14 @@ type MeasureReport struct {
 	Delivery     *ProbeReport         `json:"delivery,omitempty"`
 	// Contention is the delivery probe with several deliveries into one
 	// account at a time (measure --contention).
-	Contention  *ProbeReport `json:"contention,omitempty"`
-	UserOpen    *OpenReport  `json:"user_open,omitempty"`
-	SessionOpen *OpenReport  `json:"session_open,omitempty"`
-	Notes       []string     `json:"notes,omitempty"`
+	Contention *ProbeReport `json:"contention,omitempty"`
+	// Search and Expunge are the probes of measure --search and
+	// --expunge.
+	Search      *SearchReport `json:"search,omitempty"`
+	Expunge     *RoundReport  `json:"expunge,omitempty"`
+	UserOpen    *OpenReport   `json:"user_open,omitempty"`
+	SessionOpen *OpenReport   `json:"session_open,omitempty"`
+	Notes       []string      `json:"notes,omitempty"`
 }
 
 // Extrapolate scales the inventory to n accounts.

@@ -68,6 +68,10 @@ func WriteMeasureTable(w io.Writer, r *MeasureReport) error {
 	p.storeWide(r)
 	p.extrapolation(r.Extrapolated)
 
+	if r.Search != nil {
+		p.search(r.Search)
+	}
+
 	if r.Delivery != nil {
 		p.probe(r.Delivery)
 	}
@@ -80,6 +84,10 @@ func WriteMeasureTable(w io.Writer, r *MeasureReport) error {
 		if o != nil {
 			p.open(o)
 		}
+	}
+
+	if r.Expunge != nil {
+		p.round(r.Expunge)
 	}
 
 	for _, n := range r.Notes {
@@ -145,6 +153,37 @@ func (p *printer) probe(d *ProbeReport) {
 	p.f("  CAS retries %.0f (%.3f per delivery) by kind %v, by class %v\n",
 		d.CASRetries.Total, d.CASRetries.PerDelivery, d.CASRetries.ByKind, d.CASRetries.ByClass)
 	p.ops("per delivery", d.Ops, d.Total)
+}
+
+func (p *printer) round(r *RoundReport) {
+	p.f("\n%s (%d accounts, %d calls per round)\n", r.What, r.Accounts, r.Count)
+	p.latency("  latency ", r.Latency)
+
+	if r.CASRetries.Total > 0 {
+		p.f("  CAS retries %.0f (%.3f per call) by kind %v, by class %v\n",
+			r.CASRetries.Total, r.CASRetries.PerDelivery, r.CASRetries.ByKind, r.CASRetries.ByClass)
+	}
+
+	p.ops("per call", r.Ops, r.Total)
+}
+
+func (p *printer) search(r *SearchReport) {
+	p.round(&r.RoundReport)
+	p.f("  result fingerprint %s", r.Fingerprint)
+
+	if r.Mismatch {
+		p.f(" (the traced round found something else)")
+	}
+
+	p.f("\n")
+	p.table(tabwriter.AlignRight, func(t *printer) {
+		t.f("  key\tkind\trare\ttext\tcandidates\tnot narrowed\twords\tfingerprint\t\n")
+
+		for _, q := range r.Queries {
+			t.f("  %s\t%s\t%v\t%s\t%d\t%d\t%d\t%s\t\n",
+				q.Key, q.Kind, q.Rare, q.Text, q.Candidates, q.NotNarrowed, q.Words, q.Fingerprint[:12])
+		}
+	})
 }
 
 func (p *printer) open(o *OpenReport) {

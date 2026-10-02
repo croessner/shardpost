@@ -91,6 +91,12 @@ type MeasureOptions struct {
 	// ProbeMessages messages long), to measure compare-and-swap
 	// contention on the objects of one account.
 	Contention int
+	// Search, when above 0, runs that many search queries
+	// (bench.SearchQueries) in each probe account, before the deliveries.
+	Search int
+	// Expunge, when above 0, expunges that many of the oldest INBOX
+	// messages of each probe account in each of two rounds, at the end.
+	Expunge int
 	// EC are the parameters of the data pool's raw space estimate.
 	EC bench.ECEstimate
 	// Extrapolate scales the inventory to this many accounts (0: no).
@@ -191,7 +197,10 @@ func probeAccounts(accts []bench.AccountUsage, n int) []string {
 	return out
 }
 
-// probe runs the delivery and open rounds.
+// probe runs the search, delivery, open and expunge rounds, in that
+// order: the search sees the accounts as they were left (a run without
+// deliveries and expunges finds what the previous one found), the
+// expunge removes messages last.
 func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accounts []string) error {
 	if len(accounts) == 0 {
 		return nil
@@ -203,28 +212,75 @@ func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accoun
 		return fmt.Errorf("trace directory: %w", err)
 	}
 
-	if o.ProbeMessages > 0 {
-		d, err := m.deliveries(ctx, 1)
-		if err != nil {
-			return err
-		}
-
-		r.Delivery = d
-		r.Notes = append(r.Notes, fmt.Sprintf("the delivery probe added %d messages to each of %d accounts (after the inventory)",
-			2*o.ProbeMessages, len(accounts)))
+	err := m.probeSearch(ctx, r)
+	if err == nil {
+		err = m.probeDeliveries(ctx, r)
 	}
 
-	if o.ProbeMessages > 0 && o.Contention > 0 {
-		d, err := m.deliveries(ctx, o.Contention)
-		if err != nil {
-			return err
-		}
-
-		r.Contention = d
-		r.Notes = append(r.Notes, fmt.Sprintf("the contention probe added %d messages to each of %d accounts, %d at a time",
-			2*o.Contention*o.ProbeMessages, len(accounts), o.Contention))
+	if err == nil {
+		err = m.probeOpens(ctx, r)
 	}
 
+	if err == nil {
+		err = m.probeExpunge(ctx, r)
+	}
+
+	if m.unparsed > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("%d objecter log lines had an unknown format and were not counted; the operation counts are too low", m.unparsed))
+	}
+
+	return err
+}
+
+func (m *measurer) probeSearch(ctx context.Context, r *bench.MeasureReport) error {
+	if m.o.Search <= 0 {
+		return nil
+	}
+
+	s, err := m.search(ctx, m.o.Search)
+	if err != nil {
+		return err
+	}
+
+	r.Search = s
+	if s.Mismatch {
+		r.Notes = append(r.Notes, "the two search rounds found different messages; the accounts changed during the probe")
+	}
+
+	return nil
+}
+
+func (m *measurer) probeDeliveries(ctx context.Context, r *bench.MeasureReport) error {
+	o := m.o
+	if o.ProbeMessages <= 0 {
+		return nil
+	}
+
+	d, err := m.deliveries(ctx, 1)
+	if err != nil {
+		return err
+	}
+
+	r.Delivery = d
+	r.Notes = append(r.Notes, fmt.Sprintf("the delivery probe added %d messages to each of %d accounts (after the inventory)",
+		2*o.ProbeMessages, len(m.accounts)))
+
+	if o.Contention <= 0 {
+		return nil
+	}
+
+	if d, err = m.deliveries(ctx, o.Contention); err != nil {
+		return err
+	}
+
+	r.Contention = d
+	r.Notes = append(r.Notes, fmt.Sprintf("the contention probe added %d messages to each of %d accounts, %d at a time",
+		2*o.Contention*o.ProbeMessages, len(m.accounts), o.Contention))
+
+	return nil
+}
+
+func (m *measurer) probeOpens(ctx context.Context, r *bench.MeasureReport) error {
 	var err error
 
 	if r.UserOpen, err = m.open(ctx, "Store.User() and Close()", openOnly); err != nil {
@@ -232,14 +288,26 @@ func probe(ctx context.Context, o MeasureOptions, r *bench.MeasureReport, accoun
 	}
 
 	r.UserOpen.HeapBytes = m.heapPerView()
-
 	r.SessionOpen, err = m.open(ctx, "Store.User(), ListMailboxes(), Info(INBOX), Close()", openSession)
 
-	if m.unparsed > 0 {
-		r.Notes = append(r.Notes, fmt.Sprintf("%d objecter log lines had an unknown format and were not counted; the operation counts are too low", m.unparsed))
+	return err
+}
+
+func (m *measurer) probeExpunge(ctx context.Context, r *bench.MeasureReport) error {
+	if m.o.Expunge <= 0 {
+		return nil
 	}
 
-	return err
+	e, err := m.expunge(ctx, m.o.Expunge)
+	if err != nil {
+		return err
+	}
+
+	r.Expunge = e
+	r.Notes = append(r.Notes, fmt.Sprintf("the expunge probe removed the %d oldest INBOX messages of each of %d accounts",
+		2*m.o.Expunge, len(m.accounts)))
+
+	return nil
 }
 
 // measurer runs the rounds of a measurement.
