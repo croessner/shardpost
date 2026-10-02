@@ -1104,7 +1104,10 @@ an account with document IDs thus costs one read and one write on
 
 An omap compare-and-swap of the account's objects (`casOmap`: posting
 shards, id map, registry, account, mailbox UID shards and the other omap
-objects of the account; not the mailbox header, `casHeader`) that loses
+objects of the account; not the header changes of a mailbox — modseq,
+flags — which go through `casHeader`, `kind="header"`, without backoff;
+the header object's recent mark, retirement and move intents go through
+`casOmap`) that loses
 against another writer (the object version changed between its read
 and its write) waits at random 1 to 10 ms, times the number of rounds
 it lost so far, before it reads again, so that writers of the same

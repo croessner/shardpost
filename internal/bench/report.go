@@ -23,8 +23,9 @@ type ProbeReport struct {
 	// Parallel deliveries went into one account at a time.
 	Parallel   int   `json:"parallel"`
 	Deliveries int64 `json:"deliveries"`
-	// Latency, PerSecond and CASRetries are of the deliveries without
-	// the objecter log (PerSecond over the wall time of that round).
+	// Latency and PerSecond are of the round without the objecter log
+	// (PerSecond over its wall time); CASRetries counts both rounds,
+	// per_delivery dividing by their deliveries together.
 	Latency    LatencySummary `json:"latency"`
 	PerSecond  float64        `json:"deliveries_per_second"`
 	CASRetries CASSummary     `json:"cas_retries"`
@@ -41,8 +42,9 @@ type RoundReport struct {
 	Accounts int    `json:"accounts"`
 	// Count is the calls of one round.
 	Count int64 `json:"count"`
-	// Latency and CASRetries (per_delivery: per call) are of the round
-	// without the objecter log.
+	// Latency is of the round without the objecter log; CASRetries
+	// counts both rounds, per_delivery dividing by their calls together
+	// (a value per call).
 	Latency    LatencySummary               `json:"latency"`
 	CASRetries CASSummary                   `json:"cas_retries"`
 	Ops        map[string]map[string]OpRate `json:"ops_per_call"`

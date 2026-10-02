@@ -3,6 +3,9 @@ package bench
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,21 +15,31 @@ import (
 )
 
 // TestSearchQueries: the query set is fixed, covers every kind and key,
-// frequent and rare words, and cuts parts of 3 to 6 characters.
+// frequent and rare words, and cuts parts of 3 to 6 characters; a
+// longer set starts with the shorter one.
 func TestSearchQueries(t *testing.T) {
-	qs := SearchQueries(24)
-	if len(qs) != 24 {
-		t.Fatalf("%d queries", len(qs))
-	}
+	short := SearchQueries(24)
 
-	again := SearchQueries(24)
-	kinds, keys, rare := map[string]bool{}, map[string]bool{}, 0
-
-	for i, q := range qs {
-		if q != again[i] {
-			t.Errorf("query %d differs between calls: %+v %+v", i, q, again[i])
+	for _, k := range []int{24, 30, 60, 240} {
+		qs := SearchQueries(k)
+		if !slices.Equal(qs, SearchQueries(k)) || !slices.Equal(qs[:min(k, len(short))], short[:min(k, len(short))]) {
+			t.Errorf("k %d: the queries differ between calls", k)
 		}
 
+		checkQuerySet(t, k, qs)
+	}
+}
+
+func checkQuerySet(t *testing.T, k int, qs []SearchQuery) {
+	t.Helper()
+
+	if len(qs) != k {
+		t.Fatalf("%d queries, want %d", len(qs), k)
+	}
+
+	kinds, keys, rare := map[string]bool{}, map[string]bool{}, 0
+
+	for _, q := range qs {
 		kinds[q.Kind], keys[q.Key] = true, true
 
 		if q.Rare {
@@ -34,13 +47,56 @@ func TestSearchQueries(t *testing.T) {
 		}
 
 		if q.Kind != QueryWord && (len(q.Text) < 3 || len(q.Text) > 6) {
-			t.Errorf("query %+v: a part of %d characters", q, len(q.Text))
+			t.Errorf("k %d: query %+v: a part of %d characters", k, q, len(q.Text))
 		}
 	}
 
 	if len(kinds) != 3 || len(keys) != 4 || rare == 0 || rare == len(qs) {
-		t.Errorf("kinds %v, keys %v, rare %d of %d", kinds, keys, rare, len(qs))
+		t.Errorf("k %d: kinds %v, keys %v, rare %d of %d", k, kinds, keys, rare, len(qs))
 	}
+}
+
+// TestQueryTextShortWords: a word too short for a part becomes a word
+// query; a prefix leaves the last character out, an infix the first
+// and the last.
+func TestQueryTextShortWords(t *testing.T) {
+	for _, w := range []string{"ab", "abc", "abcd", "abcde", "abcdefghijk"} {
+		for seed := range uint64(20) {
+			for _, kind := range []string{QueryPrefix, QueryInfix} {
+				got, text := queryText(kind, w, rand.New(rand.NewPCG(seed, 1)))
+				if !cutOK(kind, w, got, text) {
+					t.Errorf("%s of %q: %s %q", kind, w, got, text)
+				}
+			}
+		}
+	}
+}
+
+// wordOK: a word query comes only of a word too short for a cut of 3.
+func wordOK(kind, w, text string) bool {
+	short := 3
+	if kind == QueryInfix {
+		short = 4
+	}
+
+	return text == w && len(w) <= short
+}
+
+// cutOK checks what queryText made of a word (whose letters differ).
+func cutOK(kind, w, got, text string) bool {
+	if got == QueryWord {
+		return wordOK(kind, w, text)
+	}
+
+	if got != kind || len(text) < 3 || len(text) > 6 || !strings.Contains(w, text) {
+		return false
+	}
+
+	if kind == QueryPrefix {
+		return strings.HasPrefix(w, text) && text != w
+	}
+
+	return !strings.HasPrefix(w, text) && !strings.HasSuffix(w, text)
 }
 
 // searchAll runs the queries in the accounts and returns the results.

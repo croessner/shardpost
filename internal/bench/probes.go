@@ -21,8 +21,9 @@ import (
 // mailbox.
 var ErrNothingToExpunge = errors.New("no message left to expunge")
 
-// ExpungeOldest expunges the message with the lowest UID of the mailbox,
-// as an IMAP client does with STORE \Deleted and EXPUNGE of one message.
+// ExpungeOldest expunges the message with the lowest UID of the mailbox:
+// the store's expunge of one message (what IMAP EXPUNGE does after the
+// client marked it \Deleted; the flag change is not part of it).
 func ExpungeOldest(u model.User, mailbox string) error {
 	mb, err := u.Lookup(mailbox)
 	if err != nil {
@@ -93,27 +94,33 @@ func SearchQueries(k int) []SearchQuery {
 			w = term(r.Uint64N(uint64(len(common))))
 		}
 
-		q.Text = queryText(q.Kind, w, r)
+		q.Kind, q.Text = queryText(q.Kind, w, r)
 		out = append(out, q)
 	}
 
 	return out
 }
 
-// queryText cuts the query of a kind out of word w (a word shorter than
-// the cut is taken whole).
-func queryText(kind, w string, r *rand.Rand) string {
+// queryText cuts the query of a kind out of word w: 3 to 6 characters,
+// fewer where the word is short (a prefix leaves at least the last
+// character out, an infix the first and the last). A word too short for
+// a cut of 3 characters becomes a word query, and the kind says so.
+func queryText(kind, w string, r *rand.Rand) (string, string) {
 	n := 3 + r.IntN(4)
 
-	switch {
-	case kind == QueryPrefix && len(w) > n:
-		return w[:n]
-	case kind == QueryInfix && len(w) > n+1:
-		start := 1 + r.IntN(len(w)-n-1)
-		return w[start : start+n]
+	switch kind {
+	case QueryPrefix:
+		if n = min(n, len(w)-1); n >= 3 {
+			return kind, w[:n]
+		}
+	case QueryInfix:
+		if n = min(n, len(w)-2); n >= 3 {
+			start := 1 + r.IntN(len(w)-n-1)
+			return kind, w[start : start+n]
+		}
 	}
 
-	return w
+	return QueryWord, w
 }
 
 // searchFields are the index fields of an IMAP search key, as the

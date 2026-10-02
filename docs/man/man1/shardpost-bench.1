@@ -350,11 +350,16 @@ which works on several accounts at once.
 .TP
 .BI \-\-search " k"
 Search queries per probe account and round (0, the default: no search
-rounds).
+rounds). With
+.B "\-\-probe\-accounts 0"
+there are no probe accounts and no search.
 .TP
 .BI \-\-expunge " n"
 INBOX messages to expunge per probe account and round (0, the default:
-no expunge rounds). The messages are gone afterwards.
+no expunge rounds). The messages are gone afterwards. Like
+.BR \-\-search ,
+it does nothing with
+.BR "\-\-probe\-accounts 0" .
 .TP
 .BI \-\-extrapolate " n"
 Scale the per-account means to

@@ -278,7 +278,8 @@ higher `--messages`; to measure a part of many accounts, use
   (`registry`, `mbox`, `ftsmap`, `fts`, …) and `ops_per_delivery`
   includes the reads and writes of the lost rounds; a lost round of the
   omap compare-and-swap (`kind` `omap`: registry, account, id map,
-  posting shards, mailbox UID shards; not the mailbox header) waits 1 to 10 ms times the rounds it lost before it
+  posting shards, mailbox UID shards; not the header changes of a
+  mailbox, `kind` `header`, which retry without waiting) waits 1 to 10 ms times the rounds it lost before it
   reads again. Compare `deliveries_per_second` and the latency with the
   `delivery` rounds. `--contention` is not `--parallel`, which only sets
   how many accounts the inventory and `populate` work on at once.
@@ -299,7 +300,8 @@ higher `--messages`; to measure a part of many accounts, use
   after a change of the index (a conversion, a new layout), must report
   the same `fingerprint`; where they differ, `queries[]` shows which
   query. `mismatch` says that the two rounds of one run found different
-  messages.
+  messages. Without probe accounts (`--probe-accounts 0`) there is no
+  search.
 - `expunge` (only with `measure --expunge N`): runs last. Every probe
   account loses its `N` oldest INBOX messages in each of two rounds, one
   EXPUNGE per message in a view of its own; `ops_per_call`, the latency
