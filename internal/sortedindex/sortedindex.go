@@ -113,11 +113,18 @@ var (
 
 func (ix *Index) cacheKey() string { return ix.b.CacheKey() + "\x00" + ix.name }
 
-// Head implements model.SortedIndex (uncached: it reads the markers).
+// Head implements model.SortedIndex (uncached: it reads the markers). A
+// head of a newer format is refused like head() refuses it: an index
+// that moved away leaves a head of a format no server reads (the system
+// pool migration), and a gate must not take its markers.
 func (ix *Index) Head() (model.IndexHead, error) {
 	h, exists, err := ix.readHead()
 	if err != nil || !exists {
 		return h, err
+	}
+
+	if h.Format > model.IndexFormat {
+		return h, fmt.Errorf("index %s: %w (format %d)", ix.name, model.ErrIndexFormat, h.Format)
 	}
 
 	after := ""

@@ -127,6 +127,46 @@ func TestNewerFormatRefused(t *testing.T) {
 	}
 }
 
+// TestHeadRefusesNewerFormat: Head (which a backfill gate reads its
+// marker through) refuses a head of a newer format as the cached head
+// does, so a gate never takes the markers of a head that moved away (a
+// system pool migration leaves format 1000 behind). The gate stays
+// closed and reports the error once.
+func TestHeadRefusesNewerFormat(t *testing.T) {
+	ix, b := newIndex(t, 2)
+
+	ForgetHeads()
+
+	if err := b.Write(HeadOID("test"), 0, map[string][]byte{keyShards: []byte("2"), keyFormat: []byte("1000"),
+		keyPhase: []byte("moved:7"), keyMarker + "backfill.kv": []byte(`{"finished":"2026-10-01T00:00:00Z"}`)}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ix.Head(); !errors.Is(err, model.ErrIndexFormat) {
+		t.Fatalf("Head of a newer format: %v", err)
+	}
+
+	if done, err := Backfilled(ix, "backfill.kv"); done || !errors.Is(err, model.ErrIndexFormat) {
+		t.Fatalf("backfilled %v, %v", done, err)
+	}
+
+	closed := 0
+
+	var cerr error
+
+	g := &Gate{Head: ix, Marker: "backfill.kv", Closed: func(err error) { closed++; cerr = err }}
+
+	for range 3 {
+		if g.Open() {
+			t.Fatal("the gate opened on a head of a newer format")
+		}
+	}
+
+	if closed != 1 || !errors.Is(cerr, model.ErrIndexFormat) {
+		t.Fatalf("closed %d times, err %v", closed, cerr)
+	}
+}
+
 func TestUpdateSemantics(t *testing.T) {
 	ix, b := newIndex(t, 4)
 
