@@ -336,7 +336,7 @@ func printLearningJob(stdout io.Writer, a supportArgs, j *adminapi.LearningJob) 
 
 	table(stdout, [][2]string{{labelID, j.Id}, {cmdAccount, j.Account}, {labelMailbox, j.MailboxId}, {"program", j.Program},
 		{labelState, string(j.State)}, {labelAttempts, fmt.Sprint(j.Attempts)}, {"retries", fmt.Sprint(j.Retries)},
-		{"created", j.Created.Format("2006-01-02 15:04:05")}, {"next", j.NextAttempt.Format("2006-01-02 15:04:05")},
+		{"created", j.Created.Format("2006-01-02 15:04:05")}, {labelNext, j.NextAttempt.Format("2006-01-02 15:04:05")},
 		{labelSize, fmt.Sprint(j.Size)}})
 
 	return exOK

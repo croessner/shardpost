@@ -220,6 +220,10 @@ type FTSLayouter interface {
 	// of any token but own; it returns the token it cleared ("" for
 	// none). Whoever takes the account lock calls it.
 	ClearForeignFTSLayoutNext(own string) (string, error)
+	// HeartbeatFTSLayoutNext records a heartbeat of the run tok in its
+	// unfinished conversion (the import reshard endpoint); false when
+	// the record carries another run.
+	HeartbeatFTSLayoutNext(tok string, at time.Time) (bool, error)
 }
 
 // FTSLayoutMarked is implemented by stores that read the cluster mark.

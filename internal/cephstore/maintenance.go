@@ -56,20 +56,8 @@ func (u *User) ScrubPending() (string, error) {
 		return "scrub candidates", nil
 	}
 
-	switch p, err := u.anyKey(oidRegistry, intentPrefixes...); {
-	case err != nil:
-		return "", fmt.Errorf("read intents: %w", err)
-	case p != "":
-		return "intents " + p, nil
-	}
-
-	// An unfinished full-text conversion: the jobs scrub clears it when
-	// its run has ended (§4.6), so the batch must not skip the account.
-	switch l, err := u.readLayout(); {
-	case err != nil:
-		return "", err
-	case l != nil && (l.Next != nil || len(l.Old) > 0):
-		return "fts conversion", nil
+	if p, err := u.intentsPending(); p != "" || err != nil {
+		return p, err
 	}
 
 	for _, prefix := range []string{regUploadPrefix, regSubmissionPrefix} {
@@ -96,6 +84,25 @@ func (u *User) ScrubPending() (string, error) {
 	}
 
 	return "", nil
+}
+
+// intentsPending reports an intent in the registry or an unfinished
+// full-text conversion: the jobs scrub clears the latter when its run
+// has ended (§4.6), so the batch must not skip the account.
+func (u *User) intentsPending() (string, error) {
+	switch p, err := u.anyKey(oidRegistry, intentPrefixes...); {
+	case err != nil:
+		return "", fmt.Errorf("read intents: %w", err)
+	case p != "":
+		return "intents " + p, nil
+	}
+
+	l, err := u.readLayout()
+	if err != nil || l == nil || (l.Next == nil && len(l.Old) == 0) {
+		return "", err
+	}
+
+	return "fts conversion", nil
 }
 
 // firstKeys reports whether an object of the index pool has a key with

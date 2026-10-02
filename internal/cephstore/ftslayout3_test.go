@@ -681,10 +681,7 @@ func TestLayoutAbortAfterP3(t *testing.T) {
 	ftsLayoutHook = nil
 	next := layoutOf(t, u).Next
 
-	// the batch scrub must not skip the account (N11)
-	if p, err := u.ScrubPending(); err != nil || p != "fts conversion" {
-		t.Errorf("scrub pending %q %v", p, err)
-	}
+	scrubSeesConversion(t, u)
 
 	// crashed: frozen, a delivery fails after its wait
 	start := time.Now()
@@ -721,6 +718,18 @@ func TestLayoutAbortAfterP3(t *testing.T) {
 
 	if ok, _ := u.ClearFTSLayoutNext(tok); ok {
 		t.Error("cleared twice")
+	}
+}
+
+// scrubSeesConversion: the batch scrub must not skip an account with an
+// unfinished conversion (N11).
+func scrubSeesConversion(t *testing.T, u *User) {
+	t.Helper()
+
+	u.flushIntents(false) // the deliveries' blob intents go in the background
+
+	if p, err := u.ScrubPending(); err != nil || p != "fts conversion" {
+		t.Errorf("scrub pending %q %v", p, err)
 	}
 }
 

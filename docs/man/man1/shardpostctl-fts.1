@@ -1,0 +1,243 @@
+.TH SHARDPOSTCTL-FTS 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accounts with layout 3, the layout record of an account
+.SH SYNOPSIS
+.B shardpostctl fts layout3 status
+.RB [ \-json ]
+.br
+.B shardpostctl fts layout3 enable \-pods
+.I n
+.RB [ \-force ]
+.RB [ \-json ]
+.br
+.B shardpostctl fts layout3 disable
+.RB [ \-json ]
+.br
+.B shardpostctl fts layout3 list
+.RB [ \-verify ]
+.RB [ \-after
+.IR account ]
+.RB [ \-limit
+.IR n ]
+.RB [ \-json ]
+.br
+.B shardpostctl fts layout show
+.RB [ \-json ]
+.I account
+.br
+.B shardpostctl fts layout clear
+.RB [ \-json ]
+.I account
+.SH DESCRIPTION
+The full-text index of an account has one of two object layouts.
+Layout 2 is the fixed set of objects of every version before 0.45.0
+(posting lists in
+.BR fts/<nn> ,
+the substring dictionary in 256 objects
+.BR ftst/<nnn> ,
+the header texts in
+.BR ftsh/<nn> );
+a delivery writes nearly all of them. Layout 3 keeps the same data in an
+index generation of S posting, D dictionary and H header objects
+.RB ( ftx/<gen>/p<i> ,
+.BR d<j> ,
+.BR h<k> )
+whose counts follow the size of the account; a delivery into a small
+account writes a handful of objects. The layout record in the account's
+id map names the current generation, a conversion in progress and the
+sources a conversion has not removed yet. Searches give the same
+results in both layouts.
+.PP
+Servers before 0.45.0 cannot read layout 3. A cluster mark therefore
+allows it: without the mark no layout 3 index is created, whatever
+.I fts.layout
+says, and
+.B fts_layout
+jobs refuse to convert to it. The mark is read whenever an index is
+created. Every server since 0.45.0 registers itself at startup and then
+every minute
+.RB ( servers/<instance>
+in the admin store), also without jobs or an admin listener; a
+registration seen within three minutes is fresh, one not renewed for 24
+hours is deleted (by the expiry worker of the job system, and by status
+and enable).
+.PP
+Conversions are
+.B fts_layout
+jobs, see
+.BR shardpostctl-job (1);
+between import batches the import reshard endpoint reshards under the
+import session, see
+.BR shardpostctl-migrate (1).
+.SS fts layout3 status
+Shows whether the mark is set (when, by whom, for how many pods, whether
+forced) and every registration with its version, capabilities, last
+heartbeat and freshness. With
+.I admin.kv_index
+other than
+.B read
+it lists the admin namespace. Role:
+.BR diagnose .
+.SS fts layout3 enable
+Sets the mark when exactly
+.I n
+fresh registrations report the capability
+.BR fts_layout3 .
+Servers before 0.45.0 do not register, so the number of pods running
+now is the check:
+.B \-pods
+is required. A pod that was replaced less than three minutes ago leaves
+the fresh record of its predecessor, so the check sees one record too
+many: wait three minutes after a rollout, check
+.BR status ,
+then enable. The refusal names the instances and when they were seen.
+.B \-force
+skips the check; the audit log and the mark record it. Role:
+.BR repair .
+.SS fts layout3 disable
+Removes the mark, waits five seconds (a server that read the mark just
+before finishes creating its index) and lists the accounts that still
+have a layout 3 index. While there are any, a downgrade to a version
+before 0.45.0 is not possible: convert them back first with
+.BR "shardpostctl plan \-all \-layout 2 fts_layout" .
+Role:
+.BR repair .
+.SS fts layout3 list
+Lists the presence index of the accounts with a layout 3 index (or a
+conversion to it), a page at a time, with the time each was entered.
+With
+.B \-verify
+each account's layout record is read and an entry whose account has no
+layout 3 index is marked
+.BR MISMATCH .
+Export the list before an emergency downgrade. Role:
+.B diagnose
+with the scope of all accounts.
+.SS fts layout show
+Prints the layout record of an account: the current generation (layout
+2 without a record) with its object counts, a conversion in progress
+.RB ( next ,
+the token of its run and, for an import reshard, its last heartbeat) and
+sources not removed yet
+.RB ( old ).
+Role:
+.BR diagnose .
+.SS fts layout clear
+Removes the conversion in progress of an account when its run has
+ended: a job that does not run any more, or an import reshard whose
+heartbeat is older than 90 seconds. Its freeze is lifted (only the
+freeze of exactly that run) and its target objects are deleted; a
+conversion whose run still works is left alone. Deliveries into an
+account with a stale conversion fail temporarily after
+.I fts.frozen_wait_seconds
+until it is cleared; the job itself, a job or import that takes the
+account lock and the jobs scrub clear it as well. Role:
+.BR repair .
+.SH OPTIONS
+.TP
+.BI \-pods " n"
+.BR enable :
+the number of servers running now (required).
+.TP
+.B \-force
+.BR enable :
+set the mark without the registrations check.
+.TP
+.B \-verify
+.BR list :
+read each account's layout record.
+.TP
+.BI \-after " account"
+.BR list :
+continue after this account (printed as
+.B more:
+at the end of a full page).
+.TP
+.BI \-limit " n"
+.BR list :
+accounts per page, 1 to 10000 (100).
+.TP
+.B \-json
+Print the answer as JSON.
+.SH EXAMPLES
+After the rollout of 0.45.0 to all three pods, wait three minutes, check
+the registrations and allow layout 3:
+.PP
+.nf
+.RS
+shardpostctl fts layout3 status
+shardpostctl fts layout3 enable -pods 3
+.RE
+.fi
+.PP
+Then set
+.I fts.layout: 3
+in the configuration (new accounts get layout 3) and convert existing
+accounts, for example in a batch with small parallelism:
+.PP
+.nf
+.RS
+shardpostctl plan -all -layout 3 fts_layout
+.RE
+.fi
+.PP
+A delivery keeps failing temporarily for one account; look for a
+conversion whose run died and clear it:
+.PP
+.nf
+.RS
+shardpostctl fts layout show user@example.org
+shardpostctl fts layout clear user@example.org
+.RE
+.fi
+.PP
+Going back to a release before 0.45.0: set
+.I fts.layout: 2 ,
+convert every account back, remove the mark (exit status 0 only when no
+account has layout 3 any more), then roll the image back:
+.PP
+.nf
+.RS
+shardpostctl plan -all -layout 2 fts_layout
+shardpostctl fts layout3 disable
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 64
+Wrong arguments (for
+.BR enable :
+no
+.BR \-pods ).
+.TP
+.B 65
+.BR enable :
+the registrations do not show exactly
+.I n
+fresh servers with layout 3;
+.BR disable :
+the mark is removed, but accounts still have layout 3.
+.TP
+.B 67
+No such account.
+.TP
+.B 70
+An unexpected answer from the server.
+.TP
+.B 75
+The server cannot be reached, or it has no layout administration.
+.TP
+.B 77
+The caller lacks the role
+.B diagnose
+(status, list, show) or
+.B repair
+(enable, disable, clear), or the scope of all accounts (list).
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-job (1),
+.BR shardpostctl-migrate (1),
+.BR shardpost-scrub (1)

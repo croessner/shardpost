@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-JOB 1 "2026-10-01" "ShardPost 0.42.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-JOB 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-job \- plan, apply and watch maintenance jobs
 .SH SYNOPSIS
@@ -9,6 +9,11 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .IR mailbox ]
 .RB [ \-uids
 .IR list " | " \-deleted ]
+.RB [ \-layout
+.IR n ]
+.RB [ \-shards
+.IR n ]
+.RB [ \-due-only ]
 .RB [ \-\-json ]
 .I kind account
 .br
@@ -16,6 +21,11 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-classes
 .IR list ]
 .RB [ \-skip-idle ]
+.RB [ \-layout
+.IR n ]
+.RB [ \-shards
+.IR n ]
+.RB [ \-due-only ]
 .RB [ \-\-json ]
 .I kind
 .br
@@ -98,9 +108,10 @@ below.
 Plans a batch of the kind over every account of the account directory:
 .BR index_check ,
 .BR scrub ,
-.B fts_rebuild
+.BR fts_rebuild ,
+.B attachment_backfill
 or
-.BR attachment_backfill .
+.BR fts_layout .
 .B \-classes
 selects the repair classes of a scrub as for one account;
 .B \-skip-idle
@@ -265,7 +276,44 @@ shows how many objects of the old layout are left; the result counts the
 terms by field, the dictionary entries written and the old objects
 removed. Running it again is harmless, and it is also the repair for a
 term that lost its dictionary entries (it is then found as a whole word
-but not as a part of one). It has no checkpoint.
+but not as a part of one). It has no checkpoint. On a layout 3 index it
+does nothing (see
+.BR fts_layout ).
+.TP
+.B fts_layout
+Role
+.BR repair ,
+locks the account. Converts the full-text index between layout 2 and
+layout 3, or reshards a layout 3 index (see
+.BR shardpostctl-fts (1)).
+.B \-layout
+2 or 3 is the target (default the account's layout);
+.B \-shards
+forces the object counts of a layout 3 target, otherwise they follow the
+key counts and
+.I fts.shard_target_keys
+(a conversion from layout 2 estimates them from the number of messages);
+.B \-due-only
+ends without a change while the key counts ask for the shape the index
+has (the fts_due worker plans the job so). Converting to layout 3 needs
+the cluster mark
+.RB ( "shardpostctl fts layout3 enable" ),
+read when the job is planned and when it starts. The job freezes the
+account's posting objects, writes the target generation from them (dead
+document ids left out, the dictionary derived from the terms, the header
+texts copied), switches the layout record and deletes the sources.
+Deliveries into the account fail temporarily for the whole job (the
+account lock refuses them; one already running waits up to
+.I fts.frozen_wait_seconds
+for the switch). A job that fails or is cancelled removes its unfinished
+conversion itself; one that lost its lease leaves it to the server that
+takes over, which replaces it. The result names the source and target
+generations and counts terms, dictionary keys, header texts and
+documents; a
+.B noop
+result changed nothing. In a batch
+.RB ( "plan \-all" )
+it runs per account with the batch's lock.
 .TP
 .B mailbox_name_convert
 Role
@@ -421,6 +469,18 @@ a batch of the kind over every account instead of one account.
 .B plan \-all scrub
 skips the accounts unchanged since their last clean batch scrub.
 .TP
+.BI \-layout " n"
+.BR fts_layout :
+the target layout, 2 or 3.
+.TP
+.BI \-shards " n"
+.BR fts_layout :
+forced object counts of a layout 3 target (1 to 4096).
+.TP
+.B \-due-only
+.BR fts_layout :
+no change while the key counts ask for the shape the index has.
+.TP
 .B \-wait
 Wait until the job ends. The exit code is then the job's outcome.
 .TP
@@ -510,6 +570,17 @@ this has run.
 .RS
 shardpostctl plan fts_dict_convert user@example.org
 shardpostctl apply -wait <plan-id>
+.RE
+.fi
+.PP
+Convert one account to layout 3 of the full-text index (the cluster
+mark is set), then reshard it to four objects of each kind:
+.PP
+.nf
+.RS
+shardpostctl plan -layout 3 fts_layout user@example.org
+shardpostctl apply -wait <plan-id>
+shardpostctl plan -layout 3 -shards 4 fts_layout user@example.org
 .RE
 .fi
 .PP

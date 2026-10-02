@@ -306,6 +306,7 @@ const (
 	AttachmentBackfill PlanRequestKind = "attachment_backfill"
 	Expunge            PlanRequestKind = "expunge"
 	FtsDictConvert     PlanRequestKind = "fts_dict_convert"
+	FtsLayout          PlanRequestKind = "fts_layout"
 	FtsRebuild         PlanRequestKind = "fts_rebuild"
 	MailboxDelete      PlanRequestKind = "mailbox_delete"
 	MailboxNameConvert PlanRequestKind = "mailbox_name_convert"
@@ -324,6 +325,8 @@ func (e PlanRequestKind) Valid() bool {
 	case Expunge:
 		return true
 	case FtsDictConvert:
+		return true
+	case FtsLayout:
 		return true
 	case FtsRebuild:
 		return true
@@ -505,7 +508,8 @@ type BatchPlanRequest struct {
 	Kind string `json:"kind"`
 
 	// Params Parameters of the kind for every account; scrub: `classes`
-	// (empty = all). The other kinds take none.
+	// (empty = all); fts_layout: `layout`, `shards`, `due_only`. The
+	// other kinds take none.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
 	// SkipIdle scrub only: skip the accounts whose last batch scrub was
@@ -638,6 +642,96 @@ type Error struct {
 // ErrorCode defines model for Error.Code.
 type ErrorCode string
 
+// FTSLayout3Disable defines model for FTSLayout3Disable.
+type FTSLayout3Disable struct {
+	// Accounts Accounts that still have a layout 3 index (at most 1000).
+	Accounts []string `json:"accounts"`
+
+	// More There are more than listed.
+	More *bool `json:"more,omitempty"`
+}
+
+// FTSLayout3Enable defines model for FTSLayout3Enable.
+type FTSLayout3Enable struct {
+	// Force Set the mark without the check.
+	Force *bool `json:"force,omitempty"`
+
+	// Pods The number of servers running now; exactly as many fresh registrations must report layout 3.
+	Pods int `json:"pods"`
+}
+
+// FTSLayout3Mark defines model for FTSLayout3Mark.
+type FTSLayout3Mark struct {
+	EnabledAt time.Time `json:"enabled_at"`
+	Forced    *bool     `json:"forced,omitempty"`
+	Pods      int       `json:"pods"`
+	Principal *string   `json:"principal,omitempty"`
+}
+
+// FTSLayout3Status defines model for FTSLayout3Status.
+type FTSLayout3Status struct {
+	Enabled bool                 `json:"enabled"`
+	Mark    *FTSLayout3Mark      `json:"mark,omitempty"`
+	Servers []ServerRegistration `json:"servers"`
+}
+
+// FTSLayoutAccount defines model for FTSLayoutAccount.
+type FTSLayoutAccount struct {
+	Account string          `json:"account"`
+	Error   *string         `json:"error,omitempty"`
+	Layout  *FTSLayoutState `json:"layout,omitempty"`
+
+	// Mismatch With verify, the account has no layout 3 index (or no conversion to it).
+	Mismatch *bool      `json:"mismatch,omitempty"`
+	Since    *time.Time `json:"since,omitempty"`
+}
+
+// FTSLayoutAccountPage defines model for FTSLayoutAccountPage.
+type FTSLayoutAccountPage struct {
+	Items []FTSLayoutAccount `json:"items"`
+
+	// Next Pass as `after` for the next page; absent at the end.
+	Next *string `json:"next,omitempty"`
+}
+
+// FTSLayoutClear defines model for FTSLayoutClear.
+type FTSLayoutClear struct {
+	// Cleared The token of the run whose conversion was removed; empty for none.
+	Cleared string         `json:"cleared"`
+	State   FTSLayoutState `json:"state"`
+}
+
+// FTSLayoutShape defines model for FTSLayoutShape.
+type FTSLayoutShape struct {
+	// D Dictionary objects.
+	D *int `json:"d,omitempty"`
+
+	// Gen The generation (layout 3).
+	Gen *string `json:"gen,omitempty"`
+
+	// H Header text objects.
+	H *int `json:"h,omitempty"`
+
+	// Layout 2 (fixed shards) or 3 (an index generation).
+	Layout int `json:"layout"`
+
+	// S Posting objects.
+	S *int `json:"s,omitempty"`
+}
+
+// FTSLayoutState defines model for FTSLayoutState.
+type FTSLayoutState struct {
+	Current FTSLayoutShape  `json:"current"`
+	Next    *FTSLayoutShape `json:"next,omitempty"`
+
+	// NextAt Last heartbeat of an import reshard run.
+	NextAt *time.Time `json:"next_at,omitempty"`
+
+	// NextTok The run of the conversion in progress (`job-<id>/<lease generation>` or `<session>/<nonce>`).
+	NextTok *string           `json:"next_tok,omitempty"`
+	Old     *[]FTSLayoutShape `json:"old,omitempty"`
+}
+
 // FlagRequest defines model for FlagRequest.
 type FlagRequest struct {
 	Add            *[]string `json:"add,omitempty"`
@@ -747,6 +841,19 @@ type ImportReaderResult struct {
 	Changed int `json:"changed"`
 }
 
+// ImportReshard defines model for ImportReshard.
+type ImportReshard struct {
+	Error *string `json:"error,omitempty"`
+
+	// G The current index generation (empty in layout 2).
+	G string `json:"g"`
+
+	// State `idle` (nothing to do or nothing runs), `running`, `done` (the
+	// reshard finished; this server's runs only), `failed` (with
+	// `error`).
+	State string `json:"state"`
+}
+
 // ImportResult defines model for ImportResult.
 type ImportResult struct {
 	Bytes    int64 `json:"bytes"`
@@ -764,6 +871,11 @@ type ImportSession struct {
 
 // ImportSessionRequest defines model for ImportSessionRequest.
 type ImportSessionRequest struct {
+	// Messages How many messages the import is going to store (a hint): a
+	// fresh layout 3 full-text index is sized for them when the first
+	// batch creates it. Kept by this server for the session.
+	Messages *int `json:"messages,omitempty"`
+
 	// Session Resume this session (it must hold the lock or the lock must be free); omitted, the server chooses one.
 	Session *string `json:"session,omitempty"`
 }
@@ -1006,7 +1118,11 @@ type PlanRequest struct {
 	Kind PlanRequestKind `json:"kind"`
 
 	// Params scrub: `classes` (deliveries, moves, retired, uncovered, entries,
-	// refs, orphans, unknown, quota; empty = all); mailbox_delete:
+	// refs, orphans, unknown, quota; empty = all); fts_layout:
+	// `layout` (2 or 3; omitted: the account's), `shards` (forced
+	// object counts of a layout 3 target; 0: from the key counts),
+	// `due_only` (end without a change while the key counts ask for
+	// the shape the index has); mailbox_delete:
 	// `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
 	// `deleted: true` (every message flagged \Deleted when planned).
 	Params *map[string]interface{} `json:"params,omitempty"`
@@ -1042,6 +1158,17 @@ type SearchResult struct {
 	// Next Set when the search stopped early (limit or scan limit).
 	Next    *string `json:"next,omitempty"`
 	Scanned int64   `json:"scanned"`
+}
+
+// ServerRegistration defines model for ServerRegistration.
+type ServerRegistration struct {
+	Caps []string `json:"caps"`
+
+	// Fresh Seen within the last three minutes.
+	Fresh    bool      `json:"fresh"`
+	Instance string    `json:"instance"`
+	Seen     time.Time `json:"seen"`
+	Version  string    `json:"version"`
 }
 
 // ServerStatus defines model for ServerStatus.
@@ -1319,6 +1446,18 @@ type CloseImportParams struct {
 	XImportSession ImportSessionHeader `json:"X-Import-Session"`
 }
 
+// GetImportReshardParams defines parameters for GetImportReshard.
+type GetImportReshardParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
+// StartImportReshardParams defines parameters for StartImportReshard.
+type StartImportReshardParams struct {
+	// XImportSession The session that holds the import lock.
+	XImportSession ImportSessionHeader `json:"X-Import-Session"`
+}
+
 // ListImportMailboxesParams defines parameters for ListImportMailboxes.
 type ListImportMailboxesParams struct {
 	// XImportSession The session that holds the import lock.
@@ -1477,6 +1616,13 @@ type DeliverParams struct {
 	EnforceQuota *bool `form:"enforce_quota,omitempty" json:"enforce_quota,omitempty"`
 }
 
+// ListFTSLayout3AccountsParams defines parameters for ListFTSLayout3Accounts.
+type ListFTSLayout3AccountsParams struct {
+	After  *string `form:"after,omitempty" json:"after,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Verify *bool   `form:"verify,omitempty" json:"verify,omitempty"`
+}
+
 // ListJobsParams defines parameters for ListJobs.
 type ListJobsParams struct {
 	Account *string   `form:"account,omitempty" json:"account,omitempty"`
@@ -1566,6 +1712,9 @@ type SetTraceJSONRequestBody = TraceRequest
 
 // FlushAuthCacheJSONRequestBody defines body for FlushAuthCache for application/json ContentType.
 type FlushAuthCacheJSONRequestBody = AuthFlushRequest
+
+// EnableFTSLayout3JSONRequestBody defines body for EnableFTSLayout3 for application/json ContentType.
+type EnableFTSLayout3JSONRequestBody = FTSLayout3Enable
 
 // SubmitJobJSONRequestBody defines body for SubmitJob for application/json ContentType.
 type SubmitJobJSONRequestBody = JobRequest
@@ -1718,6 +1867,30 @@ type ClientInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account}/export (the `ExportAccount` operationId).
 	ExportAccount(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetFTSLayout The layout of the account's full-text index
+	//
+	// The layout record of the account's index: the current generation
+	// (layout 2 without a record), a conversion in progress (`next`,
+	// with the token of its run) and sources a conversion has not
+	// removed yet (`old`). One read; the account is not resolved through
+	// Nauthilus. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/fts/layout (the `GetFTSLayout` operationId).
+	GetFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClearFTSLayout Remove an unfinished conversion
+	//
+	// Removes the conversion in progress of the account's full-text
+	// index when its run has ended: a job that is not running any more,
+	// or an import reshard whose heartbeat is older than 90 seconds. Its
+	// freeze is lifted (only the freeze of exactly that run), its
+	// target objects deleted. A conversion whose run still works is
+	// left alone. The fallback for a run that could not clean up; the
+	// jobs scrub does the same. Requires the role `repair`.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
+	ClearFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// CloseImport Release the import lock
 	//
 	// Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
@@ -1750,6 +1923,37 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
 	OpenImport(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetImportReshard State of the import reshard
+	//
+	// `running`, `done` or `failed` (with `error`) from this server's
+	// runs; without one (another server, a restart) from the layout
+	// record: a conversion of the session with a heartbeat younger than
+	// 90 seconds is `running`, an older one `failed`, otherwise `idle`.
+	// `g` is the current index generation. Requires the role `import`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/import/fts-reshard (the `GetImportReshard` operationId).
+	GetImportReshard(ctx context.Context, account Account, params *GetImportReshardParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// StartImportReshard Reshard the full-text index between import batches
+	//
+	// Checks the key counts of the account's layout 3 index (one read per
+	// object) and reshards it under the import session when they ask for
+	// more objects, without leaving the import lock: a `fts_layout` job
+	// would wait for the import to end. The run waits
+	// `jobs.settle_seconds` first, works synchronously up to
+	// `fts.import_reshard_sync_seconds` and then answers 202 and goes on
+	// in the background, renewing the import lock and its heartbeat every
+	// 30 seconds. A second POST of the session while its run is active
+	// answers 202 without starting another; one while another run (other
+	// session) has a heartbeat younger than 90 seconds answers `conflict`
+	// (409); an older one is cleared and replaced. Import batches of the
+	// session answer `conflict` (409) while its reshard runs. `g` is the
+	// index generation at the answer: it changes when a reshard
+	// switched. Requires the role `import`.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/fts-reshard (the `StartImportReshard` operationId).
+	StartImportReshard(ctx context.Context, account Account, params *StartImportReshardParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListImportMailboxes Mailboxes of the account with their identity state
 	//
@@ -2147,9 +2351,10 @@ type ClientInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-	// `delete`). A plan
+	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -2163,9 +2368,10 @@ type ClientInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-	// `delete`). A plan
+	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -2447,6 +2653,78 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBody(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetFTSLayout3 Layout 3 of the full-text index in the cluster
+	//
+	// Whether the cluster mark that allows layout 3 is set, and the
+	// server registrations: every server since 0.45.0 registers at
+	// startup and then every minute (`servers/<instance>` in the admin
+	// store); a registration seen within three minutes is fresh, one not
+	// renewed for 24 hours is deleted. Reading the registrations lists
+	// the admin namespace when `admin.kv_index` is not `read`. Requires
+	// the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/fts/layout3 (the `GetFTSLayout3` operationId).
+	GetFTSLayout3(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListFTSLayout3Accounts The accounts with a layout 3 index
+	//
+	// The presence index `ix.fts_layout`: every account that has (or is
+	// being converted to) a layout 3 index, entered before its layout 3
+	// objects are created and removed after a conversion back to layout
+	// 2. With `verify` each account's layout record is read and an entry
+	// whose account has no layout 3 index is marked. Requires the role
+	// `diagnose` and the scope of all accounts.
+	//
+	// Corresponds with GET /admin/v1/fts/layout3/accounts (the `ListFTSLayout3Accounts` operationId).
+	ListFTSLayout3Accounts(ctx context.Context, params *ListFTSLayout3AccountsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableFTSLayout3 Remove the layout 3 mark
+	//
+	// Removes the cluster mark, so that no new layout 3 index is
+	// created; waits five seconds (creators read the mark when they
+	// create) and then reads the presence index of the accounts that
+	// still have a layout 3 index. A downgrade to a version before
+	// 0.45.0 is possible only when that list is empty: convert the
+	// accounts back with `fts_layout` `layout: 2` first. Requires the
+	// role `repair`.
+	//
+	// Corresponds with POST /admin/v1/fts/layout3/disable (the `DisableFTSLayout3` operationId).
+	DisableFTSLayout3(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableFTSLayout3WithBody Allow layout 3 in the cluster
+	//
+	// Sets the cluster mark after checking that exactly `pods` fresh
+	// registrations report the capability `fts_layout3`: servers before
+	// 0.45.0 do not register, so the expected number of pods is the
+	// check. A pod replaced less than three minutes ago leaves its
+	// predecessor's record fresh; wait and try again. `force` skips the
+	// check (recorded in the audit log and in the mark). With the mark,
+	// servers with `fts.layout: 3` create new indexes in layout 3 and
+	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// when the registrations do not match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+	EnableFTSLayout3WithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableFTSLayout3 Allow layout 3 in the cluster
+	//
+	// Sets the cluster mark after checking that exactly `pods` fresh
+	// registrations report the capability `fts_layout3`: servers before
+	// 0.45.0 do not register, so the expected number of pods is the
+	// check. A pod replaced less than three minutes ago leaves its
+	// predecessor's record fresh; wait and try again. `force` skips the
+	// check (recorded in the audit log and in the mark). With the mark,
+	// servers with `fts.layout: 3` create new indexes in layout 3 and
+	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// when the registrations do not match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+	EnableFTSLayout3(ctx context.Context, body EnableFTSLayout3JSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListJobs Jobs, oldest first
 	//
 	// Requires the role `diagnose`; a client with an account scope must
@@ -2555,9 +2833,9 @@ type ClientInterface interface {
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 	// takes the maintenance lock per account; an account another job or
 	// an import holds is tried again at the end. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
@@ -2578,9 +2856,9 @@ type ClientInterface interface {
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 	// takes the maintenance lock per account; an account another job or
 	// an import holds is tried again at the end. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
@@ -2751,6 +3029,50 @@ func (c *Client) ExportAccount(ctx context.Context, account Account, reqEditors 
 	return c.Client.Do(req)
 }
 
+// GetFTSLayout The layout of the account's full-text index
+//
+// The layout record of the account's index: the current generation
+// (layout 2 without a record), a conversion in progress (`next`,
+// with the token of its run) and sources a conversion has not
+// removed yet (`old`). One read; the account is not resolved through
+// Nauthilus. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/fts/layout (the `GetFTSLayout` operationId).
+func (c *Client) GetFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFTSLayoutRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ClearFTSLayout Remove an unfinished conversion
+//
+// Removes the conversion in progress of the account's full-text
+// index when its run has ended: a job that is not running any more,
+// or an import reshard whose heartbeat is older than 90 seconds. Its
+// freeze is lifted (only the freeze of exactly that run), its
+// target objects deleted. A conversion whose run still works is
+// left alone. The fallback for a run that could not clean up; the
+// jobs scrub does the same. Requires the role `repair`.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
+func (c *Client) ClearFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearFTSLayoutRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // CloseImport Release the import lock
 //
 // Corresponds with DELETE /admin/v1/accounts/{account}/import (the `CloseImport` operationId).
@@ -2804,6 +3126,57 @@ func (c *Client) OpenImportWithBody(ctx context.Context, account Account, conten
 // Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
 func (c *Client) OpenImport(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewOpenImportRequest(c.Server, account, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetImportReshard State of the import reshard
+//
+// `running`, `done` or `failed` (with `error`) from this server's
+// runs; without one (another server, a restart) from the layout
+// record: a conversion of the session with a heartbeat younger than
+// 90 seconds is `running`, an older one `failed`, otherwise `idle`.
+// `g` is the current index generation. Requires the role `import`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/import/fts-reshard (the `GetImportReshard` operationId).
+func (c *Client) GetImportReshard(ctx context.Context, account Account, params *GetImportReshardParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetImportReshardRequest(c.Server, account, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// StartImportReshard Reshard the full-text index between import batches
+//
+// Checks the key counts of the account's layout 3 index (one read per
+// object) and reshards it under the import session when they ask for
+// more objects, without leaving the import lock: a `fts_layout` job
+// would wait for the import to end. The run waits
+// `jobs.settle_seconds` first, works synchronously up to
+// `fts.import_reshard_sync_seconds` and then answers 202 and goes on
+// in the background, renewing the import lock and its heartbeat every
+// 30 seconds. A second POST of the session while its run is active
+// answers 202 without starting another; one while another run (other
+// session) has a heartbeat younger than 90 seconds answers `conflict`
+// (409); an older one is cleared and replaced. Import batches of the
+// session answer `conflict` (409) while its reshard runs. `g` is the
+// index generation at the answer: it changes when a reshard
+// switched. Requires the role `import`.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/fts-reshard (the `StartImportReshard` operationId).
+func (c *Client) StartImportReshard(ctx context.Context, account Account, params *StartImportReshardParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewStartImportReshardRequest(c.Server, account, params)
 	if err != nil {
 		return nil, err
 	}
@@ -3570,9 +3943,10 @@ func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxI
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-// `delete`). A plan
+// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -3596,9 +3970,10 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-// `delete`). A plan
+// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -4110,6 +4485,128 @@ func (c *Client) DeliverWithBody(ctx context.Context, params *DeliverParams, con
 	return c.Client.Do(req)
 }
 
+// GetFTSLayout3 Layout 3 of the full-text index in the cluster
+//
+// Whether the cluster mark that allows layout 3 is set, and the
+// server registrations: every server since 0.45.0 registers at
+// startup and then every minute (`servers/<instance>` in the admin
+// store); a registration seen within three minutes is fresh, one not
+// renewed for 24 hours is deleted. Reading the registrations lists
+// the admin namespace when `admin.kv_index` is not `read`. Requires
+// the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/fts/layout3 (the `GetFTSLayout3` operationId).
+func (c *Client) GetFTSLayout3(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFTSLayout3Request(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListFTSLayout3Accounts The accounts with a layout 3 index
+//
+// The presence index `ix.fts_layout`: every account that has (or is
+// being converted to) a layout 3 index, entered before its layout 3
+// objects are created and removed after a conversion back to layout
+// 2. With `verify` each account's layout record is read and an entry
+// whose account has no layout 3 index is marked. Requires the role
+// `diagnose` and the scope of all accounts.
+//
+// Corresponds with GET /admin/v1/fts/layout3/accounts (the `ListFTSLayout3Accounts` operationId).
+func (c *Client) ListFTSLayout3Accounts(ctx context.Context, params *ListFTSLayout3AccountsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListFTSLayout3AccountsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableFTSLayout3 Remove the layout 3 mark
+//
+// Removes the cluster mark, so that no new layout 3 index is
+// created; waits five seconds (creators read the mark when they
+// create) and then reads the presence index of the accounts that
+// still have a layout 3 index. A downgrade to a version before
+// 0.45.0 is possible only when that list is empty: convert the
+// accounts back with `fts_layout` `layout: 2` first. Requires the
+// role `repair`.
+//
+// Corresponds with POST /admin/v1/fts/layout3/disable (the `DisableFTSLayout3` operationId).
+func (c *Client) DisableFTSLayout3(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableFTSLayout3Request(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableFTSLayout3WithBody Allow layout 3 in the cluster
+//
+// Sets the cluster mark after checking that exactly `pods` fresh
+// registrations report the capability `fts_layout3`: servers before
+// 0.45.0 do not register, so the expected number of pods is the
+// check. A pod replaced less than three minutes ago leaves its
+// predecessor's record fresh; wait and try again. `force` skips the
+// check (recorded in the audit log and in the mark). With the mark,
+// servers with `fts.layout: 3` create new indexes in layout 3 and
+// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// when the registrations do not match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+func (c *Client) EnableFTSLayout3WithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableFTSLayout3RequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableFTSLayout3 Allow layout 3 in the cluster
+//
+// Sets the cluster mark after checking that exactly `pods` fresh
+// registrations report the capability `fts_layout3`: servers before
+// 0.45.0 do not register, so the expected number of pods is the
+// check. A pod replaced less than three minutes ago leaves its
+// predecessor's record fresh; wait and try again. `force` skips the
+// check (recorded in the audit log and in the mark). With the mark,
+// servers with `fts.layout: 3` create new indexes in layout 3 and
+// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// when the registrations do not match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+func (c *Client) EnableFTSLayout3(ctx context.Context, body EnableFTSLayout3JSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableFTSLayout3Request(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ListJobs Jobs, oldest first
 //
 // Requires the role `diagnose`; a client with an account scope must
@@ -4308,9 +4805,9 @@ func (c *Client) RetryLearningJob(ctx context.Context, job JobID, body RetryLear
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 // takes the maintenance lock per account; an account another job or
 // an import holds is tried again at the end. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
@@ -4341,9 +4838,9 @@ func (c *Client) CreateBatchPlanWithBody(ctx context.Context, contentType string
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 // takes the maintenance lock per account; an account another job or
 // an import holds is tried again at the end. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
@@ -4659,6 +5156,74 @@ func NewExportAccountRequest(server string, account Account) (*http.Request, err
 	return req, nil
 }
 
+// NewGetFTSLayoutRequest constructs an http.Request for the GetFTSLayout method
+func NewGetFTSLayoutRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/fts/layout", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewClearFTSLayoutRequest constructs an http.Request for the ClearFTSLayout method
+func NewClearFTSLayoutRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/fts/layout/clear", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewCloseImportRequest constructs an http.Request for the CloseImport method
 func NewCloseImportRequest(server string, account Account, params *CloseImportParams) (*http.Request, error) {
 	var err error
@@ -4749,6 +5314,100 @@ func NewOpenImportRequestWithBody(server string, account Account, contentType st
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetImportReshardRequest constructs an http.Request for the GetImportReshard method
+func NewGetImportReshardRequest(server string, account Account, params *GetImportReshardParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/fts-reshard", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewStartImportReshardRequest constructs an http.Request for the StartImportReshard method
+func NewStartImportReshardRequest(server string, account Account, params *StartImportReshardParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/import/fts-reshard", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Import-Session", params.XImportSession, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-Import-Session", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -7078,6 +7737,178 @@ func NewDeliverRequestWithBody(server string, params *DeliverParams, contentType
 	return req, nil
 }
 
+// NewGetFTSLayout3Request constructs an http.Request for the GetFTSLayout3 method
+func NewGetFTSLayout3Request(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/layout3")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListFTSLayout3AccountsRequest constructs an http.Request for the ListFTSLayout3Accounts method
+func NewListFTSLayout3AccountsRequest(server string, params *ListFTSLayout3AccountsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/layout3/accounts")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "after", *params.After, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Verify != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "verify", *params.Verify, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDisableFTSLayout3Request constructs an http.Request for the DisableFTSLayout3 method
+func NewDisableFTSLayout3Request(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/layout3/disable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnableFTSLayout3Request calls the generic EnableFTSLayout3 builder with application/json body
+func NewEnableFTSLayout3Request(server string, body EnableFTSLayout3JSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnableFTSLayout3RequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnableFTSLayout3RequestWithBody constructs an http.Request for the EnableFTSLayout3 method, with any body, and a specified content type
+func NewEnableFTSLayout3RequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/layout3/enable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewListJobsRequest constructs an http.Request for the ListJobs method
 func NewListJobsRequest(server string, params *ListJobsParams) (*http.Request, error) {
 	var err error
@@ -7778,6 +8609,34 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /admin/v1/accounts/{account}/export (the `ExportAccount` operationId).
 	ExportAccountWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ExportAccountResponse, error)
 
+	// GetFTSLayoutWithResponse The layout of the account's full-text index
+	//
+	// The layout record of the account's index: the current generation
+	// (layout 2 without a record), a conversion in progress (`next`,
+	// with the token of its run) and sources a conversion has not
+	// removed yet (`old`). One read; the account is not resolved through
+	// Nauthilus. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/fts/layout (the `GetFTSLayout` operationId).
+	GetFTSLayoutWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetFTSLayoutResponse, error)
+
+	// ClearFTSLayoutWithResponse Remove an unfinished conversion
+	//
+	// Removes the conversion in progress of the account's full-text
+	// index when its run has ended: a job that is not running any more,
+	// or an import reshard whose heartbeat is older than 90 seconds. Its
+	// freeze is lifted (only the freeze of exactly that run), its
+	// target objects deleted. A conversion whose run still works is
+	// left alone. The fallback for a run that could not clean up; the
+	// jobs scrub does the same. Requires the role `repair`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
+	ClearFTSLayoutWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ClearFTSLayoutResponse, error)
+
 	// CloseImportWithResponse Release the import lock
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -7812,6 +8671,41 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/import (the `OpenImport` operationId).
 	OpenImportWithResponse(ctx context.Context, account Account, body OpenImportJSONRequestBody, reqEditors ...RequestEditorFn) (*OpenImportResponse, error)
+
+	// GetImportReshardWithResponse State of the import reshard
+	//
+	// `running`, `done` or `failed` (with `error`) from this server's
+	// runs; without one (another server, a restart) from the layout
+	// record: a conversion of the session with a heartbeat younger than
+	// 90 seconds is `running`, an older one `failed`, otherwise `idle`.
+	// `g` is the current index generation. Requires the role `import`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/import/fts-reshard (the `GetImportReshard` operationId).
+	GetImportReshardWithResponse(ctx context.Context, account Account, params *GetImportReshardParams, reqEditors ...RequestEditorFn) (*GetImportReshardResponse, error)
+
+	// StartImportReshardWithResponse Reshard the full-text index between import batches
+	//
+	// Checks the key counts of the account's layout 3 index (one read per
+	// object) and reshards it under the import session when they ask for
+	// more objects, without leaving the import lock: a `fts_layout` job
+	// would wait for the import to end. The run waits
+	// `jobs.settle_seconds` first, works synchronously up to
+	// `fts.import_reshard_sync_seconds` and then answers 202 and goes on
+	// in the background, renewing the import lock and its heartbeat every
+	// 30 seconds. A second POST of the session while its run is active
+	// answers 202 without starting another; one while another run (other
+	// session) has a heartbeat younger than 90 seconds answers `conflict`
+	// (409); an older one is cleared and replaced. Import batches of the
+	// session answer `conflict` (409) while its reshard runs. `g` is the
+	// index generation at the answer: it changes when a reshard
+	// switched. Requires the role `import`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/import/fts-reshard (the `StartImportReshard` operationId).
+	StartImportReshardWithResponse(ctx context.Context, account Account, params *StartImportReshardParams, reqEditors ...RequestEditorFn) (*StartImportReshardResponse, error)
 
 	// ListImportMailboxesWithResponse Mailboxes of the account with their identity state
 	//
@@ -8231,9 +9125,10 @@ type ClientWithResponsesInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-	// `delete`). A plan
+	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -8247,9 +9142,10 @@ type ClientWithResponsesInterface interface {
 	// Computes what the job would do (target set, effects) and stores the
 	// plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 	// and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-	// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-	// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-	// `delete`). A plan
+	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 	// that changes other accounts (ACL repairs, purge) needs them in the
 	// client scope. The account must be canonical.
 	//
@@ -8549,6 +9445,84 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBodyWithResponse(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeliverResponse, error)
 
+	// GetFTSLayout3WithResponse Layout 3 of the full-text index in the cluster
+	//
+	// Whether the cluster mark that allows layout 3 is set, and the
+	// server registrations: every server since 0.45.0 registers at
+	// startup and then every minute (`servers/<instance>` in the admin
+	// store); a registration seen within three minutes is fresh, one not
+	// renewed for 24 hours is deleted. Reading the registrations lists
+	// the admin namespace when `admin.kv_index` is not `read`. Requires
+	// the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/fts/layout3 (the `GetFTSLayout3` operationId).
+	GetFTSLayout3WithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetFTSLayout3Response, error)
+
+	// ListFTSLayout3AccountsWithResponse The accounts with a layout 3 index
+	//
+	// The presence index `ix.fts_layout`: every account that has (or is
+	// being converted to) a layout 3 index, entered before its layout 3
+	// objects are created and removed after a conversion back to layout
+	// 2. With `verify` each account's layout record is read and an entry
+	// whose account has no layout 3 index is marked. Requires the role
+	// `diagnose` and the scope of all accounts.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/fts/layout3/accounts (the `ListFTSLayout3Accounts` operationId).
+	ListFTSLayout3AccountsWithResponse(ctx context.Context, params *ListFTSLayout3AccountsParams, reqEditors ...RequestEditorFn) (*ListFTSLayout3AccountsResponse, error)
+
+	// DisableFTSLayout3WithResponse Remove the layout 3 mark
+	//
+	// Removes the cluster mark, so that no new layout 3 index is
+	// created; waits five seconds (creators read the mark when they
+	// create) and then reads the presence index of the accounts that
+	// still have a layout 3 index. A downgrade to a version before
+	// 0.45.0 is possible only when that list is empty: convert the
+	// accounts back with `fts_layout` `layout: 2` first. Requires the
+	// role `repair`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/layout3/disable (the `DisableFTSLayout3` operationId).
+	DisableFTSLayout3WithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableFTSLayout3Response, error)
+
+	// EnableFTSLayout3WithBodyWithResponse Allow layout 3 in the cluster
+	//
+	// Sets the cluster mark after checking that exactly `pods` fresh
+	// registrations report the capability `fts_layout3`: servers before
+	// 0.45.0 do not register, so the expected number of pods is the
+	// check. A pod replaced less than three minutes ago leaves its
+	// predecessor's record fresh; wait and try again. `force` skips the
+	// check (recorded in the audit log and in the mark). With the mark,
+	// servers with `fts.layout: 3` create new indexes in layout 3 and
+	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// when the registrations do not match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+	EnableFTSLayout3WithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableFTSLayout3Response, error)
+
+	// EnableFTSLayout3WithResponse Allow layout 3 in the cluster
+	//
+	// Sets the cluster mark after checking that exactly `pods` fresh
+	// registrations report the capability `fts_layout3`: servers before
+	// 0.45.0 do not register, so the expected number of pods is the
+	// check. A pod replaced less than three minutes ago leaves its
+	// predecessor's record fresh; wait and try again. `force` skips the
+	// check (recorded in the audit log and in the mark). With the mark,
+	// servers with `fts.layout: 3` create new indexes in layout 3 and
+	// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+	// when the registrations do not match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+	EnableFTSLayout3WithResponse(ctx context.Context, body EnableFTSLayout3JSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSLayout3Response, error)
+
 	// ListJobsWithResponse Jobs, oldest first
 	//
 	// Requires the role `diagnose`; a client with an account scope must
@@ -8667,9 +9641,9 @@ type ClientWithResponsesInterface interface {
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 	// takes the maintenance lock per account; an account another job or
 	// an import holds is tried again at the end. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
@@ -8690,9 +9664,9 @@ type ClientWithResponsesInterface interface {
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 	// takes the maintenance lock per account; an account another job or
 	// an import holds is tried again at the end. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
@@ -8986,6 +9960,102 @@ func (r ExportAccountResponse) ContentType() string {
 	return ""
 }
 
+type GetFTSLayoutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayoutState
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetFTSLayoutResponse) GetJSON200() *FTSLayoutState {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetFTSLayoutResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetFTSLayoutResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFTSLayoutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFTSLayoutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetFTSLayoutResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ClearFTSLayoutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayoutClear
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ClearFTSLayoutResponse) GetJSON200() *FTSLayoutClear {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ClearFTSLayoutResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ClearFTSLayoutResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearFTSLayoutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearFTSLayoutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ClearFTSLayoutResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type CloseImportResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -9069,6 +10139,109 @@ func (r OpenImportResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r OpenImportResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetImportReshardResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportReshard
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetImportReshardResponse) GetJSON200() *ImportReshard {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetImportReshardResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetImportReshardResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetImportReshardResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetImportReshardResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetImportReshardResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type StartImportReshardResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImportReshard
+	// JSON202 the response for an HTTP 202 `application/json` response
+	JSON202 *ImportReshard
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r StartImportReshardResponse) GetJSON200() *ImportReshard {
+	return r.JSON200
+}
+
+// GetJSON202 returns the response for an HTTP 202 `application/json` response
+func (r StartImportReshardResponse) GetJSON202() *ImportReshard {
+	return r.JSON202
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r StartImportReshardResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r StartImportReshardResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r StartImportReshardResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r StartImportReshardResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r StartImportReshardResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -11050,6 +12223,198 @@ func (r DeliverResponse) ContentType() string {
 	return ""
 }
 
+type GetFTSLayout3Response struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetFTSLayout3Response) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetFTSLayout3Response) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetFTSLayout3Response) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFTSLayout3Response) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFTSLayout3Response) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetFTSLayout3Response) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListFTSLayout3AccountsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayoutAccountPage
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListFTSLayout3AccountsResponse) GetJSON200() *FTSLayoutAccountPage {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListFTSLayout3AccountsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListFTSLayout3AccountsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListFTSLayout3AccountsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListFTSLayout3AccountsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListFTSLayout3AccountsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableFTSLayout3Response struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Disable
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DisableFTSLayout3Response) GetJSON200() *FTSLayout3Disable {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableFTSLayout3Response) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableFTSLayout3Response) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableFTSLayout3Response) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableFTSLayout3Response) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableFTSLayout3Response) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type EnableFTSLayout3Response struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r EnableFTSLayout3Response) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r EnableFTSLayout3Response) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r EnableFTSLayout3Response) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableFTSLayout3Response) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableFTSLayout3Response) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r EnableFTSLayout3Response) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListJobsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -11741,6 +13106,46 @@ func (c *ClientWithResponses) ExportAccountWithResponse(ctx context.Context, acc
 	return ParseExportAccountResponse(rsp)
 }
 
+// GetFTSLayoutWithResponse The layout of the account's full-text index
+//
+// The layout record of the account's index: the current generation
+// (layout 2 without a record), a conversion in progress (`next`,
+// with the token of its run) and sources a conversion has not
+// removed yet (`old`). One read; the account is not resolved through
+// Nauthilus. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/fts/layout (the `GetFTSLayout` operationId).
+func (c *ClientWithResponses) GetFTSLayoutWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*GetFTSLayoutResponse, error) {
+	rsp, err := c.GetFTSLayout(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFTSLayoutResponse(rsp)
+}
+
+// ClearFTSLayoutWithResponse Remove an unfinished conversion
+//
+// Removes the conversion in progress of the account's full-text
+// index when its run has ended: a job that is not running any more,
+// or an import reshard whose heartbeat is older than 90 seconds. Its
+// freeze is lifted (only the freeze of exactly that run), its
+// target objects deleted. A conversion whose run still works is
+// left alone. The fallback for a run that could not clean up; the
+// jobs scrub does the same. Requires the role `repair`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
+func (c *ClientWithResponses) ClearFTSLayoutWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ClearFTSLayoutResponse, error) {
+	rsp, err := c.ClearFTSLayout(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearFTSLayoutResponse(rsp)
+}
+
 // CloseImportWithResponse Release the import lock
 //
 // Returns a wrapper object for the known response body format(s).
@@ -11792,6 +13197,53 @@ func (c *ClientWithResponses) OpenImportWithResponse(ctx context.Context, accoun
 		return nil, err
 	}
 	return ParseOpenImportResponse(rsp)
+}
+
+// GetImportReshardWithResponse State of the import reshard
+//
+// `running`, `done` or `failed` (with `error`) from this server's
+// runs; without one (another server, a restart) from the layout
+// record: a conversion of the session with a heartbeat younger than
+// 90 seconds is `running`, an older one `failed`, otherwise `idle`.
+// `g` is the current index generation. Requires the role `import`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/import/fts-reshard (the `GetImportReshard` operationId).
+func (c *ClientWithResponses) GetImportReshardWithResponse(ctx context.Context, account Account, params *GetImportReshardParams, reqEditors ...RequestEditorFn) (*GetImportReshardResponse, error) {
+	rsp, err := c.GetImportReshard(ctx, account, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetImportReshardResponse(rsp)
+}
+
+// StartImportReshardWithResponse Reshard the full-text index between import batches
+//
+// Checks the key counts of the account's layout 3 index (one read per
+// object) and reshards it under the import session when they ask for
+// more objects, without leaving the import lock: a `fts_layout` job
+// would wait for the import to end. The run waits
+// `jobs.settle_seconds` first, works synchronously up to
+// `fts.import_reshard_sync_seconds` and then answers 202 and goes on
+// in the background, renewing the import lock and its heartbeat every
+// 30 seconds. A second POST of the session while its run is active
+// answers 202 without starting another; one while another run (other
+// session) has a heartbeat younger than 90 seconds answers `conflict`
+// (409); an older one is cleared and replaced. Import batches of the
+// session answer `conflict` (409) while its reshard runs. `g` is the
+// index generation at the answer: it changes when a reshard
+// switched. Requires the role `import`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/import/fts-reshard (the `StartImportReshard` operationId).
+func (c *ClientWithResponses) StartImportReshardWithResponse(ctx context.Context, account Account, params *StartImportReshardParams, reqEditors ...RequestEditorFn) (*StartImportReshardResponse, error) {
+	rsp, err := c.StartImportReshard(ctx, account, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseStartImportReshardResponse(rsp)
 }
 
 // ListImportMailboxesWithResponse Mailboxes of the account with their identity state
@@ -12428,9 +13880,10 @@ func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, acc
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-// `delete`). A plan
+// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -12450,9 +13903,10 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // Computes what the job would do (target set, effects) and stores the
 // plan; apply it with `POST /admin/v1/jobs` before it expires. Kinds
 // and roles: `scrub`, `quota_recalc`, `acl_reconcile`, `fts_rebuild`,
-// `fts_dict_convert`, `mailbox_name_convert`, `attachment_backfill`
-// (role `repair`), `mailbox_delete`, `expunge`, `purge` (role
-// `delete`). A plan
+// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
+// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
+// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
+// cluster mark (`POST /admin/v1/fts/layout3/enable`). A plan
 // that changes other accounts (ACL repairs, purge) needs them in the
 // client scope. The account must be canonical.
 //
@@ -12890,6 +14344,114 @@ func (c *ClientWithResponses) DeliverWithBodyWithResponse(ctx context.Context, p
 	return ParseDeliverResponse(rsp)
 }
 
+// GetFTSLayout3WithResponse Layout 3 of the full-text index in the cluster
+//
+// Whether the cluster mark that allows layout 3 is set, and the
+// server registrations: every server since 0.45.0 registers at
+// startup and then every minute (`servers/<instance>` in the admin
+// store); a registration seen within three minutes is fresh, one not
+// renewed for 24 hours is deleted. Reading the registrations lists
+// the admin namespace when `admin.kv_index` is not `read`. Requires
+// the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/fts/layout3 (the `GetFTSLayout3` operationId).
+func (c *ClientWithResponses) GetFTSLayout3WithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetFTSLayout3Response, error) {
+	rsp, err := c.GetFTSLayout3(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFTSLayout3Response(rsp)
+}
+
+// ListFTSLayout3AccountsWithResponse The accounts with a layout 3 index
+//
+// The presence index `ix.fts_layout`: every account that has (or is
+// being converted to) a layout 3 index, entered before its layout 3
+// objects are created and removed after a conversion back to layout
+// 2. With `verify` each account's layout record is read and an entry
+// whose account has no layout 3 index is marked. Requires the role
+// `diagnose` and the scope of all accounts.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/fts/layout3/accounts (the `ListFTSLayout3Accounts` operationId).
+func (c *ClientWithResponses) ListFTSLayout3AccountsWithResponse(ctx context.Context, params *ListFTSLayout3AccountsParams, reqEditors ...RequestEditorFn) (*ListFTSLayout3AccountsResponse, error) {
+	rsp, err := c.ListFTSLayout3Accounts(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListFTSLayout3AccountsResponse(rsp)
+}
+
+// DisableFTSLayout3WithResponse Remove the layout 3 mark
+//
+// Removes the cluster mark, so that no new layout 3 index is
+// created; waits five seconds (creators read the mark when they
+// create) and then reads the presence index of the accounts that
+// still have a layout 3 index. A downgrade to a version before
+// 0.45.0 is possible only when that list is empty: convert the
+// accounts back with `fts_layout` `layout: 2` first. Requires the
+// role `repair`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/layout3/disable (the `DisableFTSLayout3` operationId).
+func (c *ClientWithResponses) DisableFTSLayout3WithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableFTSLayout3Response, error) {
+	rsp, err := c.DisableFTSLayout3(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableFTSLayout3Response(rsp)
+}
+
+// EnableFTSLayout3WithBodyWithResponse Allow layout 3 in the cluster
+//
+// Sets the cluster mark after checking that exactly `pods` fresh
+// registrations report the capability `fts_layout3`: servers before
+// 0.45.0 do not register, so the expected number of pods is the
+// check. A pod replaced less than three minutes ago leaves its
+// predecessor's record fresh; wait and try again. `force` skips the
+// check (recorded in the audit log and in the mark). With the mark,
+// servers with `fts.layout: 3` create new indexes in layout 3 and
+// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// when the registrations do not match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+func (c *ClientWithResponses) EnableFTSLayout3WithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableFTSLayout3Response, error) {
+	rsp, err := c.EnableFTSLayout3WithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableFTSLayout3Response(rsp)
+}
+
+// EnableFTSLayout3WithResponse Allow layout 3 in the cluster
+//
+// Sets the cluster mark after checking that exactly `pods` fresh
+// registrations report the capability `fts_layout3`: servers before
+// 0.45.0 do not register, so the expected number of pods is the
+// check. A pod replaced less than three minutes ago leaves its
+// predecessor's record fresh; wait and try again. `force` skips the
+// check (recorded in the audit log and in the mark). With the mark,
+// servers with `fts.layout: 3` create new indexes in layout 3 and
+// `fts_layout` jobs may convert to it. Refused with `conflict` (409)
+// when the registrations do not match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
+func (c *ClientWithResponses) EnableFTSLayout3WithResponse(ctx context.Context, body EnableFTSLayout3JSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSLayout3Response, error) {
+	rsp, err := c.EnableFTSLayout3(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableFTSLayout3Response(rsp)
+}
+
 // ListJobsWithResponse Jobs, oldest first
 //
 // Requires the role `diagnose`; a client with an account scope must
@@ -13062,9 +14624,9 @@ func (c *ClientWithResponses) RetryLearningJobWithResponse(ctx context.Context, 
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 // takes the maintenance lock per account; an account another job or
 // an import holds is tried again at the end. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
@@ -13091,9 +14653,9 @@ func (c *ClientWithResponses) CreateBatchPlanWithBodyWithResponse(ctx context.Co
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`)
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
 // takes the maintenance lock per account; an account another job or
 // an import holds is tried again at the end. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
@@ -13341,6 +14903,72 @@ func ParseExportAccountResponse(rsp *http.Response) (*ExportAccountResponse, err
 	return response, nil
 }
 
+// ParseGetFTSLayoutResponse parses an HTTP response from a GetFTSLayoutWithResponse call
+func ParseGetFTSLayoutResponse(rsp *http.Response) (*GetFTSLayoutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFTSLayoutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayoutState
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClearFTSLayoutResponse parses an HTTP response from a ClearFTSLayoutWithResponse call
+func ParseClearFTSLayoutResponse(rsp *http.Response) (*ClearFTSLayoutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearFTSLayoutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayoutClear
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseCloseImportResponse parses an HTTP response from a CloseImportWithResponse call
 func ParseCloseImportResponse(rsp *http.Response) (*CloseImportResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -13390,6 +15018,79 @@ func ParseOpenImportResponse(rsp *http.Response) (*OpenImportResponse, error) {
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetImportReshardResponse parses an HTTP response from a GetImportReshardWithResponse call
+func ParseGetImportReshardResponse(rsp *http.Response) (*GetImportReshardResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetImportReshardResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportReshard
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseStartImportReshardResponse parses an HTTP response from a StartImportReshardWithResponse call
+func ParseStartImportReshardResponse(rsp *http.Response) (*StartImportReshardResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &StartImportReshardResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImportReshard
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest ImportReshard
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -14820,6 +16521,138 @@ func ParseDeliverResponse(rsp *http.Response) (*DeliverResponse, error) {
 	return response, nil
 }
 
+// ParseGetFTSLayout3Response parses an HTTP response from a GetFTSLayout3WithResponse call
+func ParseGetFTSLayout3Response(rsp *http.Response) (*GetFTSLayout3Response, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFTSLayout3Response{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListFTSLayout3AccountsResponse parses an HTTP response from a ListFTSLayout3AccountsWithResponse call
+func ParseListFTSLayout3AccountsResponse(rsp *http.Response) (*ListFTSLayout3AccountsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListFTSLayout3AccountsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayoutAccountPage
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableFTSLayout3Response parses an HTTP response from a DisableFTSLayout3WithResponse call
+func ParseDisableFTSLayout3Response(rsp *http.Response) (*DisableFTSLayout3Response, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableFTSLayout3Response{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Disable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableFTSLayout3Response parses an HTTP response from a EnableFTSLayout3WithResponse call
+func ParseEnableFTSLayout3Response(rsp *http.Response) (*EnableFTSLayout3Response, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableFTSLayout3Response{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListJobsResponse parses an HTTP response from a ListJobsWithResponse call
 func ParseListJobsResponse(rsp *http.Response) (*ListJobsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -15240,12 +17073,24 @@ type ServerInterface interface {
 	// ExportAccount Export the account as an archive
 	// (GET /admin/v1/accounts/{account}/export)
 	ExportAccount(w http.ResponseWriter, r *http.Request, account Account)
+	// GetFTSLayout The layout of the account's full-text index
+	// (GET /admin/v1/accounts/{account}/fts/layout)
+	GetFTSLayout(w http.ResponseWriter, r *http.Request, account Account)
+	// ClearFTSLayout Remove an unfinished conversion
+	// (POST /admin/v1/accounts/{account}/fts/layout/clear)
+	ClearFTSLayout(w http.ResponseWriter, r *http.Request, account Account)
 	// CloseImport Release the import lock
 	// (DELETE /admin/v1/accounts/{account}/import)
 	CloseImport(w http.ResponseWriter, r *http.Request, account Account, params CloseImportParams)
 	// OpenImport Open or renew an import session
 	// (POST /admin/v1/accounts/{account}/import)
 	OpenImport(w http.ResponseWriter, r *http.Request, account Account)
+	// GetImportReshard State of the import reshard
+	// (GET /admin/v1/accounts/{account}/import/fts-reshard)
+	GetImportReshard(w http.ResponseWriter, r *http.Request, account Account, params GetImportReshardParams)
+	// StartImportReshard Reshard the full-text index between import batches
+	// (POST /admin/v1/accounts/{account}/import/fts-reshard)
+	StartImportReshard(w http.ResponseWriter, r *http.Request, account Account, params StartImportReshardParams)
 	// ListImportMailboxes Mailboxes of the account with their identity state
 	// (GET /admin/v1/accounts/{account}/import/mailboxes)
 	ListImportMailboxes(w http.ResponseWriter, r *http.Request, account Account, params ListImportMailboxesParams)
@@ -15369,6 +17214,18 @@ type ServerInterface interface {
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
+	// GetFTSLayout3 Layout 3 of the full-text index in the cluster
+	// (GET /admin/v1/fts/layout3)
+	GetFTSLayout3(w http.ResponseWriter, r *http.Request)
+	// ListFTSLayout3Accounts The accounts with a layout 3 index
+	// (GET /admin/v1/fts/layout3/accounts)
+	ListFTSLayout3Accounts(w http.ResponseWriter, r *http.Request, params ListFTSLayout3AccountsParams)
+	// DisableFTSLayout3 Remove the layout 3 mark
+	// (POST /admin/v1/fts/layout3/disable)
+	DisableFTSLayout3(w http.ResponseWriter, r *http.Request)
+	// EnableFTSLayout3 Allow layout 3 in the cluster
+	// (POST /admin/v1/fts/layout3/enable)
+	EnableFTSLayout3(w http.ResponseWriter, r *http.Request)
 	// ListJobs Jobs, oldest first
 	// (GET /admin/v1/jobs)
 	ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams)
@@ -15579,6 +17436,58 @@ func (siw *ServerInterfaceWrapper) ExportAccount(w http.ResponseWriter, r *http.
 	handler.ServeHTTP(w, r)
 }
 
+// GetFTSLayout operation middleware
+func (siw *ServerInterfaceWrapper) GetFTSLayout(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetFTSLayout(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ClearFTSLayout operation middleware
+func (siw *ServerInterfaceWrapper) ClearFTSLayout(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ClearFTSLayout(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CloseImport operation middleware
 func (siw *ServerInterfaceWrapper) CloseImport(w http.ResponseWriter, r *http.Request) {
 
@@ -15650,6 +17559,114 @@ func (siw *ServerInterfaceWrapper) OpenImport(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.OpenImport(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetImportReshard operation middleware
+func (siw *ServerInterfaceWrapper) GetImportReshard(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetImportReshardParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetImportReshard(w, r, account, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// StartImportReshard operation middleware
+func (siw *ServerInterfaceWrapper) StartImportReshard(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params StartImportReshardParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-Import-Session" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Import-Session")]; found {
+		var XImportSession ImportSessionHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Import-Session", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Import-Session", valueList[0], &XImportSession, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Import-Session", Err: err})
+			return
+		}
+
+		params.XImportSession = XImportSession
+
+	} else {
+		err := fmt.Errorf("Header parameter X-Import-Session is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Import-Session", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.StartImportReshard(w, r, account, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -17616,6 +19633,107 @@ func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Reques
 	handler.ServeHTTP(w, r)
 }
 
+// GetFTSLayout3 operation middleware
+func (siw *ServerInterfaceWrapper) GetFTSLayout3(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetFTSLayout3(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListFTSLayout3Accounts operation middleware
+func (siw *ServerInterfaceWrapper) ListFTSLayout3Accounts(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListFTSLayout3AccountsParams
+
+	// ------------- Optional query parameter "after" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "after", r.URL.Query(), &params.After, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "after"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "after", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "verify" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "verify", r.URL.Query(), &params.Verify, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "verify"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "verify", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListFTSLayout3Accounts(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DisableFTSLayout3 operation middleware
+func (siw *ServerInterfaceWrapper) DisableFTSLayout3(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DisableFTSLayout3(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// EnableFTSLayout3 operation middleware
+func (siw *ServerInterfaceWrapper) EnableFTSLayout3(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.EnableFTSLayout3(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListJobs operation middleware
 func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Request) {
 
@@ -18196,6 +20314,14 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/readers/{reader}", wrapper.PutImportReader)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/mailboxes/{id}/metadata", wrapper.PutImportMetadata)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/sieve", wrapper.PutImportSieve)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3", wrapper.GetFTSLayout3)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/layout3/enable", wrapper.EnableFTSLayout3)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/layout3/disable", wrapper.DisableFTSLayout3)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3/accounts", wrapper.ListFTSLayout3Accounts)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout", wrapper.GetFTSLayout)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout/clear", wrapper.ClearFTSLayout)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/fts-reshard", wrapper.GetImportReshard)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/fts-reshard", wrapper.StartImportReshard)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.ClearTrace)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.GetTrace)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.SetTrace)

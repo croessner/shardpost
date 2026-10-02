@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"shardpost/internal/config"
+	"shardpost/internal/jobs"
 	"shardpost/internal/logging"
 	"strings"
 	"sync/atomic"
@@ -452,6 +453,9 @@ type servers struct {
 	jmapFront *jmap.Server
 	// jmapKV is the admin store the JMAP push subscriptions are kept in.
 	jmapKV *cephstore.AdminKV
+	// kv is the admin store of the server registration, the full-text
+	// layout mark and the admin API (open for the server's lifetime).
+	kv *cephstore.AdminKV
 	// sieveConfig are the Sieve settings ManageSieve compiles with; JMAP
 	// compiles scripts with the same.
 	sieveConfig map[string]string
@@ -501,7 +505,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	defer bg.stop()
 
 	srv := newServers(log, settings, store, authn, tlsCfg, bg.imapSieve, programs, sieveCfg)
-	srv.sendq = bg.sendq
+	srv.sendq, srv.kv = bg.sendq, bg.kv
 
 	logRelay(log, settings)
 
@@ -548,6 +552,34 @@ func scrubCommand(ctx context.Context, command string) (func(*cephstore.Store, *
 	}
 
 	return nil, false
+}
+
+// startRegistration opens the server's own admin store and registers the
+// server in it (servers/<instance>) now and every model.ServerHeartbeat,
+// whether or not this server runs jobs or an admin listener (N8, F8d).
+// The returned function stops the heartbeat and closes the admin store;
+// serve defers it, so both happen before the store closes.
+func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store) (*cephstore.AdminKV, func(), error) {
+	kv, err := store.AdminKV()
+	if err != nil {
+		return nil, nil, fmt.Errorf("admin store: %w", err)
+	}
+
+	instance, _ := os.Hostname()
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		jobs.RunRegistration(ctx, kv, instance, version.Version, model.ServerHeartbeat, log.With("component", "registration"))
+	}()
+
+	return kv, func() {
+		cancel()
+		<-done
+		kv.Close()
+	}, nil
 }
 
 // uploadExpiryPoll is how often the upload expiry worker looks for

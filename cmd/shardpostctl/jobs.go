@@ -15,8 +15,8 @@ import (
 
 // Maintenance jobs (roadmap 8c):
 //
-//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account>   dry run, prints the plan
-//	plan -all [-classes a,b] [-skip-idle] <kind>        a batch of the kind over every account
+//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n] [-due-only] <kind> <account>   dry run, prints the plan
+//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n] [-due-only] <kind>   a batch of the kind over every account
 //	plan show <plan-id>
 //	apply [-wait] [-idempotency-key K] <plan-id>        run the plan as a job
 //	check [-wait] <account>                             read-only index check
@@ -26,12 +26,12 @@ import (
 // With -wait (and for job wait) the exit code is the job's outcome: 0
 // succeeded, 1 partially failed, 69 failed or cancelled.
 
-const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] <kind> <account> |
-  plan -all [-classes a,b] [-skip-idle] <kind> | plan show <plan-id> |
+const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n] [-due-only] <kind> <account> |
+  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n] [-due-only] <kind> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
-  kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, mailbox_name_convert,
-  attachment_backfill, mailbox_delete, expunge, purge; with -all: index_check, scrub, fts_rebuild, attachment_backfill`
+  kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, fts_layout, mailbox_name_convert,
+  attachment_backfill, mailbox_delete, expunge, purge; with -all: index_check, scrub, fts_rebuild, attachment_backfill, fts_layout`
 
 // labelKind labels the kind row.
 const labelKind = "kind"
@@ -42,6 +42,8 @@ type jobArgs struct {
 	asJSON, wait     bool
 	deleted          bool
 	all, skipIdle    bool
+	dueOnly          bool
+	layout, shards   int
 	uids             string
 	classes, mailbox string
 	idemKey, account string
@@ -64,6 +66,9 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 	fs.BoolVar(&a.deleted, "deleted", false, "expunge: every message flagged \\Deleted")
 	fs.BoolVar(&a.all, "all", false, "plan: a batch of the kind over every account")
 	fs.BoolVar(&a.skipIdle, "skip-idle", false, "plan -all scrub: skip the accounts unchanged since their last clean scrub")
+	fs.IntVar(&a.layout, "layout", 0, "fts_layout: the target layout (2 or 3; default the account's)")
+	fs.IntVar(&a.shards, "shards", 0, "fts_layout: forced object counts of a layout 3 target (default from the key counts)")
+	fs.BoolVar(&a.dueOnly, "due-only", false, "fts_layout: no change while the key counts ask for the shape the index has")
 	fs.StringVar(&a.idemKey, "idempotency-key", "", "reuse the job of an earlier identical request")
 	fs.StringVar(&a.account, "account", "", "job list: only this account")
 	fs.StringVar(&a.state, labelState, "", "job list: only this state")
@@ -91,7 +96,7 @@ func jobsCmd(client *adminapi.ClientWithResponses, cmd string, args []string, st
 
 	if (cmd == cmdPlan || cmd == cmdJob) && len(a.args) > 0 {
 		switch a.args[0] {
-		case "show", verbList, "wait", verbCancel:
+		case verbShow, verbList, "wait", verbCancel:
 			verb, a.args = cmd+" "+a.args[0], a.args[1:]
 		}
 	}
@@ -165,6 +170,8 @@ func planCreate(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs,
 		params["deleted"] = true
 	}
 
+	layoutParams(a, params)
+
 	req := adminapi.PlanRequest{Kind: adminapi.PlanRequestKind(kind)}
 	if len(params) > 0 {
 		req.Params = &params
@@ -191,9 +198,14 @@ func planAll(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, st
 	}
 
 	req := adminapi.BatchPlanRequest{Kind: a.args[0]}
+	params := map[string]any{}
 
 	if a.classes != "" {
-		req.Params = &map[string]any{"classes": strings.Split(a.classes, ",")}
+		params["classes"] = strings.Split(a.classes, ",")
+	}
+
+	if layoutParams(a, params); len(params) > 0 {
+		req.Params = &params
 	}
 
 	if a.skipIdle {
@@ -221,6 +233,21 @@ func planShow(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, s
 
 		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 	}, func(p *adminapi.Plan) int { return printPlan(stdout, a, p) })
+}
+
+// layoutParams adds the parameters of fts_layout.
+func layoutParams(a jobArgs, params map[string]any) {
+	if a.layout != 0 {
+		params["layout"] = a.layout
+	}
+
+	if a.shards != 0 {
+		params["shards"] = a.shards
+	}
+
+	if a.dueOnly {
+		params["due_only"] = true
+	}
 }
 
 // request runs one API call: a transport error or an error document ends

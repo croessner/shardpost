@@ -455,6 +455,8 @@ func (m *Manager) expireEntry(e model.DueEntry, now time.Time) error {
 		return m.expireIdem(e, now)
 	case strings.HasPrefix(e.ID, prefixPlan):
 		return m.expirePlan(e, now)
+	case strings.HasPrefix(e.ID, model.ServersPrefix):
+		return m.expireServer(e, now)
 	default:
 		return m.expiryMove(e, nil)
 	}

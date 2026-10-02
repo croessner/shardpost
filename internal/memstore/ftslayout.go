@@ -47,6 +47,9 @@ func (u *User) ClearFTSLayoutNext(string) (bool, error) { return false, nil }
 // ClearForeignFTSLayoutNext implements model.FTSLayouter.
 func (u *User) ClearForeignFTSLayoutNext(string) (string, error) { return "", nil }
 
+// HeartbeatFTSLayoutNext implements model.FTSLayouter.
+func (u *User) HeartbeatFTSLayoutNext(string, time.Time) (bool, error) { return false, nil }
+
 // SetImportHint implements model.ImportHinter (the store sizes nothing).
 func (u *User) SetImportHint(model.ImportHint) {}
 

@@ -51,7 +51,7 @@ func traceCmd(client *adminapi.ClientWithResponses, args []string, stdout, stder
 		return traceOn(client, account, *dur, *asJSON, stdout, stderr)
 	case traceOffText:
 		return traceOff(client, account, stdout, stderr)
-	case "status":
+	case verbStatus:
 		return traceStatus(client, account, *asJSON, stdout, stderr)
 	default:
 		sayln(stderr, traceUsage)

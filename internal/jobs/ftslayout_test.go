@@ -116,6 +116,19 @@ func (u *layoutUser) ClearForeignFTSLayoutNext(own string) (string, error) {
 	return tok, nil
 }
 
+func (u *layoutUser) HeartbeatFTSLayoutNext(tok string, at time.Time) (bool, error) {
+	u.f.mu.Lock()
+	defer u.f.mu.Unlock()
+
+	if u.f.next != tok {
+		return false, nil
+	}
+
+	u.f.nextAt = at
+
+	return true, nil
+}
+
 // layoutOpener opens memstore accounts with fake layouts.
 type layoutOpener struct {
 	s     *memstore.Store
