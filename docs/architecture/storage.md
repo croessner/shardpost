@@ -85,7 +85,7 @@ outside `kv.` and `ix.` (no server reads them as records or indexes):
 
 | Object | Pool | Values |
 |---|---|---|
-| fence `system.moved` | index | `state` (`leased`, `initializing`, `migrating`, `done`, `native`, `reverted`), the system pool (`to_id`, `to_name`), `index_id`, `fsid`, `run`, `at`, `by`, the tool lease (`tool_instance`, `tool_epoch`, `tool_seen`) |
+| fence `system.moved` | index | `state` (`leased` for a fence a tool created only to hold its lease, `initializing`, `migrating`, `done`, `native`, `reverted`), the system pool (`to_id`, `to_name`), `index_id`, `fsid`, `run`, `at`, `by`, the tool lease (`tool_instance`, `tool_epoch`, `tool_seen`) |
 | mark `system.pool` | system | `format` 1, `state` (`active`, `retired`), `origin` (`native`, `migrated`), the ids and names of the index, data and system pool, `fsid`, `run`, `at` |
 
 Pools are compared by id and cluster fsid; the names are for messages
@@ -116,8 +116,11 @@ the configuration (a migration began, the mark was retired, a fence
 appeared) logs `event=system_placement_lost` and ends the process after
 draining; a read that fails is a warning and
 `imapceph_system_placement{state="unknown"}`, never an exit, so that a
-Ceph outage does not become a crash loop. The check stops in
-`Store.Drain` and `Store.Close`.
+Ceph outage does not become a crash loop. The same holds at startup for
+these two: a check that cannot read lets them start in the state
+`unknown`, and the periodic check decides. A short-lived command
+without the periodic check refuses to start when it cannot read. The
+check stops in `Store.Drain` and `Store.Close`.
 
 **Init.** A new cluster gets its system pool from `shardpost system
 init`; the routine ([system.go](../../internal/cephstore/system.go)) is
@@ -125,13 +128,16 @@ the one the bench uses for its own pools:
 
 1. Nothing to do when the fence is `native`/`done` for the pool and the
    mark is active for this index pool and cluster (it only reads then).
-2. The tool lease is taken (below); an absent or reverted fence becomes
+2. The tool lease is taken (below). An existing fence keeps its state;
+   where there is none, one is created exclusively in the state
    `leased`, which the servers treat as no fence.
 3. The index pool must hold nothing of the four namespaces but the fence
    and the sweep's objects (else the cluster exists: migrate it), the
    system pool nothing but the index heads of this same run, or a
    retired mark of an earlier run with its copies, which are deleted
-   when that run is confirmed (after the fence is set).
+   when that run is confirmed and the objects belong to it (the run
+   state `system.migrate` of its migration names it, or every object is
+   an index head of that run), after the fence is set.
 4. A probe object with omap is written and removed (an erasure coded pool
    fails here).
 5. The fence becomes `initializing` with a new run, by compare-and-swap.
@@ -144,16 +150,21 @@ the one the bench uses for its own pools:
 7. The mark is created exclusively: the commit.
 8. The fence becomes `native` and the lease is given up.
 
-A refusal gives the lease up and leaves the fence as it was. A crash
-between 5 and 8 leaves `initializing`: servers refuse until the init
-has run again, which takes the stale lease over and completes it.
+Every failure but a lost lease gives the lease up and leaves the fence
+as it was (a `leased` fence the init created is removed). A failure or
+crash between 5 and 8 leaves `initializing`: servers refuse until the
+init has run again and completed it; the lease of an init that died is
+taken over by one that is asked to wait (below).
 
 **The tool lease.** Every write of the fence is a compare-and-swap on
 its version, renewals and state changes alike, through one writer per
-process. A free lease is taken at once; one held by another instance
-only after its `tool_instance` and `tool_epoch` were seen unchanged for
-three minutes of the taker's own monotonic clock (a `tool_seen` more
-than 30 s ahead of it is refused). The holder renews every 30 s and
+process. Taking it changes only the lease fields of an existing fence,
+and giving it up removes them (or the fence the lease created). A free
+lease is taken at once. One held by another instance refuses the tool
+at once, naming the holder, unless the tool was asked to wait; then it
+is taken once its `tool_instance` and `tool_epoch` were seen unchanged
+for three minutes of the taker's own monotonic clock (a `tool_seen` more
+than 30 s ahead of that clock is refused either way). The holder renews every 30 s and
 trusts the lease only for 90 s after it sent its last successful write;
 then it stops writing and ends (running the tool again continues). A
 tool needs an OSD operation timeout of at most 60 s and throttles that

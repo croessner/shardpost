@@ -470,7 +470,7 @@ func TestInitKeepsRevertedFence(t *testing.T) {
 		t.Fatalf("init over a reverted fence on an existing cluster: %v", err)
 	}
 
-	if _, f, _ := inputs(t, tool); f.State != FenceReverted || f.Run != "hand" || f.Values[keyToolInstance] != "" || f.Values[keyPrevState] != "" {
+	if _, f, _ := inputs(t, tool); f.State != FenceReverted || f.Run != "hand" || f.Values[keyToolInstance] != "" {
 		t.Fatalf("reverted fence after a refusal: %+v", f)
 	}
 
@@ -509,8 +509,16 @@ func TestInitRetiredRun(t *testing.T) {
 		t.Fatalf("init over a retired run without confirmation: %v", err)
 	}
 
+	// Confirmed, but nothing says the other object belongs to that run.
+	if _, err := tool.InitSystem(InitOptions{Confirm: "hand"}); !errors.Is(err, ErrInitRefused) || !strings.Contains(err.Error(), "do not belong") {
+		t.Fatalf("init over a retired run with foreign objects: %v", err)
+	}
+
+	// The run state of its migration says they do.
+	putOmap(t, tool, cfg.SystemPool, model.AdminNamespace, runStateOID, map[string]string{pkRun: "hand"})
+
 	res, err := tool.InitSystem(InitOptions{Confirm: "hand"})
-	if err != nil || res.Cleared != 2 {
+	if err != nil || res.Cleared != 3 {
 		t.Fatalf("init over a confirmed retired run: %+v %v", res, err)
 	}
 
@@ -551,8 +559,9 @@ func crashAndResume(t *testing.T, step string) {
 		t.Fatalf("crash: %v", err)
 	}
 
+	// The failed init gave its lease up and left the fence initializing.
 	_, f, _ := inputs(t, tool)
-	if f.State != FenceInitializing || f.Values[keyToolInstance] == "" {
+	if f.State != FenceInitializing || f.Values[keyToolInstance] != "" {
 		t.Fatalf("fence after the crash: %+v", f)
 	}
 
@@ -566,6 +575,59 @@ func crashAndResume(t *testing.T, step string) {
 	}
 
 	mustOpen(t, serverConfig(cfg))
+}
+
+// TestInitStaleLease: a lease left by a tool that died refuses an init
+// at once, naming the holder; with Wait the init takes it over once the
+// holder has been idle and completes the unfinished run.
+func TestInitStaleLease(t *testing.T) {
+	shortLease(t)
+
+	tool, cfg := migPools(t)
+	v, _, _ := inputs(t, tool)
+
+	dead := fenceVals(v, FenceInitializing)
+	dead[keyToolInstance], dead[keyToolEpoch], dead[keyToolSeen] = "dead-host-1", "3", time.Now().UTC().Format(time.RFC3339Nano)
+	putOmap(t, tool, cfg.IndexPool, model.AdminNamespace, FenceOID, dead)
+
+	_, err := tool.InitSystem(InitOptions{})
+	if !errors.Is(err, ErrInitRefused) || !errors.Is(err, ErrFenceHeld) || !strings.Contains(err.Error(), "dead-host-1") {
+		t.Fatalf("init against a held lease: %v", err)
+	}
+
+	if _, f, _ := inputs(t, tool); f.Values[keyToolInstance] != "dead-host-1" {
+		t.Fatalf("a refused init touched a foreign lease: %+v", f)
+	}
+
+	res, err := tool.InitSystem(InitOptions{Wait: true})
+	if err != nil || !res.Resumed || res.Run != "hand" {
+		t.Fatalf("init that waits: %+v %v", res, err)
+	}
+
+	checkNative(t, tool, "hand")
+}
+
+// TestOpenReadError: a placement that cannot be read at startup refuses
+// a short-lived command, while a long-running process (with the
+// periodic check) starts in the state "unknown".
+func TestOpenReadError(t *testing.T) {
+	tool, cfg := migPools(t)
+	mustInit(t, tool)
+
+	timeout := errors.New("timed out")
+	placementReadFail.Store(&timeout)
+
+	t.Cleanup(func() { placementReadFail.Store(nil) })
+
+	if _, err := Open(serverConfig(cfg), quiet()); !errors.Is(err, errPlacementRead) {
+		t.Fatalf("a command without the periodic check: %v", err)
+	}
+
+	s, _ := watched(t, serverConfig(cfg))
+
+	if state, _ := s.Placement(); state != PlacementUnknown {
+		t.Fatalf("placement %q", state)
+	}
 }
 
 // TestInitParallel: two inits at the same time leave exactly one mark;

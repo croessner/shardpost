@@ -794,11 +794,15 @@ What a process says about the placement (see
 | `inconsistent placement: …` | fence and mark disagree: look at both before anything else |
 | `… was withdrawn (mark retired …)` | the placement was reverted: clear `ceph.system_pool` |
 | log `event=system_placement_lost` | a running server or push worker read a contradiction and ends after draining; it will not start again until the configuration matches |
-| log `event=system_placement_unknown`, `imapceph_system_placement{state="unknown"} 1` | the check could not read; the process goes on. A Ceph problem, not a placement one |
+| log `event=system_placement_unknown`, `imapceph_system_placement{state="unknown"} 1` | the check could not read; a running server or push worker goes on, and one that starts starts anyway (its periodic check decides later). A Ceph problem, not a placement one |
+| `placement unknown: …` at the start of a `shardpost` command | a short-lived command (scrub, backfill, sweep) could not read the placement and does not start; run it again once Ceph answers |
 
 Set `ceph.system_pool` on the server, the push worker and the scrub
 CronJob together: a process whose setting does not match refuses to
-start instead of writing beside the others.
+start instead of writing beside the others. The manifests set the
+environment variable `CEPH_SYSTEM_POOL` (empty until the migration), and
+an environment variable wins over `server.yaml` even when it is empty:
+change the value in the manifests, not in the configuration file.
 
 ### Pool sizes for a large cluster
 

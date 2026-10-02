@@ -72,6 +72,10 @@ type InitOptions struct {
 	By string
 	// Log receives the progress (the store's log when nil).
 	Log *slog.Logger
+	// Wait takes over the lease of another tool once it has been idle
+	// for three minutes; without it a held lease refuses at once
+	// (ErrInitRefused wrapping ErrFenceHeld, naming the holder).
+	Wait bool
 }
 
 // InitResult is what InitSystem did.
@@ -176,7 +180,7 @@ func (in *initRun) do() (*InitResult, error) {
 		return &InitResult{Run: m.Run, Already: true}, nil
 	}
 
-	in.lease = newFenceLease(in.conn, in.cfg.IndexPool, in.log)
+	in.lease = newFenceLease(in.conn, in.cfg.IndexPool, in.log, in.o.Wait)
 	defer in.lease.close()
 
 	resumed, err := in.takeLease()
@@ -184,18 +188,18 @@ func (in *initRun) do() (*InitResult, error) {
 		return in.finishedMeanwhile()
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
 	res := &InitResult{Resumed: resumed}
 
-	if err := in.work(res); err != nil {
-		// A refusal gives the lease up (a fence that is still "leased"
-		// goes back to what it was), so that nothing is left that a
-		// server or the next tool would have to wait for; anything else
-		// (a crash, a lost lease) leaves it to be taken over.
-		if errors.Is(err, ErrInitRefused) {
+	if err == nil {
+		err = in.work(res)
+	}
+
+	if err != nil {
+		// The lease is given up on every error but a lost lease (a fence
+		// that is still "leased" goes), so that the next init need not
+		// wait for it; a lost lease is someone else's now, and a process
+		// that dies leaves its lease to be taken over.
+		if !errors.Is(err, ErrLeaseLost) {
 			if rerr := in.lease.release(); rerr != nil {
 				in.log.Warn("fence lease not given up", "err", rerr)
 			}
@@ -241,7 +245,7 @@ func (in *initRun) leasePlan(f Fence) (map[string]string, error) {
 	case f.Exists && f.State == FenceInitializing && f.ToID == in.v.SystemID:
 		return maps.Clone(f.Values), nil
 	case !f.Exists || f.State == FenceReverted || f.State == FenceLeased:
-		return leasedValues(f, in.o.By), nil
+		return leasedValues(f, in.o.By, in.lease.now()), nil
 	default:
 		return nil, fmt.Errorf("%w: the fence in the index pool has state %s (run %s, pool %q)",
 			ErrInitRefused, f.State, f.Run, f.ToName)
@@ -414,12 +418,7 @@ func (in *initRun) checkSystemPool(f Fence, m Mark) (wipe bool, err error) {
 
 	switch {
 	case m.Exists && m.State == MarkRetired:
-		if in.o.Confirm != m.Run {
-			return false, fmt.Errorf("%w: system pool %q holds the retired mark of run %s and %d objects of it; confirm that run to delete them",
-				ErrInitRefused, in.cfg.SystemPool, m.Run, len(foreign))
-		}
-
-		return true, nil
+		return in.retiredRun(m, len(foreign))
 	case m.Exists && (m.State != MarkActive || run == "" || m.Run != run):
 		return false, fmt.Errorf("%w: system pool %q carries a mark (state %s, run %s) that no init of it left unfinished",
 			ErrInitRefused, in.cfg.SystemPool, m.State, m.Run)
@@ -430,6 +429,42 @@ func (in *initRun) checkSystemPool(f Fence, m Mark) (wipe bool, err error) {
 
 	return false, nil
 }
+
+// retiredRun allows the deletion of a retired run's mark and copies when
+// InitOptions.Confirm names that run and the objects belong to it: the
+// run state of its migration names it, or (a native init) every object
+// is an index head of that run.
+func (in *initRun) retiredRun(m Mark, objects int) (bool, error) {
+	if in.o.Confirm != m.Run {
+		return false, fmt.Errorf("%w: system pool %q holds the retired mark of run %s and %d objects of it; confirm that run to delete them",
+			ErrInitRefused, in.cfg.SystemPool, m.Run, objects)
+	}
+
+	vals, _, err := readObjectOmap(in.conn, in.cfg.SystemPool, model.AdminNamespace, runStateOID, []string{pkRun})
+	if err != nil {
+		return false, fmt.Errorf("read the run state: %w", err)
+	}
+
+	if string(vals[pkRun]) == m.Run {
+		return true, nil
+	}
+
+	foreign, err := in.foreignObjects(m.Run)
+	if err != nil {
+		return false, err
+	}
+
+	if len(foreign) > 0 {
+		return false, fmt.Errorf("%w: system pool %q holds objects that do not belong to the retired run %s (no run state of it), first %s",
+			ErrInitRefused, in.cfg.SystemPool, m.Run, foreign[0])
+	}
+
+	return true, nil
+}
+
+// runStateOID is the run state of a migration in the system pool, which
+// names the run its copies belong to.
+const runStateOID = "system.migrate"
 
 // unfinished is the run of an init of this pool that f shows unfinished
 // ("" none).
@@ -592,7 +627,7 @@ func (in *initRun) startFence() error {
 	run := newGUID()[:12]
 
 	err := in.lease.update(func(vals map[string]string) error {
-		if vals[pkState] != FenceLeased {
+		if s := vals[pkState]; s != FenceLeased && s != FenceReverted {
 			return fmt.Errorf("%w: the fence changed under the lease (state %s)", ErrInitRefused, vals[pkState])
 		}
 

@@ -141,7 +141,7 @@ func TestCheckToolClientOptions(t *testing.T) {
 	for _, ok := range []map[string]string{
 		nil,
 		{"rados_osd_op_timeout": "60"},
-		{"rados_osd_op_timeout": "1", "objecter_inflight_ops": "16", "objecter_inflight_op_bytes": "67108864"},
+		{"rados_osd_op_timeout": "1", "objecter_inflight_ops": "64", "objecter_inflight_op_bytes": "67108864"},
 		{"rados_mon_op_timeout": "0"},
 	} {
 		if err := checkToolClientOptions(ok, 16); err != nil {
@@ -153,7 +153,7 @@ func TestCheckToolClientOptions(t *testing.T) {
 		{"rados_osd_op_timeout": "0"},
 		{"rados_osd_op_timeout": "61"},
 		{"rados_osd_op_timeout": "x"},
-		{"objecter_inflight_ops": "8"},
+		{"objecter_inflight_ops": "63"},
 		{"objecter_inflight_op_bytes": "1048576"},
 	} {
 		if err := checkToolClientOptions(bad, 16); err == nil {

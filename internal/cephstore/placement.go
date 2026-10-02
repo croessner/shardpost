@@ -65,8 +65,8 @@ const (
 	FenceDone         = "done"
 	FenceNative       = "native"
 	FenceReverted     = "reverted"
-	// FenceLeased is the neutral state of a fence a tool holds the lease
-	// of before its first real step (fencelease.go): no fence for the
+	// FenceLeased is the neutral state of a fence a tool created to hold
+	// the lease where there was none (fencelease.go): no fence for the
 	// servers.
 	FenceLeased = "leased"
 )
@@ -140,7 +140,7 @@ const (
 // fenceKeys are the omap keys of the fence (with those a migration
 // writes).
 var fenceKeys = []string{pkState, pkToID, pkToName, pkIndexID, pkFSID, pkRun, pkAt, pkBy,
-	"direction", "fenced_digest", "heads", "cleaned_at", keyToolInstance, keyToolEpoch, keyToolSeen, keyPrevState}
+	"direction", "fenced_digest", "heads", "cleaned_at", keyToolInstance, keyToolEpoch, keyToolSeen}
 
 // Mark is the mark as read (Exists false: there is none).
 type Mark struct {

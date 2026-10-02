@@ -27,15 +27,15 @@ import (
 //	tool_epoch     counted up by every write of a holder
 //	tool_seen      the holder's clock at its last write (informational)
 //
-// A tool takes the lease before its checks, without changing what the
-// fence means to the servers: a fence that was absent or reverted gets
-// the neutral state "leased" (with the state before in "prev_state"),
-// which Open and the periodic check treat as no fence. Only the tool's
-// first real step sets its start state ("initializing") by
-// compare-and-swap. A tool that ends before that (a refusal) gives the
-// lease up by deleting the fence it created, or by restoring the state
-// before; a "leased" fence that a crash left behind is harmless and
-// taken over by the next tool.
+// Taking the lease never changes what the fence means to the servers.
+// An existing fence keeps its state; only the lease fields change. Where
+// there is no fence, the tool creates one exclusively in the neutral
+// state "leased", which Open and the periodic check treat as no fence.
+// Only the tool's first real step sets its start state ("initializing")
+// by compare-and-swap. Giving the lease up removes the lease fields, and
+// deletes a fence that is still "leased" (the tool created it); a
+// "leased" fence that a crash left behind is harmless and taken over by
+// the next tool.
 //
 // Every write of the fence is a compare-and-swap on its version, the
 // holder's renewals as well as its state changes, and all of them go
@@ -44,16 +44,17 @@ import (
 // Only a foreign holder ends it.
 //
 // The lease does not depend on synchronized clocks. A free lease is
-// taken at once. An occupied one only when the taker has seen
-// tool_instance and tool_epoch unchanged for toolLeaseTakeover of its
-// own monotonic clock; a tool_seen more than toolLeaseFuture ahead of
-// the taker's clock is refused (a clock that far off is a fault to fix
-// first). The holder trusts its lease only for toolLeaseValid after it
-// sent its last successful write, measured on its own monotonic clock
-// and well below the takeover time: after that it stops writing and
-// ends (the work is resumable). OSD operations of a tool time out within
-// 60 s (checkToolClientOptions), so a write sent within the window lands
-// before a taker can act.
+// taken at once. A held one is refused (ErrFenceHeld, naming the holder)
+// unless the tool was asked to wait; then it is taken when the taker has
+// seen tool_instance and tool_epoch unchanged for toolLeaseTakeover of
+// its own monotonic clock. A tool_seen more than toolLeaseFuture ahead
+// of the taker's clock is refused either way (a clock that far off is a
+// fault to fix first). The holder trusts its lease only for
+// toolLeaseValid after it sent its last successful write, measured on
+// its own monotonic clock and well below the takeover time: after that
+// it stops writing and ends (the work is resumable). OSD operations of a
+// tool time out within 60 s (checkToolClientOptions), so a write sent
+// within the window lands before a taker can act.
 
 // Timing of the tool lease (variables for the tests).
 var (
@@ -69,7 +70,6 @@ const (
 	keyToolInstance = "tool_instance"
 	keyToolEpoch    = "tool_epoch"
 	keyToolSeen     = "tool_seen"
-	keyPrevState    = "prev_state"
 )
 
 // ErrFenceHeld refuses a tool while another one holds the fence.
@@ -79,12 +79,28 @@ var ErrFenceHeld = errors.New("another tool holds the fence")
 // writing at once; running it again continues the work.
 var ErrLeaseLost = errors.New("the fence lease was lost")
 
+// fenceIO reads and writes the fence: write creates it exclusively at
+// version 0, replaces every value at another version, and removes it
+// when vals is nil; a lost compare-and-swap reports false.
+type fenceIO interface {
+	read() (Fence, error)
+	write(ver uint64, vals map[string]string) (bool, error)
+}
+
 // fenceLease is the lease of one tool process.
 type fenceLease struct {
-	conn     *rados.Conn
-	pool     string
+	io       fenceIO
 	instance string
 	log      *slog.Logger
+	// wait lets acquire take a held lease over once its holder has been
+	// idle for toolLeaseTakeover (otherwise: ErrFenceHeld at once).
+	wait bool
+	// now and sleep are the clock (time.Now, time.Sleep; tests replace
+	// them).
+	now   func() time.Time
+	sleep func(time.Duration)
+	// every is the interval of the renewals (toolLeaseRenew).
+	every time.Duration
 
 	// mu serializes the writes of the fence; lastOK is when the last
 	// successful write was sent (monotonic).
@@ -99,19 +115,25 @@ type fenceLease struct {
 
 // newFenceLease prepares the lease of this process on the fence of the
 // index pool.
-func newFenceLease(conn *rados.Conn, pool string, log *slog.Logger) *fenceLease {
+func newFenceLease(conn *rados.Conn, pool string, log *slog.Logger, wait bool) *fenceLease {
 	host, _ := os.Hostname()
 
 	var b [6]byte
 
 	_, _ = rand.Read(b[:])
 
-	return &fenceLease{conn: conn, pool: pool, instance: host + "-" + hex.EncodeToString(b[:]), log: log}
+	return &fenceLease{io: &radosFence{conn: conn, pool: pool}, instance: host + "-" + hex.EncodeToString(b[:]), log: log,
+		wait: wait, now: time.Now, sleep: time.Sleep, every: toolLeaseRenew}
 }
 
-// read reads the fence.
-func (l *fenceLease) read() (Fence, error) {
-	vals, ver, err := readObjectOmap(l.conn, l.pool, model.AdminNamespace, FenceOID, fenceKeys)
+// radosFence is the fence in the index pool.
+type radosFence struct {
+	conn *rados.Conn
+	pool string
+}
+
+func (r *radosFence) read() (Fence, error) {
+	vals, ver, err := readObjectOmap(r.conn, r.pool, model.AdminNamespace, FenceOID, fenceKeys)
 	if err != nil {
 		return Fence{}, fmt.Errorf("read the fence: %w", err)
 	}
@@ -119,13 +141,10 @@ func (l *fenceLease) read() (Fence, error) {
 	return fenceOf(vals, ver), nil
 }
 
-// write writes the fence: created exclusively at version 0, otherwise
-// replacing every value at that version (vals nil: removing the fence
-// at that version). A conflict reports false.
-func (l *fenceLease) write(ver uint64, vals map[string]string) (bool, error) {
-	ioctx, err := l.conn.OpenIOContext(l.pool)
+func (r *radosFence) write(ver uint64, vals map[string]string) (bool, error) {
+	ioctx, err := r.conn.OpenIOContext(r.pool)
 	if err != nil {
-		return false, fmt.Errorf("open pool %q: %w", l.pool, err)
+		return false, fmt.Errorf("open pool %q: %w", r.pool, err)
 	}
 	defer ioctx.Destroy()
 
@@ -176,25 +195,18 @@ func (l *fenceLease) stamp(f Fence, vals map[string]string) {
 
 	vals[keyToolInstance] = l.instance
 	vals[keyToolEpoch] = strconv.FormatUint(epoch+1, 10)
-	vals[keyToolSeen] = time.Now().UTC().Format(time.RFC3339Nano)
+	vals[keyToolSeen] = l.now().UTC().Format(time.RFC3339Nano)
 }
 
-// leasedValues are the values a free fence gets with the lease: the
-// neutral state "leased", the state before kept in "prev_state" (none
-// for an absent fence).
-func leasedValues(f Fence, by string) map[string]string {
+// leasedValues are the values of a fence that a tool leases without a
+// change of its own: an existing fence keeps everything (stamp adds the
+// lease), an absent one is created in the neutral state "leased".
+func leasedValues(f Fence, by string, now time.Time) map[string]string {
 	if !f.Exists {
-		return map[string]string{pkState: FenceLeased, pkBy: by, pkAt: time.Now().UTC().Format(time.RFC3339)}
+		return map[string]string{pkState: FenceLeased, pkBy: by, pkAt: now.UTC().Format(time.RFC3339)}
 	}
 
-	vals := maps.Clone(f.Values)
-	if f.State != FenceLeased {
-		vals[keyPrevState] = f.State
-	}
-
-	vals[pkState] = FenceLeased
-
-	return vals
+	return maps.Clone(f.Values)
 }
 
 // errFenceStop ends acquire without an error of its own: plan decided
@@ -204,15 +216,15 @@ var errFenceStop = errors.New("nothing to take")
 // acquire takes the lease. plan sees every fence read and returns the
 // values the fence gets with the lease, or an error that ends acquire
 // (errFenceStop: nothing to do). A fence held by another instance is
-// taken only once its holder has been seen idle for toolLeaseTakeover;
-// a holder seen writing meanwhile refuses with ErrFenceHeld. The fence
-// as read after the write is returned; the lease is renewed in the
-// background until close.
+// refused with ErrFenceHeld, or, with wait, taken once its holder has
+// been seen idle for toolLeaseTakeover (a holder seen writing meanwhile
+// refuses). The fence as read after the write is returned; the lease is
+// renewed in the background until close.
 func (l *fenceLease) acquire(plan func(Fence) (map[string]string, error)) (Fence, error) {
 	var w holderWatch
 
 	for {
-		f, err := l.read()
+		f, err := l.io.read()
 		if err != nil {
 			return f, err
 		}
@@ -227,16 +239,16 @@ func (l *fenceLease) acquire(plan func(Fence) (map[string]string, error)) (Fence
 				return f, err
 			}
 
-			time.Sleep(toolLeasePoll)
+			l.sleep(toolLeasePoll)
 
 			continue
 		}
 
 		l.stamp(f, vals)
 
-		sent := time.Now()
+		sent := l.now()
 
-		ok, err := l.write(f.Version, vals)
+		ok, err := l.io.write(f.Version, vals)
 		if err != nil {
 			return f, err
 		}
@@ -251,7 +263,7 @@ func (l *fenceLease) acquire(plan func(Fence) (map[string]string, error)) (Fence
 
 		l.renew()
 
-		nf, err := l.read()
+		nf, err := l.io.read()
 		if err == nil && nf.Values[keyToolInstance] != l.instance {
 			err = fmt.Errorf("%w: the fence was taken by %s", ErrLeaseLost, nf.Values[keyToolInstance])
 		}
@@ -267,25 +279,31 @@ type holderWatch struct {
 }
 
 // idle reports whether the tool has to wait for the holder of f (wait),
-// or refuses: a holder that wrote while it was watched, or one whose
-// clock is ahead. A free fence, or one of this instance, needs no wait;
-// a holder seen idle for toolLeaseTakeover is taken over.
+// or refuses: a holder whose clock is ahead, a holder when the tool may
+// not wait, a holder that wrote while it was watched. A free fence, or
+// one of this instance, needs no wait; a holder seen idle for
+// toolLeaseTakeover is taken over.
 func (w *holderWatch) idle(l *fenceLease, f Fence) (bool, error) {
 	holder := f.Values[keyToolInstance]
 	if holder == "" || holder == l.instance {
 		return false, nil
 	}
 
-	if seen, err := time.Parse(time.RFC3339Nano, f.Values[keyToolSeen]); err == nil && seen.After(time.Now().Add(toolLeaseFuture)) {
+	if seen, err := time.Parse(time.RFC3339Nano, f.Values[keyToolSeen]); err == nil && seen.After(l.now().Add(toolLeaseFuture)) {
 		return false, fmt.Errorf("%w: its last write (%s, by %s) lies in the future of this host's clock; fix the clocks first",
 			ErrFenceHeld, f.Values[keyToolSeen], holder)
+	}
+
+	if !l.wait {
+		return false, fmt.Errorf("%w: %s (state %s, run %s, last write %s); wait for it, or let this tool wait to take over a holder that stopped",
+			ErrFenceHeld, holder, f.State, f.Run, f.Values[keyToolSeen])
 	}
 
 	key := holder + "\x00" + f.Values[keyToolEpoch]
 
 	switch {
 	case w.key == "":
-		w.key, w.from = key, time.Now()
+		w.key, w.from = key, l.now()
 
 		l.log.Info("the fence is held by another tool, waiting to see whether it is alive", "holder", holder,
 			"takeover_after", toolLeaseTakeover)
@@ -293,7 +311,7 @@ func (w *holderWatch) idle(l *fenceLease, f Fence) (bool, error) {
 		return false, fmt.Errorf("%w: %s is working on it (state %s, run %s)", ErrFenceHeld, holder, f.State, f.Run)
 	}
 
-	if time.Since(w.from) < toolLeaseTakeover {
+	if l.now().Sub(w.from) < toolLeaseTakeover {
 		return true, nil
 	}
 
@@ -311,13 +329,18 @@ func (l *fenceLease) valid() bool {
 	return l.validLocked()
 }
 
-func (l *fenceLease) validLocked() bool { return l.held && time.Since(l.lastOK) < toolLeaseValid }
+func (l *fenceLease) validLocked() bool { return l.held && l.now().Sub(l.lastOK) < toolLeaseValid }
+
+// errLeaseExpired is the error of a holder whose window ran out.
+func errLeaseExpired() error {
+	return fmt.Errorf("%w: no successful write of the fence for %s; run the tool again to continue", ErrLeaseLost, toolLeaseValid)
+}
 
 // check returns ErrLeaseLost when the lease is no longer valid; a
 // holder calls it before every write of its work.
 func (l *fenceLease) check() error {
 	if !l.valid() {
-		return fmt.Errorf("%w: no successful write of the fence for %s; run the tool again to continue", ErrLeaseLost, toolLeaseValid)
+		return errLeaseExpired()
 	}
 
 	return nil
@@ -333,10 +356,10 @@ func (l *fenceLease) update(mutate func(map[string]string) error, release bool) 
 
 	for range fenceRetries {
 		if !l.validLocked() {
-			return fmt.Errorf("%w: no successful write of the fence for %s; run the tool again to continue", ErrLeaseLost, toolLeaseValid)
+			return errLeaseExpired()
 		}
 
-		f, err := l.read()
+		f, err := l.io.read()
 		if err != nil {
 			return err
 		}
@@ -360,9 +383,9 @@ func (l *fenceLease) update(mutate func(map[string]string) error, release bool) 
 			delete(vals, keyToolSeen)
 		}
 
-		sent := time.Now()
+		sent := l.now()
 
-		ok, err := l.write(f.Version, vals)
+		ok, err := l.io.write(f.Version, vals)
 		if err != nil {
 			return err
 		}
@@ -377,9 +400,9 @@ func (l *fenceLease) update(mutate func(map[string]string) error, release bool) 
 }
 
 // release gives the lease up without a state change of its own: a fence
-// still "leased" goes back to what it was (deleted when there was none,
-// its previous state otherwise); any other keeps its state. A lease
-// that is no longer ours is left alone.
+// still "leased" (created with the lease) is deleted, any other keeps
+// its state and loses the lease fields. A lease that is no longer ours
+// is left alone.
 func (l *fenceLease) release() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -389,7 +412,7 @@ func (l *fenceLease) release() error {
 	}
 
 	for range fenceRetries {
-		f, err := l.read()
+		f, err := l.io.read()
 		if err != nil {
 			return err
 		}
@@ -399,25 +422,15 @@ func (l *fenceLease) release() error {
 			return nil
 		}
 
-		var vals map[string]string
+		var vals map[string]string // nil: the fence goes
 
-		switch prev := f.Values[keyPrevState]; {
-		case f.State == FenceLeased && prev == "":
-			// nil: the fence goes
-		case f.State == FenceLeased:
+		if f.State != FenceLeased {
 			vals = maps.Clone(f.Values)
-			vals[pkState] = prev
-		default:
-			vals = maps.Clone(f.Values)
-		}
-
-		if vals != nil {
-			delete(vals, keyPrevState)
 			delete(vals, keyToolInstance)
 			delete(vals, keyToolSeen)
 		}
 
-		ok, err := l.write(f.Version, vals)
+		ok, err := l.io.write(f.Version, vals)
 		if err != nil {
 			return err
 		}
@@ -439,7 +452,7 @@ func (l *fenceLease) renew() {
 	go func() {
 		defer close(l.done)
 
-		t := time.NewTicker(toolLeaseRenew)
+		t := time.NewTicker(l.every)
 		defer t.Stop()
 
 		for {
@@ -483,11 +496,18 @@ const maxToolOpTimeout = 60
 // toolChunk is the largest read or write of a tool (the copy's chunk).
 const toolChunk = 4 << 20
 
+// toolOpsPerWorker is the objecter operation budget a tool needs per
+// parallel worker (design K3): a copy has a read, a write and the
+// stat and omap pages of one object in flight.
+const toolOpsPerWorker = 4
+
 // checkToolClientOptions refuses librados options a tool cannot keep its
-// lease with: an OSD operation timeout that is off or above 60 s, and an
-// objecter byte throttle below parallel chunks (an operation that waits
-// in the throttle has not started its timeout).
+// lease with: an OSD operation timeout that is off or above 60 s, and
+// objecter throttles below what parallel workers have in flight (an
+// operation that waits in the throttle has not started its timeout).
 func checkToolClientOptions(opts map[string]string, parallel int) error {
+	parallel = max(parallel, 1)
+
 	if v, ok := opts["rados_osd_op_timeout"]; ok {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 || n > maxToolOpTimeout {
@@ -497,15 +517,15 @@ func checkToolClientOptions(opts map[string]string, parallel int) error {
 
 	if v, ok := opts["objecter_inflight_ops"]; ok {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < max(parallel, 1) {
-			return fmt.Errorf("objecter_inflight_ops %q: a tool with %d parallel operations needs at least as many", v, max(parallel, 1))
+		if err != nil || n < toolOpsPerWorker*parallel {
+			return fmt.Errorf("objecter_inflight_ops %q: a tool with %d parallel workers needs at least %d", v, parallel, toolOpsPerWorker*parallel)
 		}
 	}
 
 	if v, ok := opts["objecter_inflight_op_bytes"]; ok {
 		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || n < int64(max(parallel, 1))*toolChunk {
-			return fmt.Errorf("objecter_inflight_op_bytes %q: a tool with %d parallel operations needs at least %d bytes", v, max(parallel, 1), int64(max(parallel, 1))*toolChunk)
+		if err != nil || n < int64(parallel)*toolChunk {
+			return fmt.Errorf("objecter_inflight_op_bytes %q: a tool with %d parallel workers needs at least %d bytes", v, parallel, int64(parallel)*toolChunk)
 		}
 	}
 

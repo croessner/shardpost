@@ -75,7 +75,7 @@ func initTestSystemPool() error {
 		s.Close()
 	}()
 
-	_, err = s.InitSystem(InitOptions{By: "cephstore tests"})
+	_, err = s.InitSystem(InitOptions{By: "cephstore tests", Wait: true})
 
 	return err
 }

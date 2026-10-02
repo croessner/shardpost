@@ -110,8 +110,13 @@ listing):
 
 A server and the push worker repeat the check every minute and end
 (after draining) when it reads a placement that contradicts the
-configuration; a check that cannot read logs a warning and goes on. Set
-the key on the server, the push worker and the scrub CronJob together.
+configuration; a check that cannot read logs a warning and goes on (a
+server or push worker that cannot read at startup starts in the state
+`unknown`; a short-lived command does not start). Set the key on the
+server, the push worker and the scrub CronJob together. The Kubernetes
+manifests set `CEPH_SYSTEM_POOL` (empty until the migration), and an
+environment variable that is set wins over the file even when it is
+empty: change it in the manifests, not in `server.yaml`.
 See [Storage: placement](architecture/storage.md#system-pool-and-placement)
 and [Operations](operations/README.md#pools).
 

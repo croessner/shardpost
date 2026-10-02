@@ -19,6 +19,7 @@
 package cephstore
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -221,7 +222,7 @@ func Open(cfg Config, log *slog.Logger) (*Store, error) {
 		return s, nil
 	}
 
-	if _, err := s.checkPlacement(true); err != nil {
+	if err := s.openPlacement(); err != nil {
 		conn.Shutdown()
 		return nil, err
 	}
@@ -231,6 +232,25 @@ func Open(cfg Config, log *slog.Logger) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// openPlacement is the placement check of Open. A placement read
+// positively that does not match refuses. A check that could not read
+// refuses a short-lived command too; a long-running process (one with
+// OnPlacementLost, whose periodic check reads it again every minute)
+// starts with a warning and the state "unknown" instead, so that a Ceph
+// outage does not keep the servers from coming up.
+func (s *Store) openPlacement() error {
+	_, err := s.checkPlacement(true)
+
+	if errors.Is(err, errPlacementRead) && s.cfg.OnPlacementLost != nil {
+		s.log.Warn("system placement could not be checked at startup, starting anyway; the periodic check reads it again",
+			"event", "system_placement_unknown", "err", err)
+
+		return nil
+	}
+
+	return err
 }
 
 // Rotate replaces the cephx key (and optionally the mon list) by opening a
