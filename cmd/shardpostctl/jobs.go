@@ -91,7 +91,7 @@ func jobsCmd(client *adminapi.ClientWithResponses, cmd string, args []string, st
 
 	if (cmd == cmdPlan || cmd == cmdJob) && len(a.args) > 0 {
 		switch a.args[0] {
-		case "show", "list", "wait", "cancel":
+		case "show", verbList, "wait", verbCancel:
 			verb, a.args = cmd+" "+a.args[0], a.args[1:]
 		}
 	}

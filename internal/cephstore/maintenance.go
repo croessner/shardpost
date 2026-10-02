@@ -44,7 +44,7 @@ func (u *User) ScrubState() (model.ScrubState, error) {
 
 // ScrubPending implements model.ScrubProber: any key of the scrub object
 // (orphan candidates "o:", the quota count), an intent in the registry
-// (d:, bi:, bimp:, up:, ci:, dm:; one read op), or a MOVE or removal
+// (d:, bi:, bimp:, up:, sub:, ci:, dm:; one read op), or a MOVE or removal
 // intent on a mailbox (i:, r:; one read op per mailbox, no listing).
 func (u *User) ScrubPending() (string, error) {
 	switch n, err := u.firstKeys(oidScrub, ""); {
@@ -61,11 +61,13 @@ func (u *User) ScrubPending() (string, error) {
 		return "intents " + p, nil
 	}
 
-	switch expired, err := u.expiredUpload(time.Now()); {
-	case err != nil:
-		return "", fmt.Errorf("read upload intents: %w", err)
-	case expired:
-		return "intents " + regUploadPrefix, nil
+	for _, prefix := range []string{regUploadPrefix, regSubmissionPrefix} {
+		switch expired, err := u.expiredUpload(prefix, time.Now()); {
+		case err != nil:
+			return "", fmt.Errorf("read %s intents: %w", prefix, err)
+		case expired:
+			return "intents " + prefix, nil
+		}
 	}
 
 	boxes, err := u.ListMailboxes()

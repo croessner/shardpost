@@ -90,9 +90,71 @@ chunk size or to the index mapping, an old binary is not a sufficient rollback.
 Define a compatibility strategy for old and new writers beforehand.
 Do not rename or recreate pools and namespaces when rebranding.
 
+Going back behind 0.43.0 needs an empty delayed submission queue (see
+[Delayed submissions](#delayed-submissions)).
+
 A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
 the header can reach the server as a protocol command.
+
+## Delayed submissions
+
+Delayed JMAP sending (0.43.0, [JMAP](../jmap.md#delayed-sending),
+[storage](../architecture/storage.md#delayed-submissions)) is off until
+`jmap.submission.delayed.max_delay_seconds` is set. It needs the admin
+store indexes (`admin.kv_index` `write` or `read`) and a relay; every
+server with a relay runs the worker unless
+`jmap.submission.delayed.worker` is `false`.
+
+**Rollout.** Roll the release out to every server first, then set
+`max_delay_seconds`. A server before 0.43.0 refuses `HOLDFOR` and
+`HOLDUNTIL`, so a client that reads the capability from a new server
+and lands on an old one gets `invalidProperties`; nothing is sent twice
+or lost.
+
+**Watching.** `imapceph_jmap_delayed_submissions_total{outcome}` and
+`imapceph_jmap_submission_queue_entries{state="due"}` (see
+[observability](../observability.md#reading-the-metrics-correctly)). A
+`due` above 0 for longer than a poll means no worker sends. The log line
+`sendqueue: partition lease taken` names the server that holds a
+partition; `submission interrupted while sending` marks a submission
+that is final with an unknown result.
+
+**An account's submissions.** `shardpostctl submission list <account>`
+(role `diagnose`) shows them; `shardpostctl submission cancel <account>
+<id>` (role `support`) cancels a pending one for the user
+([manual page](../man/man1/shardpostctl-submission.1)).
+
+**At most once.** A submission is never sent twice. One whose server
+stopped while sending, or whose conversation with the relay broke while
+the message was transferred, is final with `delivered` `unknown` after
+`sending_timeout_seconds` (one hour) and is not sent again; the user
+sees that in `deliveryStatus` and decides. The timeout has to exceed the
+longest conversation with the relay (ten minutes for its answer to the
+message plus a step timeout per command); a shorter one reports live
+conversations as unknown (`outcome="conflict"`), never sends twice.
+
+**Stopping a server.** A server that stops gives its partition leases
+back; another server takes them on its next poll. A server that dies
+keeps them until the cls_lock runs out (three minutes).
+
+**Rollback.** Servers before 0.43.0 do not send queued submissions and
+do not clean them up. Before going back:
+
+1. Set `max_delay_seconds` to 0 on every server (no new delayed
+   submissions; the workers keep sending what is queued).
+2. Wait until the queue is empty: `imapceph_jmap_submission_queue_entries{state="all"}`
+   is 0, or `shardpostctl submission list` is empty for the accounts
+   that used it. A submission due far ahead can be canceled with
+   `shardpostctl submission cancel` (tell the user).
+3. Then roll back.
+
+What a rollback leaves behind with a non-empty queue: the records and
+queue entries in `~admin`, and the message copies with their `sub:`
+intents in the accounts. Nothing is sent until a server of 0.43.0 or
+later runs again, which then sends what has become due (late). The
+copies expire seven days after their release time, and a scrub of an
+older server lists them as orphans and deletes them after two runs.
 
 ## Account directory backfill
 

@@ -25,7 +25,8 @@ import (
 //     shard 0 (or the tombstone), and every shard above that exists;
 //   - the blobs of their entries, of the removal intents (r:) and MOVE
 //     intents (i:) on shard 0, of the blob, import and upload intents
-//     (bi:, bimp:, up:), of the delivery intents (d:) and of the orphan
+//     (bi:, bimp:, up:) and of the submission copies (sub:), of the
+//     delivery intents (d:) and of the orphan
 //     candidates of the scrub object;
 //   - the fixed objects: the full-text index (fts/, ftst/, ftsh/, ftsd/,
 //     ftsmap), the front-end indexes (ix/<space>/<nn>), account, metadata,
@@ -234,12 +235,13 @@ func addMailbox(mailboxes map[string]mailboxIntent, id string) {
 // registryBlobs adds the blobs a registry intent names.
 func registryBlobs(k string, v []byte, n *namedObjects) {
 	switch {
-	case strings.HasPrefix(k, regBlobPrefix), strings.HasPrefix(k, regUploadPrefix):
+	case strings.HasPrefix(k, regBlobPrefix), strings.HasPrefix(k, regUploadPrefix), strings.HasPrefix(k, regSubmissionPrefix):
 		var bi blobIntent
 
 		_ = json.Unmarshal(v, &bi)
 
-		n.blob(strings.TrimPrefix(strings.TrimPrefix(k, regBlobPrefix), regUploadPrefix), bi.Chunks)
+		_, guid, _ := strings.Cut(k, ":")
+		n.blob(guid, bi.Chunks)
 	case strings.HasPrefix(k, regImportBlobPrefix):
 		var im importIntent
 

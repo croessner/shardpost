@@ -11,6 +11,7 @@
 //	shardpostctl [connection flags] messages | search | message show|export | flags | copy | move | sieve ... | learning ...
 //	shardpostctl [connection flags] export -o file.tar <account> | archive verify <file> | restore [-account A] <file>
 //	shardpostctl [connection flags] auth flush [<account>]
+//	shardpostctl [connection flags] submission list <account> | submission cancel <account> <id>
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -95,7 +96,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ... | auth flush [<account>]")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ... | auth flush [<account>] | submission list|cancel ...")
 		return exUsage
 	}
 
@@ -131,6 +132,8 @@ func dispatch(client *adminapi.ClientWithResponses, args []string, timeout time.
 		return archiveCmd(client, cmd, rest, timeout, stdout, stderr)
 	case cmdAuth:
 		return authCmd(client, rest, stdout, stderr)
+	case cmdSubmission:
+		return submissionCmd(client, rest, stdout, stderr)
 	default:
 		sayln(stderr, "shardpostctl: unknown command", cmd)
 		return exUsage
@@ -251,7 +254,8 @@ func failure(stderr io.Writer, e *adminapi.Error, status int) int {
 	sayf(stderr, "shardpostctl: %s: %s\n", e.Code, e.Message)
 
 	switch e.Code {
-	case adminapi.NoSuchUser, adminapi.NoSuchMailbox, adminapi.NoSuchJob, adminapi.NoSuchMessage, adminapi.NoSuchScript:
+	case adminapi.NoSuchUser, adminapi.NoSuchMailbox, adminapi.NoSuchJob, adminapi.NoSuchMessage, adminapi.NoSuchScript,
+		adminapi.NoSuchSubmission:
 		return exNoUser
 	case adminapi.OverQuota, adminapi.LimitExceeded:
 		return exCantCreate

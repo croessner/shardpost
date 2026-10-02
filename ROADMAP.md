@@ -282,8 +282,8 @@ back-references, authentication, blob upload and download), stage 2
 stage 4 (`Email/query`, `Email/queryChanges`, `Email/set`,
 `Email/import`, `Email/parse`, `Email/copy`) and stage 5 (push with an
 event source and a Web Push worker, `Identity/*`, `EmailSubmission/*`
-as a proxy to the relay with XCLIENT; delayed sending prepared, not
-offered) are implemented, and of stage 6 itself `Quota/*`,
+as a proxy to the relay with XCLIENT; delayed sending with
+`FUTURERELEASE` since 0.43.0) are implemented, and of stage 6 itself `Quota/*`,
 `VacationResponse/*`, `Blob/*` (RFC 9404), `SieveScript/*` (RFC 9661)
 and the first part of sharing (6c-1: shared mailboxes and public folders
 as accounts of the session, with the RFC 4314 rights enforced as IMAP

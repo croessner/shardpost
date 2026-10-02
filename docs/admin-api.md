@@ -38,7 +38,7 @@ by itself. For mTLS, `admin.tls_cert`, `admin.tls_key` and
 restart. A broken new version is logged, and until it is fixed the old one
 stays in use. Client certificates need `extKeyUsage clientAuth`.
 
-Roles: `diagnose` (version, server status and read-only diagnosis), `deliver` (delivery with quota enforcement),
+Roles: `diagnose` (version, server status and read-only diagnosis, delayed JMAP submissions), `deliver` (delivery with quota enforcement),
 `deliver:noenforce` (additionally required for `enforce_quota=false`),
 `import` (account import), `trace` (protocol trace of an account, see
 below), `provision` (create, rename and subscribe mailboxes; change
@@ -46,7 +46,7 @@ ACLs), `repair` (maintenance jobs that repair; retry learning jobs;
 flush the auth cache, see below),
 `delete` (permanently delete a mailbox, messages and an account),
 `content` (read message content: search, headers, export, Sieve scripts)
-and `support` (flags, copy/move, change and activate Sieve scripts) and
+and `support` (flags, copy/move, change and activate Sieve scripts, cancel delayed JMAP submissions) and
 `export` (export whole accounts as an archive; the restore runs through
 `import`). `content` is deliberately separate from `diagnose`: diagnosis
 sees metadata, but no content.
@@ -854,6 +854,31 @@ Reading it out, for example:
 kubectl -n shardpost logs -l app.kubernetes.io/name=shardpost-server -c server --since=30m \
   | jq -r 'select(.event=="protocol_trace" and .user=="user@example.org") | "\(.time) \(.session_id[0:8]) \(.dir): \(.line)"'
 ```
+
+## Delayed JMAP submissions
+
+The pending delayed submissions of an account (JMAP `HOLDFOR` and
+`HOLDUNTIL`, see [JMAP](jmap.md#delayed-sending)) can be listed and
+canceled for the user:
+
+```sh
+shardpostctl submission list user@example.org                 # role diagnose
+shardpostctl submission cancel user@example.org S5f0c1e2d3b4a  # role support
+```
+
+API: `GET /admin/v1/accounts/{account}/submissions` (role `diagnose`)
+lists the submissions the account still holds a message copy for —
+pending, being sent, or ended and not yet cleaned up — by release time,
+read from the account's intents and one record each, without a listing.
+`POST /admin/v1/accounts/{account}/submissions/{submission}/cancel`
+(role `support`) cancels a pending one as a JMAP client would: the
+message is not sent, its copy is deleted, the EmailSubmission shows
+`canceled`, and the record names the canceling principal
+(`canceled_by` `admin:<identity>`). A submission the worker has begun to
+send is `conflict` (409); one that ended and was cleaned up is
+`no_such_submission` (404). Without the admin store indexes there is no
+queue and both answer `temporary` (503). See the
+[manual page](man/man1/shardpostctl-submission.1).
 
 ## Auth cache flush
 

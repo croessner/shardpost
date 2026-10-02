@@ -16,7 +16,6 @@ import (
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
-	"shardpost/internal/outbound"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/webpush"
 )
@@ -32,7 +31,7 @@ func (srv *servers) setupHTTP(log *slog.Logger, settings *config.Config, store *
 		return err
 	}
 
-	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog)
+	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog, srv.sendq)
 	if err != nil {
 		return err
 	}
@@ -189,25 +188,20 @@ func (srv *servers) jmapSubmission(c config.JMAPSubmission, store *cephstore.Sto
 		srv.jmapKV = kv
 	}
 
-	timeout := sec(c.TimeoutSeconds)
-	if timeout <= 0 {
-		timeout = 30 * time.Second
+	relay := submissionRelay(c)
+
+	if c.XClient && c.User != "" {
+		slog.Warn("jmap.submission.user is ignored with xclient on: the relay is told the user, not logged into")
 	}
 
-	relay := &outbound.Relay{Addr: c.RelayAddr, HELO: c.Helo, StartTLS: c.Starttls, Implicit: c.TLS,
-		ServerName: c.ServerName, Timeout: timeout}
-
-	switch {
-	case !c.XClient:
-		relay.User, relay.Password = c.User, c.Password
-	case c.User != "":
-		slog.Warn("jmap.submission.user is ignored with xclient on: the relay is told the user, not logged into")
+	if c.Delayed.Enabled() && srv.sendq == nil {
+		return nil, fmt.Errorf("jmap.submission.delayed needs the submission queue (admin.kv_index write or read)")
 	}
 
 	return &jmap.SubmissionOptions{
 		Relay: relay, KV: srv.jmapKV, AddressAttributes: c.Attributes(), XClient: c.XClient, XClientAddr: c.XClientAddr,
 		CheckSender: c.CheckSender, MaxRecipients: int(c.MaxRecipients), MaxSize: c.MaxSize,
-		Retention: sec(c.RetentionSeconds), MaxKept: int(c.MaxKept),
+		Retention: sec(c.RetentionSeconds), MaxKept: int(c.MaxKept), Delayed: delayedOptions(c.Delayed, srv.sendq),
 	}, nil
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"shardpost/internal/model"
 	"shardpost/internal/outbound"
+	"shardpost/internal/sendqueue"
 )
 
 // EmailSubmission (RFC 8621 7). ShardPost sends nothing itself: it hands
@@ -19,11 +20,26 @@ import (
 // against the account's identities, bounds the recipients and removes the
 // Bcc field.
 //
-// A submission is final as soon as the relay has taken it: delayed
-// sending (FUTURERELEASE) is not offered, so maxDelayedSend is 0, every
-// submission is "final", and a cancellation is cannotUnsend. The record
-// keeps sendAt and undoStatus all the same, so that a queue for delayed
-// sending can be added without changing what is stored.
+// A submission without FUTURERELEASE is final as soon as the relay has
+// taken it. With delayed sending configured (SubmissionOptions.Delayed),
+// a client asks for a later release with the MAIL FROM parameter HOLDFOR
+// or HOLDUNTIL of the envelope (RFC 4865, RFC 8621 7): the message is
+// copied, the submission waits in the queue (internal/sendqueue) with
+// undoStatus "pending" and sendAt at the release time, a client may set
+// undoStatus to "canceled" until the worker begins to send it, and the
+// worker writes "final" (or "canceled") with the delivery status here
+// when it ends. A submission that failed is "final" with "delivered":
+// "no"; one whose sending was interrupted is "final" with "unknown"
+// (sent at most once, never repeated).
+//
+// onSuccessUpdateEmail and onSuccessDestroyEmail apply when the
+// EmailSubmission/set succeeds (RFC 8621 7.5 ties them to the create,
+// update or destroy, not to the delivery), so for a delayed submission
+// at its creation: the queue sends the copy taken then, and the draft
+// may be moved or destroyed at once (7.5: destroying the Email does not
+// change the submission). Destroying a pending EmailSubmission removes
+// its record only and does not cancel it (7.5); a client cancels by
+// setting undoStatus.
 //
 // The records of an account are one record in the admin store, bounded
 // in number and age: RFC 8621 7 lets a server destroy a submission at any
@@ -39,6 +55,14 @@ const (
 	undoPending  = "pending"
 	undoFinal    = "final"
 	undoCanceled = "canceled"
+)
+
+// extFutureRelease is the SMTP extension of delayed sending (RFC 4865),
+// with its MAIL FROM parameters.
+const (
+	extFutureRelease = "FUTURERELEASE"
+	paramHoldFor     = "HOLDFOR"
+	paramHoldUntil   = "HOLDUNTIL"
 )
 
 // The set errors of EmailSubmission (RFC 8621 7.5).
@@ -147,13 +171,15 @@ func (b *submissionBook) note(id string, op model.AccountOp) {
 const maxSubmissionBytes = 1 << 20
 
 // expire drops the submissions over the age, the number and the size an
-// account keeps, oldest first; to a client it is a destruction.
+// account keeps, oldest first; to a client it is a destruction. A
+// pending submission is not dropped for the number (its sendAt lies
+// ahead, so it is never too old).
 func (b *submissionBook) expire(maxAge time.Duration, maxKept int) {
 	cut := time.Now().Add(-maxAge)
 	kept := b.Subs[:0]
 
 	for i, s := range b.Subs {
-		if s.SendAt.Before(cut) || len(b.Subs)-i > maxKept {
+		if s.SendAt.Before(cut) || (len(b.Subs)-i > maxKept && s.UndoStatus != undoPending) {
 			b.note(s.ID, model.OpDestroyed)
 			continue
 		}
@@ -212,6 +238,59 @@ func updateSubmissions(kv model.AdminKV, account string, opts *SubmissionOptions
 
 		return json.Marshal(b)
 	})
+}
+
+// submissionBookView is the JMAP view the delayed submission queue
+// settles finished submissions in (sendqueue.Book).
+type submissionBookView struct {
+	kv   model.AdminKV
+	opts *SubmissionOptions
+}
+
+// SubmissionBook returns the JMAP view of the accounts' submissions for
+// the delayed submission queue; retention and maxKept are those of the
+// front-end (0 takes the default).
+func SubmissionBook(kv model.AdminKV, retention time.Duration, maxKept int) sendqueue.Book {
+	return &submissionBookView{kv: kv, opts: submissionDefaults(&SubmissionOptions{Retention: retention, MaxKept: maxKept}, 0)}
+}
+
+// errNoChange aborts an update that has nothing to write.
+var errNoChange = errors.New("nothing to change")
+
+// Settle implements sendqueue.Book: the submission's undoStatus and
+// deliveryStatus, if the account still has it (a client may have
+// destroyed it; RFC 8621 7.5 says that does not cancel it).
+func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
+	status := undoFinal
+	if rec.State == sendqueue.StateCanceled {
+		status = undoCanceled
+	}
+
+	var ds map[string]deliveryStatus
+
+	if len(rec.Delivery) > 0 && status == undoFinal {
+		ds = make(map[string]deliveryStatus, len(rec.Delivery))
+		for rcpt, d := range rec.Delivery {
+			ds[rcpt] = deliveryStatus{SMTPReply: d.SMTPReply, Delivered: d.Delivered, Displayed: lookupUnknown}
+		}
+	}
+
+	err := updateSubmissions(v.kv, rec.Account, v.opts, func(b *submissionBook) error {
+		s := b.find(rec.ID)
+		if s == nil || s.UndoStatus == status {
+			return errNoChange
+		}
+
+		s.UndoStatus, s.DeliveryStatus = status, ds
+		b.note(s.ID, model.OpUpdated)
+
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return nil
+	}
+
+	return err
 }
 
 // submissionStore is the configuration and the store of submissions.

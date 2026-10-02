@@ -1018,7 +1018,7 @@ func (sr *scrubRun) collectOrphans(refs map[string][]Meta) (map[string]int, erro
 		rest := strings.TrimPrefix(oid, msgPrefix)
 
 		guid, chunkStr, _ := strings.Cut(rest, "/")
-		if _, ok := refs[guid]; ok {
+		if _, ok := refs[guid]; ok || sr.liveCopy(guid) {
 			continue
 		}
 
@@ -1031,6 +1031,19 @@ func (sr *scrubRun) collectOrphans(refs map[string][]Meta) (map[string]int, erro
 	iter.Close()
 
 	return orphans, nil
+}
+
+// liveCopy reports whether guid is the copy of a delayed submission that
+// has not expired: nothing references it, but it is no orphan
+// (subcopies.go). The intents were read before the listing.
+func (sr *scrubRun) liveCopy(guid string) bool {
+	if _, ok := sr.intents.reg[regSubmissionPrefix][guid]; !ok {
+		return false
+	}
+
+	c := sr.intents.blobs[guid]
+
+	return c == nil || !c.old
 }
 
 // removeOrphans deletes orphan blobs. An orphan is only deleted when two

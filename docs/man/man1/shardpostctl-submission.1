@@ -1,0 +1,121 @@
+.TH SHARDPOSTCTL-SUBMISSION 1 "2026-10-02" "ShardPost 0.43.0" "ShardPost Manual"
+.SH NAME
+shardpostctl-submission \- list and cancel delayed JMAP submissions of an account
+.SH SYNOPSIS
+.B shardpostctl submission list
+.RB [ \-json ]
+.I account
+.br
+.B shardpostctl submission cancel
+.RB [ \-json ]
+.I account
+.I id
+.SH DESCRIPTION
+A JMAP client can ask for a message to be released later (EmailSubmission
+with the FUTURERELEASE parameter HOLDFOR or HOLDUNTIL). Such a submission
+waits in the submission queue of the cluster until its release time;
+then a worker sends a copy of the message that was taken when it was
+created. These commands show the submissions an account has waiting and
+cancel one for the user.
+.PP
+Delayed sending is offered with
+.IR jmap.submission.delayed.max_delay_seconds ;
+the queue needs the admin store indexes
+.RI ( admin.kv_index
+.B write
+or
+.BR read ).
+Without them both commands fail with exit status 75.
+.SS submission list
+Lists the submissions the account still holds a message copy for, by
+release time: pending, being sent, or ended and not yet cleaned up. Each
+line names the submission id, its state
+.RB ( pending ,
+.BR sending ,
+.BR final ,
+.BR canceled ,
+.BR failed ),
+the release time, the attempts so far, the size and the envelope. The
+list is read from the account's own records, without a listing of the
+cluster. Role:
+.BR diagnose .
+.SS submission cancel
+Cancels a pending submission as a JMAP client would (undoStatus
+canceled): the message is not sent, its copy is deleted, and the user's
+EmailSubmission shows
+.BR canceled .
+The record names who canceled it
+.RB ( admin: \fIidentity\fR).
+A submission that the worker has begun to send cannot be canceled any
+more (exit status 65); one that has ended and was cleaned up is not
+found (exit status 67). Tell the user: their client shows the
+submission as canceled. Role:
+.BR support .
+.SH OPTIONS
+.TP
+.B \-json
+Print the answer as JSON.
+.SH EXAMPLES
+A user asks why a message they scheduled has not gone out yet:
+.PP
+.nf
+.RS
+shardpostctl submission list user@example.org
+.RE
+.fi
+.PP
+The user scheduled a message to the wrong recipients and cannot reach
+their client; cancel it:
+.PP
+.nf
+.RS
+shardpostctl submission cancel user@example.org S5f0c1e2d3b4a5f6e7d8c9b0a
+.RE
+.fi
+.PP
+Before going back to a release older than 0.43.0 the queue has to be
+empty; find what an account still has waiting, as JSON:
+.PP
+.nf
+.RS
+shardpostctl submission list -json user@example.org | jq -r '.items[] | "\e(.id) \e(.state) \e(.release)"'
+.RE
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Done.
+.TP
+.B 64
+Wrong arguments, or the account or id is not valid.
+.TP
+.B 65
+The submission is no longer pending (it is being sent or has been sent).
+.TP
+.B 67
+No such submission (it may have ended).
+.TP
+.B 70
+An unexpected answer from the server.
+.TP
+.B 75
+The server cannot be reached, or it has no submission queue (try again,
+or check
+.IR admin.kv_index ).
+.TP
+.B 77
+The caller lacks the role
+.B diagnose
+(list) or
+.B support
+(cancel), or may not address the account.
+.SH SEE ALSO
+.BR shardpostctl (1),
+.BR shardpostctl-account (1)
+.PP
+Delayed sending is described in
+.IR docs/jmap.md ,
+its settings in
+.IR docs/configuration.md ,
+its operation and the rollback rule in
+.IR docs/operations/README.md .

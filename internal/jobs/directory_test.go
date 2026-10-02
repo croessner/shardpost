@@ -9,6 +9,7 @@ import (
 
 	"shardpost/internal/memstore"
 	"shardpost/internal/model"
+	"shardpost/internal/sendqueue"
 )
 
 func dirEntry(t *testing.T, store *memstore.Store, account string) (model.AccountEntry, bool) {
@@ -268,5 +269,44 @@ func TestPurgeRunning(t *testing.T) {
 		if got, err := PurgeRunning(kv, session); err != nil || got != want {
 			t.Errorf("%q: %v %v", session, got, err)
 		}
+	}
+}
+
+// TestPurgeRemovesSubmissions: a purge removes the account's delayed
+// submissions (record, queue entry, copy) and leaves other accounts'.
+func TestPurgeRemovesSubmissions(t *testing.T) {
+	m, store := kindsSetup(t)
+
+	q, err := sendqueue.New(sendqueue.Options{KV: memstore.NewAdminKV(), Accounts: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.env.Submissions = q
+
+	ids := map[string]string{"alice": "S0a", "bob": "S0b"}
+
+	for account, id := range ids {
+		u, _ := store.User(account)
+
+		if _, err := q.Schedule(u, sendqueue.Spec{Account: account, ID: id, Release: time.Now().Add(time.Hour),
+			MailFrom: account, RcptTo: []string{"x@example.net"}, Raw: []byte("x\r\n")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	planAndApply(t, m, KindPurge, "alice", nil)
+
+	if _, err := q.Get("alice", ids["alice"]); !errors.Is(err, sendqueue.ErrNotFound) {
+		t.Errorf("alice's submission left: %v", err)
+	}
+
+	if list, err := q.List("bob"); err != nil || len(list) != 1 {
+		t.Errorf("bob's submissions %d %v", len(list), err)
+	}
+
+	u, _ := store.User("alice")
+	if copies, _ := u.(model.SubmissionCopies).SubmissionCopies(); len(copies) != 0 {
+		t.Errorf("alice's copies left: %d", len(copies))
 	}
 }

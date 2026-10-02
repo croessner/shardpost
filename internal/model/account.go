@@ -1,6 +1,9 @@
 package model
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // The account change log answers the one question the IMAP data model
 // cannot: what changed anywhere in this account. RFC 7162 counts per
@@ -123,6 +126,37 @@ type Blobs interface {
 	// up again for every buffer it fills. A length of -1 reads to the
 	// end; a range beyond the end is truncated, not an error.
 	ReadBlob(guid string, size, offset, length int64) ([]byte, error)
+}
+
+// SubmissionCopies is implemented by stores that keep the message of a
+// delayed JMAP submission (scaling plan B10). The copy is a blob of its
+// own, never a reference to the message in a mailbox: RFC 8621 7.5 says
+// that destroying the Email after the submission was created must not
+// change what is sent. Like an upload it is recorded as an intent in the
+// account ("sub:<guid>"), so a purge and a scrub find it without a
+// listing; the intent carries the submission id and when the copy may be
+// taken for debris.
+type SubmissionCopies interface {
+	// PutSubmissionCopy stores raw as the copy of submission id; the
+	// copy counts as debris after expires.
+	PutSubmissionCopy(id string, raw []byte, expires time.Time) (guid string, err error)
+	// ReadSubmissionCopy returns the copy. ErrNoBlob: there is none.
+	ReadSubmissionCopy(guid string) ([]byte, error)
+	// DropSubmissionCopy deletes the copy and its intent; a copy that is
+	// gone already is no error.
+	DropSubmissionCopy(guid string) error
+	// SubmissionCopies lists the copies the account holds, from their
+	// intents (no listing of a pool).
+	SubmissionCopies() ([]SubmissionCopy, error)
+}
+
+// SubmissionCopy is the intent of one submission copy.
+type SubmissionCopy struct {
+	GUID    string
+	ID      string
+	Size    int64
+	Created time.Time
+	Expires time.Time
 }
 
 // AccountWatcher is implemented by stores that can tell a front-end,

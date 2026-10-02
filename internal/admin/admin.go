@@ -126,6 +126,9 @@ type Options struct {
 	Directory model.AccountDirectory
 	// Learning is the learning queue (nil: its operations answer 503).
 	Learning LearningAdmin
+	// Submissions is the delayed JMAP submission queue (nil: its
+	// operations answer 503).
+	Submissions SubmissionAdmin
 	// SearchScanLimit bounds the messages one search request examines.
 	SearchScanLimit int
 	// AuthFlush flushes the auth cache of the cluster; nil when this

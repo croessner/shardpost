@@ -172,6 +172,7 @@ const (
 	NoSuchMailbox      ErrorCode = "no_such_mailbox"
 	NoSuchMessage      ErrorCode = "no_such_message"
 	NoSuchScript       ErrorCode = "no_such_script"
+	NoSuchSubmission   ErrorCode = "no_such_submission"
 	NoSuchUser         ErrorCode = "no_such_user"
 	NotLocked          ErrorCode = "not_locked"
 	OverQuota          ErrorCode = "over_quota"
@@ -206,6 +207,8 @@ func (e ErrorCode) Valid() bool {
 	case NoSuchMessage:
 		return true
 	case NoSuchScript:
+		return true
+	case NoSuchSubmission:
 		return true
 	case NoSuchUser:
 		return true
@@ -333,6 +336,33 @@ func (e PlanRequestKind) Valid() bool {
 	case QuotaRecalc:
 		return true
 	case Scrub:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SubmissionState.
+const (
+	SubmissionCanceled SubmissionState = "canceled"
+	SubmissionFailed   SubmissionState = "failed"
+	SubmissionFinal    SubmissionState = "final"
+	SubmissionPending  SubmissionState = "pending"
+	SubmissionSending  SubmissionState = "sending"
+)
+
+// Valid indicates whether the value is a known member of the SubmissionState enum.
+func (e SubmissionState) Valid() bool {
+	switch e {
+	case SubmissionCanceled:
+		return true
+	case SubmissionFailed:
+		return true
+	case SubmissionFinal:
+		return true
+	case SubmissionPending:
+		return true
+	case SubmissionSending:
 		return true
 	default:
 		return false
@@ -1173,6 +1203,45 @@ type StoredMessage struct {
 	Uid     int64  `json:"uid"`
 }
 
+// Submission A delayed JMAP submission as the submission queue keeps it. The
+// state `failed` and an `unknown` result show in JMAP as
+// undoStatus `final`.
+type Submission struct {
+	Account    string    `json:"account"`
+	Attempts   int       `json:"attempts"`
+	CanceledBy *string   `json:"canceled_by,omitempty"`
+	Created    time.Time `json:"created"`
+
+	// Due When a pending submission is tried next (later than `release` after a temporary failure).
+	Due      time.Time  `json:"due"`
+	Finished *time.Time `json:"finished,omitempty"`
+	Id       string     `json:"id"`
+	MailFrom string     `json:"mail_from"`
+	RcptTo   []string   `json:"rcpt_to"`
+
+	// Reason Why it failed or its result is unknown, or why the last attempt was retried.
+	Reason *string `json:"reason,omitempty"`
+
+	// Release The release time the client asked for (sendAt).
+	Release time.Time `json:"release"`
+
+	// SendingSince Start of the current attempt (state `sending`).
+	SendingSince *time.Time      `json:"sending_since,omitempty"`
+	Size         int64           `json:"size"`
+	State        SubmissionState `json:"state"`
+
+	// Unknown The sending was interrupted; the message may or may not have been relayed and is not sent again.
+	Unknown *bool `json:"unknown,omitempty"`
+}
+
+// SubmissionState defines model for Submission.State.
+type SubmissionState string
+
+// SubmissionList defines model for SubmissionList.
+type SubmissionList struct {
+	Items []Submission `json:"items"`
+}
+
 // TraceRequest defines model for TraceRequest.
 type TraceRequest struct {
 	// DurationSeconds How long the trace lasts (capped at the configured maximum).
@@ -1221,6 +1290,9 @@ type Reader = string
 
 // ScriptName defines model for ScriptName.
 type ScriptName = string
+
+// SubmissionID defines model for SubmissionID.
+type SubmissionID = string
 
 // UID defines model for UID.
 type UID = int64
@@ -2238,6 +2310,30 @@ type ClientInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
 	PutSieveScript(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSubmissions The account's delayed JMAP submissions
+	//
+	// The delayed submissions (JMAP EmailSubmission with HOLDFOR or
+	// HOLDUNTIL) the account still holds a message copy for: pending,
+	// being sent, or ended and not yet cleaned up. Read from the
+	// account's intents and one record per submission, no listing; the
+	// account is not resolved through Nauthilus. Requires the role
+	// `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/submissions (the `ListSubmissions` operationId).
+	ListSubmissions(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelSubmission Cancel a pending delayed submission
+	//
+	// Cancels a pending delayed submission as a JMAP client would
+	// (undoStatus canceled): the message is not sent, its copy is
+	// deleted, and the account's EmailSubmission shows `canceled`.
+	// Once the worker has begun to send it the cancel is refused with
+	// `conflict`; a submission that has ended and been cleaned up is
+	// `no_such_submission`. Requires the role `support`.
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/submissions/{submission}/cancel (the `CancelSubmission` operationId).
+	CancelSubmission(ctx context.Context, account Account, submission SubmissionID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ClearTrace Switch the protocol trace off
 	//
@@ -3764,6 +3860,50 @@ func (c *Client) PutSieveScriptWithBody(ctx context.Context, account Account, na
 // Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
 func (c *Client) PutSieveScript(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutSieveScriptRequest(c.Server, account, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListSubmissions The account's delayed JMAP submissions
+//
+// The delayed submissions (JMAP EmailSubmission with HOLDFOR or
+// HOLDUNTIL) the account still holds a message copy for: pending,
+// being sent, or ended and not yet cleaned up. Read from the
+// account's intents and one record per submission, no listing; the
+// account is not resolved through Nauthilus. Requires the role
+// `diagnose`.
+//
+// Corresponds with GET /admin/v1/accounts/{account}/submissions (the `ListSubmissions` operationId).
+func (c *Client) ListSubmissions(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSubmissionsRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CancelSubmission Cancel a pending delayed submission
+//
+// Cancels a pending delayed submission as a JMAP client would
+// (undoStatus canceled): the message is not sent, its copy is
+// deleted, and the account's EmailSubmission shows `canceled`.
+// Once the worker has begun to send it the cancel is refused with
+// `conflict`; a submission that has ended and been cleaned up is
+// `no_such_submission`. Requires the role `support`.
+//
+// Corresponds with POST /admin/v1/accounts/{account}/submissions/{submission}/cancel (the `CancelSubmission` operationId).
+func (c *Client) CancelSubmission(ctx context.Context, account Account, submission SubmissionID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelSubmissionRequest(c.Server, account, submission)
 	if err != nil {
 		return nil, err
 	}
@@ -6561,6 +6701,81 @@ func NewPutSieveScriptRequestWithBody(server string, account Account, name Scrip
 	return req, nil
 }
 
+// NewListSubmissionsRequest constructs an http.Request for the ListSubmissions method
+func NewListSubmissionsRequest(server string, account Account) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/submissions", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCancelSubmissionRequest constructs an http.Request for the CancelSubmission method
+func NewCancelSubmissionRequest(server string, account Account, submission SubmissionID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "submission", submission, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/submissions/%s/cancel", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewClearTraceRequest constructs an http.Request for the ClearTrace method
 func NewClearTraceRequest(server string, account Account) (*http.Request, error) {
 	var err error
@@ -8085,6 +8300,34 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with PUT /admin/v1/accounts/{account}/sieve/{name} (the `PutSieveScript` operationId).
 	PutSieveScriptWithResponse(ctx context.Context, account Account, name ScriptName, params *PutSieveScriptParams, body PutSieveScriptJSONRequestBody, reqEditors ...RequestEditorFn) (*PutSieveScriptResponse, error)
+
+	// ListSubmissionsWithResponse The account's delayed JMAP submissions
+	//
+	// The delayed submissions (JMAP EmailSubmission with HOLDFOR or
+	// HOLDUNTIL) the account still holds a message copy for: pending,
+	// being sent, or ended and not yet cleaned up. Read from the
+	// account's intents and one record per submission, no listing; the
+	// account is not resolved through Nauthilus. Requires the role
+	// `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/submissions (the `ListSubmissions` operationId).
+	ListSubmissionsWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSubmissionsResponse, error)
+
+	// CancelSubmissionWithResponse Cancel a pending delayed submission
+	//
+	// Cancels a pending delayed submission as a JMAP client would
+	// (undoStatus canceled): the message is not sent, its copy is
+	// deleted, and the account's EmailSubmission shows `canceled`.
+	// Once the worker has begun to send it the cancel is refused with
+	// `conflict`; a submission that has ended and been cleaned up is
+	// `no_such_submission`. Requires the role `support`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/accounts/{account}/submissions/{submission}/cancel (the `CancelSubmission` operationId).
+	CancelSubmissionWithResponse(ctx context.Context, account Account, submission SubmissionID, reqEditors ...RequestEditorFn) (*CancelSubmissionResponse, error)
 
 	// ClearTraceWithResponse Switch the protocol trace off
 	//
@@ -10349,6 +10592,102 @@ func (r PutSieveScriptResponse) ContentType() string {
 	return ""
 }
 
+type ListSubmissionsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SubmissionList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListSubmissionsResponse) GetJSON200() *SubmissionList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListSubmissionsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListSubmissionsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSubmissionsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSubmissionsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListSubmissionsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CancelSubmissionResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Submission
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CancelSubmissionResponse) GetJSON200() *Submission {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CancelSubmissionResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CancelSubmissionResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelSubmissionResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelSubmissionResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CancelSubmissionResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ClearTraceResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -12185,6 +12524,46 @@ func (c *ClientWithResponses) PutSieveScriptWithResponse(ctx context.Context, ac
 	return ParsePutSieveScriptResponse(rsp)
 }
 
+// ListSubmissionsWithResponse The account's delayed JMAP submissions
+//
+// The delayed submissions (JMAP EmailSubmission with HOLDFOR or
+// HOLDUNTIL) the account still holds a message copy for: pending,
+// being sent, or ended and not yet cleaned up. Read from the
+// account's intents and one record per submission, no listing; the
+// account is not resolved through Nauthilus. Requires the role
+// `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/submissions (the `ListSubmissions` operationId).
+func (c *ClientWithResponses) ListSubmissionsWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ListSubmissionsResponse, error) {
+	rsp, err := c.ListSubmissions(ctx, account, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSubmissionsResponse(rsp)
+}
+
+// CancelSubmissionWithResponse Cancel a pending delayed submission
+//
+// Cancels a pending delayed submission as a JMAP client would
+// (undoStatus canceled): the message is not sent, its copy is
+// deleted, and the account's EmailSubmission shows `canceled`.
+// Once the worker has begun to send it the cancel is refused with
+// `conflict`; a submission that has ended and been cleaned up is
+// `no_such_submission`. Requires the role `support`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/accounts/{account}/submissions/{submission}/cancel (the `CancelSubmission` operationId).
+func (c *ClientWithResponses) CancelSubmissionWithResponse(ctx context.Context, account Account, submission SubmissionID, reqEditors ...RequestEditorFn) (*CancelSubmissionResponse, error) {
+	rsp, err := c.CancelSubmission(ctx, account, submission, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelSubmissionResponse(rsp)
+}
+
 // ClearTraceWithResponse Switch the protocol trace off
 //
 // Removes the switch; a traced session stops at its next command once
@@ -14015,6 +14394,72 @@ func ParsePutSieveScriptResponse(rsp *http.Response) (*PutSieveScriptResponse, e
 	return response, nil
 }
 
+// ParseListSubmissionsResponse parses an HTTP response from a ListSubmissionsWithResponse call
+func ParseListSubmissionsResponse(rsp *http.Response) (*ListSubmissionsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSubmissionsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SubmissionList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelSubmissionResponse parses an HTTP response from a CancelSubmissionWithResponse call
+func ParseCancelSubmissionResponse(rsp *http.Response) (*CancelSubmissionResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelSubmissionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Submission
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseClearTraceResponse parses an HTTP response from a ClearTraceWithResponse call
 func ParseClearTraceResponse(rsp *http.Response) (*ClearTraceResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -14671,6 +15116,12 @@ type ServerInterface interface {
 	// PutSieveScript Store (and optionally activate) a Sieve script
 	// (PUT /admin/v1/accounts/{account}/sieve/{name})
 	PutSieveScript(w http.ResponseWriter, r *http.Request, account Account, name ScriptName, params PutSieveScriptParams)
+	// ListSubmissions The account's delayed JMAP submissions
+	// (GET /admin/v1/accounts/{account}/submissions)
+	ListSubmissions(w http.ResponseWriter, r *http.Request, account Account)
+	// CancelSubmission Cancel a pending delayed submission
+	// (POST /admin/v1/accounts/{account}/submissions/{submission}/cancel)
+	CancelSubmission(w http.ResponseWriter, r *http.Request, account Account, submission SubmissionID)
 	// ClearTrace Switch the protocol trace off
 	// (DELETE /admin/v1/accounts/{account}/trace)
 	ClearTrace(w http.ResponseWriter, r *http.Request, account Account)
@@ -16692,6 +17143,67 @@ func (siw *ServerInterfaceWrapper) PutSieveScript(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// ListSubmissions operation middleware
+func (siw *ServerInterfaceWrapper) ListSubmissions(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListSubmissions(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CancelSubmission operation middleware
+func (siw *ServerInterfaceWrapper) CancelSubmission(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "submission" -------------
+	var submission SubmissionID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "submission", r.PathValue("submission"), &submission, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "submission", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CancelSubmission(w, r, account, submission)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ClearTrace operation middleware
 func (siw *ServerInterfaceWrapper) ClearTrace(w http.ResponseWriter, r *http.Request) {
 
@@ -17363,6 +17875,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/shared", wrapper.ListSharedMailboxes)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/directory", wrapper.GetAccountDirectory)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/directory/repair", wrapper.RepairAccountDirectory)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/submissions", wrapper.ListSubmissions)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/submissions/{submission}/cancel", wrapper.CancelSubmission)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/plans", wrapper.CreatePlan)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/plans", wrapper.CreateBatchPlan)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/plans/{plan}", wrapper.GetPlan)

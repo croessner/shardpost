@@ -673,6 +673,22 @@ stays well below the response timeouts in front (the Director's
 behind a proxy every client then has the proxy's address. See
 [JMAP: Load](jmap.md#load).
 
+### Delayed sending
+
+JMAP delayed sending (`FUTURERELEASE`, see [JMAP](jmap.md#delayed-sending)
+and [operations](operations/README.md#delayed-submissions)):
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `jmap.submission.delayed.max_delay_seconds` | `JMAP_SUBMISSION_DELAYED_MAX_DELAY_SECONDS` | 0 | the longest delay a client may ask for with `HOLDFOR`/`HOLDUNTIL`, advertised as `maxDelayedSend` (0–31536000); 0 offers no delayed sending. Needs `jmap.submission.relay_addr` and `admin.kv_index` `write` or `read` |
+| `jmap.submission.delayed.worker` | `JMAP_SUBMISSION_DELAYED_WORKER` | true | this server runs the submission worker (with a relay); it runs also with `max_delay_seconds` 0, so that what is queued is still sent |
+| `jmap.submission.delayed.partitions` | `JMAP_SUBMISSION_DELAYED_PARTITIONS` | 1 | worker partitions: the accounts by hash, each partition with a lease of its own (1–64); all servers should use the same value (a difference costs only duplicate reads: the record is the fence) |
+| `jmap.submission.delayed.max_partitions` | `JMAP_SUBMISSION_DELAYED_MAX_PARTITIONS` | 0 | partitions one server holds at most (0: all; at most `partitions`) |
+| `jmap.submission.delayed.poll_seconds` | `JMAP_SUBMISSION_DELAYED_POLL_SECONDS` | 30 | how often a worker looks at the queue without a notification, and tries to take free partitions (1–3600); a new submission wakes the workers at once, and a worker sleeps only until the earliest entry it saw is due |
+| `jmap.submission.delayed.sending_timeout_seconds` | `JMAP_SUBMISSION_DELAYED_SENDING_TIMEOUT_SECONDS` | 3600 | how long a submission may stay in `sending` before it counts as final with an unknown result and is not sent again (1800–86400); has to exceed the longest conversation with the relay |
+| `jmap.submission.delayed.concurrency` | `JMAP_SUBMISSION_DELAYED_CONCURRENCY` | 4 | conversations with the relay one worker holds at once (1–64) |
+| `jmap.submission.delayed.retry_attempts` | `JMAP_SUBMISSION_DELAYED_RETRY_ATTEMPTS` | 5 | attempts of a submission whose relay failed temporarily before the message was transferred (1–20); the backoff starts at one minute and doubles up to 30 minutes |
+
 ### Nauthilus client (`nauthilus.timeout`, `nauthilus.http_max_idle_per_host`)
 
 | Key | Env | Default | Meaning |

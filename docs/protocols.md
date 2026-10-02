@@ -518,7 +518,7 @@ set.
 |---|---|---|---|
 | `urn:ietf:params:jmap:core` | RFC 8620 | ✅ | See the limits below. |
 | `urn:ietf:params:jmap:mail` | RFC 8621 | ✅ | `maxSizeMailboxName` 255, `maxSizeAttachmentsPerEmail` = upload limit, no mailbox-per-email or depth limit. |
-| `urn:ietf:params:jmap:submission` | RFC 8621 | ⚙ | With `jmap.submission.relay_addr`. `maxDelayedSend` 0, no submission extensions. |
+| `urn:ietf:params:jmap:submission` | RFC 8621 | ⚙ | With `jmap.submission.relay_addr`. Delayed sending (`FUTURERELEASE`, RFC 4865: `HOLDFOR`/`HOLDUNTIL`) with `jmap.submission.delayed.max_delay_seconds` (0.43.0); otherwise `maxDelayedSend` 0 and no submission extensions. |
 | `urn:ietf:params:jmap:vacationresponse` | RFC 8621 | ⚙ | With an SMTP relay (`smtp.addr`). |
 | `urn:ietf:params:jmap:quota` | RFC 9425 | ✅ | |
 | `urn:ietf:params:jmap:blob` | RFC 9404 | ✅ | Digests `sha-256`, `sha`; types Email, Mailbox, Thread, SieveScript; `maxSizeBlobSet` = upload limit, `maxDataSources` at least 64. |
@@ -559,7 +559,7 @@ limits: `max_size_blob_set`, `max_data_sources`, `max_size_blob_get`
 | Email | `get`, `changes`, `query`, `queryChanges`, `set`, `copy`, `import`, `parse` | `queryChanges` only for the default sort, without `collapseThreads` and without thread-keyword conditions. |
 | SearchSnippet | `get` | Subject and a body preview (at most 255 octets) with the matched words in `<mark>`; the body is read up to `jmap.search.snippet_read_bytes` (default 256 KiB), a match beyond that gives no preview. Also on shared accounts. |
 | Identity | `get`, `changes`, `set` | `changes` only from the current state. |
-| EmailSubmission | `get`, `changes`, `query`, `queryChanges`, `set` | `onSuccessUpdateEmail`, `onSuccessDestroyEmail`; sent through the relay (see [Outbound SMTP](#outbound-smtp)). `query` filters by `identityIds`, `emailIds`, `threadIds`, `undoStatus`, `before`, `after` with `AND`/`OR`/`NOT`; anything else is `unsupportedFilter`. `queryChanges` always `cannotCalculateChanges`. |
+| EmailSubmission | `get`, `changes`, `query`, `queryChanges`, `set` | `onSuccessUpdateEmail`, `onSuccessDestroyEmail`; sent through the relay (see [Outbound SMTP](#outbound-smtp)). Delayed sending with `undoStatus` `pending` and canceling to `canceled` when configured; sent at most once (an interrupted sending is `final` with `delivered` `unknown`). `query` filters by `identityIds`, `emailIds`, `threadIds`, `undoStatus`, `before`, `after` with `AND`/`OR`/`NOT`; anything else is `unsupportedFilter`. `queryChanges` always `cannotCalculateChanges`. |
 | VacationResponse | `get`, `set` | Stored as metadata and turned into a Sieve vacation at delivery; the user's own vacation wins. |
 | Quota | `get`, `changes`, `query`, `queryChanges` | `queryChanges` always `cannotCalculateChanges`. |
 | Blob | `upload`, `get`, `lookup` | `Blob/copy` is not implemented. |
@@ -847,6 +847,7 @@ implemented.
 | RFC 4616 | SASL PLAIN | IMAP, POP3, ManageSieve, LMTP |
 | RFC 4731 | IMAP ESEARCH | IMAP |
 | RFC 4790 | Collation registry (comparators) | Sieve |
+| RFC 4865 | SMTP Future Message Release (FUTURERELEASE) | JMAP (delayed sending) |
 | RFC 4954 | SMTP AUTH | LMTP, outbound |
 | RFC 4959 | IMAP SASL-IR | IMAP |
 | RFC 4978 | IMAP COMPRESS | IMAP |

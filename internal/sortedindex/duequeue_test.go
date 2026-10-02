@@ -138,6 +138,40 @@ func TestQueueDueMergesShards(t *testing.T) {
 	}
 }
 
+// TestQueueDueAfterPages: DueAfter from the last key of a page returns
+// the next page, so paging reads every due entry once, in order.
+func TestQueueDueAfterPages(t *testing.T) {
+	q := NewQueue(NewMemBackend(), "q", 4)
+	want := seedQueue(t, q, 200, at(200))
+
+	var got []model.DueEntry
+
+	for after := ""; ; {
+		page, err := q.DueAfter(at(200), after, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got = append(got, page...)
+
+		if len(page) < 7 {
+			break
+		}
+
+		after = page[len(page)-1].Key()
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("%d entries paged, want %d", len(got), len(want))
+	}
+
+	for i := range got {
+		if got[i].Key() != want[i].Key() {
+			t.Fatalf("entry %d: %s, want %s", i, got[i].Key(), want[i].Key())
+		}
+	}
+}
+
 // seedQueue writes n entries at random times and returns the ones due
 // at now, in key order.
 func seedQueue(t *testing.T, q *Queue, n int, now time.Time) []model.DueEntry {

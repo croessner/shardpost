@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/mail"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/model"
 	"shardpost/internal/outbound"
+	"shardpost/internal/sendqueue"
 )
 
 // sortSubmissions orders the submissions by the comparators, then by
@@ -208,13 +210,17 @@ func (r *submissionRun) send(ctx context.Context, raw json.RawMessage) (*submiss
 		return nil, serr
 	}
 
-	env, serr := r.envelopeOf(spec.Envelope, hdr, ident)
+	env, release, serr := r.envelopeOf(spec.Envelope, hdr, ident)
 	if serr != nil {
 		return nil, serr
 	}
 
 	if serr := r.checkFrom(hdr); serr != nil {
 		return nil, serr
+	}
+
+	if !release.IsZero() {
+		return r.schedule(ident, emailID, mailmeta.ThreadID(meta), env, release, stripBcc(msg))
 	}
 
 	rep, serr := r.relay(ctx, env, stripBcc(msg))
@@ -226,10 +232,40 @@ func (r *submissionRun) send(ctx context.Context, raw json.RawMessage) (*submiss
 		Envelope: *env, SendAt: time.Now().UTC(), UndoStatus: undoFinal, DeliveryStatus: map[string]deliveryStatus{}}
 
 	for _, rc := range env.RcptTo {
-		s.DeliveryStatus[rc.Email] = deliveryStatus{SMTPReply: rep.Final.String(), Delivered: "queued", Displayed: "unknown"}
+		s.DeliveryStatus[rc.Email] = deliveryStatus{SMTPReply: rep.Final.String(), Delivered: "queued", Displayed: lookupUnknown}
 	}
 
 	return s, nil
+}
+
+// schedule hands a submission with a release time to the delayed
+// submission queue: the copy of the message, the queue entry and the
+// record are written before the client hears of it.
+func (r *submissionRun) schedule(ident *identity, emailID, threadID string, env *envelope, release time.Time, msg []byte) (*submission, *setError) {
+	to := make([]string, 0, len(env.RcptTo))
+	for _, rc := range env.RcptTo {
+		to = append(to, rc.Email)
+	}
+
+	id := "S" + randomHex(12)
+	sp := sendqueue.Spec{Account: r.sess.account, ID: id, Release: release, MailFrom: env.MailFrom.Email, RcptTo: to,
+		XClient: r.opts.XClient, Raw: msg}
+
+	if r.opts.XClient {
+		sp.Login = r.sess.account
+		if r.opts.XClientAddr {
+			sp.ClientAddr = r.sess.remote
+		}
+	}
+
+	if _, err := r.opts.Delayed.Queue.Schedule(r.sess.user, sp); err != nil {
+		r.sess.log.Warn("jmap: delayed submission not scheduled", "err", err)
+
+		return nil, &setError{Type: setServerFail, Description: "the submission could not be scheduled; try again later"}
+	}
+
+	return &submission{ID: id, IdentityID: ident.ID, EmailID: emailID, ThreadID: threadID, Envelope: *env,
+		SendAt: release.UTC(), UndoStatus: undoPending}, nil
 }
 
 // submissionCreatable are the properties a creation may carry.
@@ -296,31 +332,33 @@ func (r *submissionRun) message(emailID string) ([]byte, *model.Meta, *setError)
 }
 
 // envelopeOf is the envelope of a submission: the one given, checked, or
-// the one RFC 8621 7 derives from the message.
-func (r *submissionRun) envelopeOf(given *envelope, hdr textproto.Header, ident *identity) (*envelope, *setError) {
+// the one RFC 8621 7 derives from the message; release is the time a
+// FUTURERELEASE parameter asks for (zero: send now).
+func (r *submissionRun) envelopeOf(given *envelope, hdr textproto.Header, ident *identity) (*envelope, time.Time, *setError) {
 	env := given
 	if env == nil {
 		var serr *setError
 		if env, serr = r.deriveEnvelope(hdr, ident); serr != nil {
-			return nil, serr
+			return nil, time.Time{}, serr
 		}
 	}
 
-	if serr := checkParameters(env); serr != nil {
-		return nil, serr
+	release, serr := checkParameters(env, r.opts.delayed(), time.Now())
+	if serr != nil {
+		return nil, time.Time{}, serr
 	}
 
 	// A bare addr-spec only, as for the recipients: a display name or
 	// comment would otherwise reach MAIL FROM verbatim.
 	if a, err := mail.ParseAddress(env.MailFrom.Email); err != nil || a.Address != env.MailFrom.Email {
-		return nil, &setError{Type: setForbiddenMailFrom, Description: "not an address: " + env.MailFrom.Email}
+		return nil, time.Time{}, &setError{Type: setForbiddenMailFrom, Description: "not an address: " + env.MailFrom.Email}
 	}
 
 	if r.opts.CheckSender && !r.idents.allowed[strings.ToLower(env.MailFrom.Email)] {
-		return nil, &setError{Type: setForbiddenMailFrom, Description: "this account may not send as " + env.MailFrom.Email}
+		return nil, time.Time{}, &setError{Type: setForbiddenMailFrom, Description: "this account may not send as " + env.MailFrom.Email}
 	}
 
-	return env, checkRecipients(env, r.opts.MaxRecipients)
+	return env, release, checkRecipients(env, r.opts.MaxRecipients)
 }
 
 // deriveEnvelope builds the envelope from the message (RFC 8621 7): the
@@ -398,21 +436,90 @@ func checkOriginator(hdr textproto.Header) *setError {
 	return nil
 }
 
-// checkParameters refuses SMTP parameters: none are offered
-// (submissionExtensions is empty), and HOLDFOR/HOLDUNTIL in particular
-// would ask for delayed sending, which maxDelayedSend 0 says is not here.
-func checkParameters(env *envelope) *setError {
-	has := len(env.MailFrom.Parameters) > 0
-
+// checkParameters checks the SMTP parameters of an envelope and returns
+// the release time a FUTURERELEASE parameter asks for (zero: send now).
+// The only parameters offered are HOLDFOR and HOLDUNTIL of MAIL FROM,
+// and only with delayed sending (submissionExtensions); everything else
+// is refused, as is a hold beyond maxDelayedSend, a second hold
+// parameter, or one without a valid value (RFC 4865 4.2). A HOLDUNTIL
+// that has passed, and HOLDFOR=0, send now.
+func checkParameters(env *envelope, delayed *DelayedOptions, now time.Time) (time.Time, *setError) {
 	for _, rc := range env.RcptTo {
-		has = has || len(rc.Parameters) > 0
+		if len(rc.Parameters) > 0 {
+			return time.Time{}, invalidProperty(propEnvelope, "this server passes no RCPT TO parameters")
+		}
 	}
 
-	if has {
-		return invalidProperty(propEnvelope, "this server passes no SMTP parameters (submissionExtensions is empty)")
+	if len(env.MailFrom.Parameters) == 0 {
+		return time.Time{}, nil
 	}
 
-	return nil
+	if delayed == nil {
+		return time.Time{}, invalidProperty(propEnvelope, "this server passes no SMTP parameters (submissionExtensions is empty)")
+	}
+
+	if len(env.MailFrom.Parameters) > 1 {
+		return time.Time{}, invalidProperty(propEnvelope, "only one MAIL FROM parameter, HOLDFOR or HOLDUNTIL, is accepted")
+	}
+
+	for k, v := range env.MailFrom.Parameters {
+		if v == nil {
+			return time.Time{}, invalidProperty(propEnvelope, k+" needs a value")
+		}
+
+		switch strings.ToUpper(k) {
+		case paramHoldFor:
+			return holdFor(*v, delayed.MaxDelay, now)
+		case paramHoldUntil:
+			return holdUntil(*v, delayed.MaxDelay, now)
+		}
+
+		return time.Time{}, invalidProperty(propEnvelope, "unsupported MAIL FROM parameter "+k+" (only HOLDFOR and HOLDUNTIL)")
+	}
+
+	return time.Time{}, nil
+}
+
+// holdFor reads HOLDFOR: whole seconds, at most maxDelay.
+func holdFor(v string, maxDelay time.Duration, now time.Time) (time.Time, *setError) {
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil || strings.TrimSpace(v) != v || v == "" {
+		return time.Time{}, invalidProperty(propEnvelope, "HOLDFOR is not a number of seconds: "+v)
+	}
+
+	d := time.Duration(n) * time.Second
+	if d > maxDelay {
+		return time.Time{}, invalidProperty(propEnvelope, "HOLDFOR is longer than maxDelayedSend")
+	}
+
+	if n == 0 {
+		return time.Time{}, nil
+	}
+
+	return now.Add(d).UTC(), nil
+}
+
+// holdUntilSlack is how far beyond now + maxDelay a HOLDUNTIL may lie: a
+// client computes it from the advertised latest time, on its own clock.
+const holdUntilSlack = time.Minute
+
+// holdUntil reads HOLDUNTIL: an RFC 3339 date-time, at most maxDelay
+// ahead.
+func holdUntil(v string, maxDelay time.Duration, now time.Time) (time.Time, *setError) {
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, invalidProperty(propEnvelope, "HOLDUNTIL is not an RFC 3339 date-time: "+v)
+	}
+
+	if t.After(now.Add(maxDelay + holdUntilSlack)) {
+		return time.Time{}, invalidProperty(propEnvelope, "HOLDUNTIL lies further ahead than maxDelayedSend")
+	}
+
+	if !t.After(now) {
+		return time.Time{}, nil
+	}
+
+	return t.UTC(), nil
 }
 
 // checkRecipients bounds the recipients and checks their form.
@@ -594,8 +701,9 @@ func stripBcc(msg []byte) []byte {
 }
 
 // update changes a submission: only undoStatus, and only from pending to
-// canceled. Nothing is pending on this server, so a cancellation is
-// cannotUnsend.
+// canceled. A delayed submission is canceled in the queue by
+// compare-and-swap, which fails once the worker has begun to send it
+// (cannotUnsend); every other submission has been handed to the relay.
 func (r *submissionRun) update(ref string, patch map[string]json.RawMessage) {
 	id, _ := resolveCreationID(r.sess, ref)
 
@@ -622,14 +730,42 @@ func (r *submissionRun) update(ref string, patch map[string]json.RawMessage) {
 		}
 	}
 
-	if len(patch) == 0 {
+	if len(patch) == 0 || s.UndoStatus == undoCanceled {
 		r.out.Updated[id] = nil
 		r.emailOf[id] = s.EmailID
 
 		return
 	}
 
-	r.out.NotUpdated[ref] = &setError{Type: setCannotUnsend, Description: "the message has been handed to the relay"}
+	if serr := r.cancel(s); serr != nil {
+		r.out.NotUpdated[ref] = serr
+
+		return
+	}
+
+	r.out.Updated[id] = nil
+	r.emailOf[id] = s.EmailID
+}
+
+// cancel cancels a pending delayed submission in the queue.
+func (r *submissionRun) cancel(s *submission) *setError {
+	d := r.opts.delayed()
+	if d == nil || s.UndoStatus != undoPending {
+		return &setError{Type: setCannotUnsend, Description: "the message has been handed to the relay"}
+	}
+
+	_, err := d.Queue.Cancel(r.sess.account, s.ID, "jmap")
+
+	var np *sendqueue.NotPendingError
+
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &np), errors.Is(err, sendqueue.ErrNotFound):
+		return &setError{Type: setCannotUnsend, Description: "the message is being sent or has been sent"}
+	default:
+		return &setError{Type: setServerFail, Description: err.Error()}
+	}
 }
 
 // destroy removes the record of a submission; the message stays sent.
