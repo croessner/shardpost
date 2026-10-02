@@ -1,0 +1,398 @@
+.TH SHARDPOST-BENCH 1 "2026-10-02" "ShardPost 0.43.0" "ShardPost Manual"
+.SH NAME
+shardpost-bench \- fill separate bench pools with accounts and measure what an account costs in Ceph
+.SH SYNOPSIS
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B bench populate
+.BI \-\-index\-pool " pool"
+.BI \-\-data\-pool " pool"
+.RI [ options ]
+.br
+.B shardpost
+.RB [ \-\-config
+.IR file ]
+.B bench measure
+.BI \-\-index\-pool " pool"
+.BI \-\-data\-pool " pool"
+.RI [ options ]
+.SH DESCRIPTION
+The bench is the measurement of the scaling plan's stage R4: objects and
+bytes per account, RADOS operations per delivery, delivery latency,
+compare-and-swap retries and the cost of opening an account. It is a
+command of the server binary, not of
+.BR shardpostctl (1):
+it links the RADOS store and writes through it directly, with the
+server's configuration and Ceph credentials. It needs neither a running
+server nor Nauthilus, and it does not use IMAP or LMTP. It runs in a
+Kubernetes Job of its own with the server's image
+.RB ( hack/bench\-job.yaml ).
+.PP
+The bench writes only into two pools of its own, which the operator
+creates for it and deletes afterwards
+.RB ( docs/operations/bench.md ).
+It refuses to run (exit status 2):
+.IP \(bu 2
+without
+.B \-\-index\-pool
+and
+.BR \-\-data\-pool ,
+when either names
+.I ceph.index_pool
+or
+.I ceph.data_pool
+of the configuration (file or environment) or their built-in defaults
+.B shardpost\-index
+and
+.BR shardpost\-data ,
+or when both name the same pool;
+.IP \(bu 2
+with an account prefix that does not start with
+.BR bench\- ;
+.IP \(bu 2
+.B measure
+on pools that carry no bench marker (the object
+.B marker
+in the namespace
+.BR ~bench ,
+written by the first
+.BR populate );
+.IP \(bu 2
+.B populate
+on a pool without the marker that holds any object, in the index pool
+in particular an account directory
+.RB ( ix.accounts/head
+in
+.BR ~accounts ):
+a pool somebody uses. The marker is written, pool by pool, only into a
+pool that is empty.
+.PP
+Everything the store keeps beside the accounts (the account directory
+in
+.BR ~accounts )
+lands in the bench pools as well;
+.B ~admin
+and
+.B ~accounts
+of the production pools are never touched.
+.SS bench populate
+Creates the accounts
+.IR prefix NNNNNN
+(six digits, from
+.B \-\-first
+on) with the mailboxes of
+.B \-\-mailboxes
+and delivers messages until every account holds
+.BR \-\-messages .
+Each message goes through the delivery pipeline LMTP uses (the Sieve
+run, the delivery headers, the reservation, the blob, the full-text
+index, the index entry and the account change log); a share of
+.B \-\-inbox\-share
+goes to INBOX through Sieve, the rest evenly into the other mailboxes,
+named in the request as
+.B dovecot\-lda \-m
+does. The pipeline has no relay, no external programs and none of the
+global, before or after scripts of the configuration.
+.PP
+The messages are generated: the size is drawn from
+.BR \-\-sizes ,
+the text from a Zipf distribution over a vocabulary of 50000 terms (so
+the full-text index sees frequent and rare terms), and a message above
+32 KiB carries a base64 attachment for the rest of its size. Message
+.I n
+of an account is the same for the same
+.BR \-\-seed .
+An account continues at its current message count, so a run that was
+stopped is resumed by running it again with the same options, and a run
+with a higher
+.B \-\-messages
+adds to the accounts.
+.PP
+The report gives the deliveries, their throughput, the delivery
+latency (p50, p90, p99, maximum; one delivery per account at a time,
+.B \-\-parallel
+accounts at once) and the compare-and-swap retries per delivery by
+object kind.
+.SS bench measure
+Takes the inventory of the bench accounts and counts operations. The
+inventory lists both bench pools in every namespace and reads the size
+and, in the index pool, the omap of every object of the accounts (every
+.BR \-\-sample\-every \-th
+account by number) and of the store's own namespaces. It reports per
+account the objects, bytes, omap keys and omap bytes by pool and object
+class:
+.BR registry ,
+.BR account ,
+.B mbox
+(header and first UID shard),
+.BR mbox\-shard ,
+.B msg
+(data pool),
+.B fts
+(posting lists),
+.B ftst
+(trigram dictionary),
+.B ftsh
+(header store),
+.B ftsd
+(dictionary before 0.35.0),
+.BR ftsmap ,
+.BR metadata ,
+.BR sieve ,
+.BR scrub ,
+.B ix
+(front-end indexes),
+.BR pubseen ,
+.B store\-ix
+(the store's own indexes) and
+.BR other ;
+the mean, minimum and maximum over the accounts, the usage per message,
+an estimate of the raw space the data objects take in an erasure coded
+pool, and the means scaled to
+.B \-\-extrapolate
+accounts.
+.PP
+Then
+.B \-\-probe\-accounts
+accounts, spread over the inventory, get
+.B \-\-probe\-messages
+more messages each in two rounds: the first measures latency and
+compare-and-swap retries, the second, on a connection of its own with
+the client library's objecter log switched on, counts every operation
+sent to an OSD by pool, object class and kind (read, write, class
+method call). The same accounts are opened in two more pairs of
+rounds: Store.User() and Close() alone, and the opening of a session
+(Store.User(), the mailbox list, the state of INBOX). The report gives
+operations per delivery and per open, the latencies, and the Go heap
+one open view holds. The probe messages stay in the accounts; the next
+.B populate
+counts them.
+.PP
+The objecter log
+.RB ( debug_objecter
+10, one line per operation) is written to
+.B \-\-trace\-dir
+and parsed when the round ends; it holds about 2.5 KB per operation.
+Lines of a format the parser does not know are not counted; the report
+says how many there were.
+.SS RocksDB and onode caches
+The OSD's caches come from Ceph itself; the bench does not ask for
+them. While the bench pools are filled, on a host with the admin key
+(the Rook toolbox):
+.PP
+.nf
+.RS
+ceph tell osd.0 perf dump bluestore | jq '.bluestore | with_entries(select(.key | test("onode")))'
+ceph tell osd.0 perf dump rocksdb
+ceph tell osd.0 dump_mempools | jq '.mempool.by_pool | {bluestore_cache_onode, bluestore_cache_meta, bluestore_cache_data, bluestore_cache_other}'
+ceph tell osd.0 config get osd_memory_target
+ceph tell osd.0 bluestore allocator score block
+ceph osd df tree
+ceph df detail
+.RE
+.fi
+.PP
+Take them before
+.BR populate ,
+after it, and after
+.BR measure ,
+for every OSD that holds placement groups of the bench pools
+.RB ( "ceph pg ls\-by\-pool shardpost\-load\-index" ).
+.SH OPTIONS
+Both subcommands:
+.TP
+.BI \-\-config " file"
+The server configuration (default: the environment variable
+.BR SHARDPOST_CONFIG ).
+Its
+.I ceph.index_pool
+and
+.I ceph.data_pool
+are the production pools the guard compares with; the rest
+.RI ( ceph.user ,
+the Rook secret,
+.IR server.fts_shards ,
+.IR server.mbox_shard_size ,
+.IR ceph.chunk_size ,
+.IR server.quota_bytes ,
+.IR fts.* )
+applies to the bench as to a server.
+.TP
+.BI \-\-index\-pool " pool"
+The bench index pool (replicated; required).
+.TP
+.BI \-\-data\-pool " pool"
+The bench data pool (erasure coded like production; required).
+.TP
+.BI \-\-prefix " prefix"
+The account name prefix; it must start with
+.B bench\-
+(default
+.BR bench\- ).
+.TP
+.BI \-\-parallel " n"
+Accounts worked on at the same time; for
+.BR measure ,
+the inventory's readers (4). Run it off-peak: the bench pools share
+the OSDs with production.
+.TP
+.BI \-\-sizes " dist"
+The message size distribution,
+.IB weight : min \- max
+separated by commas, sizes in bytes or with
+.BR KiB ,
+.B MiB
+(default
+.BR 60:1KiB\-8KiB,30:8KiB\-64KiB,10:64KiB\-1MiB ).
+.TP
+.BI \-\-seed " n"
+The seed of the message generator (1).
+.TP
+.BI \-\-json " file"
+Also write the report as JSON to
+.IR file ;
+.B \-
+writes it to standard output and the table to standard error.
+.PP
+.BR populate :
+.TP
+.BI \-\-accounts " n"
+Number of accounts (1000).
+.TP
+.BI \-\-first " n"
+Number of the first account (0); several Jobs can fill disjoint ranges.
+.TP
+.BI \-\-messages " n"
+Messages every account ends up with (50).
+.TP
+.BI \-\-mailboxes " list"
+The mailboxes of every account, INBOX first
+.RB ( INBOX,Sent,Drafts,Trash,Junk,Archive ;
+the five after INBOX get their special use).
+.TP
+.BI \-\-inbox\-share " f"
+Share of the messages delivered to INBOX through Sieve (0.7).
+.TP
+.BI \-\-progress " duration"
+Interval of the progress log (30s; 0 for none).
+.PP
+.BR measure :
+.TP
+.BI \-\-sample\-every " n"
+Take the inventory of every
+.IR n \-th
+account by number (1: all).
+.TP
+.BI \-\-probe\-accounts " n"
+Accounts of the delivery and open rounds (20; 0 for the inventory
+only).
+.TP
+.BI \-\-probe\-messages " n"
+Messages per probe account and delivery round (10; 0 for no delivery
+rounds).
+.TP
+.BI \-\-extrapolate " n"
+Scale the per-account means to
+.I n
+accounts (1000000; 0 for none).
+.TP
+.BI \-\-ec\-k " k" "\fR, \fP\-\-ec\-m " m
+The erasure code profile of the data pool for the raw space estimate
+(2 and 1).
+.TP
+.BI \-\-stripe\-unit " bytes"
+The profile's stripe unit (4096).
+.TP
+.BI \-\-min\-alloc " bytes"
+BlueStore's allocation unit on the data pool's OSDs (4096).
+.TP
+.BI \-\-trace\-dir " dir"
+Where the objecter logs go (the temporary directory, below
+.BR shardpost\-bench ).
+.TP
+.B \-\-keep\-traces
+Keep the objecter logs.
+.SH PERMISSIONS
+The cephx user of the configuration needs
+.B osd 'allow rwx pool=<bench index pool>, allow rwx pool=<bench data pool>'
+and
+.B mon 'allow r'.
+and nothing on the production pools. No admin API role is involved. In
+Kubernetes the bench runs as
+.B client.shardpost\-bench
+(the CephClient in
+.BR hack/bench\-pools.yaml ,
+caps on the bench pools only) and reads its key the way the server does,
+from the Rook secret
+.BR rook\-ceph\-client\-shardpost\-bench ,
+through the ServiceAccount
+.BR shardpost\-bench .
+.SH OUTPUT
+A table on standard output (standard error with
+.BR "\-\-json \-" ),
+logs on standard error, and with
+.B \-\-json
+the report as JSON. The JSON of
+.B measure
+has the keys
+.BR inventory.per_account. \fIpool\fP. \fIclass\fP
+(spreads of objects, bytes, omap_keys, omap_bytes),
+.BR inventory.per_message ,
+.BR store_wide ,
+.BR data_raw ,
+.BR extrapolated ,
+.BR pools ,
+.B delivery
+(latency, cas_retries, ops_per_delivery by pool and class),
+.B user_open
+and
+.BR session_open .
+.SH EXIT STATUS
+.TP
+.B 0
+The run ended and every account was filled (populate) or measured.
+.TP
+.B 1
+Something failed: the cluster, the credentials, the inventory, a probe
+round, or accounts that could not be filled (the report says how many;
+run populate again to finish them).
+.TP
+.B 2
+A usage error or a refusal of the guard: no or production pools, a
+prefix outside
+.BR bench\- ,
+pools without the bench marker, or a pool in use.
+.SH EXAMPLES
+Fill 1000 accounts with 50 messages each, then measure:
+.PP
+.nf
+.RS
+shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-accounts 1000 \-\-messages 50
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-json /tmp/measure.json
+.RE
+.fi
+.PP
+Grow the same accounts to 500 messages and measure a tenth of them:
+.PP
+.nf
+.RS
+shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-messages 500
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-sample\-every 10
+.RE
+.fi
+.PP
+The operations of a delivery, by object class, from the JSON:
+.PP
+.nf
+.RS
+jq '.delivery.ops_per_delivery' /tmp/measure.json
+.RE
+.fi
+.SH SEE ALSO
+.BR shardpost\-scrub (1),
+.BR shardpostctl (1)

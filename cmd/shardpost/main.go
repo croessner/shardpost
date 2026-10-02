@@ -75,6 +75,11 @@ func (s importStore) User(name string) (model.User, error) { return s.Store.User
 var draining atomic.Bool
 
 func main() {
+	// "bench" has flags of its own and reports on standard output.
+	if pre, args, ok := splitBench(os.Args[1:]); ok {
+		os.Exit(runBench(pre, args))
+	}
+
 	log := logging.New(os.Stdout, "info")
 
 	settings, command, err := loadConfig(os.Args[1:])

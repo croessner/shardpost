@@ -320,6 +320,20 @@ func autocreateDefaults(pairs ...string) []map[string]any {
 	return out
 }
 
+// Default returns the built-in default of a configuration key ("" when
+// it has none or it is no string). The bench refuses the default pool
+// names whatever the configuration says.
+func Default(key string) string {
+	for _, d := range defaults {
+		if d.key == key {
+			s, _ := d.value.(string)
+			return s
+		}
+	}
+
+	return ""
+}
+
 // defaults are the configuration values used when neither the YAML file
 // nor the environment sets a key.
 var defaults = []struct {

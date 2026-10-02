@@ -19,7 +19,7 @@ func loadConfig(args []string) (*config.Config, string, error) {
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--config":
+		case flagConfig:
 			i++
 			if i >= len(args) {
 				return nil, "", fmt.Errorf("--config needs a path")
@@ -60,6 +60,7 @@ func loadConfig(args []string) (*config.Config, string, error) {
 // --sweep runs the sweep (commandScrubSweep), which --repair lets delete
 // and --restart starts over.
 const (
+	flagConfig  = "--config"
 	flagBatch   = "--batch"
 	flagSweep   = "--sweep"
 	flagRepair  = "--repair"

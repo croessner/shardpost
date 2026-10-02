@@ -29,6 +29,7 @@ are documented as [manual pages](man/README.md).
 | [Quality](development/quality.md) | Test levels, conformance limits, current and historical evidence |
 | [Stage 8: operational administration](development/admin-stage.md) | Planned: shardpostctl, OpenAPI, mailboxes, ACL, quota, FTS, repairs, and migration |
 | [Operations](operations/README.md) | Dependencies, safe diagnosis, release and rollback, running without Kubernetes |
+| [Bench](operations/bench.md) | Bench pools, `shardpost bench populate/measure`, what an account costs in Ceph |
 | [Configuration](configuration.md) | Viper, environment variables, secret files, log levels |
 | [Sieve and learning](imapsieve.md) | Script execution, external programs, learning queue |
 | [Quota](quota.md) | Grace, mailbox rules, warning programs, over flag |
