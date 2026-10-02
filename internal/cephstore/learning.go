@@ -56,7 +56,7 @@ func (s *Store) LearningQueue() (*learnindex.Queue, error) {
 		o := learnindex.Options{Mode: mode, QueueShards: shards, RequireBackfill: true, Log: s.log.With("component", "learning")}
 
 		if mode != model.KVIndexOff {
-			h, err := s.openHandle(model.LearningNamespace)
+			h, err := s.openHandle(model.LearningNamespace, true)
 			if err != nil {
 				s.learnErr = err
 				return

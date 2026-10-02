@@ -50,7 +50,7 @@ func (s *Store) uploadsQueue() (*sortedindex.Queue, error) {
 // accountsQueue opens the due queue name in "~accounts" on a handle that
 // follows key rotations.
 func (s *Store) accountsQueue(name string) (*sortedindex.Queue, error) {
-	h, err := s.openHandle(model.AccountsNamespace)
+	h, err := s.openHandle(model.AccountsNamespace, true)
 	if err != nil {
 		return nil, err
 	}

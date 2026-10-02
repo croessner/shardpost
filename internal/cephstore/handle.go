@@ -28,6 +28,11 @@ import (
 // rotated its connection.
 var ErrRotated = errors.New("the store rotated its connection, watch again")
 
+// ErrHandleClosed is reported by a long-lived view used after it was
+// closed: an admin store after its Close, a queue of the store after
+// Store.Drain.
+var ErrHandleClosed = errors.New("the store view is closed")
+
 // userHandle is a long-lived view on one namespace that follows
 // Store.Rotate.
 type userHandle struct {
@@ -45,17 +50,22 @@ type userHandle struct {
 	closeUser func(*User)
 	// forget unregisters the handle from its store.
 	forget func()
+	// owned marks a handle of the store's own (the queues it opens once
+	// per process), which Store.Drain closes; the others belong to
+	// whoever opened them (AdminKV.Close).
+	owned bool
 }
 
 // openHandle opens a handle on namespace ns and registers it for key
-// rotations.
-func (s *Store) openHandle(ns string) (*userHandle, error) {
+// rotations; owned is set for the store's own handles (see
+// userHandle.owned).
+func (s *Store) openHandle(ns string, owned bool) (*userHandle, error) {
 	u, err := s.User(ns)
 	if err != nil {
 		return nil, err
 	}
 
-	h := &userHandle{ns: ns, u: u, watches: map[*Watch]struct{}{},
+	h := &userHandle{ns: ns, u: u, watches: map[*Watch]struct{}{}, owned: owned,
 		reopen: func() (*User, error) { return s.User(ns) }, closeUser: (*User).Close}
 
 	s.heldMu.Lock()
@@ -76,15 +86,20 @@ func (s *Store) openHandle(ns string) (*userHandle, error) {
 }
 
 // get returns the current view and a function to call when the request
-// is done; until then a rotation does not close the view.
-func (h *userHandle) get() (*User, func()) {
+// is done; until then neither a rotation nor close closes the view.
+// ErrHandleClosed once the handle is closed.
+func (h *userHandle) get() (*User, func(), error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+
+	if h.closed {
+		return nil, nil, ErrHandleClosed
+	}
 
 	u := h.u
 	u.inflight.Add(1)
 
-	return u, u.inflight.Done
+	return u, u.inflight.Done, nil
 }
 
 // swap replaces the view by nu, fails the watches on the old one and
@@ -133,7 +148,10 @@ func (h *userHandle) close() {
 // watch creates oid if needed (a watch needs the object) and watches it
 // on the current view; a rotation fails the watch.
 func (h *userHandle) watch(oid string) (model.Watch, error) {
-	u, done := h.get()
+	u, done, err := h.get()
+	if err != nil {
+		return nil, err
+	}
 	defer done()
 
 	op := rados.CreateWriteOp()
@@ -176,7 +194,10 @@ func (h *userHandle) track(u *User, w *Watch) {
 
 // notify wakes the watchers of oid in the background (best effort).
 func (h *userHandle) notify(oid string) {
-	u, done := h.get()
+	u, done, err := h.get()
+	if err != nil {
+		return
+	}
 
 	go func() {
 		defer done()
@@ -214,6 +235,24 @@ func (s *Store) rotateHandles() {
 	}
 }
 
+// closeOwnedHandles closes the store's own handles (Store.Drain); their
+// views close once the requests that use them are done.
+func (s *Store) closeOwnedHandles() {
+	s.heldMu.Lock()
+	hs := make([]*userHandle, 0, len(s.handles))
+
+	for h := range s.handles {
+		if h.owned {
+			hs = append(hs, h)
+		}
+	}
+	s.heldMu.Unlock()
+
+	for _, h := range hs {
+		h.close()
+	}
+}
+
 // handleOmap is the sortedindex.Backend of a handle's namespace: every
 // call runs on the current view.
 type handleOmap struct {
@@ -226,13 +265,17 @@ var (
 	_ sortedindex.Waker   = (*handleOmap)(nil)
 )
 
-// on runs fn with the omap backend of the current view.
-func (b *handleOmap) on() (*radosOmap, func()) {
-	u, done := b.h.get()
+// on returns the omap backend of the current view and the function to
+// call when the request is done.
+func (b *handleOmap) on() (*radosOmap, func(), error) {
+	u, done, err := b.h.get()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return &radosOmap{ioctx: u.idx, key: b.key, keysVer: func(oid string, keys []string) (map[string][]byte, uint64, error) {
 		return u.getKeysVer(u.idx, oid, keys)
-	}}, done
+	}}, done, nil
 }
 
 // CacheKey implements sortedindex.Backend.
@@ -240,7 +283,10 @@ func (b *handleOmap) CacheKey() string { return b.key }
 
 // ReadKeys implements sortedindex.Backend.
 func (b *handleOmap) ReadKeys(oid string, keys []string) (map[string][]byte, uint64, error) {
-	r, done := b.on()
+	r, done, err := b.on()
+	if err != nil {
+		return nil, 0, err
+	}
 	defer done()
 
 	return r.ReadKeys(oid, keys)
@@ -248,7 +294,10 @@ func (b *handleOmap) ReadKeys(oid string, keys []string) (map[string][]byte, uin
 
 // ReadPage implements sortedindex.Backend.
 func (b *handleOmap) ReadPage(oid, startAfter string, limit int) ([]sortedindex.KV, bool, error) {
-	r, done := b.on()
+	r, done, err := b.on()
+	if err != nil {
+		return nil, false, err
+	}
 	defer done()
 
 	return r.ReadPage(oid, startAfter, limit)
@@ -256,7 +305,10 @@ func (b *handleOmap) ReadPage(oid, startAfter string, limit int) ([]sortedindex.
 
 // Write implements sortedindex.Backend.
 func (b *handleOmap) Write(oid string, ver uint64, set map[string][]byte, rm []string) error {
-	r, done := b.on()
+	r, done, err := b.on()
+	if err != nil {
+		return err
+	}
 	defer done()
 
 	return r.Write(oid, ver, set, rm)

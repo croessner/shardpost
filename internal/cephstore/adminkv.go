@@ -54,7 +54,7 @@ var _ model.AdminKV = (*adminRecords)(nil)
 // AdminKV opens the admin store with the configured index mode; Close
 // releases it.
 func (s *Store) AdminKV() (*AdminKV, error) {
-	h, err := s.openHandle(adminNamespace)
+	h, err := s.openHandle(adminNamespace, false)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,10 @@ func (kv *AdminKV) Close() { kv.recs.h.close() }
 // Keys lists the keys of every record (one listing of the namespace, for
 // the backfill).
 func (kv *AdminKV) Keys() ([]string, error) {
-	u, done := kv.recs.h.get()
+	u, done, err := kv.recs.h.get()
+	if err != nil {
+		return nil, err
+	}
 	defer done()
 
 	it, err := listObjects(u.idx, listAdminBackfill)
@@ -120,7 +123,10 @@ func adminOID(key string) string { return "kv." + key }
 // The version is only meaningful on a context nobody else uses between
 // the read and the query, so the read takes a private one (verpool.go).
 func (kv *adminRecords) read(key string) ([]byte, uint64, error) {
-	u, done := kv.h.get()
+	u, done, err := kv.h.get()
+	if err != nil {
+		return nil, 0, err
+	}
 	defer done()
 
 	pool := u.poolFor(u.idx)
@@ -247,7 +253,10 @@ func (kv *adminRecords) write(key string, ver uint64, exists bool, next []byte) 
 		op.WriteFull(next)
 	}
 
-	u, done := kv.h.get()
+	u, done, err := kv.h.get()
+	if err != nil {
+		return err
+	}
 	defer done()
 
 	return op.Operate(u.idx, adminOID(key), rados.OperationNoFlag)
@@ -285,7 +294,10 @@ func (kv *adminRecords) List(prefix, after string, limit int) ([]model.KVEntry, 
 
 // listKeys lists the record keys with prefix after after, sorted.
 func (kv *adminRecords) listKeys(prefix, after string) ([]string, error) {
-	u, done := kv.h.get()
+	u, done, err := kv.h.get()
+	if err != nil {
+		return nil, err
+	}
 	defer done()
 
 	it, err := listObjects(u.idx, listAdminKV)
