@@ -188,6 +188,19 @@ func TestLayoutDeliveriesDuringConversion(t *testing.T) {
 			t.Errorf("message %s delivered during the conversion is not found", g)
 		}
 	}
+
+	// the substring search goes through the dictionary of the new
+	// generation: the deliveries' new subject terms must be in it
+	cands, err := u.SearchCandidates([]string{fts.FieldSubject}, "uring")
+	if err != nil || cands == nil {
+		t.Fatalf("substring search: %v %v", cands, err)
+	}
+
+	for _, g := range guids {
+		if !cands[g] {
+			t.Errorf("message %s delivered during the conversion is not a substring candidate", g)
+		}
+	}
 }
 
 // concurrentDeliveries are deliveries into one account at the same time,

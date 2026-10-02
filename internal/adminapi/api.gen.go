@@ -696,7 +696,7 @@ type FTSLayoutAccountPage struct {
 
 // FTSLayoutClear defines model for FTSLayoutClear.
 type FTSLayoutClear struct {
-	// Cleared The token of the run whose conversion was removed; empty for none.
+	// Cleared The tokens of the runs whose conversion or left-behind sources were removed, comma-separated; empty for none.
 	Cleared string         `json:"cleared"`
 	State   FTSLayoutState `json:"state"`
 }
@@ -1885,8 +1885,10 @@ type ClientInterface interface {
 	// or an import reshard whose heartbeat is older than 90 seconds. Its
 	// freeze is lifted (only the freeze of exactly that run), its
 	// target objects deleted. A conversion whose run still works is
-	// left alone. The fallback for a run that could not clean up; the
-	// jobs scrub does the same. Requires the role `repair`.
+	// left alone. Sources an ended run left behind after its switch
+	// (the record's `old`) are deleted as well. The fallback for a run
+	// that could not clean up; the jobs scrub does the same. Requires
+	// the role `repair`.
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
 	ClearFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3057,8 +3059,10 @@ func (c *Client) GetFTSLayout(ctx context.Context, account Account, reqEditors .
 // or an import reshard whose heartbeat is older than 90 seconds. Its
 // freeze is lifted (only the freeze of exactly that run), its
 // target objects deleted. A conversion whose run still works is
-// left alone. The fallback for a run that could not clean up; the
-// jobs scrub does the same. Requires the role `repair`.
+// left alone. Sources an ended run left behind after its switch
+// (the record's `old`) are deleted as well. The fallback for a run
+// that could not clean up; the jobs scrub does the same. Requires
+// the role `repair`.
 //
 // Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
 func (c *Client) ClearFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -8629,8 +8633,10 @@ type ClientWithResponsesInterface interface {
 	// or an import reshard whose heartbeat is older than 90 seconds. Its
 	// freeze is lifted (only the freeze of exactly that run), its
 	// target objects deleted. A conversion whose run still works is
-	// left alone. The fallback for a run that could not clean up; the
-	// jobs scrub does the same. Requires the role `repair`.
+	// left alone. Sources an ended run left behind after its switch
+	// (the record's `old`) are deleted as well. The fallback for a run
+	// that could not clean up; the jobs scrub does the same. Requires
+	// the role `repair`.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -13132,8 +13138,10 @@ func (c *ClientWithResponses) GetFTSLayoutWithResponse(ctx context.Context, acco
 // or an import reshard whose heartbeat is older than 90 seconds. Its
 // freeze is lifted (only the freeze of exactly that run), its
 // target objects deleted. A conversion whose run still works is
-// left alone. The fallback for a run that could not clean up; the
-// jobs scrub does the same. Requires the role `repair`.
+// left alone. Sources an ended run left behind after its switch
+// (the record's `old`) are deleted as well. The fallback for a run
+// that could not clean up; the jobs scrub does the same. Requires
+// the role `repair`.
 //
 // Returns a wrapper object for the known response body format(s).
 //

@@ -38,6 +38,10 @@ type fakeIndex struct {
 	// release, when set, holds a conversion until it is closed; the
 	// conversion then fails when its fence does.
 	release chan struct{}
+	// dueEntered and dueGate, when set, make FTSLayoutDue report that it
+	// was called and hold it until dueGate is closed.
+	dueEntered chan struct{}
+	dueGate    chan struct{}
 }
 
 func (f *fakeIndex) snapshot() (gen, next string, cleared []string) {
@@ -71,6 +75,12 @@ func (u *fakeLayoutUser) FTSLayout() (model.FTSLayoutState, error) {
 }
 
 func (u *fakeLayoutUser) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
+	if u.f.dueGate != nil {
+		u.f.dueEntered <- struct{}{}
+
+		<-u.f.dueGate
+	}
+
 	u.f.mu.Lock()
 	defer u.f.mu.Unlock()
 
@@ -136,6 +146,8 @@ func (u *fakeLayoutUser) ClearForeignFTSLayoutNext(own string) (string, error) {
 
 	return tok, err
 }
+
+func (u *fakeLayoutUser) ClearFTSLayoutOld(string) (bool, error) { return false, nil }
 
 func (u *fakeLayoutUser) HeartbeatFTSLayoutNext(tok string, at time.Time) (bool, error) {
 	u.f.mu.Lock()
@@ -499,6 +511,53 @@ func TestImportReshardStateFromStore(t *testing.T) {
 
 	if st := getReshard(t, fx, session); st.State != reshardFailed || st.Error == nil {
 		t.Fatalf("stale: %+v", st)
+	}
+}
+
+// TestImportReshardMapNotHeldOverIO (review M5): while a POST reads the
+// store (here the key counts), the process map is free: a GET of the
+// session answers running at once, and the map's mutex is not held.
+func TestImportReshardMapNotHeldOverIO(t *testing.T) {
+	fx := serveLayout(t, Options{}, RoleImport)
+	session := openSession(t, fx.c, "user")
+
+	fx.f.dueEntered, fx.f.dueGate = make(chan struct{}, 1), make(chan struct{})
+
+	done := make(chan int, 1)
+
+	go func() {
+		code, _ := postReshard(t, fx, session)
+		done <- code
+	}()
+
+	select {
+	case <-fx.f.dueEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the POST did not read the key counts")
+	}
+
+	if !fx.s.rs.mu.TryLock() {
+		t.Fatal("the process map is locked while the store is read")
+	}
+
+	fx.s.rs.mu.Unlock()
+
+	if st := getReshard(t, fx, session); st.State != reshardRunning {
+		t.Errorf("get during the check: %+v", st)
+	}
+
+	close(fx.f.dueGate)
+
+	if code := <-done; code != http.StatusOK {
+		t.Errorf("post %d", code)
+	}
+
+	fx.s.rs.mu.Lock()
+	left := len(fx.s.rs.runs)
+	fx.s.rs.mu.Unlock()
+
+	if left != 0 {
+		t.Errorf("%d map entries after a check without need", left)
 	}
 }
 

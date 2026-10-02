@@ -30,7 +30,7 @@ import (
 //     candidates of the scrub object;
 //   - the fixed objects: the full-text index (every generation its layout
 //     record names, ftx/<gen>/…; the layout 2 objects fts/, ftst/, ftsh/,
-//     ftsd/ unless the record says they are gone; ftsmap after them), the
+//     ftsd/ in any case; ftsmap after them), the
 //     front-end indexes (ix/<space>/<nn>), account, metadata, sieve (with
 //     the vacation records), scrub;
 //   - pubseen/<id> for every ps:<id>;
@@ -341,10 +341,12 @@ func (u *User) enumerateCandidates(n *namedObjects) error {
 
 // fixedObjects are the index objects every account may have: the
 // full-text index as its layout record names it — every generation
-// (current, "next", "old") before the id map, the layout 2 objects
-// unless the record says they are gone (one read, N13) — the front-end
-// indexes and the account's single objects. An id map that cannot be
-// read leaves the model incomplete.
+// (current, "next", "old") before the id map, and the layout 2 objects
+// always, also when the record says they are gone: a layout 2 writer
+// that slept through a conversion may have left one, and deleting an
+// absent object is cheap (one read, N13) — the front-end indexes and the
+// account's single objects. An id map that cannot be read leaves the
+// model incomplete.
 func (u *User) fixedObjects() ([]string, error) {
 	lay, err := u.readLayout()
 	if err != nil {
@@ -359,9 +361,7 @@ func (u *User) fixedObjects() ([]string, error) {
 		}
 	}
 
-	if lay == nil || !lay.LG {
-		oids = append(oids, u.layout2Objects()...)
-	}
+	oids = append(oids, u.layout2Objects()...)
 
 	for _, space := range purgeFixedIndexSpaces {
 		for s := range uint32(indexShards) {

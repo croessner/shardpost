@@ -68,21 +68,27 @@ func (sr *scrubRun) checkGeneration(loc ftsLoc) {
 	}
 }
 
-// checkMixed looks for a layout 2 object in an account whose layout 2
-// objects are gone (one stat of fts/00).
+// checkMixed looks for layout 2 objects in an account whose layout 2
+// objects are gone: the first posting, header and dictionary object (one
+// stat each), which a server before 0.45.0 or a layout 2 writer that
+// slept through the conversion would have written.
 func (sr *scrubRun) checkMixed(l *ftsLayout) {
 	if !l.LG {
 		return
 	}
 
-	oid := layout2Loc(sr.u.ftsShards).postingOIDn(0)
+	l2 := layout2Loc(sr.u.ftsShards)
 
-	switch _, err := sr.u.idx.Stat(oid); {
-	case err == nil:
-		sr.rep.FTSMixedLayout++
-		sr.log.Warn("scrub: layout 2 objects in a layout 3 full-text index, repair with fts_rebuild", "oid", oid)
-	case errCode(err) != syscall.ENOENT:
-		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("fts object %s: %v", oid, err))
+	for _, oid := range []string{l2.postingOIDn(0), l2.headerOIDn(0), l2.dictOIDn(0)} {
+		switch _, err := sr.u.idx.Stat(oid); {
+		case err == nil:
+			sr.rep.FTSMixedLayout++
+			sr.log.Warn("scrub: layout 2 objects in a layout 3 full-text index, repair with fts_rebuild", "oid", oid)
+
+			return
+		case errCode(err) != syscall.ENOENT:
+			sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("fts object %s: %v", oid, err))
+		}
 	}
 }
 

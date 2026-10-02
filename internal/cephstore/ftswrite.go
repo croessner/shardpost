@@ -57,11 +57,56 @@ type ftsWrite struct {
 	// noRecord: a read of the layout record after an anomaly found none,
 	// so missing layout 2 posting objects are created as before.
 	noRecord bool
+
+	// changed are the terms whose posting lists this write created (an
+	// indexing) or emptied (a removal) in the generation of w, over all
+	// its attempts: a retry in the same generation finds them existing
+	// (or gone) and would not name them again, so the dictionary step
+	// takes them from here. A new generation starts afresh: the
+	// conversion derived its dictionary from the lists it copied.
+	changedMu sync.Mutex
+	changed   map[string]bool
 }
 
 // follow makes the write go to the current generation of l.
 func (w *ftsWrite) follow(l *ftsLayout, n int) {
 	w.lay, w.loc, w.stale, w.noRecord = l, curLoc(l, n), nil, false
+
+	w.changedMu.Lock()
+	w.changed = nil
+	w.changedMu.Unlock()
+}
+
+// note records terms whose lists a compare-and-swap of this write
+// created or emptied.
+func (w *ftsWrite) note(terms []string) {
+	if len(terms) == 0 {
+		return
+	}
+
+	w.changedMu.Lock()
+	defer w.changedMu.Unlock()
+
+	if w.changed == nil {
+		w.changed = map[string]bool{}
+	}
+
+	for _, t := range terms {
+		w.changed[t] = true
+	}
+}
+
+// noted returns the terms note recorded in the generation of w.
+func (w *ftsWrite) noted() []string {
+	w.changedMu.Lock()
+	defer w.changedMu.Unlock()
+
+	out := make([]string, 0, len(w.changed))
+	for t := range w.changed {
+		out = append(out, t)
+	}
+
+	return out
 }
 
 // ftsIndex adds the message's GUID to the posting list of every term and
@@ -128,25 +173,14 @@ func (u *User) indexInto(w *ftsWrite, docsOf map[string][]uint64, terms []string
 		return err
 	}
 
-	var (
-		mu       sync.Mutex
-		newTerms []string
-	)
-
 	add := func(oid string, terms []string) error {
-		fresh, err := u.addPostings(w, oid, terms, docsOf)
-		if err != nil {
+		if err := u.addPostings(w, oid, terms, docsOf); err != nil {
 			if asAnomaly(err) != nil {
 				return err
 			}
 
 			return fmt.Errorf("fts index shard %s: %w", oid, err)
 		}
-
-		mu.Lock()
-
-		newTerms = append(newTerms, fresh...)
-		mu.Unlock()
 
 		return nil
 	}
@@ -155,7 +189,9 @@ func (u *User) indexInto(w *ftsWrite, docsOf map[string][]uint64, terms []string
 		return err
 	}
 
-	_, err := u.dictApplyAt(w.loc, newTerms, true)
+	// The new terms of every attempt in this generation, also of one
+	// that ended at an anomaly after some objects were written.
+	_, err := u.dictApplyAt(w.loc, w.noted(), true)
 
 	return err
 }
@@ -264,31 +300,27 @@ func (u *User) waitFrozen(w *ftsWrite) error {
 }
 
 // addPostings adds the ids of docsOf to the posting lists of the terms
-// of one posting object and returns the terms that had no list yet. A
+// of one posting object and notes the terms that had no list yet. A
 // term the read does not return counts as new and its list is written
 // afresh, so the read must be complete: the terms go through in pieces
 // of postingsPerCAS, as every other read by keys here does, rather than
 // relying on the OSD to answer any number of keys at once.
-func (u *User) addPostings(w *ftsWrite, oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
-	var fresh []string
-
+func (u *User) addPostings(w *ftsWrite, oid string, terms []string, docsOf map[string][]uint64) error {
 	for len(terms) > 0 {
 		n := min(len(terms), postingsPerCAS)
 
-		part, err := u.addPostingsPage(w, oid, terms[:n], docsOf)
-		if err != nil {
-			return nil, err
+		if err := u.addPostingsPage(w, oid, terms[:n], docsOf); err != nil {
+			return err
 		}
 
-		fresh = append(fresh, part...)
 		terms = terms[n:]
 	}
 
-	return fresh, nil
+	return nil
 }
 
 // addPostingsPage is addPostings for at most postingsPerCAS terms.
-func (u *User) addPostingsPage(w *ftsWrite, oid string, terms []string, docsOf map[string][]uint64) ([]string, error) {
+func (u *User) addPostingsPage(w *ftsWrite, oid string, terms []string, docsOf map[string][]uint64) error {
 	var fresh []string
 
 	err := u.casPostings(w, oid, terms, func(cur map[string][]byte, conv func([]byte) []byte) shardChange {
@@ -308,8 +340,11 @@ func (u *User) addPostingsPage(w *ftsWrite, oid string, terms []string, docsOf m
 
 		return ch
 	})
+	if err == nil {
+		w.note(fresh)
+	}
 
-	return fresh, err
+	return err
 }
 
 // shardChange is what one compare-and-swap of a posting object writes:
@@ -492,8 +527,14 @@ func (u *User) shardWrite(w *ftsWrite, ch shardChange, m map[string][]byte, lift
 // ver; lift reports a stale freeze this write lifts.
 func (w *ftsWrite) check(oid string, ver uint64, cur map[string][]byte) (lift bool, err error) {
 	if ver == 0 && !w.loc.v3() {
-		if w.noRecord {
-			return false, nil // created as before
+		// Without a layout record (the one this indexing read with its
+		// ids, or one read after an anomaly) no conversion runs: the
+		// object is created in this compare-and-swap, as before 0.45.0.
+		// A conversion takes the account lock, which refuses new
+		// deliveries, and waits jobs.settle_seconds for running ones
+		// before it records anything (§4.3 rule 3, B1).
+		if w.lay == nil || w.noRecord {
+			return false, nil
 		}
 
 		return false, &ftsAnomaly{kind: anomMissing, oid: oid}
@@ -827,9 +868,24 @@ func (a *docAlloc) round(cur map[string][]byte) (map[string][]byte, []string) {
 		c := atoiMarker(cur[ftsCountKey]) + added
 		set[ftsCountKey] = itoaMarker(c)
 		a.due = float64(c)/float64(max(a.lay.H, 1)) > reshardFactor*float64(a.u.ftsCfg.sizing.target)
+
+		markFreshIndex3(cur, set)
 	}
 
 	return set, nil
+}
+
+// markFreshIndex3 sets the layout 3 version marker with the first ids of
+// a layout 3 index that has none yet (no "n") and is not being rebuilt:
+// an index a conversion produced from an empty account. Every document
+// of it is then indexed by this version.
+func markFreshIndex3(cur, set map[string][]byte) {
+	_, hasN := cur["n"]
+	_, rebuilding := cur[ftsRebuildKey]
+
+	if !hasN && !rebuilding {
+		set[ftsVersionKey3] = []byte(ftsVersion)
+	}
 }
 
 // first handles the first ids of an index; false ends the round without
@@ -1091,38 +1147,22 @@ func (u *User) removeFrom(w *ftsWrite, guid string, g []byte, id uint64, hasID b
 		return nil
 	}
 
-	var (
-		mu   sync.Mutex
-		gone []string
-	)
-
 	err := parallel(groupBy(terms, w.loc.postingOID), func(oid string, terms []string) error {
-		empty, err := u.ftsRemoveShard(w, oid, terms, g, id, hasID)
-		if err != nil {
-			return err
-		}
-
-		mu.Lock()
-
-		gone = append(gone, empty...)
-		mu.Unlock()
-
-		return nil
+		return u.ftsRemoveShard(w, oid, terms, g, id, hasID)
 	})
 	if err != nil {
 		return err
 	}
 
-	_, err = u.dictApplyAt(w.loc, gone, false)
+	// The terms emptied by every attempt in this generation.
+	_, err = u.dictApplyAt(w.loc, w.noted(), false)
 
 	return err
 }
 
 // ftsRemoveShard removes the message from the posting lists of terms on
-// one posting object and returns the terms whose lists became empty.
-func (u *User) ftsRemoveShard(w *ftsWrite, oid string, terms []string, g []byte, id uint64, hasID bool) ([]string, error) {
-	var empty []string
-
+// one posting object and notes the terms whose lists became empty.
+func (u *User) ftsRemoveShard(w *ftsWrite, oid string, terms []string, g []byte, id uint64, hasID bool) error {
 	for len(terms) > 0 {
 		page := terms[:min(len(terms), postingsPerCAS)]
 		terms = terms[len(page):]
@@ -1150,14 +1190,14 @@ func (u *User) ftsRemoveShard(w *ftsWrite, oid string, terms []string, g []byte,
 		})
 		if err != nil {
 			if asAnomaly(err) != nil {
-				return nil, err
+				return err
 			}
 
-			return nil, fmt.Errorf("fts remove shard %s: %w", oid, err)
+			return fmt.Errorf("fts remove shard %s: %w", oid, err)
 		}
 
-		empty = append(empty, part...)
+		w.note(part)
 	}
 
-	return empty, nil
+	return nil
 }

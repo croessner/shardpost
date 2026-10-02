@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -190,6 +191,7 @@ func TestFTSDueLifecycle(t *testing.T) {
 
 	runManagerNoDue(t, m)
 	waitState(t, m, again.JobID, StateSucceeded)
+	waitUnlocked(t, m, "alice") // the runner releases the lock after the final state
 	fire(t, m, entriesOf(t, q, "alice")[0])
 
 	if left := entriesOf(t, q, "alice"); len(left) != 0 || dueRecord(t, m, "alice") != nil {
@@ -241,6 +243,7 @@ func TestFTSDueNoop(t *testing.T) {
 
 	runManagerNoDue(t, m)
 	waitState(t, m, rec.JobID, StateSucceeded)
+	waitUnlocked(t, m, "alice")
 
 	fire(t, m, entriesOf(t, q, "alice")[0])
 
@@ -377,4 +380,75 @@ func TestPurgeDeletesDueRecord(t *testing.T) {
 	if len(b) == 0 {
 		t.Fatal("record")
 	}
+}
+
+// TestFTSDueNoStarvation (N4): more than a page of entries that cannot
+// go on (their accounts locked) and entries that fail (no account) are
+// due before an account that can; one pass postpones or removes them
+// and still plans the account behind them.
+func TestFTSDueNoStarvation(t *testing.T) {
+	locked := make([]string, 0, 150)
+	for i := range 150 {
+		locked = append(locked, fmt.Sprintf("locked%03d", i))
+	}
+
+	m, o, store, q := dueSetup(t, append(locked, "zed")...)
+	early := time.Now().Add(-time.Hour)
+
+	for _, a := range locked {
+		o.fake(a).gen = "g1"
+
+		u, _ := store.User(a)
+		if _, err := u.(model.Importer).ImportLock("importsession0123456", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+
+		queueDue(t, q, a, "g1", early)
+	}
+
+	for i := range 20 {
+		queueDue(t, q, fmt.Sprintf("gone%02d", i), "g1", early)
+	}
+
+	o.fake("zed").gen = "g1"
+
+	queueDue(t, q, "zed", "g1", time.Now().Add(-time.Second))
+
+	m.ftsDueOnce(context.Background(), notLost)
+
+	if rec := dueRecord(t, m, "zed"); rec == nil || rec.JobID == "" {
+		t.Fatalf("the account behind %d blocked entries was not planned: %+v", len(locked), rec)
+	}
+
+	due, err := q.Due(time.Now(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(due) != 0 {
+		t.Errorf("%d entries still due after one pass, first %+v", len(due), due[0])
+	}
+}
+
+// waitUnlocked waits until the account's maintenance lock is free (a
+// job runner releases it after it wrote the job's final state).
+func waitUnlocked(t *testing.T, m *Manager, account string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		locked, err := m.accountLocked(account)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !locked {
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("%s still locked", account)
 }

@@ -155,9 +155,12 @@ func (r *radosIndex) readMarkers(posting bool) []string {
 func (r *radosIndex) check(oid string, posting, exists bool, marks map[string][]byte) error {
 	if !r.rs.loc.v3() {
 		switch {
-		case !exists && posting:
+		case !exists && posting && r.rs.lay != nil:
+			// a conversion recorded: the object may be gone with it
 			return r.confirm()
 		case !exists:
+			// no record: empty, as before 0.45.0 (a conversion locks the
+			// account, which ends the sessions that cached this)
 			return nil
 		}
 	}

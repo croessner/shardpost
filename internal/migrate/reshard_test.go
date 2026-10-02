@@ -2,7 +2,9 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -94,5 +96,48 @@ func TestReshardOutcome(t *testing.T) {
 
 	if reshardBusy(&APIError{Status: http.StatusConflict, Code: string(adminapi.Conflict), Msg: "import conflict: uid taken"}) {
 		t.Error("an import conflict taken for a running reshard")
+	}
+}
+
+// TestReshardGenerationCompared (R5.4): after a 202 the importer takes an
+// idle state for finished only when the generation changed; an idle
+// state with the generation it started from is a reshard that stopped
+// without a switch.
+func TestReshardGenerationCompared(t *testing.T) {
+	poll := reshardPoll
+	reshardPoll = time.Millisecond
+
+	t.Cleanup(func() { reshardPoll = poll })
+
+	for _, c := range []struct {
+		after string
+		fail  bool
+	}{{"g2", false}, {"g1", true}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"state":"running","g":"g1"}`))
+
+				return
+			}
+
+			_, _ = w.Write([]byte(`{"state":"idle","g":"` + c.after + `"}`))
+		}))
+
+		client, err := adminapi.NewClientWithResponses(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		tgt := &APITarget{C: client, account: "alice", session: "session0123456789"}
+
+		err = tgt.Reshard(context.Background())
+		if c.fail != errors.Is(err, errReshardFailed) {
+			t.Errorf("idle with generation %s after a 202 from g1: %v", c.after, err)
+		}
+
+		srv.Close()
 	}
 }

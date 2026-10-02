@@ -1661,8 +1661,10 @@ paths:
         or an import reshard whose heartbeat is older than 90 seconds. Its
         freeze is lifted (only the freeze of exactly that run), its
         target objects deleted. A conversion whose run still works is
-        left alone. The fallback for a run that could not clean up; the
-        jobs scrub does the same. Requires the role `repair`.
+        left alone. Sources an ended run left behind after its switch
+        (the record's `old`) are deleted as well. The fallback for a run
+        that could not clean up; the jobs scrub does the same. Requires
+        the role `repair`.
       responses:
         "200":
           description: What was cleared ("" for nothing) and the record after.
@@ -2463,7 +2465,7 @@ components:
       properties:
         cleared:
           type: string
-          description: The token of the run whose conversion was removed; empty for none.
+          description: The tokens of the runs whose conversion or left-behind sources were removed, comma-separated; empty for none.
         state:
           $ref: "#/components/schemas/FTSLayoutState"
     FTSLayout3Mark:

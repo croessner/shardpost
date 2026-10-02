@@ -19,7 +19,8 @@ import (
 // it: the token of an unfinished conversion and what was called.
 type fakeLayout struct {
 	mu      sync.Mutex
-	gen     string // current generation
+	gen     string   // current generation
+	old     []string // runs that left sources after their switch
 	next    string
 	nextAt  time.Time
 	toks    []string // tokens of ConvertFTSLayout
@@ -50,7 +51,7 @@ func (u *layoutUser) FTSLayout() (model.FTSLayoutState, error) {
 	u.f.mu.Lock()
 	defer u.f.mu.Unlock()
 
-	st := model.FTSLayoutState{Current: model.FTSLayoutShape{Layout: 3, Gen: u.f.gen}}
+	st := model.FTSLayoutState{Current: model.FTSLayoutShape{Layout: 3, Gen: u.f.gen}, OldToks: append([]string(nil), u.f.old...)}
 	if u.f.next != "" {
 		st.Next, st.NextTok, st.NextAt = &model.FTSLayoutShape{Layout: 3}, u.f.next, u.f.nextAt
 	}
@@ -114,6 +115,22 @@ func (u *layoutUser) ClearForeignFTSLayoutNext(own string) (string, error) {
 	u.f.cleared, u.f.next = append(u.f.cleared, tok), ""
 
 	return tok, nil
+}
+
+func (u *layoutUser) ClearFTSLayoutOld(tok string) (bool, error) {
+	u.f.mu.Lock()
+	defer u.f.mu.Unlock()
+
+	for i, o := range u.f.old {
+		if o == tok {
+			u.f.old = append(u.f.old[:i:i], u.f.old[i+1:]...)
+			u.f.cleared = append(u.f.cleared, tok)
+
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (u *layoutUser) HeartbeatFTSLayoutNext(tok string, at time.Time) (bool, error) {
@@ -456,5 +473,26 @@ func TestClearStaleLayout(t *testing.T) {
 		if err != nil || (tok != "") != c.clear {
 			t.Errorf("%s: cleared %q %v, want %v", c.tok, tok, err, c.clear)
 		}
+	}
+
+	// sources a crashed run left after its switch go as well (its job
+	// ended), those of a running one stay
+	ended := model.JobLockToken(lockSession("20261001T000000Z-000000000001"), 1)
+	live := model.JobLockToken(lockSession(claimed.ID), gen)
+
+	f.mu.Lock()
+	f.next, f.old = "", []string{ended, live}
+	f.mu.Unlock()
+
+	if tok, err := ClearStaleLayout(m.st.kv, u, now); err != nil || tok != ended {
+		t.Errorf("old entries: cleared %q %v", tok, err)
+	}
+
+	f.mu.Lock()
+	left := append([]string(nil), f.old...)
+	f.mu.Unlock()
+
+	if len(left) != 1 || left[0] != live {
+		t.Errorf("old entries left %v", left)
 	}
 }

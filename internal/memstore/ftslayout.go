@@ -47,6 +47,9 @@ func (u *User) ClearFTSLayoutNext(string) (bool, error) { return false, nil }
 // ClearForeignFTSLayoutNext implements model.FTSLayouter.
 func (u *User) ClearForeignFTSLayoutNext(string) (string, error) { return "", nil }
 
+// ClearFTSLayoutOld implements model.FTSLayouter.
+func (u *User) ClearFTSLayoutOld(string) (bool, error) { return false, nil }
+
 // HeartbeatFTSLayoutNext implements model.FTSLayouter.
 func (u *User) HeartbeatFTSLayoutNext(string, time.Time) (bool, error) { return false, nil }
 

@@ -72,9 +72,9 @@ func TestLayoutPurgeAndNaming(t *testing.T) {
 	}
 }
 
-// checkNamed: the enumeration names the current generation and the
-// conversion's targets before the id map, not the orphan, not the layout
-// 2 objects of a record that says they are gone.
+// checkNamed: the enumeration names the current generation, the
+// conversion's targets and the layout 2 objects before the id map, not
+// the orphan.
 func checkNamed(t *testing.T, u *User, next, orphan ftsLoc) {
 	t.Helper()
 
@@ -90,13 +90,15 @@ func checkNamed(t *testing.T, u *User, next, orphan ftsLoc) {
 
 	cur := curLoc(layoutOf(t, u), u.ftsShards)
 
-	for _, oid := range append(cur.objects(), next.objects()...) {
+	// the layout 2 objects are named although the record says they are
+	// gone: a writer that slept through the conversion may have left one
+	for _, oid := range append(append(cur.objects(), next.objects()...), layout2Loc(u.ftsShards).headerOIDn(0)) {
 		if !index[oid] {
 			t.Errorf("%s is not named", oid)
 		}
 	}
 
-	for _, oid := range append(orphan.objects(), layout2Loc(u.ftsShards).postingOIDn(0)) {
+	for _, oid := range orphan.objects() {
 		if index[oid] {
 			t.Errorf("%s is named", oid)
 		}

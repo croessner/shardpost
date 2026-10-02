@@ -397,6 +397,7 @@ func layoutState(l *ftsLayout, n int) model.FTSLayoutState {
 
 	for _, o := range l.Old {
 		st.Old = append(st.Old, genLoc(o, n).shape())
+		st.OldToks = append(st.OldToks, o.Tok)
 	}
 
 	return st

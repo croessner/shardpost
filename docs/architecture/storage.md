@@ -1305,7 +1305,10 @@ D + H objects are created exclusively with their markers, then the
 compare-and-swap that allocates the first document ids writes `L`, `V`
 and `c`. A writer that loses that race to another creator deletes its
 objects and follows the record that won; the presence entry belongs to
-the account and stays. Objects of a generation come into being only
+the account and stays. An account converted to layout 3 while it had no
+documents gets `V` with its first document ids (no `n` and no rebuild
+under way), so its substring searches narrow from the start. Objects of
+a generation come into being only
 there, in `fts_rebuild` (which decides the layout the same way when it
 starts) and in a conversion. A fresh index has S = D = H =
 `fts.shards_min` (1), or, when an import or a rebuild knows how many
@@ -1317,10 +1320,12 @@ a conversion that freezes the posting objects afterwards finds them in
 the source it copies), then one compare-and-swap per posting object —
 reading the terms of a page (1020 terms and the four markers) and
 writing the lists and the counters — then the dictionary keys of the
-new terms blindly, asserting that the object exists. An *anomaly* — a
-frozen object, a missing object, a foreign `!g`, in layout 2 a missing
-posting object while `L` exists — ends the attempt; the writer reads `L`
-and
+new terms blindly, asserting that the object exists. The new terms of
+every attempt in a generation count, also of one that ended at an
+anomaly after some objects were written: a retry finds those terms
+existing and would not name them again. An *anomaly* — a frozen object,
+a missing object, a foreign `!g`, in layout 2 a missing posting object
+while `L` exists — ends the attempt; the writer reads `L` and
 
 - repeats the whole indexing in the generation `L` names when it is
   another one (the same document ids; nothing more goes into the old
@@ -1334,7 +1339,18 @@ and
   write;
 - fails on a missing object of the named generation (the scrub reports
   it, `fts_rebuild` repairs it); a layout 3 object is never created by a
-  writer, a layout 2 object only after a read of `L` found none.
+  writer.
+
+A layout 2 index without `L` is written and read with the operations of
+0.44.0: a missing posting object is created in the writer's
+compare-and-swap (the `L` it read with its ids says no conversion runs),
+and a reader takes a missing one for empty. That is safe because a
+conversion takes the account lock — which refuses new deliveries and
+ends open sessions — and waits `jobs.settle_seconds` before it records
+`L`; only a writer that sleeps through a whole conversion could create
+an object of the removed layout 2 objects afterwards, which the scrub
+reports (`fts_mixed_layout`) and the purge and the sweep remove. With
+`L` present a missing layout 2 posting object is an anomaly as above.
 
 One indexing follows at most two generation changes and waits at most
 once; the posting goroutines report a freeze and the indexing waits
@@ -1439,13 +1455,16 @@ run has a view of its own and stops, clearing its conversion, before the
 store closes at shutdown.
 
 **Purge, sweep, scrub.** The data model names every generation of `L`
-(current, `next`, `old`) before the id map, and the layout 2 objects
-unless `lg` says they are gone (one more read per account). A purge
+(current, `next`, `old`) before the id map, and the layout 2 objects in
+any case, also with `lg`: a layout 2 writer that slept through the
+conversion may have left one, and deleting absent objects is cheap (one
+more read per account for `L`). A purge
 removes the account from the presence index before its registry; an
 unnamed generation (a creation that lost its race and crashed) is a
 remnant for the sweep. The scrub reports a missing object of the current
-generation and layout 2 objects in an account with `lg`
-(`fts_mixed_layout`), both repaired by `fts_rebuild`, and keeps the
+generation and layout 2 objects in an account with `lg` (a stat of
+`fts/00`, `ftsh/00` and `ftst/000`: `fts_mixed_layout`), both repaired
+by `fts_rebuild`, and keeps the
 presence index in step. The full-text objects do not count against the
 quota, in neither layout.
 
@@ -1455,7 +1474,11 @@ registers itself (`servers/<instance>` in the admin store, at startup
 and every minute, with its version and the capability `fts_layout3`;
 the hint index `ix.servers` carries version and capabilities only, so a
 heartbeat does not write it; a registration not renewed for 24 hours is
-deleted). Older servers do not register and cannot read layout 3, so
+deleted). While a server before 0.45.0 holds the lease of the expiry
+worker, it removes the `jobs/expiry` entries of the registrations it
+does not know; those records then expire only through `status` and
+`enable`, which delete registrations older than 24 hours. Older servers
+do not register and cannot read layout 3, so
 the cluster mark is set by `shardpostctl fts layout3 enable --pods n`
 only when exactly `n` fresh registrations report the capability
 (`--force` skips that, audited). Without the mark no layout 3 index is

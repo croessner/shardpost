@@ -196,8 +196,10 @@ type FTSLayoutState struct {
 	// conversion of the import reshard endpoint).
 	NextTok string    `json:"next_tok,omitempty"`
 	NextAt  time.Time `json:"next_at,omitzero"`
-	// Old are source generations a conversion has not removed yet.
-	Old []FTSLayoutShape `json:"old,omitempty"`
+	// Old are source generations a conversion has not removed yet, OldToks
+	// the runs that left them (the same order).
+	Old     []FTSLayoutShape `json:"old,omitempty"`
+	OldToks []string         `json:"old_toks,omitempty"`
 }
 
 // FTSLayouter is implemented by user views whose full-text index has
@@ -220,6 +222,10 @@ type FTSLayouter interface {
 	// of any token but own; it returns the token it cleared ("" for
 	// none). Whoever takes the account lock calls it.
 	ClearForeignFTSLayoutNext(own string) (string, error)
+	// ClearFTSLayoutOld removes the sources the run tok left behind after
+	// its switch (a crash between P6 and P7): they are deleted and the
+	// record's "old" entry goes. false when there is none of tok.
+	ClearFTSLayoutOld(tok string) (bool, error)
 	// HeartbeatFTSLayoutNext records a heartbeat of the run tok in its
 	// unfinished conversion (the import reshard endpoint); false when
 	// the record carries another run.

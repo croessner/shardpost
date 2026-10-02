@@ -579,8 +579,15 @@ func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.S
 		cancel()
 		<-done
 		kv.Close()
+		shutdownStep("registration")
 	}, nil
 }
+
+// shutdownStep is told each step of serve's shutdown that has to come
+// before another: the admin API (which uses the registration's admin
+// store) before the registration closes that store. A test records the
+// order.
+var shutdownStep = func(string) {}
 
 // uploadExpiryPoll is how often the upload expiry worker looks for
 // expired JMAP uploads, and how often the other servers try its lease.
@@ -619,6 +626,7 @@ func (srv *servers) shutdown(settings *config.Config, quotaSvc *quota.Service) {
 	actx, cancel := context.WithTimeout(context.Background(), adminDrain)
 	srv.admin.shutdown(actx)
 	cancel()
+	shutdownStep("admin")
 }
 
 // newServers builds the protocol servers.

@@ -64,17 +64,21 @@ func (t *APITarget) Reshard(ctx context.Context) error {
 	switch {
 	case resp.JSON200 != nil:
 		return reshardOutcome(resp.JSON200)
-	case resp.JSON202 != nil, resp.StatusCode() == http.StatusConflict:
-		// running here, or another run (of a session before) still works
-		return t.waitReshard(ctx)
+	case resp.JSON202 != nil:
+		return t.waitReshard(ctx, resp.JSON202.G)
+	case resp.StatusCode() == http.StatusConflict:
+		// another run (of a session before) still works
+		return t.waitReshard(ctx, "")
 	default:
 		return apiError(resp.StatusCode(), resp.JSONDefault)
 	}
 }
 
 // waitReshard asks for the session's reshard until it does not run any
-// more.
-func (t *APITarget) waitReshard(ctx context.Context) error {
+// more. A run this session started (from the generation from) that ends
+// idle has finished when the generation changed; with the generation
+// unchanged it stopped without a switch (its server ended).
+func (t *APITarget) waitReshard(ctx context.Context, from string) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -91,8 +95,15 @@ func (t *APITarget) waitReshard(ctx context.Context) error {
 			return apiError(resp.StatusCode(), resp.JSONDefault)
 		}
 
-		if resp.JSON200.State != "running" {
-			return reshardOutcome(resp.JSON200)
+		st := resp.JSON200
+
+		switch {
+		case st.State == "running":
+			continue
+		case st.State == "idle" && from != "" && st.G == from:
+			return fmt.Errorf("%w: it stopped without a switch (generation %s)", errReshardFailed, from)
+		default:
+			return reshardOutcome(st)
 		}
 	}
 }

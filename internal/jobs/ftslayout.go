@@ -193,11 +193,13 @@ func clearJobLayout(u model.User, jobID string) error {
 // run must be for the run to count as alive (3 × its 30 s beat).
 const ImportReshardFresh = 90 * time.Second
 
-// ClearStaleLayout removes an unfinished conversion whose run has ended
-// (the fallback of the jobs scrub and of "shardpostctl fts layout clear"):
-// a job's when the job is not running any more (pattern of
-// PurgeRunning), an import reshard's when its heartbeat is older than
-// ImportReshardFresh. It returns the token it cleared ("" for none).
+// ClearStaleLayout removes what a conversion whose run has ended left
+// (the fallback of the jobs scrub and of "shardpostctl fts layout
+// clear"): its unfinished conversion ("next") and the sources it left
+// after its switch ("old"). A run has ended when its job is not running
+// any more (pattern of PurgeRunning), an import reshard when its
+// heartbeat is older than ImportReshardFresh. It returns the tokens it
+// cleared, comma-separated ("" for none).
 func ClearStaleLayout(kv model.AdminKV, u model.User, now time.Time) (string, error) {
 	lay, ok := u.(model.FTSLayouter)
 	if !ok {
@@ -205,30 +207,55 @@ func ClearStaleLayout(kv model.AdminKV, u model.User, now time.Time) (string, er
 	}
 
 	st, err := lay.FTSLayout()
-	if err != nil || st.NextTok == "" {
+	if err != nil {
 		return "", err
 	}
 
-	running, err := layoutRunAlive(kv, st, now)
-	if err != nil || running {
-		return "", err
+	var cleared []string
+
+	if st.NextTok != "" {
+		ok, err := clearIfEnded(kv, st.NextTok, st.NextAt, now, lay.ClearFTSLayoutNext)
+		if err != nil {
+			return "", err
+		}
+
+		if ok {
+			cleared = append(cleared, st.NextTok)
+		}
 	}
 
-	if _, err := lay.ClearFTSLayoutNext(st.NextTok); err != nil {
-		return "", err
+	for _, tok := range st.OldToks {
+		ok, err := clearIfEnded(kv, tok, time.Time{}, now, lay.ClearFTSLayoutOld)
+		if err != nil {
+			return strings.Join(cleared, ","), err
+		}
+
+		if ok {
+			cleared = append(cleared, tok)
+		}
 	}
 
-	return st.NextTok, nil
+	return strings.Join(cleared, ","), nil
 }
 
-// layoutRunAlive reports whether the run of an unfinished conversion
-// may still be working.
-func layoutRunAlive(kv model.AdminKV, st model.FTSLayoutState, now time.Time) (bool, error) {
-	session := model.TokenSession(st.NextTok)
+// clearIfEnded runs drop for tok when its run has ended.
+func clearIfEnded(kv model.AdminKV, tok string, at, now time.Time, drop func(string) (bool, error)) (bool, error) {
+	running, err := layoutRunAlive(kv, tok, at, now)
+	if err != nil || running {
+		return false, err
+	}
+
+	return drop(tok)
+}
+
+// layoutRunAlive reports whether the run tok (its heartbeat at, for an
+// import reshard) may still be working.
+func layoutRunAlive(kv model.AdminKV, tok string, at, now time.Time) (bool, error) {
+	session := model.TokenSession(tok)
 
 	id, ok := strings.CutPrefix(session, "job-")
 	if !ok || lockSession(id) != session {
-		return !st.NextAt.IsZero() && now.Sub(st.NextAt) < ImportReshardFresh, nil
+		return !at.IsZero() && now.Sub(at) < ImportReshardFresh, nil
 	}
 
 	j, err := store{kv}.getJob(id)

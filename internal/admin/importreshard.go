@@ -61,9 +61,12 @@ func (r *reshardRun) result() (string, string) {
 	return r.state, r.err
 }
 
-func (r *reshardRun) finish(err error) {
+func (r *reshardRun) finish(err error) { r.end(reshardDone, err) }
+
+// end ends the run in state, or failed with err.
+func (r *reshardRun) end(state string, err error) {
 	r.mu.Lock()
-	r.state, r.finished = reshardDone, time.Now()
+	r.state, r.finished = state, time.Now()
 
 	if err != nil {
 		r.state, r.err = reshardFailed, err.Error()
@@ -192,50 +195,92 @@ func (s *Server) reshardError(w http.ResponseWriter, r *http.Request, err error)
 	s.importError(w, r, err)
 }
 
-// startReshard decides under the process map's mutex (R5.2): the
-// session's run is already active (202, nothing new), another session's
-// run has a fresh heartbeat (409), the counts ask for nothing (idle), or
-// a new run starts. A stale foreign run is cleared first.
+// startReshard starts the session's reshard when the key counts ask for
+// one. Only the check and the insert of the run happen under the
+// process map's mutex (R5.2): the session's run is already active (202,
+// nothing new), another session's run is active here (409), or a new
+// run is entered. The reads of the store come after, outside the mutex:
+// another session's conversion with a fresh heartbeat (409), a stale one
+// (cleared), no need (idle) end the entered run and remove it again.
 func (s *Server) startReshard(account, session string, lay model.FTSLayouter) (*reshardRun, adminapi.ImportReshard, error) {
-	s.rs.mu.Lock()
-	defer s.rs.mu.Unlock()
-
-	now := time.Now()
-	s.rs.expire(2*s.o.ImportLockTTL, now)
-
-	if run := s.rs.runs[account]; run != nil && run.session == session {
-		if state, _ := run.result(); state == reshardRunning {
-			return run, adminapi.ImportReshard{}, nil
-		}
+	run, active, err := s.claimReshard(account, session)
+	if err != nil || active {
+		return run, adminapi.ImportReshard{}, err
 	}
 
-	st, err := lay.FTSLayout()
-	if err != nil {
-		return nil, adminapi.ImportReshard{}, err
+	answer, start, err := checkReshard(lay)
+	if err != nil || !start {
+		s.dropReshard(account, run, err)
+		return nil, answer, err
 	}
 
-	if st.NextTok != "" {
-		if !st.NextAt.IsZero() && now.Sub(st.NextAt) < jobs.ImportReshardFresh {
-			return nil, adminapi.ImportReshard{}, errReshardConflict
-		}
-
-		if _, err := lay.ClearFTSLayoutNext(st.NextTok); err != nil {
-			return nil, adminapi.ImportReshard{}, err
-		}
-	}
-
-	_, due, err := lay.FTSLayoutDue()
-	if err != nil || !due {
-		return nil, adminapi.ImportReshard{State: reshardIdle, G: st.Current.Gen}, err
-	}
-
-	run := &reshardRun{session: session, tok: session + "/" + nonce(), done: make(chan struct{}), state: reshardRunning}
-	s.rs.runs[account] = run
 	s.rs.wg.Add(1)
 
 	go s.runReshard(account, run)
 
 	return run, adminapi.ImportReshard{}, nil
+}
+
+// claimReshard returns the session's active run (active) or enters a
+// new one; another session's active run here is a conflict.
+func (s *Server) claimReshard(account, session string) (*reshardRun, bool, error) {
+	s.rs.mu.Lock()
+	defer s.rs.mu.Unlock()
+
+	s.rs.expire(2*s.o.ImportLockTTL, time.Now())
+
+	if run := s.rs.runs[account]; run != nil {
+		if state, _ := run.result(); state == reshardRunning {
+			if run.session != session {
+				return nil, false, errReshardConflict
+			}
+
+			return run, true, nil
+		}
+	}
+
+	run := &reshardRun{session: session, tok: session + "/" + nonce(), done: make(chan struct{}), state: reshardRunning}
+	s.rs.runs[account] = run
+
+	return run, false, nil
+}
+
+// checkReshard reads the record and the key counts: start is whether a
+// run has to start; a foreign conversion with a fresh heartbeat is a
+// conflict, a stale one is cleared.
+func checkReshard(lay model.FTSLayouter) (adminapi.ImportReshard, bool, error) {
+	st, err := lay.FTSLayout()
+	if err != nil {
+		return adminapi.ImportReshard{}, false, err
+	}
+
+	if st.NextTok != "" {
+		if !st.NextAt.IsZero() && time.Since(st.NextAt) < jobs.ImportReshardFresh {
+			return adminapi.ImportReshard{}, false, errReshardConflict
+		}
+
+		if _, err := lay.ClearFTSLayoutNext(st.NextTok); err != nil {
+			return adminapi.ImportReshard{}, false, err
+		}
+	}
+
+	_, due, err := lay.FTSLayoutDue()
+
+	return adminapi.ImportReshard{State: reshardIdle, G: st.Current.Gen}, due && err == nil, err
+}
+
+// dropReshard ends an entered run that does not start (idle, or err)
+// and removes it from the map; a concurrent POST that waits for it gets
+// its state.
+func (s *Server) dropReshard(account string, run *reshardRun, err error) {
+	run.end(reshardIdle, err)
+
+	s.rs.mu.Lock()
+	defer s.rs.mu.Unlock()
+
+	if s.rs.runs[account] == run {
+		delete(s.rs.runs, account)
+	}
 }
 
 // nonce is a fresh nonce of a run's token.

@@ -285,11 +285,11 @@ func (s *Server) GetFTSLayout(w http.ResponseWriter, r *http.Request, account ad
 
 // ClearFTSLayout removes the unfinished conversion of an ended run.
 func (s *Server) ClearFTSLayout(w http.ResponseWriter, r *http.Request, account adminapi.Account) {
-	auditf(r, "account", account)
-
 	if !requireAccount(w, r, jobs.RoleRepair, account) || !s.layoutEnabled(w) {
 		return
 	}
+
+	auditf(r, "account", account)
 
 	if !validAccount(account) || s.o.Accounts == nil {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "invalid account")

@@ -179,6 +179,13 @@ func (u *User) ConvertFTSLayout(req model.FTSLayoutRequest) (rep model.FTSLayout
 		return rep, u.finishOld(req, genLoc(*old, u.ftsShards))
 	}
 
+	// Sources a crashed run of another token left after its P6 go first:
+	// the run holds the account lock, and a run that finds nothing to do
+	// (due_only) must not leave them for good.
+	if l, err = u.dropForeignOld(req, l); err != nil {
+		return rep, err
+	}
+
 	target, resume, err := u.conversionTarget(req, l, src)
 	if err != nil || target == nil {
 		rep.Noop, rep.Reason, rep.To = err == nil, "nothing to do", src.shape()
@@ -255,6 +262,47 @@ func pastP6(l *ftsLayout, tok string) *ftsGen {
 	}
 
 	return nil
+}
+
+// dropForeignOld removes the "old" entries of other runs (their sources
+// and the entries) and returns the record after it.
+func (u *User) dropForeignOld(req model.FTSLayoutRequest, l *ftsLayout) (*ftsLayout, error) {
+	if l == nil || len(l.Old) == 0 {
+		return l, nil
+	}
+
+	if err := req.Fence(); err != nil {
+		return l, err
+	}
+
+	for _, o := range l.Old {
+		if o.Tok == req.Tok {
+			continue
+		}
+
+		if err := u.removeOld(o); err != nil {
+			return l, err
+		}
+	}
+
+	return u.readLayout()
+}
+
+// ClearFTSLayoutOld implements model.FTSLayouter.
+func (u *User) ClearFTSLayoutOld(tok string) (bool, error) {
+	l, err := u.readLayout()
+	if err != nil || l == nil {
+		return false, err
+	}
+
+	i := oldOf(l, tok)
+	if i < 0 {
+		return false, nil
+	}
+
+	defer u.ftsForget()
+
+	return true, u.removeOld(l.Old[i])
 }
 
 // oldOf returns the index of the "old" entry of tok, or -1.
