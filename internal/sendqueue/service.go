@@ -182,6 +182,10 @@ type Spec struct {
 	// change log: Settle re-creates a missing view only while the log
 	// still reaches back to it (else it may have been destroyed).
 	ViewSeq uint64
+	// ViewEpoch is the epoch of the account's records the view was
+	// created in: an account purged and created again under the same
+	// name has records of another epoch.
+	ViewEpoch string
 	// Raw is the message as it is sent (Bcc removed).
 	Raw []byte
 }
@@ -210,7 +214,8 @@ func (s *Service) Schedule(u model.User, sp Spec) (*Record, error) {
 	now := s.o.Now().UTC()
 	rec := &Record{Account: sp.Account, ID: sp.ID, Gen: 1, State: StatePending, Release: sp.Release.UTC(),
 		Due: sp.Release.UTC(), Created: now, GUID: guid, Size: int64(len(sp.Raw)), MailFrom: sp.MailFrom,
-		RcptTo: sp.RcptTo, XClient: sp.XClient, Login: sp.Login, ClientAddr: sp.ClientAddr, View: sp.View, ViewSeq: sp.ViewSeq}
+		RcptTo: sp.RcptTo, XClient: sp.XClient, Login: sp.Login, ClientAddr: sp.ClientAddr, View: sp.View, ViewSeq: sp.ViewSeq,
+		ViewEpoch: sp.ViewEpoch}
 
 	eid, pos := EntryID(sp.Account, sp.ID), rec.position(s.o.SendingTimeout)
 

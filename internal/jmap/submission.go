@@ -140,6 +140,10 @@ type submissionBook struct {
 	Subs    []*submission      `json:"subs"`
 	Log     []submissionChange `json:"log"`
 	State   uint64             `json:"state"`
+	// Epoch is random and set when the record is first written: an
+	// account purged and created again under its name gets records of
+	// another epoch, so the queue can tell its old submissions apart.
+	Epoch string `json:"epoch,omitempty"`
 }
 
 // submissionLog bounds the change log of the submissions.
@@ -244,6 +248,10 @@ func updateSubmissions(kv model.AdminKV, account string, opts *SubmissionOptions
 			return nil, err
 		}
 
+		if b.Epoch == "" {
+			b.Epoch = randomHex(8)
+		}
+
 		return json.Marshal(b)
 	})
 }
@@ -276,10 +284,11 @@ func viewOf(rec *sendqueue.Record) *submission {
 	return s
 }
 
-// covers reports whether the change log still holds the entry of seq
-// (seq 0: unknown, never covered).
-func (b *submissionBook) covers(seq uint64) bool {
-	return seq > 0 && len(b.Log) > 0 && b.Log[0].Seq <= seq && seq <= b.State
+// covers reports whether these records are of epoch and their change
+// log still holds the entry of seq (seq 0 or no epoch: unknown, never
+// covered).
+func (b *submissionBook) covers(epoch string, seq uint64) bool {
+	return epoch != "" && epoch == b.Epoch && seq > 0 && len(b.Log) > 0 && b.Log[0].Seq <= seq && seq <= b.State
 }
 
 // destroyed reports whether the change log records the destruction of
@@ -301,9 +310,12 @@ var errNoChange = errors.New("nothing to change")
 // deliveryStatus. A submission the client destroyed stays destroyed
 // (RFC 8621 7.5: that does not cancel it). One the records lack is added
 // from the view the queue kept only while the change log still reaches
-// back to its creation and shows no destruction: the record was lost,
-// not destroyed. Past the log's reach a missing record counts as
-// destroyed, and an account without records (purged) is left alone.
+// back to its creation, in the same epoch of the records, and shows no
+// destruction: the record was lost, not destroyed. Past the log's reach,
+// in records of another epoch (the name was purged and used again) or
+// for a submission that failed because its account or copy is gone, a
+// missing record counts as destroyed, and an account without records
+// (purged) is left alone.
 func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
 	status := undoFinal
 	if rec.State == sendqueue.StateCanceled {
@@ -325,7 +337,7 @@ func (v *submissionBookView) Settle(rec *sendqueue.Record) error {
 		switch {
 		case s == nil:
 			s = viewOf(rec)
-			if s == nil || !b.covers(rec.ViewSeq) || b.destroyed(rec.ID) {
+			if s == nil || rec.Gone || !b.covers(rec.ViewEpoch, rec.ViewSeq) || b.destroyed(rec.ID) {
 				return errNoChange
 			}
 

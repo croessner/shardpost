@@ -827,7 +827,7 @@ func TestAccountGone(t *testing.T) {
 	removeEntry(t, e, "alice")
 	e.worker(t).round(context.Background())
 
-	if s := e.book.get(rec.ID); s == nil || s.State != StateFailed || e.relay.count() != 0 {
+	if s := e.book.get(rec.ID); s == nil || s.State != StateFailed || !s.Gone || e.relay.count() != 0 {
 		t.Fatalf("calls %d, %#v", e.relay.count(), s)
 	}
 }

@@ -446,8 +446,10 @@ type outcome struct {
 	// uncounted is a retry that does not count as an attempt: the server
 	// is shutting down and the relay was never reached.
 	uncounted bool
-	delivery  map[string]Delivery
-	reason    string
+	// gone marks a failure because the account or the copy is gone.
+	gone     bool
+	delivery map[string]Delivery
+	reason   string
 }
 
 // attempt reads the copy and hands it to the relay.
@@ -456,14 +458,14 @@ func (s *Service) attempt(ctx context.Context, rec *Record) outcome {
 	case err != nil:
 		return s.retry(rec, "the account directory could not be read: "+err.Error())
 	case reason != "":
-		return outcome{state: StateFailed, reason: reason, delivery: deliveries(rec.RcptTo, Delivery{Delivered: DeliveredNo})}
+		return outcome{state: StateFailed, gone: true, reason: reason, delivery: deliveries(rec.RcptTo, Delivery{Delivered: DeliveredNo})}
 	}
 
 	raw, err := s.readCopy(rec)
 
 	switch {
 	case errors.Is(err, model.ErrNoBlob):
-		return outcome{state: StateFailed, reason: "the copy of the message is gone",
+		return outcome{state: StateFailed, gone: true, reason: "the copy of the message is gone",
 			delivery: deliveries(rec.RcptTo, Delivery{Delivered: DeliveredNo})}
 	case err != nil:
 		return s.retry(rec, "the copy of the message could not be read: "+err.Error())
@@ -599,7 +601,7 @@ func (s *Service) finish(sending *Record, out outcome) {
 		}
 
 		r.Gen++
-		r.State, r.Reason, r.Unknown = out.state, out.reason, out.unknown
+		r.State, r.Reason, r.Unknown, r.Gone = out.state, out.reason, out.unknown, out.gone
 
 		if out.uncounted {
 			r.Attempts-- // Due stays: the next worker sends at once

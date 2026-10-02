@@ -866,7 +866,9 @@ the worker writes the outcome there when the submission ends.
 **States.** The record moves by compare-and-swap, each write raising its
 generation: `pending → sending → final | failed`, `pending → canceled`,
 `sending → pending` (a temporary failure before the message was
-transferred, while retries are left), and `sending → final` with an
+transferred, while retries are left — one budget of `retry_attempts`
+for relay errors and for an account directory, registry or message copy
+that could not be read), and `sending → final` with an
 unknown result once `sending_timeout_seconds` has passed since the
 attempt began. Only the compare-and-swap `pending → sending` starts a
 conversation with the relay, and only the worker that made it returns
@@ -884,8 +886,13 @@ back. The record keeps the JMAP view as created with the sequence of
 its creation in the account's change log; settling adds the view to the
 account's records when it is missing there, the change log still
 reaches back to that sequence and does not show it destroyed (a lost
-view write). Past the log's reach a missing view counts as destroyed,
-and an account without any records (purged) gets none. Ending (worker, cancel): the
+view write). The records carry a random epoch set when they are first
+written, and the queue record the epoch it was created in: a name that
+was purged and used again has records of another epoch, which never get
+an old submission's view. Past the log's reach, in another epoch, or for
+a submission that failed because its account or copy is gone, a missing
+view counts as destroyed, and an account without any records (purged)
+gets none. Ending (worker, cancel): the
 JMAP view, the copy with its intent, the record, the entry (the record
 before the entry). The entry's position follows from the record: a pending
 submission at its next attempt, one being sent at the end of its

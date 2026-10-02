@@ -379,7 +379,7 @@ func TestSettleWithoutRecord(t *testing.T) {
 	}
 
 	final := func(id string, seq uint64) *sendqueue.Record {
-		return &sendqueue.Record{Account: "test", ID: id, State: sendqueue.StateFinal, View: view(id), ViewSeq: seq,
+		return &sendqueue.Record{Account: "test", ID: id, State: sendqueue.StateFinal, View: view(id), ViewSeq: seq, ViewEpoch: "e1",
 			Delivery: map[string]sendqueue.Delivery{"bob@example.net": {SMTPReply: "250 ok", Delivered: sendqueue.DeliveredQueued}}}
 	}
 
@@ -396,7 +396,7 @@ func TestSettleWithoutRecord(t *testing.T) {
 	// client, S03 created (seq 3) and lost, S04 created long ago (seq 0
 	// in this log's terms: before what it reaches back to).
 	if err := updateSubmissions(kv, "test", opts, func(b *submissionBook) error {
-		b.State = 10
+		b.State, b.Epoch = 10, "e1"
 		b.note("S02", model.OpCreated)
 		b.note("S02", model.OpDestroyed)
 		b.note("S03", model.OpCreated)
@@ -408,6 +408,19 @@ func TestSettleWithoutRecord(t *testing.T) {
 
 	for id, seq := range map[string]uint64{"S02": 11, "S03": 13, "S04": 5, "S05": 0} {
 		if err := book.Settle(final(id, seq)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The same submission from another epoch (the name was purged and
+	// used again) or failed because its account is gone stays out.
+	other := final("S06", 13)
+	other.ViewEpoch = "e0"
+	gone := final("S07", 13)
+	gone.Gone = true
+
+	for _, rec := range []*sendqueue.Record{other, gone} {
+		if err := book.Settle(rec); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -425,7 +438,7 @@ func checkSettled(t *testing.T, kv model.AdminKV, opts *SubmissionOptions) {
 		t.Fatal(err)
 	}
 
-	if b.find("S02") != nil || b.find("S04") != nil || b.find("S05") != nil {
+	if b.find("S02") != nil || b.find("S04") != nil || b.find("S05") != nil || b.find("S06") != nil || b.find("S07") != nil {
 		t.Error("a destroyed submission, or one past the log's reach, came back")
 	}
 

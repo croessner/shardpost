@@ -133,6 +133,13 @@ sees that in `deliveryStatus` and decides. The timeout has to exceed the
 longest conversation with the relay (ten minutes for its answer to the
 message plus a step timeout per command); a shorter one reports live
 conversations as unknown (`outcome="conflict"`), never sends twice.
+A temporary failure before the transfer — the relay refusing for now or
+unreachable, but also the account directory, the registry or the
+message copy not readable — is retried with a backoff and counts
+against `retry_attempts`; when they are used up the submission fails
+(`delivered` `no`). A Ceph outage longer than the backoffs therefore
+fails submissions that were due in it; a dial the shutdown cancels does
+not count.
 
 **Partitions.** The servers running the worker times `max_partitions`
 must reach `partitions`; otherwise a partition nobody holds is never

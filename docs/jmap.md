@@ -1337,8 +1337,10 @@ and bounds the delay (see [configuration](configuration.md#delayed-sending)).
   of its creation in the change log of the account's submissions, and
   restores a record that went missing without the log showing it
   destroyed — but only while that log (the last 256 changes) still
-  reaches back to the creation; beyond it a missing record counts as
-  destroyed.
+  reaches back to the creation, and only in the same incarnation of the
+  account (a name purged and used again starts records of a new epoch);
+  beyond that, and for a submission that failed because its account or
+  copy is gone, a missing record counts as destroyed.
 - **Changes.** The transition to `final` or `canceled` is an update in
   `EmailSubmission/changes` and the push state, like every other change
   of the record.

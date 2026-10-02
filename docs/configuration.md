@@ -687,7 +687,7 @@ and [operations](operations/README.md#delayed-submissions)):
 | `jmap.submission.delayed.poll_seconds` | `JMAP_SUBMISSION_DELAYED_POLL_SECONDS` | 30 | how often a worker looks at the queue without a notification, and tries to take free partitions (1–3600); a new submission wakes the workers at once, and a worker sleeps only until the earliest entry it saw is due |
 | `jmap.submission.delayed.sending_timeout_seconds` | `JMAP_SUBMISSION_DELAYED_SENDING_TIMEOUT_SECONDS` | 3600 | how long a submission may stay in `sending` before it counts as final with an unknown result and is not sent again (1800–86400); has to exceed the longest conversation with the relay (see below) |
 | `jmap.submission.delayed.concurrency` | `JMAP_SUBMISSION_DELAYED_CONCURRENCY` | 4 | conversations with the relay one worker holds at once (1–64) |
-| `jmap.submission.delayed.retry_attempts` | `JMAP_SUBMISSION_DELAYED_RETRY_ATTEMPTS` | 5 | attempts of a submission whose relay failed temporarily before the message was transferred (1–20); the backoff starts at one minute and doubles up to 30 minutes |
+| `jmap.submission.delayed.retry_attempts` | `JMAP_SUBMISSION_DELAYED_RETRY_ATTEMPTS` | 5 | attempts of a submission whose relay failed temporarily before the message was transferred, or whose account directory, registry or message copy could not be read (1–20); the backoff starts at one minute and doubles up to 30 minutes |
 
 The longest conversation with the relay is about ten step timeouts
 (`jmap.submission.timeout_seconds`, 30 by default: connection,

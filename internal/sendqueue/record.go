@@ -153,9 +153,14 @@ type Record struct {
 	// CanceledBy names who canceled ("jmap", "admin:<principal>").
 	CanceledBy string `json:"canceled_by,omitempty"`
 	// View is the JMAP view of the submission as created (Spec.View),
-	// ViewSeq the change log sequence of its creation there.
-	View    json.RawMessage `json:"view,omitempty"`
-	ViewSeq uint64          `json:"view_seq,omitempty"`
+	// ViewSeq the change log sequence of its creation there and
+	// ViewEpoch the epoch of the account's records it was created in.
+	View      json.RawMessage `json:"view,omitempty"`
+	ViewSeq   uint64          `json:"view_seq,omitempty"`
+	ViewEpoch string          `json:"view_epoch,omitempty"`
+	// Gone is set when the submission failed because its account or its
+	// copy is gone: its view is never written back.
+	Gone bool `json:"gone,omitempty"`
 }
 
 // position is where the record's queue entry belongs: a pending
