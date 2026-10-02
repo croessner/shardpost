@@ -199,6 +199,8 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 		return runPush(ctx, log, settings, store)
 	}
 
+	logFTSLayout(log, settings, store)
+
 	return serve(ctx, log, settings, store, programs, quotaSvc)
 }
 
@@ -468,6 +470,15 @@ type servers struct {
 	// sendq is the delayed submission queue (nil without the admin store
 	// indexes).
 	sendq *sendqueue.Service
+}
+
+// logFTSLayout logs the layout new full-text indexes get: fts.layout
+// (default 3) takes effect only with the cluster mark. A failed read is
+// not fatal; the mark is read again whenever an index is created.
+func logFTSLayout(log *slog.Logger, settings *config.Config, store *cephstore.Store) {
+	if err := store.LogFTSLayout(); err != nil {
+		log.Warn("full-text layout: cannot read the layout 3 mark", "event", "fts_layout", "configured", settings.FTS.Layout, "err", err)
+	}
 }
 
 // serve starts all listeners and blocks until a signal or a fatal listener

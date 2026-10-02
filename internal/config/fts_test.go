@@ -58,15 +58,16 @@ func TestFTSIMAPSearch(t *testing.T) {
 	}
 }
 
-// TestFTSLayoutKeys: the layout keys default to today's layout 2 with
-// the bounds of the plan, and layout 3 settings are taken.
+// TestFTSLayoutKeys: the layout keys default to layout 3 (since 0.46.0;
+// effective only with the cluster mark) with the bounds of the plan,
+// layout 3 settings are taken, and an explicit layout 2 stays 2.
 func TestFTSLayoutKeys(t *testing.T) {
 	c, err := Load(configFile(t, "logging:\n  level: info\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := FTS{Layout: 2, ShardsMin: 1, ShardsMax: 32, ShardTargetKeys: 100000, AutoReshard: true,
+	want := FTS{Layout: 3, ShardsMin: 1, ShardsMax: 32, ShardTargetKeys: 100000, AutoReshard: true,
 		FrozenWaitSeconds: 10, ImportReshardSyncSeconds: 60}
 
 	got := c.FTS
@@ -87,6 +88,11 @@ func TestFTSLayoutKeys(t *testing.T) {
 
 	if c.FTS.ShardTargetWarning() == "" {
 		t.Error("a target above 200000 keys does not warn")
+	}
+
+	c, err = Load(configFile(t, "fts:\n  layout: 2\n"))
+	if err != nil || c.FTS.Layout != 2 {
+		t.Fatalf("explicit layout 2: %+v, %v", c.FTS, err)
 	}
 }
 

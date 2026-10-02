@@ -20,9 +20,11 @@ reports per account and per delivery:
   into one account;
 - with `measure --search K` and `--expunge N`, the cost of a search query
   and of an expunge, and a fingerprint of the search results;
-- with `--fts-layout 3` (`populate` and `measure`) new accounts get
-  layout 3 of the full-text index (the bench sets the layout 3 mark in
-  its own pools), and with `measure --convert` the probe accounts are
+- with `--fts-layout 3` (`populate` and `measure`; also without the
+  flag when the configuration leaves `fts.layout` at its default `3`)
+  new accounts get layout 3 of the full-text index (the bench sets the
+  layout 3 mark in its own pools; `--fts-layout 2` measures layout 2),
+  and with `measure --convert` the probe accounts are
   converted to it as a `fts_layout` job would do: the time each account
   is locked (the window in which its deliveries fail temporarily), the
   operations of a reshard, and the search fingerprints before and after;
@@ -315,8 +317,9 @@ higher `--messages`; to measure a part of many accounts, use
   EXPUNGE per message in a view of its own; `ops_per_call`, the latency
   and the compare-and-swap retries are per expunge. The messages are
   gone afterwards (a later `populate` does not refill them).
-- `convert` (only with `measure --convert`, which needs `--fts-layout
-  3`): runs after the search. The first round converts every probe
+- `convert` (only with `measure --convert`, which needs layout 3:
+  `--fts-layout 3`, or without the flag `fts.layout: 3` of the
+  configuration, the default): runs after the search. The first round converts every probe
   account from layout 2 to layout 3 under its account lock; its latency
   is the lock time, the window of a `fts_layout` job in which the
   account's deliveries answer 451. The second round, the counted one,

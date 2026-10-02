@@ -63,6 +63,19 @@ var (
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "shard_missing_total",
 		Help: "Full-text objects missing in the generation the layout record names (repair with fts_rebuild).",
 	})
+	// FTSLayoutConfigured is fts.layout of this server (2 or 3).
+	FTSLayoutConfigured = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemFTS, Name: "layout_configured",
+		Help: "Configured layout of new full-text indexes (fts.layout).",
+	})
+	// FTSLayoutEffective is the layout new indexes of this server get as
+	// of the last read of the cluster mark (at startup and whenever an
+	// index is created): 3 only with fts.layout 3 and the mark set; 0
+	// while a server with fts.layout 3 has not read the mark yet.
+	FTSLayoutEffective = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemFTS, Name: "layout_effective",
+		Help: "Layout new full-text indexes get: fts.layout combined with the layout 3 cluster mark at its last read.",
+	})
 	// FTSShardsCapped counts reshards whose target was capped at
 	// fts.shards_max: the objects grow beyond fts.shard_target_keys.
 	FTSShardsCapped = promauto.NewCounter(prometheus.CounterOpts{

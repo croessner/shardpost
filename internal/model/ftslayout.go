@@ -26,6 +26,19 @@ const (
 // stops new layout 3 indexes at once.
 const FTSLayoutMarkKey = "fts/layout3"
 
+// EffectiveFTSLayout is the layout a new full-text index gets: layout 3
+// only when fts.layout is 3 and the cluster mark is set, layout 2 in
+// every other case (fts.layout 2, or 3 without the mark). The built-in
+// default of fts.layout is 3 since 0.46.0, so it is the mark that
+// switches a cluster to layout 3.
+func EffectiveFTSLayout(configured int, marked bool) int {
+	if configured == FTSLayout3 && marked {
+		return FTSLayout3
+	}
+
+	return FTSLayout2
+}
+
 // FTSLayoutMark is the value of FTSLayoutMarkKey.
 type FTSLayoutMark struct {
 	EnabledAt time.Time `json:"enabled_at"`
@@ -250,6 +263,12 @@ var ErrIndexUnavailable = errors.New("full-text index temporarily unavailable")
 // ErrFTSLayoutMark refuses a conversion to layout 3 without the cluster
 // mark.
 var ErrFTSLayoutMark = errors.New("layout 3 is not enabled in this cluster (shardpostctl fts layout3 enable)")
+
+// ErrFTSDictLayout3 refuses fts_dict_convert for an account whose index
+// has layout 3: the job is a legacy kind for layout 2 indexes written
+// before 0.35.0, and layout 3 always has its dictionary.
+var ErrFTSDictLayout3 = errors.New("the account's full-text index has layout 3, which needs no dictionary conversion " +
+	"(fts_dict_convert is a legacy job for layout 2 indexes written before 0.35.0)")
 
 // ImportHint is what an importer knows of the account before it imports
 // it: the number of messages it is going to store, from which the store

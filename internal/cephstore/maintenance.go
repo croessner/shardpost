@@ -1,6 +1,7 @@
 package cephstore
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"syscall"
@@ -302,20 +303,30 @@ func (u *User) LegacyFTSDict() (int, error) {
 // Setting a dictionary key that is already there changes nothing, which
 // is why this needs no lock against deliveries and may be repeated. A
 // layout 3 index has no layout 2 dictionary to write: nothing is done
-// (a conversion to layout 3 derives the dictionary itself).
+// (a conversion to layout 3 derives the dictionary itself). The layout
+// record is read again before every batch, so that a conversion that
+// started after the first check is never answered with layout 2
+// dictionary objects (fts_dict_convert is a legacy kind since 0.46.0).
 func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)) (model.FTSDictReport, error) {
 	rep := model.FTSDictReport{Terms: map[string]int64{}}
 
-	switch lay, err := u.readLayout(); {
+	switch err := u.dictLayoutCheck(); {
+	case errors.Is(err, errDictLayoutBusy):
+		rep.Skipped = model.FTSDictSkippedLayout3
+
+		progress(1, 1)
+
+		return rep, nil
 	case err != nil:
 		return rep, err
-	case lay != nil && lay.F == model.FTSLayout3:
-		progress(1, 1)
-		return rep, nil
 	}
 
 	flush := func(terms []string) error {
 		if err := fence(); err != nil {
+			return err
+		}
+
+		if err := u.dictLayoutCheck(); err != nil {
 			return err
 		}
 
@@ -326,7 +337,19 @@ func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)
 	}
 
 	for i := 0; i < u.ftsShards; i++ {
-		if err := u.convertShard(fmt.Sprintf("%s%02d", ftsPrefix, i), &rep, flush); err != nil {
+		err := u.convertShard(fmt.Sprintf("%s%02d", ftsPrefix, i), &rep, flush)
+		if errors.Is(err, errDictLayoutBusy) {
+			// A conversion started during the run: what was written
+			// is harmless (the conversion derives its own dictionary);
+			// nothing more is written and the legacy objects stay.
+			rep.Skipped = model.FTSDictSkippedLayout3
+
+			progress(u.ftsShards, u.ftsShards)
+
+			return rep, nil
+		}
+
+		if err != nil {
 			return rep, err
 		}
 
@@ -347,6 +370,27 @@ func (u *User) ConvertFTSDict(fence func() error, progress func(done, total int)
 	}
 
 	return rep, nil
+}
+
+// errDictLayoutBusy stops a dictionary conversion whose account has (or
+// is getting) layout 3; ConvertFTSDict reports it as skipped.
+var errDictLayoutBusy = errors.New("the full-text index has layout 3 or a layout conversion is under way; " +
+	"run the dictionary conversion again only if the account keeps layout 2")
+
+// dictLayoutCheck answers errDictLayoutBusy when the account's index has
+// layout 3 or a layout conversion is under way: then ConvertFTSDict must
+// not write layout 2 dictionary objects.
+func (u *User) dictLayoutCheck() error {
+	lay, err := u.readLayout()
+	if err != nil {
+		return err
+	}
+
+	if lay != nil && (lay.F == model.FTSLayout3 || lay.Next != nil) {
+		return errDictLayoutBusy
+	}
+
+	return nil
 }
 
 // convertShard hands the terms of one posting shard to flush, in batches.

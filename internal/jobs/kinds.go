@@ -493,6 +493,11 @@ func (k *ftsRebuild) Run(_ context.Context, run *Run) (any, error) {
 // layout. It reads no message and needs no lock: deliveries and searches
 // go on beside it. It stops when an import or another job locks the
 // account.
+//
+// It is a legacy kind (since 0.46.0): only layout 2 indexes written
+// before 0.35.0 have a dictionary to convert. An account whose index has
+// layout 3 is refused when planned (model.ErrFTSDictLayout3), and a run
+// that finds layout 3 changes nothing.
 type ftsDictConvert struct{ kindBase }
 
 type ftsDictSummary struct {
@@ -503,6 +508,17 @@ func (k *ftsDictConvert) Plan(_ context.Context, _ *Env, u model.User, _ string,
 	cv, err := capability[model.FTSDictConverter](u, "convert the full-text dictionary")
 	if err != nil {
 		return nil, "", err
+	}
+
+	if lay, ok := u.(model.FTSLayouter); ok {
+		st, err := lay.FTSLayout()
+		if err != nil {
+			return nil, "", err
+		}
+
+		if st.Current.Layout == model.FTSLayout3 {
+			return nil, "", model.ErrFTSDictLayout3
+		}
 	}
 
 	n, err := cv.LegacyFTSDict()

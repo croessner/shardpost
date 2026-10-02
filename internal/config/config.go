@@ -382,7 +382,7 @@ var defaults = []struct {
 	{"fts.html", "text"},
 	{"fts.imap_search", "substring"},
 	{"fts.verify_parallel", 8},
-	{"fts.layout", 2},
+	{"fts.layout", 3},
 	{"fts.shards_min", 1},
 	{"fts.shards_max", 32},
 	{"fts.shard_target_keys", 100000},

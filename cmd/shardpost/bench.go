@@ -133,9 +133,7 @@ func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, 
 	cfg := cephConfig(settings)
 	cfg.IndexPool, cfg.DataPool = f.indexPool, f.dataPool
 
-	if f.ftsLayout != 0 {
-		cfg.FTS.Layout = f.ftsLayout
-	}
+	cfg.FTS.Layout = f.effectiveLayout(cfg.FTS.Layout)
 
 	rotate, err := rookCredentials(ctx, log, settings, &cfg)
 	if err != nil {
@@ -265,7 +263,7 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	fs.IntVar(&o.Contention, "contention", 0, "also deliver this many messages at a time into each probe account (0: no contention rounds)")
 	fs.IntVar(&o.Search, "search", 0, "search queries per probe account (0: no search rounds)")
 	fs.IntVar(&o.Expunge, "expunge", 0, "INBOX messages per probe account and expunge round (0: no expunge rounds)")
-	fs.BoolVar(&o.Convert, "convert", false, "convert the probe accounts' full-text index to layout 3 (needs --fts-layout 3) and reshard it once more, counting the second round")
+	fs.BoolVar(&o.Convert, "convert", false, "convert the probe accounts' full-text index to layout 3 (needs layout 3: --fts-layout 3 or fts.layout 3, the default) and reshard it once more, counting the second round")
 	fs.Int64Var(&o.Extrapolate, "extrapolate", 1000000, "scale the per-account means to this many accounts (0: no)")
 	fs.IntVar(&ec.DataChunks, "ec-k", 2, "data chunks of the data pool's erasure code profile")
 	fs.IntVar(&ec.CodingChunks, "ec-m", 1, "coding chunks of the data pool's erasure code profile")
@@ -279,7 +277,7 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	}
 
 	sizes, err := bench.ParseSizes(f.sizes)
-	if err != nil || !measureValid(&o, &f) {
+	if err != nil || !measureValid(&o, &f, settings.FTS.Layout) {
 		log.Error("bench: invalid options", "err", err)
 		return benchRefused
 	}
@@ -302,9 +300,20 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	return benchExit(log, err, code)
 }
 
-// measureValid checks the counts of measure (--convert needs
-// --fts-layout 3).
-func measureValid(o *cephbench.MeasureOptions, f *benchFlags) bool {
+// effectiveLayout is the fts.layout the bench runs with: --fts-layout
+// when given, otherwise the configuration's (default 3).
+func (f *benchFlags) effectiveLayout(configured int) int {
+	if f.ftsLayout != 0 {
+		return f.ftsLayout
+	}
+
+	return configured
+}
+
+// measureValid checks the counts of measure (--convert needs layout 3:
+// --fts-layout 3, or fts.layout 3 of the configuration without the
+// flag).
+func measureValid(o *cephbench.MeasureOptions, f *benchFlags, configured int) bool {
 	counts := []int{o.ProbeAccounts, o.ProbeMessages, o.Contention, o.Search, o.Expunge}
 	for _, n := range counts {
 		if n < 0 {
@@ -312,7 +321,7 @@ func measureValid(o *cephbench.MeasureOptions, f *benchFlags) bool {
 		}
 	}
 
-	return o.Every > 0 && f.parallel > 0 && (!o.Convert || f.ftsLayout == 3)
+	return o.Every > 0 && f.parallel > 0 && (!o.Convert || f.effectiveLayout(configured) == 3)
 }
 
 // writeBenchReport writes the table (to standard error when the JSON

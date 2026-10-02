@@ -272,8 +272,17 @@ func TestExclusiveHoldsMaintenanceLock(t *testing.T) {
 	runManager(t, m)
 	waitState(t, m, j.ID, StateSucceeded)
 
+	// The final state is stored before the lock is released (only the
+	// server that stored it releases it), so the release may follow the
+	// state by a moment.
 	u, _ := store.User("alice")
 	locked, _ := u.(model.Importer).ImportLocked()
+
+	for deadline := time.Now().Add(5 * time.Second); locked && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+
+		locked, _ = u.(model.Importer).ImportLocked()
+	}
 
 	k.mu.Lock()
 	defer k.mu.Unlock()

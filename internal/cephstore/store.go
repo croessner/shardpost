@@ -104,8 +104,9 @@ type Config struct {
 // FTSConfig are the layout settings of the full-text index
 // (configuration fts.layout and the keys after it).
 type FTSConfig struct {
-	// Layout is the layout of indexes created from now on (2, the default,
-	// or 3; 3 needs the cluster mark).
+	// Layout is the layout of indexes created from now on (2 or 3; 3
+	// needs the cluster mark; the zero value means 2 — the server
+	// passes fts.layout, whose built-in default is 3).
 	Layout int
 	// ShardsMin, ShardsMax and ShardTargetKeys size layout 3 generations.
 	ShardsMin, ShardsMax, ShardTargetKeys int
@@ -151,6 +152,14 @@ type Store struct {
 	ftsDueQ    *sortedindex.Queue
 	ftsDueErr  error
 	ftsDueSeen ftsDueMemo
+
+	// ftsMarkSeen is the layout 3 cluster mark as this server last read
+	// it (ftsMarkUnknown, ftsMarkOff, ftsMarkOn): a change is logged once
+	// (noteFTSLayout). ftsMarkMu serializes the read of the mark with
+	// the update, so that concurrent readers cannot leave an older
+	// answer in the log and the gauges (readFTSMark).
+	ftsMarkMu   sync.Mutex
+	ftsMarkSeen int32
 }
 
 // connRef is a reference-counted librados connection.

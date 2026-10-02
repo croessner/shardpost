@@ -276,9 +276,17 @@ shows how many objects of the old layout are left; the result counts the
 terms by field, the dictionary entries written and the old objects
 removed. Running it again is harmless, and it is also the repair for a
 term that lost its dictionary entries (it is then found as a whole word
-but not as a part of one). It has no checkpoint. On a layout 3 index it
-does nothing (see
-.BR fts_layout ).
+but not as a part of one). It has no checkpoint.
+.IP
+A legacy kind since 0.46.0: it matters only for layout 2 indexes
+written before 0.35.0. A layout 3 index always has its dictionary (see
+.BR fts_layout ),
+so planning it for a layout 3 account is refused (exit status 65), and a
+run that finds layout 3 or a layout conversion under way, at its start
+or before any later batch, stops writing (no further batch, no deletion
+of old objects), succeeds and reports
+.B skipped
+in its result.
 .TP
 .B fts_layout
 Role
@@ -562,9 +570,10 @@ shardpostctl apply -wait <plan-id>
 .RE
 .fi
 .PP
-After the upgrade to 0.35.0, move an account to the new dictionary
-layout. Search works before and after; the old objects take space until
-this has run.
+After an upgrade from a release before 0.35.0, move an account with a
+layout 2 index to the new dictionary layout (a legacy job: layout 3
+accounts are refused). Search works before and after; the old objects
+take space until this has run.
 .PP
 .nf
 .RS
@@ -688,7 +697,14 @@ The job partly failed; its errors are printed.
 .TP
 .B 65
 The plan was already applied or has expired, or a batch was planned
-before the account directory completed its backfill.
+before the account directory completed its backfill, or the plan was
+refused for the account's full-text layout:
+.B fts_layout
+with
+.B "\-layout 3"
+without the cluster mark,
+.B fts_dict_convert
+for an account whose index has layout 3.
 .TP
 .B 67
 No such job, plan or account.

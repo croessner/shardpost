@@ -522,3 +522,43 @@ func TestClearStaleLayoutImportOld(t *testing.T) {
 		t.Errorf("import reshard old entries: cleared %q %v", tok, err)
 	}
 }
+
+// dictLayoutUser is a layout 3 account (fake layout) that can convert
+// its dictionary (memstore).
+type dictLayoutUser struct {
+	*layoutUser
+	conv model.FTSDictConverter
+}
+
+func (u dictLayoutUser) LegacyFTSDict() (int, error) { return u.conv.LegacyFTSDict() }
+
+func (u dictLayoutUser) ConvertFTSDict(fence func() error, progress func(done, total int)) (model.FTSDictReport, error) {
+	return u.conv.ConvertFTSDict(fence, progress)
+}
+
+// dictLayoutOpener opens dictLayoutUser views.
+type dictLayoutOpener struct{ *layoutOpener }
+
+func (o dictLayoutOpener) User(name string) (model.User, error) {
+	u, err := o.s.User(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return dictLayoutUser{layoutUser: &layoutUser{importerUser: u.(importerUser), f: o.fake(name)}, conv: u.(model.FTSDictConverter)}, nil
+}
+
+// TestFTSDictConvertLayout3: fts_dict_convert is a legacy kind for
+// layout 2 indexes; planning it for a layout 3 account is refused with
+// a message that says why.
+func TestFTSDictConvertLayout3(t *testing.T) {
+	m, o := layoutManager(t)
+	m.env.Accounts = dictLayoutOpener{o}
+
+	k, _ := m.Kind(KindFTSDict)
+
+	_, err := m.CreatePlan(context.Background(), k, "alice", nil, "tester", nil)
+	if !errors.Is(err, model.ErrFTSDictLayout3) || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("plan on layout 3: %v", err)
+	}
+}
