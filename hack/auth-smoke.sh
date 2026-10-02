@@ -108,7 +108,16 @@ imap_logins "$LOGINS"
 h1=$(hits)
 m1=$(misses)
 echo "hits +$((h1 - h0)), misses +$((m1 - m0))"
-[ $((h1 - h0)) -ge $((LOGINS - npods)) ] || fail "expected at least $((LOGINS - npods)) cache hits"
+if [ $((h1 - h0)) -lt $((LOGINS - npods)) ]; then
+	# Per-pod counters and flushes, so that a failure says where the
+	# hits went (a pod that drained, a flush, a shared backend call).
+	for pod in $(pods); do
+		echo "-- $pod"
+		$K exec "$pod" -c server -- curl -s http://127.0.0.1:8080/metrics |
+			grep -E '^imapceph_auth_cache_(total|flushes_total)' || true
+	done
+	fail "expected at least $((LOGINS - npods)) cache hits"
+fi
 
 echo; echo "== shardpostctl auth flush $ACCOUNT =="
 ctl auth flush "$ACCOUNT"
