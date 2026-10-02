@@ -521,6 +521,17 @@ func TestMigrateCheck(t *testing.T) {
 	if _, f, _ := inputs(t, tool); f.Exists {
 		t.Fatalf("--check wrote the fence: %+v", f)
 	}
+}
+
+// TestMigrateCheckLocks: a held worker lock is reported in --check, not
+// refused (the servers hold their locks while they serve); the
+// migration itself refuses it, and a target that is not empty still
+// refuses --check.
+func TestMigrateCheckLocks(t *testing.T) {
+	quickChecks(t)
+
+	tool, cfg := migPools(t)
+	populate(t, tool, cfg)
 
 	s := mustOpen(t, plainConfig(cfg))
 
@@ -530,8 +541,38 @@ func TestMigrateCheck(t *testing.T) {
 	}
 	defer l.Release()
 
+	rep, err := migrate(tool, cfg, SystemOptions{Check: true})
+	if err != nil {
+		t.Fatalf("check with a held lock: %v", err)
+	}
+
+	if !slices.ContainsFunc(rep.Findings, func(f Finding) bool {
+		return f.Check == checkLocks && f.Object == objName(model.AdminNamespace, "ix.kv/lock") && !f.Blocking
+	}) {
+		t.Fatalf("check with a held lock: findings %+v", rep.Findings)
+	}
+
+	rep, err = migrate(tool, cfg, SystemOptions{})
+	wantErr(t, err, ErrSystemRefused, "migration with a held lock")
+
+	if !slices.ContainsFunc(rep.Findings, func(f Finding) bool { return f.Check == checkLocks && f.Blocking }) {
+		t.Fatalf("migration with a held lock: findings %+v", rep.Findings)
+	}
+
+	if _, f, _ := inputs(t, tool); f.Exists {
+		t.Fatalf("a refused migration left a fence: %+v", f.Values)
+	}
+
+	// A wrong target still refuses --check.
+	l.Release()
+	writeRaw(t, tool, cfg.SystemPool, model.AdminNamespace, "stray", []byte("x"))
+
 	_, err = migrate(tool, cfg, SystemOptions{Check: true})
-	wantErr(t, err, ErrSystemRefused, "check with a held lock")
+	wantErr(t, err, ErrSystemRefused, "check with a used target")
+
+	if !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("check with a used target: %v", err)
+	}
 }
 
 // running writes the records of processes that run: a server

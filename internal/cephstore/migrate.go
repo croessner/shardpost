@@ -318,8 +318,10 @@ func (m *migration) list() error {
 	return nil
 }
 
-// checkSource runs M0.3 to M0.6 on the source: registrations, leases and
-// watchers (refusing only when strict), and locks (always).
+// checkSource runs M0.3 to M0.6 on the source: registrations, leases,
+// watchers and locks, refusing only when strict. "--check" runs before
+// the processes stop, so the worker locks of the running servers are
+// reported there like their leases and registrations, not refused.
 func (m *migration) checkSource(strict bool) ([]Finding, error) {
 	t := m.t
 
@@ -345,6 +347,10 @@ func (m *migration) checkSource(strict bool) ([]Finding, error) {
 	}
 
 	ls, err := t.lockCheckSource(locks, m.run)
+
+	for i := range ls {
+		ls[i].Blocking = strict
+	}
 
 	return append(fs, ls...), err
 }

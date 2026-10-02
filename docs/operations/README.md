@@ -860,18 +860,22 @@ prints its report as JSON on standard output and ends with an exit code:
 | 3 | a check found the pools different from what they must be (a digest, an object that must not be there) |
 
 To run one command, put its arguments into the Job and wait for it.
-With a small helper:
+With a small helper (bash or zsh; the kubectl prefix is a function, not
+a variable such as `k="kubectl …"; $k …`, which only bash splits into
+words — zsh runs it as one command name and fails):
 
 ```bash
+# k: kubectl against the shardpost namespace of croessner.
+k() { kubectl --context croessner -n shardpost "$@"; }
+
 # system_job '<JSON args>': one run of the system tools; prints the
 # report and the exit code.
 system_job() {
-  k="kubectl --context croessner -n shardpost"
-  $k delete job shardpost-system --ignore-not-found --wait
-  sed "s|^          args: .*|          args: $1|" hack/system-job.yaml | $k apply -f -
-  until $k get job shardpost-system -o jsonpath='{.status.succeeded}{.status.failed}' | grep -q 1; do sleep 5; done
-  $k logs job/shardpost-system | sed -n '/^{$/,/^}$/p'
-  $k get pod -l job-name=shardpost-system \
+  k delete job shardpost-system --ignore-not-found --wait
+  sed "s|^          args: .*|          args: $1|" hack/system-job.yaml | k apply -f -
+  until k get job shardpost-system -o jsonpath='{.status.succeeded}{.status.failed}' | grep -q 1; do sleep 5; done
+  k logs job/shardpost-system | sed -n '/^{$/,/^}$/p'
+  k get pod -l job-name=shardpost-system \
     -o jsonpath='exit {.items[0].status.containerStatuses[0].state.terminated.exitCode}{"\n"}'
 }
 ```
@@ -908,7 +912,11 @@ an optional hardening for large clusters and not implemented.
 Create the pool (`pools.yaml`, `nodelete`, the caps of the `CephClient`),
 then run `system_job '["system", "init", "--pool", "shardpost-system"]'`
 before any server, and set `CEPH_SYSTEM_POOL` to `shardpost-system` on
-the server, the push worker and the scrub CronJob. A server with
+the server, the push worker and the scrub CronJob (or `ceph.system_pool`
+in `server.yaml` for a process whose env list an overlay replaces, as
+the croessner overlay does for the server; check what each one gets
+with `kubectl kustomize <overlay> | grep -A1 CEPH_SYSTEM_POOL` and the
+`server.yaml`). A server with
 `ceph.system_pool` on a pool without the init refuses to start, naming
 the command. The init writes the completion markers of the empty
 indexes, so `admin.kv_index: read` and `imapsieve.learning.index: read`
@@ -930,9 +938,26 @@ queue. The steps:
 2. The caps include the system pool, the pool `shardpost-system` is
    `HEALTH_OK`, `nodelete` is set on all three pools.
 3. The check: `system_job '["system", "migrate", "--to",
-   "shardpost-system", "--check"]'`. Target, probe and locks must pass
-   (exit 0); the running registrations, the push lease and the watchers
-   it reports are expected now.
+   "shardpost-system", "--check"]'`. Target and probe must pass (exit
+   0). The running registrations, the push lease, the watchers and the
+   worker locks of the running servers (`ix.fts_due/lock`,
+   `ix.uploads/lock`, `ix.jobs/expiry/lock`, `ix.submission/p<n>/lock`,
+   `learning-worker`, …) it reports are expected now: in `--check` they
+   are findings with `"blocking": false`. The migration itself refuses
+   every one of them.
+4. Look at how the overlay hands the system pool to each process, so
+   that the switch in the window reaches all three. In
+   `deploy/overlays/croessner-nauthilus` the server takes its
+   configuration from `server.yaml` only: a later patch replaces the
+   server container's env list, so a `CEPH_SYSTEM_POOL` env patch for
+   the server has no effect there. The push worker and the scrub
+   CronJob take the env patch (the environment wins over `server.yaml`).
+   Check both before the window:
+
+   ```bash
+   kubectl kustomize deploy/overlays/croessner-nauthilus | grep -A1 CEPH_SYSTEM_POOL
+   grep -n system_pool deploy/overlays/croessner-nauthilus/server.yaml
+   ```
 
 **In the window:**
 
@@ -967,24 +992,19 @@ queue. The steps:
    and take the run back with `abort` (below). Then compare source and
    copy once more: `system_job '["system", "verify"]'` (exit 0).
 
-4. Switch the configuration: `CEPH_SYSTEM_POOL` to `shardpost-system`
-   for the server, the push worker and the CronJob, as a patch in
+4. Switch the configuration. For the server, set `ceph.system_pool` in
+   the overlay's `server.yaml` (as done on 2026-10-02; an env patch for
+   the server is overwritten, see step 4 before the window):
+
+   ```yaml
+   ceph:
+     system_pool: "shardpost-system"
+   ```
+
+   For the push worker and the CronJob, `CEPH_SYSTEM_POOL` as a patch in
    `deploy/overlays/croessner-nauthilus/kustomization.yaml`:
 
    ```yaml
-   - patch: |
-       apiVersion: apps/v1
-       kind: Deployment
-       metadata:
-         name: shardpost-server
-       spec:
-         template:
-           spec:
-             containers:
-               - name: server
-                 env:
-                   - name: CEPH_SYSTEM_POOL
-                     value: shardpost-system
    - patch: |
        apiVersion: apps/v1
        kind: Deployment
@@ -1016,7 +1036,12 @@ queue. The steps:
                          value: shardpost-system
    ```
 
+   Then check that all three get it (the push worker and the CronJob in
+   the env, the server in its ConfigMap) and look at the diff:
+
    ```bash
+   kubectl kustomize deploy/overlays/croessner-nauthilus | grep -A1 CEPH_SYSTEM_POOL
+   kubectl kustomize deploy/overlays/croessner-nauthilus | grep 'system_pool:'
    kubectl --context croessner diff -k deploy/overlays/croessner-nauthilus
    ```
 
