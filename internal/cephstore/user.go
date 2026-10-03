@@ -3570,8 +3570,11 @@ func (u *User) lockNamed(id, lockName string, ttl time.Duration) (model.Lease, e
 // lock (holdLockOn), which carries what Retake needs to move it to
 // another connection.
 type lease struct {
-	// mu guards stop, done, u and cookie, which Retake replaces.
+	// mu guards stop, done, u and cookie, which Retake replaces; opMu
+	// serializes Retake and Release, so that a release never races the
+	// take through the new connection.
 	mu   sync.Mutex
+	opMu sync.Mutex
 	stop chan struct{}
 	// done is closed when the renewal goroutine ended (nil: none).
 	done     chan struct{}
@@ -3605,6 +3608,9 @@ func (l *lease) Lost() bool { return l.lost.Load() }
 // would otherwise take the lock again after the unlock) and unlocks.
 func (l *lease) Release() {
 	l.once.Do(func() {
+		l.opMu.Lock()
+		defer l.opMu.Unlock()
+
 		l.mu.Lock()
 		l.released = true
 		stop, done := l.stop, l.done

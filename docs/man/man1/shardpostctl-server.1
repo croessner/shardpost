@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-SERVER 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-SERVER 1 "2026-10-03" "ShardPost 0.52.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-server \- version, state and registrations of ShardPost servers
 .SH SYNOPSIS
@@ -67,6 +67,8 @@ in the admin store) and record their orderly end. Columns:
 .TP
 .B INSTANCE
 The pod name for a server;
+.IB host \-push
+for the JMAP push worker (stable across restarts of its container);
 .IB host \- role \- random
 for the other processes, which may run in a server's pod.
 .TP
@@ -99,6 +101,15 @@ for up to three minutes after its last heartbeat.
 The last heartbeat, the start of the process and its orderly end
 .RB ( \-
 while it runs or after a crash).
+.TP
+.BR PARTITIONS ", " WATCHED
+For the JMAP push worker: the push partitions it holds (of 64) and
+the accounts with push subscriptions it watches, as of its last
+heartbeat;
+.B \-
+for the other roles. The partitions of all fresh push workers together
+should reach 64; see
+.IR docs/jmap.md .
 .PP
 A registration not renewed for 24 hours is deleted. With
 .I admin.kv_index
@@ -117,6 +128,15 @@ What runs against the store right now, with which role and system pool?
 .RS
 shardpostctl server list
 shardpostctl server list \-\-json | jq \-r '.servers[] | select(.fresh) | .instance'
+.RE
+.fi
+.PP
+Do the push workers hold every partition between them?
+.PP
+.nf
+.RS
+shardpostctl server list \-\-json \\
+    | jq '[.servers[] | select(.fresh and .role == "push") | .partitions] | add'
 .RE
 .fi
 .PP

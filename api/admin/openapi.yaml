@@ -2922,6 +2922,16 @@ components:
           type: string
           format: date-time
           description: When the process ended in order; missing while it runs or after a crash.
+        partitions:
+          type: integer
+          description: |
+            The push partitions a push worker holds (role `push`, since
+            0.52.0); missing for the other roles.
+        watched:
+          type: integer
+          description: |
+            The accounts with push subscriptions a push worker watches
+            (role `push`, since 0.52.0); missing for the other roles.
     ServerRegistrationList:
       type: object
       required: [servers]

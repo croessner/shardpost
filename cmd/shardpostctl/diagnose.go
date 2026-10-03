@@ -236,7 +236,7 @@ func serverList(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "INSTANCE\tROLE\tVERSION\tSYSTEM POOL\tRUNNING\tSEEN\tSTARTED\tSTOPPED")
+	_, _ = fmt.Fprintln(tw, "INSTANCE\tROLE\tVERSION\tSYSTEM POOL\tRUNNING\tSEEN\tSTARTED\tSTOPPED\tPARTITIONS\tWATCHED")
 
 	for _, s := range resp.JSON200.Servers {
 		role := "serve (before 0.47)"
@@ -257,8 +257,16 @@ func serverList(ctx context.Context, c *adminapi.ClientWithResponses, a diagArgs
 			return t.Format(time.RFC3339)
 		}
 
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\t%s\t%s\t%s\n", s.Instance, role, s.Version, pool, s.Fresh,
-			s.Seen.Format(time.RFC3339), at(s.StartedAt), at(s.StoppedAt))
+		count := func(n *int) string {
+			if n == nil {
+				return "-"
+			}
+
+			return fmt.Sprint(*n)
+		}
+
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\t%s\t%s\t%s\t%s\t%s\n", s.Instance, role, s.Version, pool, s.Fresh,
+			s.Seen.Format(time.RFC3339), at(s.StartedAt), at(s.StoppedAt), count(s.Partitions), count(s.Watched))
 	}
 
 	_ = tw.Flush()

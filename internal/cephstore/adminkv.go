@@ -84,7 +84,9 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 				return nil, err
 			}
 
-			l.observer = func(op string, d time.Duration) { metrics.PushLockOp.WithLabelValues(op).Observe(d.Seconds()) }
+			if ll, ok := l.(*lease); ok {
+				ll.observer = func(op string, d time.Duration) { metrics.PushLockOp.WithLabelValues(op).Observe(d.Seconds()) }
+			}
 
 			return l, nil
 		}})

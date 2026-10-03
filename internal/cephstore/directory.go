@@ -400,6 +400,9 @@ func (l *lease) Retake() error {
 		return errors.New("the lease cannot be retaken")
 	}
 
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
+
 	l.mu.Lock()
 	if l.released {
 		l.mu.Unlock()

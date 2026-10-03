@@ -16,7 +16,9 @@ import (
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
+	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
+	"shardpost/internal/version"
 	"shardpost/internal/webpush"
 )
 
@@ -243,8 +245,9 @@ func pushAuth(ctx context.Context, log *slog.Logger, settings *config.Config, kv
 }
 
 // runPush runs the push worker ("shardpost push") until ctx ends, with the
-// health and metrics listener beside it for the probes.
-func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store) error {
+// health and metrics listener beside it for the probes. status is what
+// the registration shows of it.
+func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store, status *jmap.PushStatus) error {
 	c := settings.JMAP.Push
 	if !c.Enabled() {
 		return fmt.Errorf("shardpost push needs jmap.push.vapid_key_file")
@@ -277,13 +280,14 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 
 	defer func() { _ = health.Close() }()
 
-	host, _ := os.Hostname()
-
 	return jmap.RunPushWorker(ctx, jmap.WorkerOptions{
-		Store:          storeAdapter{store},
-		KV:             kv,
-		Sender:         pushSender(c, vapid),
-		Instance:       host + "-" + randomSuffix(),
+		Store:  storeAdapter{store},
+		KV:     kv,
+		Sender: pushSender(c, vapid),
+		// The same name as the registration: stable across restarts of
+		// the container, so the worker finds its own membership record.
+		Instance:       registrationInstance(model.RolePush),
+		Version:        version.Version,
 		Auth:           authn,
 		Log:            log.With("component", "push"),
 		VAPIDPublicKey: vapid.PublicKey(),
@@ -293,6 +297,21 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 		Sharing:          jmapSharing(settings),
 		MaxSharedWatches: int(c.MaxSharedWatches),
 		MaxWatches:       int(c.WorkerMaxWatches),
+		// The partitions (stage B18a).
+		LeaseTTL:           sec(c.LeaseSeconds),
+		Take:               sec(c.TakeSeconds),
+		Retry:              sec(c.RetrySeconds),
+		OrphanHold:         sec(c.OrphanHoldSeconds),
+		FullScan:           sec(c.FullScanSeconds),
+		Rebalance:          sec(c.RebalanceSeconds),
+		RebalanceSettle:    sec(c.RebalanceSettleSeconds),
+		Handoff:            sec(c.HandoffSeconds),
+		MaxPartitions:      int(c.MaxPartitions),
+		MaxWatchedAccounts: int(c.MaxWatchedAccounts),
+		StartRate:          int(c.StartRate),
+		SelfStopMargin:     config.PushSelfStopMargin * time.Second,
+		Rotate:             store,
+		Status:             status,
 	})
 }
 

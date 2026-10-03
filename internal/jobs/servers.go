@@ -50,13 +50,24 @@ type Registration struct {
 	SystemPool *model.PoolRef
 	// StartedAt is when the process started.
 	StartedAt time.Time
+	// Status, when set, supplies the partitions held and the accounts
+	// watched (the push worker, stage B18a); it is called at every
+	// heartbeat. nil for the other roles.
+	Status func() (partitions, watched int)
 }
 
 // record is the value of the registration at now.
 func (r Registration) record(now time.Time) model.ServerRecord {
-	return model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool, model.CapFTSDictFilter,
+	rec := model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool, model.CapFTSDictFilter,
 		model.CapFTSOnlineBuild}, Seen: now.UTC(),
 		Role: r.Role, SystemPool: r.SystemPool, StartedAt: r.StartedAt.UTC()}
+
+	if r.Status != nil {
+		partitions, watched := r.Status()
+		rec.Partitions, rec.Watched = &partitions, &watched
+	}
+
+	return rec
 }
 
 // RegisterServer writes the registration of a server (role serve) that

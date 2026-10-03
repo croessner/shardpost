@@ -375,10 +375,6 @@ type accountFeed struct {
 	notify func()
 }
 
-// rewatchDelay is how long the feed waits before it sets a broken watch
-// up again.
-const rewatchDelay = time.Second
-
 // newAccountFeed starts the feed of an account. A store without account
 // watches gives a feed that never fires; the poll covers that.
 func newAccountFeed(u model.User) *accountFeed { return newNotifyingFeed(u, nil) }
@@ -417,10 +413,13 @@ func (f *accountFeed) run(aw model.AccountWatcher) {
 			f.fire() // what the broken watch may have missed
 		}
 
+		// With a jitter, so that the watches of a process do not all
+		// come back at once after a key rotation or an OSD restart
+		// (rewatchWait).
 		select {
 		case <-f.stop:
 			return
-		case <-time.After(rewatchDelay):
+		case <-time.After(rewatchWait()):
 		}
 	}
 }

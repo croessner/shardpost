@@ -442,7 +442,7 @@ func TestAccountFeedRewatches(t *testing.T) {
 
 	select {
 	case <-fw.watches:
-	case <-time.After(3 * time.Second):
+	case <-time.After(rewatchMax + time.Second):
 		t.Fatal("no new watch")
 	}
 }
@@ -458,19 +458,19 @@ func (denyAll) Lookup(context.Context, string, string, net.Addr) (*auth.Result, 
 // TestAccountCheckSuspectsTheBackend: when most accounts are denied, none
 // is dropped; a single denied account is dropped only after three denials.
 func TestAccountCheckSuspectsTheBackend(t *testing.T) {
-	w := &worker{o: workerDefaults(WorkerOptions{Auth: denyAll{}, AccountCheck: time.Nanosecond}),
-		checked: map[string]*accountCheck{}}
+	w := &worker{o: workerDefaults(WorkerOptions{Auth: denyAll{}, AccountCheck: time.Nanosecond})}
+	svc := newPartitionService(w, &partition{})
 
 	many := map[string][]*pushRecord{"a": nil, "b": nil, "c": nil, "d": nil}
 	for range 5 {
-		if gone := w.goneAccounts(context.Background(), many); len(gone) != 0 {
+		if gone := svc.goneAccounts(context.Background(), many); len(gone) != 0 {
 			t.Fatalf("dropped %v although every account was denied", gone)
 		}
 	}
 
 	one := map[string][]*pushRecord{"x": nil}
 	for i := 1; i <= deniedToDrop; i++ {
-		gone := w.goneAccounts(context.Background(), one)
+		gone := svc.goneAccounts(context.Background(), one)
 		if (i < deniedToDrop) != (len(gone) == 0) {
 			t.Fatalf("denial %d gave %v", i, gone)
 		}
@@ -526,20 +526,29 @@ func TestPushWorkerKeepsWhatItCouldNotSend(t *testing.T) {
 	})
 }
 
-// TestPushWorkerPrunes: the worker forgets the backoff of subscriptions and
-// the checks of accounts a scan no longer finds.
+// TestPushWorkerPrunes: a partition forgets the backoff of subscriptions
+// and the checks of accounts a scan of it no longer finds; another
+// partition of the same worker keeps its own.
 func TestPushWorkerPrunes(t *testing.T) {
-	w := &worker{backoff: map[string]time.Time{"kept": {}, "gone": {}},
-		checked: map[string]*accountCheck{"kept@example.org": {}, "gone@example.org": {}}}
+	w := &worker{}
+	p3, p5 := newPartitionService(w, &partition{n: 3}), newPartitionService(w, &partition{n: 5})
+	p3.backoff = map[string]time.Time{"kept": {}, "gone": {}}
+	p3.checked = map[string]*accountCheck{"kept@example.org": {}, "gone@example.org": {}}
+	p5.backoff = map[string]time.Time{"other": {}}
+	p5.checked = map[string]*accountCheck{"other@example.org": {}}
 
-	w.prune(map[string]bool{"kept": true}, map[string][]*pushRecord{"kept@example.org": nil})
+	p3.prune(map[string]bool{"kept": true}, map[string][]*pushRecord{"kept@example.org": nil})
 
-	if _, ok := w.backoff["gone"]; ok || len(w.backoff) != 1 {
-		t.Fatalf("backoff after prune: %v", w.backoff)
+	if _, ok := p3.backoff["gone"]; ok || len(p3.backoff) != 1 {
+		t.Fatalf("backoff after prune: %v", p3.backoff)
 	}
 
-	if _, ok := w.checked["gone@example.org"]; ok || len(w.checked) != 1 {
-		t.Fatalf("checks after prune: %v", w.checked)
+	if _, ok := p3.checked["gone@example.org"]; ok || len(p3.checked) != 1 {
+		t.Fatalf("checks after prune: %v", p3.checked)
+	}
+
+	if len(p5.backoff) != 1 || len(p5.checked) != 1 {
+		t.Fatalf("the scan of one partition pruned another: %v %v", p5.backoff, p5.checked)
 	}
 }
 
@@ -577,7 +586,7 @@ func TestVerifyKeepsTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := &worker{o: workerDefaults(WorkerOptions{KV: kv, Sender: sender}), backoff: map[string]time.Time{}}
+	w := &worker{o: workerDefaults(WorkerOptions{KV: kv, Sender: sender})}
 	w.verify(context.Background())
 
 	raw, _ := kv.Get(pushVerifyQueue)

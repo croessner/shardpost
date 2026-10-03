@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"shardpost/internal/model"
@@ -88,11 +89,13 @@ func (pa *pushAccount) find(id string) *pushRecord {
 	return nil
 }
 
-// verifyItem is a verification the worker has to send.
+// verifyItem is a verification the worker has to send. Queued is when
+// it was queued (the age of the queue is a metric of the worker).
 type verifyItem struct {
-	Account  string `json:"account"`
-	ID       string `json:"id"`
-	Attempts int    `json:"attempts"`
+	Account  string    `json:"account"`
+	ID       string    `json:"id"`
+	Attempts int       `json:"attempts"`
+	Queued   time.Time `json:"queued,omitzero"`
 }
 
 // The properties of a PushSubscription.
@@ -171,17 +174,76 @@ func updatePushAccount(kv model.AdminKV, account string, fn func(*pushAccount) e
 	})
 }
 
-// queueVerify adds a verification for the worker to send.
+// queueVerify adds a verification for the worker to send, and wakes
+// the pod that sends them (the holder of partition 0, best effort).
 func queueVerify(kv model.AdminKV, account, id string) error {
-	return kv.Update(pushVerifyQueue, func(cur []byte) ([]byte, error) {
+	err := kv.Update(pushVerifyQueue, func(cur []byte) ([]byte, error) {
 		var q []verifyItem
 		if cur != nil {
 			_ = json.Unmarshal(cur, &q)
 		}
 
-		return json.Marshal(append(q, verifyItem{Account: account, ID: id}))
+		return json.Marshal(append(q, verifyItem{Account: account, ID: id, Queued: time.Now().UTC()}))
 	})
+	if err != nil {
+		return err
+	}
+
+	notifyPushWorker(kv, account, true)
+
+	return nil
 }
+
+// notifyPushWorker tells the push worker that the subscriptions of an
+// account changed (stage B18a): a notify with the account as payload
+// on the lock object of the account's partition, which its holder
+// watches; with verify, on partition 0 as well, whose holder sends the
+// verifications. Best effort and in the background: the scan of the
+// worker is the safety net, and a front-end knows nothing of the
+// membership of the push pods.
+func notifyPushWorker(kv model.AdminKV, account string, verify bool) {
+	om, ok := kv.(omapper)
+	if !ok {
+		return
+	}
+
+	n := pushPartitionsCached(kv)
+	data, _ := json.Marshal(pushWake{Account: account})
+
+	p := PushPartition(account, n)
+	om.Omap().NotifyPayload(pushLockOID(p), data)
+
+	if verify && p != 0 {
+		om.Omap().NotifyPayload(pushLockOID(0), data)
+	}
+}
+
+// pushPartitionsCached is the partition count as the front-end knows
+// it: read from the head of the subscription index once per process
+// (the count is in the data and does not change; a head that cannot be
+// read gives the default and is read again next time).
+func pushPartitionsCached(kv model.AdminKV) int {
+	pushPartitionsMu.Lock()
+	defer pushPartitionsMu.Unlock()
+
+	if n, ok := pushPartitionsKnown[kv]; ok {
+		return n
+	}
+
+	n, err := pushPartitionCount(kv)
+	if err != nil {
+		return defaultPushPartitions
+	}
+
+	pushPartitionsKnown[kv] = n
+
+	return n
+}
+
+var (
+	pushPartitionsMu    sync.Mutex
+	pushPartitionsKnown = map[model.AdminKV]int{}
+)
 
 // pushGetRequest is the argument shape of PushSubscription/get: a /get
 // without an account.
@@ -570,6 +632,8 @@ func updatePush(sess *session, kv model.AdminKV, id string, patch map[string]jso
 		return nil, &setError{Type: setServerFail, Description: err.Error()}
 	}
 
+	notifyPushWorker(kv, sess.account, false)
+
 	return changed, nil
 }
 
@@ -631,6 +695,8 @@ func destroyPush(sess *session, kv model.AdminKV, id string) *setError {
 	case err != nil:
 		return &setError{Type: setServerFail, Description: err.Error()}
 	}
+
+	notifyPushWorker(kv, sess.account, false)
 
 	return nil
 }

@@ -259,9 +259,14 @@ func dispatch(ctx context.Context, log *slog.Logger, settings *config.Config, co
 		return registered(ctx, log, store, model.RoleBackfill, func() error { return backfill(store, log, settings) })
 	}
 
-	// "shardpost push" runs the JMAP push worker.
+	// "shardpost push" runs the JMAP push worker; its registration shows
+	// the partitions it holds and the accounts it watches.
 	if command == commandPush {
-		return registered(ctx, log, store, model.RolePush, func() error { return runPush(ctx, log, settings, store) })
+		status := &jmap.PushStatus{}
+
+		return registeredWith(ctx, log, store, model.RolePush, status.Get, func() error {
+			return runPush(ctx, log, settings, store, status)
+		})
 	}
 
 	logFTSLayout(log, settings, store)
@@ -271,7 +276,14 @@ func dispatch(ctx context.Context, log *slog.Logger, settings *config.Config, co
 
 // registered runs fn while the process is registered with role.
 func registered(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string, fn func() error) error {
-	_, stop, err := startRegistration(ctx, log, store, role)
+	return registeredWith(ctx, log, store, role, nil, fn)
+}
+
+// registeredWith is registered with a status supplier for the record.
+func registeredWith(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string,
+	status func() (partitions, watched int), fn func() error,
+) error {
+	_, stop, err := startRegistration(ctx, log, store, role, status)
 	if err != nil {
 		return err
 	}
@@ -659,12 +671,19 @@ func scrubCommand(ctx context.Context, command string) (func(*cephstore.Store, *
 var processStart = time.Now()
 
 // registrationInstance is the name of the registration: the host name
-// for a server (the pod), the host name with the role and a random part
-// for every other process, which may run in the pod of a server.
+// for a server (the pod); the host name with the role for the push
+// worker, stable across restarts of its container, so that it finds
+// its own membership record and its registration (stage B18a); the
+// host name with the role and a random part for every other process,
+// which may run in the pod of a server more than once.
 func registrationInstance(role string) string {
 	host, _ := os.Hostname()
-	if role == model.RoleServe {
+
+	switch role {
+	case model.RoleServe:
 		return host
+	case model.RolePush:
+		return host + "-" + role
 	}
 
 	return host + "-" + role + "-" + randomSuffix()
@@ -676,7 +695,9 @@ func registrationInstance(role string) string {
 // or an admin listener (N8, F8d). The returned function stops the
 // heartbeat, records the orderly end and closes the admin store; serve
 // defers it, so all of it happens before the store closes.
-func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string) (*cephstore.AdminKV, func(), error) {
+func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string,
+	status func() (partitions, watched int),
+) (*cephstore.AdminKV, func(), error) {
 	pool, err := store.SystemPool()
 	if err != nil {
 		return nil, nil, fmt.Errorf("registration: %w", err)
@@ -687,7 +708,8 @@ func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.S
 		return nil, nil, fmt.Errorf("admin store: %w", err)
 	}
 
-	reg := jobs.Registration{Instance: registrationInstance(role), Version: version.Version, Role: role, SystemPool: pool, StartedAt: processStart}
+	reg := jobs.Registration{Instance: registrationInstance(role), Version: version.Version, Role: role, SystemPool: pool,
+		StartedAt: processStart, Status: status}
 	// The heartbeat goes on until the returned function is called, not
 	// until the signal: a server that drains still writes.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))

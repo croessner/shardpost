@@ -150,6 +150,10 @@ type ServerRecord struct {
 	// stops counting as running ServerFresh after its last heartbeat.
 	StartedAt time.Time `json:"started_at,omitzero"`
 	StoppedAt time.Time `json:"stopped_at,omitzero"`
+	// Partitions and Watched are what a push worker holds and watches
+	// (stage B18a); nil for the other roles.
+	Partitions *int `json:"partitions,omitempty"`
+	Watched    *int `json:"watched,omitempty"`
 }
 
 // IsServe reports whether the record is the one of a server ("shardpost

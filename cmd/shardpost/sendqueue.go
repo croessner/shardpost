@@ -42,7 +42,7 @@ func startBackground(ctx context.Context, log *slog.Logger, settings *config.Con
 
 	// The registration (and its admin store) stops with the background,
 	// before the caller closes the store (R4.8).
-	kv, stopRegistration, err := startRegistration(ctx, log, store, model.RoleServe)
+	kv, stopRegistration, err := startRegistration(ctx, log, store, model.RoleServe, nil)
 	if err != nil {
 		return nil, err
 	}
