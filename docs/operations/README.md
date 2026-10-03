@@ -191,9 +191,12 @@ pods and no runner: with two pods a third brings no relief, and a single
 runner would be a new single point. The separated topology is checked
 with `make test-docker` and a time-boxed smoke test.
 
-**What the runner is.** It reads the servers' configmap and the learning
-Secret, needs no TLS, VAPID or Nauthilus secrets (its load leaves the
-authentication secrets unread), opens no protocol listener and no admin
+**What the runner is.** It reads the servers' configmap (the system pool
+included: its manifest sets no `CEPH_SYSTEM_POOL`, which would win over
+the configmap) and the learning Secret, needs no TLS, VAPID or Nauthilus
+secrets (its load leaves the secret files of the authentication and of
+the push worker unread; a relay password file, which the delayed
+submission worker sends with, must be mounted), opens no protocol listener and no admin
 listener, and registers with the role `runner`. Diagnosis runs through a
 server pod as before: `kubectl exec ... shardpostctl job list`,
 `shardpostctl server list` (the runners' registrations show there, with
@@ -206,17 +209,19 @@ partitions are named in a notify so that another worker takes them at
 once instead of at its next poll.
 
 **Switching an existing cluster.** First apply the `runner` component
-(two to four pods): the runners take the leases beside the servers;
-nothing moves yet. Then the servers roll out with `WORKERS_RUN=false`:
+(two to four pods) and wait until its pods are ready: the runners take
+the leases beside the servers; nothing moves yet. Then add the component
+`deploy/components/runner-frontends`, a separate apply: the servers roll
+out with `WORKERS_RUN=false`:
 each old pod hands its jobs over (release plus notify, the runners take
 them at once), the leases of the expiry, `fts_due` and upload workers go
 to the runners at their next cadence (within a minute), the learning
 lease after `lock_retry_seconds`, and the submission partitions at once
 (the notify names them). Nothing is lost: the queues are durable, and a
 delayed submission goes at most one poll late. A new cluster starts
-separated. **The way back** is the reverse: remove `WORKERS_RUN` from
-the servers (they take the workers up again), then scale the runner
-deployment to 0. Always "able to take first, then give up".
+separated. **The way back** is the reverse: remove the component
+`runner-frontends` (the servers take the workers up again), then the
+`runner` component. Always "able to take first, then give up".
 
 **Mixed versions and the way back of 0.53.0.** `--pods` of `shardpostctl
 fts layout3|dictfilter|online enable` counts servers and runners since

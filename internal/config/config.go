@@ -1125,9 +1125,23 @@ func bind(v *viper.Viper, t reflect.Type, prefix string) error {
 	return nil
 }
 
+// runnerUnusedSecrets are the secret files a runner may lack: those of
+// the authentication and of the push worker, which it does not use. The
+// relay passwords it does use (the delayed submission worker sends) stay
+// required.
+var runnerUnusedSecrets = map[string]bool{
+	"LMTP_AUTH_PASSWORD_FILE":                 true,
+	"MASTER_PASSWORD_FILE":                    true,
+	"NAUTHILUS_INTROSPECT_CLIENT_SECRET_FILE": true,
+	"NAUTHILUS_PASSWORD_FILE":                 true,
+	"NAUTHILUS_TOKEN_FILE":                    true,
+	"NAUTHILUS_OIDC_CLIENT_SECRET_FILE":       true,
+	"JMAP_PUSH_VAPID_KEY_FILE":                true,
+}
+
 // resolveSecrets reads every "<Field>File" into "<Field>". lenient lets a
-// file that cannot be read pass with the field left empty (the runner,
-// which uses none of the secrets of the authentication).
+// file of runnerUnusedSecrets that cannot be read pass with the field
+// left empty (the runner).
 func resolveSecrets(v reflect.Value, lenient bool) error {
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
@@ -1153,7 +1167,7 @@ func resolveSecrets(v reflect.Value, lenient bool) error {
 
 		b, err := os.ReadFile(f.String())
 		if err != nil {
-			if lenient {
+			if lenient && runnerUnusedSecrets[sf.Tag.Get("env")] {
 				continue
 			}
 

@@ -93,6 +93,18 @@ var (
 	ErrNoWatch = errors.New("the learning queue cannot be watched")
 )
 
+// PagedQueue is a Queue that lists the due jobs page by page: ListAfter
+// returns the page after the cursor and the cursor of the next page (""
+// at the end). The worker with a concurrency above 1 reads further pages
+// when the jobs of a page all wait for their owner, so that one account
+// with many due jobs does not hold up the others.
+type PagedQueue interface {
+	ListAfter(after string) ([]Job, string, error)
+}
+
+// maxPages bounds the pages one pass reads.
+const maxPages = 10
+
 // Queue is the persistent learning job queue with a worker lease.
 type Queue interface {
 	Put(Job, []byte) error
@@ -382,19 +394,52 @@ func (w *LearningWorker) Step(ctx context.Context) {
 	}
 }
 
-// step is one pass under the lease.
+// step is one pass under the lease. With a concurrency above 1 and a
+// paged queue it reads the next page while jobs of the page waited for
+// their owner (or were in flight) and a runner slot is free, up to
+// maxPages pages.
 func (w *LearningWorker) step(ctx context.Context, lease model.Lease) {
-	jobs, err := w.Queue.List()
-	if err != nil {
-		learningResults.WithLabelValues("queue_error").Inc()
-		return
+	cursor := ""
+
+	for page := range maxPages {
+		jobs, next, err := w.list(cursor)
+		if err != nil {
+			learningResults.WithLabelValues("queue_error").Inc()
+			return
+		}
+
+		if page == 0 {
+			w.gauges(jobs)
+		}
+
+		skipped, ok := w.pass(ctx, lease, jobs)
+		if !ok || skipped == 0 || next == "" || w.slots == nil || len(w.slots) == cap(w.slots) {
+			return
+		}
+
+		cursor = next
+	}
+}
+
+// list reads one page of due jobs: from the cursor on with a paged
+// queue, the first page (and no further) otherwise.
+func (w *LearningWorker) list(cursor string) ([]Job, string, error) {
+	if pq, ok := w.Queue.(PagedQueue); ok {
+		return pq.ListAfter(cursor)
 	}
 
-	w.gauges(jobs)
+	jobs, err := w.Queue.List()
 
+	return jobs, "", err
+}
+
+// pass handles one page: it reports the due jobs it left for a later
+// pass (their owner busy, or in flight already), and whether the pass
+// goes on.
+func (w *LearningWorker) pass(ctx context.Context, lease model.Lease, jobs []Job) (skipped int, ok bool) {
 	for _, j := range jobs {
 		if ctx.Err() != nil || lease.Lost() {
-			return
+			return skipped, false
 		}
 
 		if j.Dead || time.Now().Before(j.Next) {
@@ -403,16 +448,23 @@ func (w *LearningWorker) step(ctx context.Context, lease model.Lease) {
 
 		if w.slots == nil {
 			if !w.stepJob(ctx, lease, j) {
-				return
+				return skipped, false
 			}
 
 			continue
 		}
 
-		if !w.dispatch(ctx, lease, j) {
-			return
+		started, goOn := w.dispatch(ctx, lease, j)
+		if !started && goOn {
+			skipped++
+		}
+
+		if !goOn {
+			return skipped, false
 		}
 	}
+
+	return skipped, true
 }
 
 // gauges publishes what a pass found due: the count and the age of the
@@ -441,10 +493,11 @@ func (w *LearningWorker) gauges(jobs []Job) {
 // not when another job of its owner runs (tried without waiting; the
 // next pass offers it again, in due order), and only once a slot is
 // free (waiting for one bounds the pass, which has nothing to gain by
-// listing more). It reports whether the pass goes on.
-func (w *LearningWorker) dispatch(ctx context.Context, lease model.Lease, j Job) bool {
+// listing more). It reports whether the job was handed to a runner and
+// whether the pass goes on.
+func (w *LearningWorker) dispatch(ctx context.Context, lease model.Lease, j Job) (started, goOn bool) {
 	if !w.admit(j) {
-		return true
+		return false, true
 	}
 
 	select {
@@ -452,7 +505,7 @@ func (w *LearningWorker) dispatch(ctx context.Context, lease model.Lease, j Job)
 	case <-ctx.Done():
 		w.done(j)
 
-		return false
+		return false, false
 	}
 
 	w.wg.Add(1)
@@ -465,7 +518,7 @@ func (w *LearningWorker) dispatch(ctx context.Context, lease model.Lease, j Job)
 		w.stepJob(w.jobCtx, lease, j)
 	}()
 
-	return true
+	return true, true
 }
 
 // admit takes the job into the in-flight set and its owner's semaphore

@@ -391,3 +391,27 @@ server:
 		t.Errorf("second entry: %+v, subscribed %v", second, second.Subscribed())
 	}
 }
+
+// TestLoadRunnerSecrets: a runner may lack the secret files of the
+// authentication, never the relay password the delayed submission
+// worker sends with.
+func TestLoadRunnerSecrets(t *testing.T) {
+	p := configFile(t, "ceph:\n  user: other\n")
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	t.Setenv("MASTER_PASSWORD_FILE", missing)
+
+	if _, err := LoadRunner(p); err != nil {
+		t.Fatalf("runner without the master password file: %v", err)
+	}
+
+	if _, err := Load(p); err == nil {
+		t.Fatal("a server loaded without its master password file")
+	}
+
+	t.Setenv("JMAP_SUBMISSION_PASSWORD_FILE", missing)
+
+	if _, err := LoadRunner(p); err == nil {
+		t.Fatal("a runner loaded without the relay password file")
+	}
+}

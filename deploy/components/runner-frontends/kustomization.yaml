@@ -1,0 +1,12 @@
+# The second step of a switch to job runner pods (stage B18b): the
+# servers become front-ends with WORKERS_RUN=false. Apply it only once
+# the runner component runs and its pods are ready, so that the workers
+# are never without a home; remove it first on the way back
+# (docs/operations/README.md, "Job runners").
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: server-patch.yaml
+    target:
+      kind: Deployment
+      name: shardpost-server

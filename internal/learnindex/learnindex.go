@@ -386,15 +386,32 @@ func (q *Queue) Watch() (model.Watch, error) {
 // oldest due time first; from the due queue in read mode, else from a
 // listing.
 func (q *Queue) List() ([]imapsieve.Job, error) {
+	jobs, _, err := q.ListAfter("")
+
+	return jobs, err
+}
+
+// ListAfter implements imapsieve.PagedQueue: List from the due entry
+// after the cursor on, and the cursor of the next page ("" when there is
+// none: a short page, or the listing of the namespace before the read
+// mode, which has no order to continue).
+func (q *Queue) ListAfter(after string) ([]imapsieve.Job, string, error) {
 	if !q.reads() {
-		return q.listDue()
+		jobs, err := q.listDue()
+
+		return jobs, "", err
 	}
 
 	now := q.o.Now()
 
-	due, err := q.q.Due(now, maxDue)
+	due, err := q.q.DueAfter(now, after, maxDue)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+
+	next := ""
+	if len(due) == maxDue {
+		next = due[len(due)-1].Key()
 	}
 
 	ids := make([]string, 0, len(due))
@@ -404,7 +421,7 @@ func (q *Queue) List() ([]imapsieve.Job, error) {
 
 	recs, err := q.rec.GetMany(ids)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	jobs := make([]imapsieve.Job, 0, len(due))
@@ -416,7 +433,7 @@ func (q *Queue) List() ([]imapsieve.Job, error) {
 		}
 	}
 
-	return jobs, nil
+	return jobs, next, nil
 }
 
 // checkEntry compares a due entry with its record j (found false: there

@@ -207,8 +207,9 @@ func warnNoRunner(log *slog.Logger, kv *cephstore.AdminKV) {
 		return
 	}
 
+	// A server without the workers field (0.51 and older) runs them.
 	for _, s := range servers {
-		if s.Fresh && (s.Role == model.RoleRunner || (s.IsServe() && s.Workers != nil && *s.Workers)) {
+		if s.Fresh && (s.Role == model.RoleRunner || (s.IsServe() && (s.Workers == nil || *s.Workers))) {
 			return
 		}
 	}

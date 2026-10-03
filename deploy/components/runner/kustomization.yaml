@@ -3,9 +3,10 @@
 # workers, the upload expiry, the delayed submission worker and the
 # learning worker — in pods of their own, so that the front-ends serve
 # sessions alone. The component adds the runner deployment with its
-# disruption budget and network policy, and sets WORKERS_RUN=false on the
-# server deployment: the servers keep the jobs API, the registration, the
-# auth flush and every writer of the queues, and run no worker.
+# disruption budget and network policy. The servers keep their workers
+# until the component runner-frontends sets WORKERS_RUN=false on them, a
+# separate step: they then keep the jobs API, the registration, the auth
+# flush and every writer of the queues, and run no worker.
 #
 # The runner reads the servers' configmap (shardpost-server-config at
 # /etc/shardpost/server.yaml, as the croessner-nauthilus overlay mounts
@@ -14,19 +15,16 @@
 # a server pod (kubectl exec ... shardpostctl job list, server list).
 #
 # Order of a switch on an existing cluster (docs/operations/README.md,
-# "Job runners"): apply this component (the runners take the leases
-# beside the servers), then the servers roll out with WORKERS_RUN=false
-# and hand their jobs over. The way back is the reverse: the servers
-# first (without WORKERS_RUN), then the runner deployment to 0. Not part
-# of the croessner overlays: two combined pods need no runner.
+# "Job runners"): apply this component and wait for its pods to be ready
+# (the runners take the leases beside the servers), then add the
+# component runner-frontends: the servers roll out with WORKERS_RUN=false
+# and hand their jobs over. The way back is the reverse: remove
+# runner-frontends (the servers take the workers up again), then this
+# component. Not part of the croessner overlays: two combined pods need
+# no runner.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 resources:
   - deployment.yaml
   - pdb.yaml
   - network-policy.yaml
-patches:
-  - path: server-patch.yaml
-    target:
-      kind: Deployment
-      name: shardpost-server

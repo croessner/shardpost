@@ -995,9 +995,11 @@ without jobs or an admin listener; since 0.47.0 so do the push worker
 (`shardpost push`), the scrubs (`shardpost scrub`, `scrub --batch`,
 `scrub --sweep` as role `sweep`) and the backfills (`shardpost index
 backfill …`), each with its role and for its whole runtime, and every
-one records its orderly end (`stopped_at`). A process other than a
-server registers as `<host>-<role>-<random>`, so a tool run in a
-server's pod does not overwrite the server's record. A registration not
+one records its orderly end (`stopped_at`). The push worker and the job
+runner register as `<host>-push` and `<host>-runner`, stable across
+restarts of their container; every other process other than a server
+registers as `<host>-<role>-<random>`, so a tool run in a server's pod
+does not overwrite the server's record. A registration not
 renewed for 24 hours is deleted by the expiry worker of the job system
 (with `admin.kv_index: off` or `jobs.enabled: false` everywhere, only by
 `status`, `enable` and `GET /admin/v1/servers`). With `admin.kv_index`

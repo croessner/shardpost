@@ -36,8 +36,10 @@ func (s *Service) Run(ctx context.Context) {
 
 	defer w.handOver()
 
-	events, closeWatch := w.watch()
-	defer closeWatch()
+	events, errs, closeWatch := w.watch()
+	defer func() { closeWatch() }()
+
+	rewatch := false
 
 	timer := time.NewTimer(s.o.Poll)
 	defer timer.Stop()
@@ -67,7 +69,18 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case data := <-events:
 			w.takeReleased(releasedPartitions(data))
+		case <-errs:
+			// A broken watch (an OSD drop, a key rotation) is set up
+			// again on the next pass; until then the poll remains.
+			closeWatch()
+			events, errs, closeWatch = nil, nil, func() {}
+			rewatch = true
 		case <-timer.C:
+		}
+
+		if rewatch {
+			events, errs, closeWatch = w.watch()
+			rewatch = events == nil
 		}
 	}
 }
@@ -79,11 +92,12 @@ type payloadQueue interface {
 }
 
 // watch watches the queue, with the data of the notifies when the queue
-// offers it; nil without a watch (the poll remains).
-func (w *worker) watch() (<-chan []byte, func()) {
+// offers it, and the watch's errors; nil channels without a watch (the
+// poll remains).
+func (w *worker) watch() (<-chan []byte, <-chan error, func()) {
 	if pq, ok := w.s.q.(payloadQueue); ok {
 		if watch, err := pq.WatchPayload(); err == nil {
-			return watch.Events(), watch.Close
+			return watch.Events(), watch.Errors(), watch.Close
 		}
 	}
 
@@ -91,7 +105,7 @@ func (w *worker) watch() (<-chan []byte, func()) {
 	if err != nil {
 		w.s.o.Log.Warn("sendqueue: watch the submission queue; polling only", "err", err)
 
-		return nil, func() {}
+		return nil, nil, func() {}
 	}
 
 	// A plain watch: its events are forwarded without data.
@@ -113,7 +127,7 @@ func (w *worker) watch() (<-chan []byte, func()) {
 		}
 	}()
 
-	return out, func() { close(stop); watch.Close() }
+	return out, watch.Errors(), func() { close(stop); watch.Close() }
 }
 
 // handoverNotice is the payload of the notify a worker sends when it

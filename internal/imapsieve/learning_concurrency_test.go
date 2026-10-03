@@ -389,3 +389,62 @@ func TestLearningShutdownGrace(t *testing.T) {
 		t.Fatalf("a cut-off job left the queue: %d left", q.left())
 	}
 }
+
+// pagedQueue is a syncQueue that lists in pages of size jobs (as the
+// real queue does in pages of 100), with the job ID as the cursor.
+type pagedQueue struct {
+	*syncQueue
+	size int
+}
+
+func (q *pagedQueue) ListAfter(after string) ([]Job, string, error) {
+	all, _ := q.List()
+
+	start := 0
+
+	if after != "" {
+		for i, j := range all {
+			if j.ID == after {
+				start = i + 1
+			}
+		}
+	}
+
+	end := min(start+q.size, len(all))
+	page := all[start:end]
+
+	next := ""
+	if len(page) == q.size {
+		next = page[len(page)-1].ID
+	}
+
+	return page, next, nil
+}
+
+// TestLearningPagesPastABusyOwner: the first page holds only jobs of one
+// account; the pass reads on and starts the other accounts at once,
+// instead of leaving them behind the busy account's backlog.
+func TestLearningPagesPastABusyOwner(t *testing.T) {
+	q := &pagedQueue{syncQueue: newSyncQueue(), size: 3}
+	p := newSlowPrograms(300 * time.Millisecond)
+	w := concurrentWorker(8, q, p)
+
+	for i := range 6 {
+		enqueueOwner(t, w, "busy", uint32(i+1), "spam")
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	for i := range 3 {
+		enqueueOwner(t, w, fmt.Sprintf("other%d", i), 1, "spam")
+	}
+
+	w.Step(context.Background())
+
+	waitFor(t, func() bool { return p.active() == 4 })
+
+	if jobs, owners := w.Running(); jobs != 4 || owners != 4 {
+		t.Fatalf("running %d jobs of %d owners, want 4 and 4", jobs, owners)
+	}
+
+	stepUntilEmpty(t, w, q.syncQueue, 15*time.Second)
+}

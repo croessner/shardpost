@@ -279,11 +279,6 @@ func dispatch(ctx context.Context, log *slog.Logger, settings *config.Config, co
 		return runRunner(ctx, log, settings, store, programs)
 	}
 
-	// "shardpost runner" runs the background workers without listeners.
-	if command == commandRunner {
-		return runRunner(ctx, log, settings, store, programs)
-	}
-
 	logFTSLayout(log, settings, store)
 
 	return serve(ctx, log, settings, store, programs, quotaSvc)
@@ -678,17 +673,19 @@ var processStart = time.Now()
 
 // registrationInstance is the name of the registration: the host name
 // for a server (the pod); the host name with the role for the push
-// worker, stable across restarts of its container, so that it finds
-// its own membership record and its registration (stage B18a); the
-// host name with the role and a random part for every other process,
-// which may run in the pod of a server more than once.
+// worker and the runner, stable across restarts of their container, so
+// that the push worker finds its own membership record and a restarted
+// container leaves no second fresh registration behind (cluster marks
+// count runners); the host name with the role and a random part for
+// every other process, which may run in the pod of a server more than
+// once.
 func registrationInstance(role string) string {
 	host, _ := os.Hostname()
 
 	switch role {
 	case model.RoleServe:
 		return host
-	case model.RolePush:
+	case model.RolePush, model.RoleRunner:
 		return host + "-" + role
 	}
 

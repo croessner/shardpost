@@ -68,7 +68,9 @@ in the admin store) and record their orderly end. Columns:
 .B INSTANCE
 The pod name for a server;
 .IB host \-push
-for the JMAP push worker (stable across restarts of its container);
+for the JMAP push worker and
+.IB host \-runner
+for a job runner (both stable across restarts of their container);
 .IB host \- role \- random
 for the other processes, which may run in a server's pod.
 .TP

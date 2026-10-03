@@ -61,10 +61,8 @@ spec:
               value: shardpost-index
             - name: CEPH_DATA_POOL
               value: shardpost-data
-            # ceph.system_pool: the same as the servers' (the configmap or
-            # this variable, which wins over it).
-            - name: CEPH_SYSTEM_POOL
-              value: ""
+            # ceph.system_pool comes from the configmap, as for the
+            # servers: a set variable, even an empty one, would win over it.
             - name: ROOK_NAMESPACE
               value: rook-ceph
             - name: HTTP_ADDR

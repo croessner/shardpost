@@ -56,6 +56,7 @@ func runRunner(ctx context.Context, log *slog.Logger, settings *config.Config, s
 
 	<-ctx.Done()
 
+	draining.Store(true)
 	log.Info("runner shutting down")
 
 	return nil
