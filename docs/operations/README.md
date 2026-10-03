@@ -723,10 +723,18 @@ stopped run is seen after its 90 s heartbeat aged).
   fts_rebuild <account>`.
 - Scrub `FTSMixedLayout`: layout 2 objects in a layout 3 account, written
   by a server before 0.45.0 after a wrong way back: `fts_rebuild`.
-- `imapceph_fts_shards_capped_total` rises: accounts outgrew
-  `fts.shards_max` objects; raise it, or the threshold at which Ceph
-  reports large omap objects (`osd_deep_scrub_large_omap_object_key_threshold`,
-  200 000 keys) if `fts.shard_target_keys` was raised beyond it.
+- `imapceph_fts_shards_capped_total{kind}` rises: an account's objects of
+  that kind outgrew their target at the cap (`fts.shards_max` for
+  `postings` and `headers`, `fts.dict_shards_max` for `dictionary`); the
+  log line names the generation. Raise the cap; it takes effect after a
+  restart of the pods. From then on the next delivery into the account
+  finds room below the cap and queues it, and the `fts_due` worker
+  reshards it (the account is locked for the job). To choose the time
+  yourself, reshard it by hand at a quiet time right after the restart:
+  `shardpostctl plan -due-only fts_layout <account>` and `apply -wait`.
+  Raise the threshold at which Ceph reports large omap objects
+  (`osd_deep_scrub_large_omap_object_key_threshold`, 200 000 keys) only
+  if a target was raised beyond about 133 000 keys.
 
 **The registrations.** They are deleted 24 hours after their last
 heartbeat by the expiry worker of the job system; with

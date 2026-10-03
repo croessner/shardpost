@@ -480,7 +480,7 @@ func (u *User) casShardRound(w *ftsWrite, oid string, keys, marks []string, fn f
 		return true, nil
 	}
 
-	set, rm, due := u.shardWrite(w, ch, m, lift)
+	set, rm, grow := u.shardWrite(w, ch, m, lift)
 
 	op := casWriteOp(ver, set, rm, nil)
 	err = op.Operate(u.idx, oid, rados.OperationNoFlag)
@@ -492,9 +492,7 @@ func (u *User) casShardRound(w *ftsWrite, oid string, keys, marks []string, fn f
 			metrics.FTSStaleFreezeLifted.Inc()
 		}
 
-		if due {
-			u.queueReshard(w.loc.g)
-		}
+		u.act(w.loc.g, grow)
 
 		return true, nil
 	case syscall.ERANGE, syscall.EOVERFLOW, syscall.EEXIST, syscall.ENOENT:
@@ -519,9 +517,9 @@ func splitMarkers(cur map[string][]byte, marks []string) map[string][]byte {
 }
 
 // shardWrite is what a posting compare-and-swap writes: the change, the
-// lifted freeze and the counters of a layout 3 object; due reports
-// counters that ask for a reshard.
-func (u *User) shardWrite(w *ftsWrite, ch shardChange, m map[string][]byte, lift bool) (map[string][]byte, []string, bool) {
+// lifted freeze and the counters of a layout 3 object; grow reports
+// counters that ask for a reshard or meet a cap.
+func (u *User) shardWrite(w *ftsWrite, ch shardChange, m map[string][]byte, lift bool) (map[string][]byte, []string, growth) {
 	set, rm := ch.set, ch.rm
 	if set == nil {
 		set = map[string][]byte{}
@@ -534,13 +532,17 @@ func (u *User) shardWrite(w *ftsWrite, ch shardChange, m map[string][]byte, lift
 	}
 
 	if !w.loc.v3() {
-		return set, rm, false
+		return set, rm, growth{}
 	}
 
 	n, dn := atoiMarker(m[markTerms])+ch.terms, atoiMarker(m[markDict])+ch.dict
 	set[markTerms], set[markDict] = itoaMarker(n), itoaMarker(dn)
 
-	return set, rm, ch.terms > 0 && u.reshardDue(w.loc, n, dn)
+	if ch.terms <= 0 {
+		return set, rm, growth{}
+	}
+
+	return set, rm, u.reshardDue(w.loc, n, dn)
 }
 
 // check applies the anomaly rule to a posting object read at version
@@ -857,12 +859,13 @@ type docAlloc struct {
 	// what the last round found
 	lay                            *ftsLayout
 	perr                           error
-	lookup, create, installed, due bool
+	lookup, create, installed bool
+	grow                      growth
 }
 
 // round is the compare-and-swap function of the id map.
 func (a *docAlloc) round(cur map[string][]byte) (map[string][]byte, []string) {
-	a.lookup, a.create, a.installed, a.due = false, false, false, false
+	a.lookup, a.create, a.installed, a.grow = false, false, false, growth{}
 
 	if a.lay, a.perr = parseLayout(cur[ftsLayoutKey]); a.perr != nil {
 		return nil, nil
@@ -887,7 +890,7 @@ func (a *docAlloc) round(cur map[string][]byte) (map[string][]byte, []string) {
 	case a.lay.F == model.FTSLayout3 && !a.installed:
 		c := atoiMarker(cur[ftsCountKey]) + added
 		set[ftsCountKey] = itoaMarker(c)
-		a.due = float64(c)/float64(max(a.lay.H, 1)) > reshardFactor*float64(a.u.ftsCfg.sizing.target)
+		a.grow = a.u.headersDue(a.lay.H, c)
 
 		markFreshIndex3(cur, set)
 	}
@@ -947,8 +950,8 @@ func (a *docAlloc) next() (bool, error) {
 
 	a.u.ftsHasIDs.Store(true)
 
-	if a.due {
-		a.u.queueReshard(a.lay.G)
+	if a.lay != nil {
+		a.u.act(a.lay.G, a.grow)
 	}
 
 	return true, nil

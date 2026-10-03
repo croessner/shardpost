@@ -466,7 +466,7 @@ func TestLayoutDueOnly(t *testing.T) {
 	}
 
 	// A tiny target makes the counters ask for more objects.
-	u.ftsCfg.sizing.target = 100
+	u.ftsCfg.sizing.target, u.ftsCfg.sizing.dictTarget = 100, 100
 
 	target, due, err = u.FTSLayoutDue()
 	if err != nil || !due || target.D < 2 {

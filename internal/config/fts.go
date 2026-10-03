@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path"
 
 	"shardpost/internal/charset"
 )
@@ -38,12 +39,28 @@ type FTS struct {
 	Layout int `mapstructure:"layout" validate:"oneof=2 3"`
 	// ShardsMin is the number of posting, dictionary and header objects
 	// of a fresh layout 3 index without a size hint; ShardsMax bounds
-	// what a reshard chooses.
-	ShardsMin int `mapstructure:"shards_min" validate:"gte=1,lte=4096"`
-	ShardsMax int `mapstructure:"shards_max" validate:"gte=1,lte=4096"`
-	// ShardTargetKeys is the number of keys a layout 3 object should hold
-	// (T): a shard with half as many again asks for a reshard.
+	// the posting and header objects a reshard chooses (S and H),
+	// DictShardsMax the dictionary objects (D).
+	ShardsMin     int `mapstructure:"shards_min" validate:"gte=1,lte=4096"`
+	ShardsMax     int `mapstructure:"shards_max" validate:"gte=1,lte=4096"`
+	DictShardsMax int `mapstructure:"dict_shards_max" validate:"gte=1,lte=4096"`
+	// ShardTargetKeys is the number of keys a layout 3 posting or header
+	// object should hold (T_p), DictTargetKeys the number a dictionary
+	// object should hold (T_d): an object with half as many again asks
+	// for a reshard.
 	ShardTargetKeys int `mapstructure:"shard_target_keys" validate:"gte=10000,lte=1000000"`
+	DictTargetKeys  int `mapstructure:"dict_target_keys" validate:"gte=10000,lte=1000000"`
+	// ConvertBufferKeys is the least number of keys a conversion (P5)
+	// holds before it writes them; it may hold 1024 per target object
+	// when that is more. ConvertWriters is the number of writes it has
+	// in flight.
+	ConvertBufferKeys int `mapstructure:"convert_buffer_keys" validate:"gte=16384,lte=4194304"`
+	ConvertWriters    int `mapstructure:"convert_writers" validate:"gte=1,lte=64"`
+	// StatsTestAccounts are the accounts (path.Match patterns on the
+	// lower-cased account, e.g. "bench-*") whose index terms
+	// "shardpostctl fts stats" may classify; for every other account it
+	// only counts keys.
+	StatsTestAccounts []string `mapstructure:"stats_test_accounts" validate:"dive,required"`
 	// AutoReshard runs the fts_due worker, which plans fts_layout jobs
 	// for the accounts whose shards outgrew ShardTargetKeys.
 	AutoReshard bool `mapstructure:"auto_reshard"`
@@ -60,20 +77,42 @@ type FTS struct {
 }
 
 // shardTargetWarn is the target key count above which the configuration
-// is accepted with a warning: Ceph warns about omap objects of more than
-// 200000 keys unless osd_deep_scrub_large_omap_object_key_threshold is
-// raised.
-const shardTargetWarn = 200000
+// is accepted with a warning: an object grows to 1.5 times its target
+// before a writer asks for a reshard, and Ceph warns about omap objects
+// of more than 200000 keys unless
+// osd_deep_scrub_large_omap_object_key_threshold is raised.
+const shardTargetWarn = 133000
 
-// ShardTargetWarning is the warning the server logs at startup for a
-// shard target above Ceph's large omap threshold ("" for none).
-func (f FTS) ShardTargetWarning() string {
-	if f.ShardTargetKeys <= shardTargetWarn {
-		return ""
+// ShardTargetWarnings are the warnings the server logs at startup for
+// targets whose objects may pass Ceph's large omap threshold before a
+// reshard (none: nil).
+func (f FTS) ShardTargetWarnings() []string {
+	var out []string
+
+	for _, t := range []struct {
+		key string
+		n   int
+	}{{"fts.shard_target_keys", f.ShardTargetKeys}, {"fts.dict_target_keys", f.DictTargetKeys}} {
+		if t.n > shardTargetWarn {
+			out = append(out, fmt.Sprintf("%s %d is above %d: an object grows to 1.5 times its target (%d keys) before a reshard, "+
+				"beyond the 200000 keys at which Ceph reports large omap objects; raise osd_deep_scrub_large_omap_object_key_threshold accordingly",
+				t.key, t.n, shardTargetWarn, t.n*3/2))
+		}
 	}
 
-	return fmt.Sprintf("fts.shard_target_keys %d is above the 200000 keys at which Ceph reports large omap objects; "+
-		"raise osd_deep_scrub_large_omap_object_key_threshold accordingly", f.ShardTargetKeys)
+	return out
+}
+
+// StatsTestAccount reports whether "fts stats" may classify the terms
+// of account (the lower-cased canonical account).
+func (f FTS) StatsTestAccount(account string) bool {
+	for _, p := range f.StatsTestAccounts {
+		if ok, err := path.Match(p, account); err == nil && ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // IMAPWordSearch reports whether IMAP SEARCH uses word semantics.
@@ -88,6 +127,16 @@ func (f FTS) Validate() error {
 
 	if f.ShardsMax < f.ShardsMin {
 		return fmt.Errorf("fts.shards_max (%d) must not be below fts.shards_min (%d)", f.ShardsMax, f.ShardsMin)
+	}
+
+	if f.DictShardsMax < f.ShardsMin {
+		return fmt.Errorf("fts.dict_shards_max (%d) must not be below fts.shards_min (%d)", f.DictShardsMax, f.ShardsMin)
+	}
+
+	for _, p := range f.StatsTestAccounts {
+		if _, err := path.Match(p, ""); err != nil {
+			return fmt.Errorf("fts.stats_test_accounts: pattern %q: %w", p, err)
+		}
 	}
 
 	return nil

@@ -131,8 +131,14 @@ type FTSConfig struct {
 	// needs the cluster mark; the zero value means 2 — the server
 	// passes fts.layout, whose built-in default is 3).
 	Layout int
-	// ShardsMin, ShardsMax and ShardTargetKeys size layout 3 generations.
+	// ShardsMin, ShardsMax and ShardTargetKeys size the posting and
+	// header objects of layout 3 generations, DictShardsMax and
+	// DictTargetKeys their dictionary objects (ShardsMin all three).
 	ShardsMin, ShardsMax, ShardTargetKeys int
+	DictShardsMax, DictTargetKeys         int
+	// ConvertBufferKeys is the least write buffer of a conversion's copy
+	// (P5), ConvertWriters its writes in flight.
+	ConvertBufferKeys, ConvertWriters int
 	// AutoReshard queues accounts whose shards outgrew the target.
 	AutoReshard bool
 	// FrozenWait is how long an indexing waits, once, for a conversion
@@ -170,11 +176,13 @@ type Store struct {
 	uploadsErr  error
 
 	// ftsDueQ is the reshard queue of the full-text index (ftslayout.go);
-	// ftsDueSeen remembers what this server queued.
-	ftsDueOnce sync.Once
-	ftsDueQ    *sortedindex.Queue
-	ftsDueErr  error
-	ftsDueSeen ftsDueMemo
+	// ftsDueSeen remembers what this server queued, ftsCappedSeen the
+	// generations it reported at their shard cap.
+	ftsDueOnce    sync.Once
+	ftsDueQ       *sortedindex.Queue
+	ftsDueErr     error
+	ftsDueSeen    ftsDueMemo
+	ftsCappedSeen ftsCappedMemo
 
 	// place is the periodic placement check and placeState the state of
 	// the last check (placement.go).

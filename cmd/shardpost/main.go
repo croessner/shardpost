@@ -289,7 +289,7 @@ func textSettings(log *slog.Logger, settings *config.Config) error {
 		return err
 	}
 
-	if w := settings.FTS.ShardTargetWarning(); w != "" {
+	for _, w := range settings.FTS.ShardTargetWarnings() {
 		log.Warn(w)
 	}
 
@@ -309,7 +309,9 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		ChunkSize:     settings.Ceph.ChunkSize,
 		FTSShards:     int(settings.Server.FtsShards),
 		FTS: cephstore.FTSConfig{Layout: settings.FTS.Layout, ShardsMin: settings.FTS.ShardsMin, ShardsMax: settings.FTS.ShardsMax,
-			ShardTargetKeys: settings.FTS.ShardTargetKeys, AutoReshard: settings.FTS.AutoReshard,
+			ShardTargetKeys: settings.FTS.ShardTargetKeys, DictShardsMax: settings.FTS.DictShardsMax,
+			DictTargetKeys: settings.FTS.DictTargetKeys, ConvertBufferKeys: settings.FTS.ConvertBufferKeys,
+			ConvertWriters: settings.FTS.ConvertWriters, AutoReshard: settings.FTS.AutoReshard,
 			FrozenWait: time.Duration(settings.FTS.FrozenWaitSeconds) * time.Second},
 		Quota:       cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
 		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},

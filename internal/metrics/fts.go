@@ -76,10 +76,19 @@ var (
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "layout_effective",
 		Help: "Layout new full-text indexes get: fts.layout combined with the layout 3 cluster mark at its last read.",
 	})
-	// FTSShardsCapped counts reshards whose target was capped at
-	// fts.shards_max: the objects grow beyond fts.shard_target_keys.
-	FTSShardsCapped = promauto.NewCounter(prometheus.CounterOpts{
+	// FTSShardsCapped counts index generations whose objects of a kind
+	// (postings, dictionary, headers) outgrew 1.5 times their target
+	// while their count is at its cap (fts.shards_max, for the
+	// dictionary fts.dict_shards_max): once per generation, kind and
+	// server, counted by the writer that sees it.
+	FTSShardsCapped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "shards_capped_total",
-		Help: "Full-text reshards whose shard count was capped at fts.shards_max.",
+		Help: "Full-text index generations whose objects outgrew their target at the shard cap, by kind (postings, dictionary, headers).",
+	}, []string{labelKind})
+	// FTSConvertBufferKeys is the number of keys a conversion of this
+	// server holds before it writes them (0 outside P5).
+	FTSConvertBufferKeys = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: subsystemFTS, Name: "convert_buffer_keys",
+		Help: "Keys a full-text conversion of this server holds in its write buffer (0 outside the copy phase).",
 	})
 )

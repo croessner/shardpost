@@ -1604,13 +1604,25 @@ operations of the index plus the blob read. A small account has 4
 full-text objects instead of 284; the keys are the same.
 
 <a id="full-text-reshard"></a>
-**Growth and reshard.** A posting compare-and-swap that finds more than
-1.5 × `fts.shard_target_keys` (T, 100 000) terms in its object, or more
-than that many dictionary keys per dictionary object (`!dn` · S / D),
-and an id map compare-and-swap with more than 1.5 T documents per header
-object, queue the account in `ix.fts_due` (in `~accounts`; id the
-account, generation the FNV-64 of the index generation, due now); a
-server queues a generation at most once per ten minutes. The worker
+**Growth and reshard.** Posting and header objects have the target
+T_p = `fts.shard_target_keys` and the cap `fts.shards_max` (128),
+dictionary objects the target T_d = `fts.dict_target_keys` and the cap
+`fts.dict_shards_max` (512): the dictionary has about five times as many
+keys as the postings (280 against 57 per message on the largest account
+measured), so one cap for all three either starves the dictionary or
+lets the postings fan out (0.49.0; before, `fts.shards_max` 32 applied
+to all three). A posting compare-and-swap that finds more than
+1.5 × T_p (100 000) terms in its object while S is below its cap, or
+more than 1.5 × T_d dictionary keys per dictionary object (`!dn` · S /
+D) while D is below its cap, and an id map compare-and-swap with more
+than 1.5 T_p documents per header object while H is below its cap,
+queue the account in `ix.fts_due` (in `~accounts`; id the account,
+generation the FNV-64 of the index generation, due now); a server
+queues a generation at most once per ten minutes. At a cap the trigger
+is silent: no queue entry, no job and no account lock; instead the
+writer counts `imapceph_fts_shards_capped_total{kind}` and logs a
+warning, once per generation, kind and server (a memory of 65 536
+generations without expiry, oldest out first). The worker
 `fts_due` runs with the job system on the server that holds its lease
 (`fts.auto_reshard`) and owns the entries: an entry of a purged account
 or of a generation that was replaced goes; a locked account and a job
@@ -1620,13 +1632,24 @@ remembers the job in the admin record `fts_due/<account>` (deleted with
 the account). A job that switched removes entry and record; one that
 found nothing to do (the per-object trigger and the target from the sums
 can disagree) leaves the entry six hours alone. The targets are
-S′ = 2^⌈log2(Σ`!n` / T)⌉, D′ from Σ`!dn`, H′ from `c`, each at least
-`fts.shards_min` and at most `fts.shards_max` (32). Beyond 32 × T, 3.2
-million terms or dictionary keys per account with the defaults, the
-objects grow past T (`imapceph_fts_shards_capped_total` and a log line
-say when); Ceph reports large omap objects from 200 000 keys per object
-(`osd_deep_scrub_large_omap_object_key_threshold`), 6.4 million per
-account.
+S′ = 2^⌈log2(Σ`!n` / T_p)⌉ and H′ from `c`, each at most
+`fts.shards_max`, and D′ = 2^⌈log2(Σ`!dn` / T_d)⌉, at most
+`fts.dict_shards_max`; all at least `fts.shards_min`. `FTSLayoutDue`
+(the plan of `fts_layout`, `plan -due-only`, the import reshard) uses
+the same caps and names the kinds a cap cut (`capped` in the plan's
+target); it counts nothing. Beyond 128 × T_p, 12.8 million terms, and
+512 × T_d, 51.2 million dictionary keys per account with the defaults,
+the objects grow past their targets; Ceph reports large omap objects
+from 200 000 keys per object
+(`osd_deep_scrub_large_omap_object_key_threshold`). A fresh index is
+sized from the import hint (or, for a rebuild, the documents) with
+`estimateKeys`: linear between calibration points of the bench corpus
+up to 5000 messages (about 85 dictionary keys per message, a corpus
+without identifiers) and the largest account measured (36 246 messages,
+2 069 828 terms, 10 138 532 dictionary keys), beyond it with the slope
+of that last section (about 63.5 terms and 311 dictionary keys per
+message); between 5000 and 36 246 messages it is a bridge, not a
+measurement.
 
 <a id="full-text-conversion"></a>
 **Conversion.** The job `fts_layout` (role `repair`, exclusive, also as

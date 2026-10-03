@@ -219,7 +219,7 @@ func testRecord() *ftsLayout {
 // TestLayoutSizing: object counts follow the key counts as powers of two
 // within the bounds.
 func TestLayoutSizing(t *testing.T) {
-	z := ftsSizing{min: 1, max: 32, target: 100000}
+	z := ftsSizing{min: 1, max: 32, target: 100000}.withDefaults()
 
 	for _, c := range []struct {
 		keys   int64
@@ -237,7 +237,7 @@ func TestLayoutSizing(t *testing.T) {
 // TestLayoutShapeFor: a fresh index without a hint has the lower bound;
 // with one, the estimate of the bench corpus sizes it.
 func TestLayoutShapeFor(t *testing.T) {
-	z := ftsSizing{min: 1, max: 32, target: 100000}
+	z := ftsSizing{min: 1, max: 32, target: 100000}.withDefaults()
 
 	if s, d, h := z.shapeFor(0); s != 1 || d != 1 || h != 1 {
 		t.Errorf("no hint: %d %d %d", s, d, h)

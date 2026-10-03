@@ -231,6 +231,9 @@ type FTSLayoutShape struct {
 	S      int    `json:"s,omitempty"`
 	D      int    `json:"d,omitempty"`
 	H      int    `json:"h,omitempty"`
+	// Capped names the kinds of objects (postings, dictionary, headers)
+	// whose count a cap cut, in the target FTSLayoutDue reports.
+	Capped []string `json:"capped,omitempty"`
 }
 
 // FTSLayoutReport is what a conversion did.

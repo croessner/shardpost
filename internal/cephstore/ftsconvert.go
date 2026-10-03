@@ -83,34 +83,45 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 		return cur.shape(), false, nil
 	}
 
-	target, err := u.reshardTarget(cur)
+	target, capped, err := u.reshardTarget(cur)
 	if err != nil {
 		return model.FTSLayoutShape{}, false, err
 	}
 
-	return target.shape(), target.s != cur.s || target.d != cur.d || target.h != cur.h, nil
+	shape := target.shape()
+	shape.Capped = capped
+
+	return shape, target.s != cur.s || target.d != cur.d || target.h != cur.h, nil
 }
 
 // reshardTarget computes the shape the counters of a layout 3
-// generation ask for (§4.6 "Ziele").
-func (u *User) reshardTarget(cur ftsLoc) (ftsLoc, error) {
+// generation ask for (temp/13 §4.6): S′ and H′ within fts.shards_max
+// from fts.shard_target_keys, D′ within fts.dict_shards_max from
+// fts.dict_target_keys. capped names the kinds a cap cut; it is only
+// reported, never counted (the writers count a generation at its cap).
+func (u *User) reshardTarget(cur ftsLoc) (ftsLoc, []string, error) {
 	terms, dict, docs, err := u.layoutCounts(cur)
 	if err != nil {
-		return ftsLoc{}, err
+		return ftsLoc{}, nil, err
 	}
 
 	z := u.ftsCfg.sizing
 	s, c1 := z.count(terms)
-	d, c2 := z.count(dict)
+	d, c2 := z.dictCount(dict)
 	h, c3 := z.count(docs)
 
-	if c1 || c2 || c3 {
-		metrics.FTSShardsCapped.Inc()
-		u.log.Warn("fts shard counts capped at fts.shards_max: objects grow beyond fts.shard_target_keys",
-			"terms", terms, "dict", dict, "docs", docs, "max", z.max)
+	var capped []string
+
+	for _, c := range []struct {
+		cut  bool
+		kind string
+	}{{c1, kindPostings}, {c2, kindDictionary}, {c3, kindHeaders}} {
+		if c.cut {
+			capped = append(capped, c.kind)
+		}
 	}
 
-	return ftsLoc{f: model.FTSLayout3, s: s, d: d, h: h}, nil
+	return ftsLoc{f: model.FTSLayout3, s: s, d: d, h: h}, capped, nil
 }
 
 // layoutCounts reads the term and dictionary key counters of the posting
@@ -395,7 +406,7 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 		n := min(req.Shards, 4096)
 		t.s, t.d, t.h = n, n, n
 	case src.v3():
-		shape, err := u.reshardTarget(src)
+		shape, _, err := u.reshardTarget(src)
 		if err != nil {
 			return t, err
 		}
