@@ -1482,11 +1482,12 @@ the same results in both layouts; only object names and counts differ.
 | `ftx/<gen>/p<i>`, S of them, shard = fnv1a(term) mod S | `<field>:<token>` | posting list (as in layout 2) |
 | | `!g`, `!s`, `!n`, `!dn` | generation, state (`live` or `frozen:<tok>`), terms, dictionary keys of the terms |
 | `ftx/<gen>/d<j>`, D of them, shard = fnv1a(trigram) mod D | `<trigram>:<field>:<token>` | empty |
+| | `#<tri0>:b:<token>` | empty; the start entry of a body identifier in a generation with the identifier filter (0.50.0), in the object of the token's first trigram `<tri0>` ([below](#full-text-identifier-filter)) |
 | | `!g` | generation |
 | `ftx/<gen>/h<k>`, H of them, shard = fnv1a(GUID) mod H | GUID | header text (format byte 1, DEFLATE) |
 | | `!g` | generation |
 | `ftsmap` | `L` | the layout record (JSON) |
-| | `V`, `c` | version marker of layout 3 (instead of `v`), number of documents |
+| | `V`, `c` | version marker of layout 3 (instead of `v`: `2`, since 0.50.0 also `3` and `4`, [below](#full-text-identifier-filter)), number of documents |
 
 `<gen>` is a random token of 16 hex digits. Keys that start with `!` are
 markers: every full enumeration skips them (a conversion, the
@@ -1500,7 +1501,11 @@ the token of its run, for the import reshard also its heartbeat `at`),
 sources a conversion has not removed yet (`old`, each with the token of
 its run and, for the import reshard, the heartbeat `at` it carries over
 from `next` at the switch) and whether the layout
-2 objects are gone (`lg`). Without `L` the account has layout 2.
+2 objects are gone (`lg`). Since 0.50.0 a generation (current, `next`,
+`old`) may carry the identifier filter of its dictionary (`dx`:
+`{"v":1,"n":25}`) and its text preparation (`ah`: `nosig`); both are
+fixed for the life of the generation. Without `L` the account has
+layout 2.
 Writers read `L` in the id map's compare-and-swap of every indexing (no
 extra read); removals read it with the document id; readers cache it
 per view, with the trust markers, and check the markers of every object
@@ -1683,9 +1688,10 @@ accounts, would be about 2.8·10¹² keys and 140 to 170 TB before
 replication. The identifiers — new in every message — are most of it;
 the bench corpus `ids` and `shardpostctl fts stats -classes` on test
 accounts measure how much, and a later stage may give them one key each
-instead of one per trigram. The next limit of large accounts is the
-fan-out of a delivery: with about 650 terms it touches nearly every
-posting object, 2·S operations.
+instead of one per trigram — the identifier filter of 0.50.0 does
+([below](#full-text-identifier-filter)). The next limit of large
+accounts is the fan-out of a delivery: with about 650 terms it touches
+nearly every posting object, 2·S operations.
 
 <a id="full-text-conversion"></a>
 **Conversion.** The job `fts_layout` (role `repair`, exclusive, also as
@@ -1697,8 +1703,8 @@ holds the account lock (deliveries fail temporarily for the whole job):
 |---|---|
 | P2 | fence; `L.next` = target generation and token. A `next` of exactly this token is continued; any other is foreign — also one of the same job with another lease generation, which may still be writing — its targets are deleted and it is replaced. Sources a crashed run left in `old` are deleted. 2→3 enters the presence index first. |
 | P3 | `!s` = `frozen:<tok>` on every source posting object (a missing layout 2 one is created frozen). |
-| P5 | the targets are created afresh; the sources are read page by page, markers and dead ids left out, lists of GUIDs from before document ids converted; the dictionary is derived from the terms, the header texts of live documents copied; written blindly in pieces of at most 2048 keys asserting the objects exist, fenced before each; then the counters. Since 0.49.0 the copy hands every full piece to `fts.convert_writers` (8) writers and goes on reading; its buffer holds at most max(`fts.convert_buffer_keys`, 1024 × target objects) keys, and above it the largest pending piece is written early (`imapceph_fts_convert_buffer_keys`). The result counts the writes (`writes`) and the largest buffer (`buffer_keys`). |
-| P6 | fence; `L` names the target (only while `next` carries exactly this token), the source goes to `old`; 2→3 moves `v` to `V`, 3→2 removes `L` (and moves `V` back to `v`) and the account from the presence index. |
+| P5 | the targets are created afresh; the sources are read page by page, markers and dead ids left out, lists of GUIDs from before document ids converted; the dictionary is derived from the terms by the target's identifier filter, the header texts of live documents copied; written blindly in pieces of at most 2048 keys asserting the objects exist, fenced before each; then the counters. Since 0.49.0 the copy hands every full piece to `fts.convert_writers` (8) writers and goes on reading; its buffer holds at most max(`fts.convert_buffer_keys`, 1024 × target objects) keys, and above it the largest pending piece is written early (`imapceph_fts_convert_buffer_keys`). The result counts the writes (`writes`) and the largest buffer (`buffer_keys`). |
+| P6 | fence; `L` names the target (only while `next` carries exactly this token), the source goes to `old`; the target gets the version marker of its filter and text preparation in `V` when the source's (`v` for 2→3, `V` for 3→3) was one this version trusts, else none, and 2→3 removes `v`; 3→2 removes `L`, writes `v` = `2` (`4` for the text preparation `nosig`) for a trusted source, removes `V` and takes the account out of the presence index. Before 0.50.0, 2→3 moved `v` to `V` and 3→2 moved `V` back to `v` as they were. |
 | P7 | fence; the sources are deleted (only while `old` names this run), then the `old` entry; 2→3 sets `lg`. |
 
 Between P6 and P7 the sources are frozen while `L` already names the
@@ -1787,6 +1793,138 @@ way back, either `fts.auto_reshard: false` on every pod or
 `fts.shards_max` at least the largest D in the store (`shardpostctl fts
 layout3 list -verify` prints it per page) prevents it; see
 [operations](../operations/README.md#separate-dictionary-caps-0490-rollout-and-way-back).
+
+<a id="full-text-identifier-filter"></a>
+### Identifier filter and text preparation (0.50.0)
+
+Identifiers — tracking tokens, hashes, base64 runs, the DKIM and ARC
+signatures of attached headers — are long runs of letters and digits
+that are new in every message. Each costs the substring dictionary one
+key per distinct trigram (a 64-character hash 114 keys over its three
+windows), so the dictionary of a large account grows with them
+linearly: about 280 keys per message on the largest account measured,
+85 on the bench corpus without identifiers
+([plan](../reports/2026-10-03-fts-dictionary-v0.md)). Two settings make
+it smaller. Both are off by default; with the defaults every key,
+marker and search result is the one of 0.49.0.
+
+**The identifier filter** (`fts.dict_filter: ids`,
+[ftswrite.go](../../internal/cephstore/ftswrite.go) `dictEntriesAt`). A
+body term (field `b`) whose token has at least one letter, at least one
+digit and at least N runes (`fts.dict_id_min_runes`, 13 to 40, default
+25; letters and digits as the tokenizer sees them, `fts.IsIdentifier`)
+gets one *start entry* `#<tri0>:b:<token>` in the object of its first
+trigram `<tri0>` (its first three runes) instead of a key per
+trigram. The window terms of long words are terms like any other: a
+window with a digit is an identifier. Postings, windows and the markers
+`~~` and `~+` do not change, nor do the fields `s`, `f`, `t` (their IMAP
+keys keep the substring rule) and `h` (no dictionary). `#` sorts before
+every trigram (letters and digits, from 0x30 on), starts no trigram and
+is no marker, so no trigram range reaches a start entry. The rule
+depends on the term and N alone: writers, removals, the conversion, the
+counter `!dn` (one key for an identifier) and its trigger all derive the
+same keys, and `dictEntriesAt` is the only place of the write path the
+filter changes.
+
+A substring search reads, for a body word q of at least three runes,
+besides the trigram ranges the start entries that begin with q — the
+range `#<tri0(q)>:b:<q>`, an exact prefix — in the same object and the
+same read as the range of q's first trigram, so it costs no operation
+of its own. The answer is there when a trigram range and the start range
+are both read to their end; it is their union, and `maxCandidates`
+(4096) counts both together: more and the word does not narrow. The
+reader does not need to know whether the generation has the filter:
+without it the start range is empty. An identifier is thus found as a
+whole word and by its start (and a long one by the start of each
+window), an inner piece of it is not; see
+[protocols](../protocols.md#full-text-search) for what this means for
+`BODY`, `TEXT`, JMAP and the word mode.
+
+**The text preparation** (`fts.attached_headers: nosig`,
+[attached.go](../../internal/fts/attached.go)). The body text has the
+header of every attached message (`message/rfc822`, `message/global`)
+as "Name: value" lines and the text of a `text/rfc822-headers` part (a
+bounce) as it is. With `nosig` the signature and trace fields of both —
+`DKIM-Signature`, `ARC-Seal`, `ARC-Message-Signature`,
+`ARC-Authentication-Results`, `Authentication-Results`, `Received`,
+`Received-SPF`, `X-Google-DKIM-Signature` and every `X-*-Signature` (a
+denylist, the fields the bench corpus `ids,nosig` leaves out) — are
+left out, with their continuation lines; every other field and the
+header of the message itself stay. Unlike the filter this changes the
+indexed text and so the postings: the same function prepares the text
+of the index and the text IMAP checks each candidate against, so the
+server's `BODY`/`TEXT` semantics follow the setting at once, but an
+index has the words of the preparation it was built with.
+
+**A property of the generation.** Both settings take effect only
+through a new generation: a fresh index, `fts_rebuild`, and — for the
+filter — `fts_layout`; never by the configuration alone. The generation
+records them in `L` (`dx`, `ah`, also in `next` and `old`), and
+writers, removals and conversions take them from there. A writer
+tokenizes a message in the text preparation of the generation it
+writes to, again when it follows a conversion into another; a removal
+tokenizes the blob the same way. New generations get the settings only
+while the cluster mark `fts/dictfilter` is set (`shardpostctl fts
+dictfilter enable --pods n`, the servers since 0.50.0 register the
+capability `fts_dict_filter`); it is read without a cache wherever a
+generation is created, and without either setting it is not read.
+
+**Changing an existing index.**
+
+- *Filter*: `fts_layout` with `dict_filter` `ids` or `none` (or, by the
+  configuration and the mark, `plan -all -due-only fts_layout`:
+  `due_only` is due when the filter differs). P5 copies the postings
+  and derives the dictionary from them by the target's filter, so both
+  directions are exact: after the way back a generation is the one that
+  was never filtered, also for the messages delivered meanwhile. The
+  dictionary keys of the target are estimated before P5 from a sample:
+  the posting keys of max(1, S/8) objects give the factor by which the
+  keys change, applied to Σ`!dn` (logged, no term); P5 writes the exact
+  counters. The worker `fts_due` does not plan because of the filter;
+  a job it plans for the size takes the configured filter along.
+- *Text preparation*: `fts_rebuild`, which reads every message again
+  (`fts_layout` keeps the source's preparation: it copies the
+  postings). The way back from `nosig` is a rebuild with `all`, exact
+  as well. During a rebuild IMAP reads the messages instead of the
+  index (slow, right).
+
+**Version markers.** `V` (layout 2: `v`) says which version may trust
+the index:
+
+| Marker | Generation | Trusted by |
+|---|---|---|
+| `2` | no filter, every attached header field | every version since 0.45.0 (0.35.0 for `v`) |
+| `3` | identifier filter, every field | 0.50.0 and later |
+| `4` | text preparation `nosig` (with or without the filter) | 0.50.0 and later, and only by a server with `fts.attached_headers: nosig` |
+
+A version before 0.50.0 trusts only `2`: in a generation with `3` or
+`4` IMAP narrows nothing there (it reads every message — slow, but
+right), and JMAP and the word mode find identifiers only as whole
+words. A server of 0.50.0 trusts `3` without condition — the filter is
+part of the index's search semantics, whatever its own
+`fts.dict_filter` says — but an index of `nosig` only with `nosig`
+itself: otherwise it lacks words the IMAP check looks for, and IMAP
+reads the messages. A fresh index and a rebuild set the marker of their
+generation, a conversion the one of its target (when the source's was
+trusted), 3→2 writes `2` (`4` for `nosig`), and a rebuild into layout
+2 always `2`: layout 2 has neither filter nor text preparation of its
+own and indexes with the default. The text preparation counts as
+`nosig` when `L` or the marker says so: a version before 0.50.0 that
+rewrites `L` drops `dx` and `ah`, but leaves the marker.
+
+**Mixed versions.** Without the mark nothing changes. With it every
+server is 0.50.0 or later (the registrations say so when it is set). A
+writer of an older version in a filtered generation writes trigram keys
+(a superset); an older removal leaves a start entry behind (a lookup
+that finds no postings); the next `fts_layout` derives the dictionary
+anew. An older version that reshards a filtered generation derives the
+whole dictionary but keeps `V` = `3` and drops `dx` from `L`; one that
+converts it back to layout 2 copies `3` into `v`. Both are exact
+dictionaries: this version trusts them, and the scrub reports the
+marker (`fts_version_drift`) and sets it to `2`. A marker `4` whose `L`
+lost `ah` the same way is only reported: readers take `nosig` from the
+marker, and the next `fts_layout` writes `L` anew. The way back is in
+[operations](../operations/README.md#dictionary-filter-and-attached-headers-0500).
 
 ## Repair and its limits
 

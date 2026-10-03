@@ -1,6 +1,7 @@
 package cephstore
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -71,7 +72,10 @@ func (u *User) hook(phase string) error {
 
 // FTSLayoutDue implements model.FTSLayouter: the counters of the posting
 // objects, the existence of the dictionary and header objects and the
-// document count (S + D + H + 1 reads), and the shape they ask for.
+// document count (S + D + H + 1 reads), and the shape they ask for. The
+// target has the identifier filter the configuration and the cluster
+// mark ask for; a different filter makes the index due as well (B14h),
+// and its dictionary keys are then estimated from a sample (dictFactor).
 func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 	l, err := u.readLayout()
 	if err != nil {
@@ -83,7 +87,12 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 		return cur.shape(), false, nil
 	}
 
-	target, capped, err := u.reshardTarget(cur)
+	dx, err := u.targetDX("")
+	if err != nil {
+		return model.FTSLayoutShape{}, false, err
+	}
+
+	target, capped, err := u.reshardTarget(cur, dx)
 	if err != nil {
 		return model.FTSLayoutShape{}, false, err
 	}
@@ -91,18 +100,31 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 	shape := target.shape()
 	shape.Capped = capped
 
-	return shape, target.s != cur.s || target.d != cur.d || target.h != cur.h, nil
+	return shape, !sameShape(target, cur) || !target.sameProps(cur), nil
 }
 
 // reshardTarget computes the shape the counters of a layout 3
-// generation ask for (temp/13 §4.6): S′ and H′ within fts.shards_max
-// from fts.shard_target_keys, D′ within fts.dict_shards_max from
-// fts.dict_target_keys. capped names the kinds a cap cut; it is only
-// reported, never counted (the writers count a generation at its cap).
-func (u *User) reshardTarget(cur ftsLoc) (ftsLoc, []string, error) {
-	terms, dict, docs, err := u.layoutCounts(cur)
+// generation ask for (temp/13 §4.6), for a target with the identifier
+// filter dx: S′ and H′ within fts.shards_max from fts.shard_target_keys,
+// D′ within fts.dict_shards_max from fts.dict_target_keys. The counters
+// count the dictionary keys by the source's filter; for another filter
+// they are scaled by the factor of a sample (dictFactor, temp/13 §4.8).
+// The target keeps the text preparation of the source (versionText).
+// capped names the kinds a cap cut; it is only reported, never counted
+// (the writers count a generation at its cap).
+func (u *User) reshardTarget(cur ftsLoc, dx int) (ftsLoc, []string, error) {
+	terms, dict, docs, v, err := u.layoutCounts(cur)
 	if err != nil {
 		return ftsLoc{}, nil, err
+	}
+
+	if dx != cur.dx {
+		f, err := u.dictFactor(cur, dx)
+		if err != nil {
+			return ftsLoc{}, nil, err
+		}
+
+		dict = int64(float64(dict) * f)
 	}
 
 	z := u.ftsCfg.sizing
@@ -121,29 +143,119 @@ func (u *User) reshardTarget(cur ftsLoc) (ftsLoc, []string, error) {
 		}
 	}
 
-	return ftsLoc{f: model.FTSLayout3, s: s, d: d, h: h}, capped, nil
+	return ftsLoc{f: model.FTSLayout3, s: s, d: d, h: h, dx: dx, ah: versionText(cur.ah, v)}, capped, nil
+}
+
+// dictFactor estimates how the dictionary keys of generation cur change
+// with the identifier filter dx (temp/13 §4.8): over the posting keys of
+// max(1, S/8) posting objects (keys only, in the job's memory), the sum
+// of the keys each term has with dx divided by the sum it has with the
+// filter of cur. The terms are spread over the objects by fnv1a, so the
+// sample stands for the whole. Only the factor is used and logged,
+// never a term; the copy (P5) writes the exact counters afterwards.
+func (u *User) dictFactor(cur ftsLoc, dx int) (float64, error) {
+	objects := max(1, cur.s/8)
+	to := ftsLoc{dx: dx}
+
+	var was, will int64
+
+	for _, oid := range cur.postingOIDs()[:objects] {
+		err := u.eachKey(context.Background(), oid, func(term string) {
+			was += int64(dictKeysOf(cur, term))
+			will += int64(dictKeysOf(to, term))
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	f := 1.0
+	if was > 0 {
+		f = float64(will) / float64(was)
+	}
+
+	u.log.Info("fts dictionary keys of another identifier filter estimated from a sample",
+		"objects", objects, "from_dict_filter", cur.dx, "to_dict_filter", dx, "factor", f)
+
+	return f, nil
+}
+
+// targetDX is the identifier filter of a layout 3 target for the
+// dict_filter of a request: "ids" fts.dict_id_min_runes, refused
+// without the cluster mark of the filter; "none" none; "" what the
+// configuration and the mark say (genProps).
+func (u *User) targetDX(filter string) (int, error) {
+	switch filter {
+	case model.FTSDictFilterNone:
+		return 0, nil
+	case model.FTSDictFilterIDs:
+		ok := false
+
+		if u.store != nil {
+			var err error
+			if ok, err = u.store.FTSDictFilterEnabled(); err != nil {
+				return 0, err
+			}
+		}
+
+		if !ok {
+			return 0, model.ErrFTSDictFilterMark
+		}
+
+		return u.ftsCfg.dictID, nil
+	case "":
+		if !u.ftsCfg.dictFilter {
+			return 0, nil
+		}
+
+		dx, _, err := u.genProps()
+
+		return dx, err
+	}
+
+	return 0, fmt.Errorf("fts layout: unknown dictionary filter %q", filter)
+}
+
+// sourceText is the text preparation of the postings of generation src:
+// its layout record's, or "nosig" when the version marker says so (a
+// layout 2 index, or a record a version before 0.50.0 rewrote). A
+// conversion copies the postings, so its target keeps it: changing the
+// text preparation takes fts_rebuild, which reads the messages again.
+func (u *User) sourceText(src ftsLoc) (string, error) {
+	key := ftsVersionKey
+	if src.v3() {
+		key = ftsVersionKey3
+	}
+
+	vals, err := getOmapKeys(u.idx, oidFTSMap, []string{key})
+	if err != nil && errCode(err) != syscall.ENOENT {
+		return "", err
+	}
+
+	return versionText(src.ah, vals[key]), nil
 }
 
 // layoutCounts reads the term and dictionary key counters of the posting
 // objects, checks the generation marker of every other object, and
-// reads the document count (S + D + H + 1 reads).
-func (u *User) layoutCounts(cur ftsLoc) (terms, dict, docs int64, err error) {
+// reads the document count and the version marker (S + D + H + 1
+// reads).
+func (u *User) layoutCounts(cur ftsLoc) (terms, dict, docs int64, v []byte, err error) {
 	for _, oid := range cur.objects() {
 		vals, err := u.genMarkers(cur, oid)
 		if err != nil {
-			return 0, 0, 0, err
+			return 0, 0, 0, nil, err
 		}
 
 		terms += atoiMarker(vals[markTerms])
 		dict += atoiMarker(vals[markDict])
 	}
 
-	vals, err := getOmapKeys(u.idx, oidFTSMap, []string{ftsCountKey})
+	vals, err := getOmapKeys(u.idx, oidFTSMap, []string{ftsCountKey, ftsVersionKey3})
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, nil, err
 	}
 
-	return terms, dict, atoiMarker(vals[ftsCountKey]), nil
+	return terms, dict, atoiMarker(vals[ftsCountKey]), vals[ftsVersionKey3], nil
 }
 
 // genMarkers reads the markers of an object of generation cur; a
@@ -347,7 +459,7 @@ func (u *User) conversionTarget(req model.FTSLayoutRequest, l *ftsLayout, src ft
 	}
 
 	t, err := u.layout3Target(req, src)
-	if err != nil || (req.DueOnly && sameShape(t, src)) {
+	if err != nil || (req.DueOnly && sameShape(t, src) && t.sameProps(src)) {
 		return nil, false, err
 	}
 
@@ -398,9 +510,22 @@ func (u *User) requireMark() error {
 
 // layout3Target is a new layout 3 generation of the shape the request,
 // the counters (a reshard) or the number of documents (a conversion from
-// layout 2) ask for.
+// layout 2) ask for, with the identifier filter of the request
+// (targetDX) and the text preparation of the source (sourceText).
 func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, error) {
 	t := ftsLoc{f: model.FTSLayout3, g: newFTSGen()}
+
+	dx, err := u.targetDX(req.DictFilter)
+	if err != nil {
+		return t, err
+	}
+
+	ah, err := u.sourceText(src)
+	if err != nil {
+		return t, err
+	}
+
+	t.dx, t.ah = dx, ah
 
 	switch {
 	case req.Shape != nil:
@@ -409,7 +534,7 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 		n := forcedCount(req.Shards)
 		t.s, t.d, t.h = n, n, n
 	case src.v3():
-		shape, _, err := u.reshardTarget(src)
+		shape, _, err := u.reshardTarget(src, dx)
 		if err != nil {
 			return t, err
 		}
@@ -506,7 +631,10 @@ func (u *User) phase2(req model.FTSLayoutRequest, rep *model.FTSLayoutReport, l 
 		}
 	}
 
-	next := &ftsGen{F: target.f, G: target.g, S: target.s, D: target.d, H: target.h, Tok: req.Tok}
+	g := target.gen()
+	next := &g
+	next.Tok = req.Tok
+
 	if !strings.HasPrefix(req.Tok, "job-") {
 		next.At = time.Now().Unix() // the import reshard endpoint's heartbeat
 	}
@@ -718,6 +846,8 @@ func (u *User) phase5(req model.FTSLayoutRequest, src, target ftsLoc) (convertSt
 	err = w.finish()
 	st.writes, st.buffer = w.writes.Load(), w.peak
 
+	addDictKeyMetrics(c.triKeys, c.startKeys)
+
 	if err != nil {
 		return st, err
 	}
@@ -743,8 +873,10 @@ type copier struct {
 	byGUID map[string]uint64
 	st     *convertStats
 	// terms and dicts count the terms and dictionary keys of each target
-	// posting object ("!n", "!dn").
+	// posting object ("!n", "!dn"); triKeys and startKeys the dictionary
+	// keys by entry (imapceph_fts_dict_keys_written_total).
 	terms, dicts       map[string]int64
+	triKeys, startKeys int64
 	posts, dict, heads *chunkWriter
 }
 
@@ -772,12 +904,21 @@ func (c *copier) term(term string, list []byte) error {
 		return err
 	}
 
+	// The dictionary follows the target's identifier filter: exactly the
+	// keys the target's writers would have written for the term, in
+	// either direction of a filter change (temp/13 §4.8).
 	byShard, n := dictEntriesAt(c.target, []string{term})
 	c.dicts[toid] += int64(n)
 	c.st.dict += int64(n)
 
 	for doid, keys := range byShard {
 		for _, k := range keys {
+			if isStartEntry(k) {
+				c.startKeys++
+			} else {
+				c.triKeys++
+			}
+
 			if err := c.dict.add(doid, k, nil); err != nil {
 				return err
 			}
@@ -1020,7 +1161,7 @@ func (u *User) phase6(req model.FTSLayoutRequest, src, target ftsLoc, st convert
 			}
 
 			if !target.v3() {
-				return switchTo2(cur)
+				return switchTo2(cur, src)
 			}
 
 			return switchTo3(cur, c, src, target, req.Tok, st)
@@ -1043,31 +1184,54 @@ func (u *User) phase6(req model.FTSLayoutRequest, src, target ftsLoc, st convert
 }
 
 // switchTo2 is the switch of 3→2: the record goes, the version marker
-// moves back.
-func switchTo2(cur map[string][]byte) (map[string][]byte, []string) {
-	set, rm := moveKey(cur, ftsVersionKey3, ftsVersionKey)
+// moves back. A trusted source gives layout 2 the marker of a generation
+// without the identifier filter (P5 derived the whole dictionary): "2",
+// or "4" for postings of the text preparation "nosig" (temp/13 §4.3;
+// a version before 0.50.0 copied "3" here, which the scrub corrects).
+// An untrusted one leaves none.
+func switchTo2(cur map[string][]byte, src ftsLoc) (map[string][]byte, []string) {
+	set, rm := map[string][]byte{}, []string{ftsVersionKey3, ftsLayoutKey, ftsCountKey}
 
-	return set, append(rm, ftsLayoutKey, ftsCountKey)
+	if v := cur[ftsVersionKey3]; knownVersion(v) {
+		set[ftsVersionKey] = []byte(versionFor(ftsLoc{f: model.FTSLayout2, ah: versionText(src.ah, v)}))
+	} else {
+		rm = append(rm, ftsVersionKey)
+	}
+
+	return set, rm
 }
 
 // switchTo3 is the switch to a layout 3 target: it becomes current, the
 // source is kept in "old" with the run's token (and the heartbeat of an
 // import reshard, which goes on renewing it there) until P7, the version
-// marker moves to ftsVersionKey3 (2→3) and the document count is set:
-// what P5 copied and the ids allocated since.
+// marker of the target is set (versionFor: from the target's filter and
+// text preparation, not copied, temp/13 §4.3) when the source's marker
+// was one this version knows — else the target has none — and the
+// document count is set: what P5 copied and the ids allocated since.
 func switchTo3(cur map[string][]byte, c *ftsLayout, src, target ftsLoc, tok string, st convertStats) (map[string][]byte, []string) {
 	set, rm := map[string][]byte{}, []string(nil)
+
+	from := ftsVersionKey3
 	if !src.v3() {
-		set, rm = moveKey(cur, ftsVersionKey, ftsVersionKey3)
+		from = ftsVersionKey
+		rm = append(rm, ftsVersionKey)
 	}
 
-	old := ftsGen{F: src.f, G: src.g, S: src.s, D: src.d, H: src.h, Tok: tok}
+	if knownVersion(cur[from]) {
+		set[ftsVersionKey3] = []byte(versionFor(target))
+	} else {
+		rm = append(rm, ftsVersionKey3)
+	}
+
+	old := src.gen()
+	old.Tok = tok
+
 	if c.Next != nil && c.Next.Tok == tok {
 		old.At = c.Next.At
 	}
 
 	nl := &ftsLayout{F: model.FTSLayout3, G: target.g, S: target.s, D: target.d, H: target.h, Dict: true,
-		LG: c.LG && src.v3(), Old: append(c.Old, old)}
+		LG: c.LG && src.v3(), Old: append(c.Old, old), DX: newDX(target.dx), AH: target.ah}
 
 	docs := st.docs
 	if next, _ := strconv.ParseUint(string(cur["n"]), 10, 64); next > st.nextID {
@@ -1077,16 +1241,6 @@ func switchTo3(cur map[string][]byte, c *ftsLayout, src, target ftsLoc, tok stri
 	set[ftsLayoutKey], set[ftsCountKey] = nl.encode(), itoaMarker(docs)
 
 	return set, rm
-}
-
-// moveKey moves the value of key from to key to (removing to when from
-// is absent).
-func moveKey(cur map[string][]byte, from, to string) (map[string][]byte, []string) {
-	if v, ok := cur[from]; ok {
-		return map[string][]byte{to: v}, []string{from}
-	}
-
-	return map[string][]byte{}, []string{from, to}
 }
 
 // finishOld is P7: the sources go (only while the record still lists

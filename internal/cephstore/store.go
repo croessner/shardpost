@@ -144,6 +144,17 @@ type FTSConfig struct {
 	// FrozenWait is how long an indexing waits, once, for a conversion
 	// that froze the account's posting objects.
 	FrozenWait time.Duration
+	// DictFilter (fts.dict_filter "ids") gives new layout 3 generations
+	// the identifier filter of DictIDMinRunes runes
+	// (fts.dict_id_min_runes) while the cluster mark of the filter is
+	// set; fts_layout with dict_filter "ids" takes DictIDMinRunes as
+	// well. AttachedHeaders is fts.attached_headers: the text preparation
+	// new generations get under the same mark, and which generations the
+	// searches of this server trust (one built with "nosig" only when it
+	// is "nosig" too).
+	DictFilter      bool
+	DictIDMinRunes  int
+	AttachedHeaders string
 }
 
 // Store owns the librados connection and hands out per-user views. The

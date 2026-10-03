@@ -76,10 +76,13 @@ type ScrubReport struct {
 	StaleMetadata int `json:",omitempty"`
 	// FTSMixedLayout and FTSShardsMissing are findings of the full-text
 	// layout (scrubfts.go; repair: fts_rebuild), FTSPresenceFixed the
-	// entries of the layout 3 presence index the run corrected.
+	// entries of the layout 3 presence index the run corrected,
+	// FTSVersionDrift version markers that do not fit the generation
+	// (repaired where exact, see scrubfts.go).
 	FTSMixedLayout   int `json:",omitempty"`
 	FTSShardsMissing int `json:",omitempty"`
 	FTSPresenceFixed int `json:",omitempty"`
+	FTSVersionDrift  int `json:",omitempty"`
 	// Shadow compares the listing with the intents (orphan source
 	// "shadow").
 	Shadow *ShadowReport `json:",omitempty"`
@@ -94,7 +97,7 @@ var _ model.ScrubOutcome = (*ScrubReport)(nil)
 func (r *ScrubReport) Findings() int {
 	n := r.OrphanBlobs + r.MissingBlobs + r.RefsFixed + r.MoveIntents + r.DeliveryIntents + r.OrphanCandidates +
 		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects + r.IntentsOpen + r.StaleMetadata +
-		r.FTSMixedLayout + r.FTSShardsMissing
+		r.FTSMixedLayout + r.FTSShardsMissing + r.FTSVersionDrift
 	if r.QuotaFixed {
 		n++
 	}

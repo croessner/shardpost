@@ -381,7 +381,9 @@ measurement of the dictionary (temp/13 §7) therefore runs on
 - `populate --corpus ids` and `populate --corpus ids,nosig` with the same
   seed fill two sets of accounts with the same messages, the second
   without the signature and trace fields of the attached headers.
-  Their difference is what those fields cost.
+  Their difference is what those fields cost; `ids,nosig` leaves out
+  exactly the fields `fts.attached_headers: nosig` (0.50.0) leaves out
+  of the body text, so it also shows what that setting saves.
 - `shardpostctl fts stats -classes <account>` counts the terms of a test
   account by field, class (letters, digits, mixed) and length, and
   projects the dictionary keys for every identifier bound n from 13 to

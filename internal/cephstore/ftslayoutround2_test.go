@@ -127,7 +127,7 @@ func TestLayoutRemovalRetryKeepsRefilledTerm(t *testing.T) {
 	w.follow(l, u.ftsShards)
 	w.note([]string{term}) // an earlier attempt emptied it
 
-	if err := u.removeWith(w, gone.GUID, id, hasID, fts.Terms(raw)); err != nil {
+	if err := u.removeWith(w, gone.GUID, id, hasID, rawTerms(raw)); err != nil {
 		t.Fatal(err)
 	}
 

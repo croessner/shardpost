@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"shardpost/internal/fts"
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/model"
 )
@@ -334,7 +333,7 @@ func (u *User) importOne(b *box, m *model.ImportMessage, res *model.ImportResult
 
 // index adds the search terms of raw under guid; u.mu is held.
 func (u *User) index(guid string, raw []byte) {
-	for _, t := range fts.Terms(raw) {
+	for _, t := range u.ftsTerms(raw) {
 		if u.terms[t] == nil {
 			u.terms[t] = map[string]bool{}
 		}

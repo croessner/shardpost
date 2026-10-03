@@ -58,3 +58,44 @@ func TestDictKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestDictIdentifier: only body terms, never s, f, t or h, with the
+// bound of IsIdentifier.
+func TestDictIdentifier(t *testing.T) {
+	id := "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+
+	for _, c := range []struct {
+		term string
+		n    int
+		want bool
+	}{
+		{"b:" + id, 25, true},
+		{"b:" + id, 0, false},
+		{"b:" + id, 33, false},
+		{"s:" + id, 25, false},
+		{"f:" + id, 25, false},
+		{"t:" + id, 25, false},
+		{"h:" + id, 25, false},
+		{"b:" + strings.Repeat("ab", 20), 25, false},
+	} {
+		if got := DictIdentifier(c.term, c.n); got != c.want {
+			t.Errorf("DictIdentifier(%q, %d) = %v", c.term, c.n, got)
+		}
+	}
+}
+
+// TestTri0: the first three runes, not bytes; nothing for a shorter
+// token; the first trigram Trigrams returns.
+func TestTri0(t *testing.T) {
+	for _, c := range []struct{ tok, want string }{
+		{"abcdef", "abc"}, {"äöüxyz", "äöü"}, {"ab", ""}, {"", ""}, {"ä1ö", "ä1ö"},
+	} {
+		if got := Tri0(c.tok); got != c.want {
+			t.Errorf("Tri0(%q) = %q, want %q", c.tok, got, c.want)
+		}
+
+		if tris := Trigrams(c.tok); len(tris) > 0 && tris[0] != c.want {
+			t.Errorf("Trigrams(%q)[0] = %q, Tri0 %q", c.tok, tris[0], c.want)
+		}
+	}
+}

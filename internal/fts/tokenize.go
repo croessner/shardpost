@@ -132,9 +132,20 @@ func Terms(raw []byte) []Term {
 	return terms
 }
 
+// TermsWith is Terms with the given text options (BodyTextWith).
+func TermsWith(raw []byte, opts TextOptions) []Term {
+	terms, _ := IndexTextWith(raw, opts)
+
+	return terms
+}
+
 // IndexText returns the terms of a message (Terms) and its HeaderText,
 // parsing and decoding the header once for both.
-func IndexText(raw []byte) ([]Term, string) {
+func IndexText(raw []byte) ([]Term, string) { return IndexTextWith(raw, DefaultTextOptions()) }
+
+// IndexTextWith is IndexText with the given text options: they change
+// the body text (BodyTextWith), not the header of the message itself.
+func IndexTextWith(raw []byte, opts TextOptions) ([]Term, string) {
 	set := map[Term]struct{}{}
 	add := func(field, text string) {
 		for _, tok := range Tokenize(text) {
@@ -174,7 +185,7 @@ func IndexText(raw []byte) ([]Term, string) {
 		}
 	}
 
-	add(FieldBody, BodyText(raw))
+	add(FieldBody, BodyTextWith(raw, opts))
 
 	out := make([]Term, 0, len(set))
 	for t := range set {

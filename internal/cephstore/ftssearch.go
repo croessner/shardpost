@@ -30,11 +30,63 @@ import (
 // misses messages. An index without the marker, or with ftsRebuildKey,
 // narrows nothing: the old preparation (markup, undecoded words, no file
 // names) cannot be trusted even for whole words.
+//
+// Since 0.50.0 (B14h) the marker also says what a version before it must
+// not trust (temp/13 §4.3), because it would miss messages: "3" for a
+// generation whose dictionary has the identifier filter, "4" for one
+// built without the signature fields of attached headers (with or
+// without the filter). Such a version trusts only "2" and narrows
+// nothing there (IMAP reads every message: slow, but right). This
+// version trusts every one of them (knownVersion) with one exception:
+// an index built with the text preparation "nosig" — "4", or a layout
+// record with "ah" — only while fts.attached_headers is "nosig" too,
+// since otherwise it lacks words the IMAP check looks for (ftsTrusted).
+// The dictionary filter needs no such rule: the readers always read the
+// start entries, and whether a generation has the filter is part of its
+// search semantics, not of this server's configuration.
 const (
-	ftsVersionKey = "v"
-	ftsVersion    = "2"
-	ftsRebuildKey = "r"
+	ftsVersionKey  = "v"
+	ftsVersion     = "2"
+	ftsVersionDict = "3"
+	ftsVersionText = "4"
+	ftsRebuildKey  = "r"
 )
+
+// versionFor is the version marker of a generation this version
+// indexed: "4" with the text preparation "nosig", else "3" with the
+// identifier filter, else "2".
+func versionFor(loc ftsLoc) string {
+	switch {
+	case loc.ah == fts.AttachedHeadersNoSig:
+		return ftsVersionText
+	case loc.dx > 0:
+		return ftsVersionDict
+	default:
+		return ftsVersion
+	}
+}
+
+// knownVersion reports whether a version marker is one of this version.
+func knownVersion(v []byte) bool {
+	switch string(v) {
+	case ftsVersion, ftsVersionDict, ftsVersionText:
+		return true
+	}
+
+	return false
+}
+
+// versionText is the text preparation a generation was built with by its
+// layout record (ah, "" for layout 2) and its version marker v: "nosig"
+// when either says so. A version before 0.50.0 that rewrote the record
+// dropped "ah"; the marker it left ("4") still says it.
+func versionText(ah string, v []byte) string {
+	if ah == fts.AttachedHeadersNoSig || string(v) == ftsVersionText {
+		return fts.AttachedHeadersNoSig
+	}
+
+	return ""
+}
 
 // scanReq is one page of a key range scan: the keys after after that
 // start with prefix, at most limit, each handed to fn; more is set by
@@ -74,23 +126,33 @@ func list(ix candidateIndex, oid, after, prefix string, limit uint64, fn func(st
 }
 
 // indexCurrent reports, from the keys ftsVersionKey and ftsRebuildKey of
-// the id map, whether a layout 2 index can be trusted: the marker is
-// there and no rebuild is running.
+// the id map, whether a layout 2 index can be trusted by a server with
+// the default text preparation: the marker is there and no rebuild is
+// running.
 func indexCurrent(vals map[string][]byte) bool {
-	return indexCurrentIn(vals, false)
+	return ftsTrusted(vals, ftsLoc{f: model.FTSLayout2}, "")
 }
 
-// indexCurrentIn is indexCurrent for the version marker of a layout
-// (ftsVersionKey3 in layout 3).
-func indexCurrentIn(vals map[string][]byte, v3 bool) bool {
+// ftsTrusted reports whether the index of generation loc can be trusted
+// by a server whose fts.attached_headers is readerAH ("" or "nosig"):
+// the version marker of its layout (ftsVersionKey3 in layout 3) is one
+// this version knows, no rebuild is running, and the generation's text
+// preparation (versionText) has every word the server's IMAP check
+// looks for.
+func ftsTrusted(vals map[string][]byte, loc ftsLoc, readerAH string) bool {
 	_, rebuilding := vals[ftsRebuildKey]
 
 	key := ftsVersionKey
-	if v3 {
+	if loc.v3() {
 		key = ftsVersionKey3
 	}
 
-	return string(vals[key]) == ftsVersion && !rebuilding
+	v := vals[key]
+	if !knownVersion(v) || rebuilding {
+		return false
+	}
+
+	return versionText(loc.ah, v) == "" || readerAH == fts.AttachedHeadersNoSig
 }
 
 // markFreshIndex adds the version marker to the first write of the id
@@ -169,8 +231,13 @@ func (u *User) startFTSRebuild(m int) (string, error) {
 	var gen *ftsLoc
 
 	if want3 {
+		dx, ah, err := u.genProps()
+		if err != nil {
+			return "", err
+		}
+
 		s, d, h := u.ftsCfg.sizing.shapeFor(m)
-		loc := ftsLoc{f: model.FTSLayout3, g: newFTSGen(), s: s, d: d, h: h}
+		loc := ftsLoc{f: model.FTSLayout3, g: newFTSGen(), s: s, d: d, h: h, dx: dx, ah: ah}
 
 		if err := u.markLayout3(); err != nil {
 			return "", err
@@ -182,7 +249,7 @@ func (u *User) startFTSRebuild(m int) (string, error) {
 		}
 
 		gen = &loc
-		l := &ftsLayout{F: model.FTSLayout3, G: loc.g, S: s, D: d, H: h, Dict: true, LG: true}
+		l := newLayoutRecord(loc)
 		set[ftsLayoutKey], set[ftsCountKey] = l.encode(), []byte("0")
 	} else if err := u.unmarkLayout3(); err != nil {
 		return "", err
@@ -211,12 +278,14 @@ func (u *User) finishFTSRebuild(token string) error {
 			return nil, nil
 		}
 
-		key := ftsVersionKey
+		// Layout 2 has neither filter nor text preparation of its own: a
+		// rebuild into it indexes with the default preparation.
+		key, v := ftsVersionKey, ftsVersion
 		if l, _ := parseLayout(cur[ftsLayoutKey]); l != nil && l.F == model.FTSLayout3 {
-			key = ftsVersionKey3
+			key, v = ftsVersionKey3, versionFor(curLoc(l, u.ftsShards))
 		}
 
-		return map[string][]byte{key: []byte(ftsVersion)}, []string{ftsRebuildKey}
+		return map[string][]byte{key: []byte(v)}, []string{ftsRebuildKey}
 	})
 	if err == nil && superseded {
 		err = errRebuildSuperseded

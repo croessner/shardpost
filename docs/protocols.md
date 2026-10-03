@@ -214,6 +214,33 @@ messages. An account whose index lacks the version marker (indexed
 before this release, or a rebuild that has not completed) does not use
 the index and checks every message until `fts_rebuild` has run.
 
+Two settings, both off by default, change what `BODY` and the body part
+of `TEXT` find (0.50.0; [storage](architecture/storage.md#full-text-identifier-filter)):
+
+- `fts.attached_headers: nosig` leaves the signature and trace fields
+  of attached messages (`DKIM-Signature`, `ARC-*`,
+  `Authentication-Results`, `Received`, `Received-SPF`, `X-*-Signature`,
+  also in a `text/rfc822-headers` part) out of the body text — of the
+  index and of the text each candidate is checked against alike. A
+  search for a word that occurs only there finds nothing. The header
+  of the message itself (`HEADER`, `TEXT`, `FROM`, …) is not affected.
+- `fts.dict_filter: ids` gives a body word with letters and digits of
+  at least `fts.dict_id_min_runes` (default 25) characters — a tracking
+  token, a hash, a base64 run — no trigram keys in the index of an
+  account whose index generation was built with it. Such a word is
+  found as a whole word and by its start (and a word of more than 40
+  characters also by the start of each 20-character window), not as a
+  part from its inside: a message is missing from a `BODY` or `TEXT`
+  result exactly when a word of the search occurs in its body only as
+  an inner or end piece of such identifiers. `SUBJECT`, `FROM`, `TO`,
+  `CC`, `BCC` and `HEADER` keep substring matching. RFC 9051 6.4.4
+  leaves the matching of `BODY` and `TEXT` to the server ("only
+  performing full word matching", "full-word matching"), so this is
+  within IMAP4rev2; RFC 3501 has no such exception, and for IMAP4rev1
+  sessions the setting is a documented deviation, as
+  `fts.imap_search: word` is. The index is shared by every session, so
+  there is no switch per session.
+
 Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267),
 `PARTIAL` (RFC 9394), `MULTISEARCH` (RFC 7377).
 
@@ -725,10 +752,10 @@ See [Observability](observability.md).
 
 | Feature | Notes |
 |---|---|
-| Fields | Subject, From/Sender/Reply-To, To/Cc/Bcc (every value), all header names and values (RFC 2047 in any WHATWG charset, raw 8-bit text in `fts.fallback_charset`), `text/*` parts converted to UTF-8 (the `<meta>` charset for HTML; UTF-8 under a single-byte label is kept as UTF-8), the visible text of HTML parts (`fts.html`: `text`, the default, `raw` or `skip`), the file names of all parts (RFC 2231, RFC 2047), header and text of attached messages; up to 4 MiB of text per message. |
+| Fields | Subject, From/Sender/Reply-To, To/Cc/Bcc (every value), all header names and values (RFC 2047 in any WHATWG charset, raw 8-bit text in `fts.fallback_charset`), `text/*` parts converted to UTF-8 (the `<meta>` charset for HTML; UTF-8 under a single-byte label is kept as UTF-8), the visible text of HTML parts (`fts.html`: `text`, the default, `raw` or `skip`), the file names of all parts (RFC 2231, RFC 2047), header and text of attached messages (`fts.attached_headers: nosig` without their signature and trace fields, since 0.50.0); up to 4 MiB of text per message. |
 | Words | Unicode letters and digits, 2–40 characters, lower-cased; longer words as their first 40 characters and overlapping 40-character windows (with marker terms beyond). |
 | Stemming | Snowball English and German, always both. |
-| Substrings | Trigram dictionary. |
+| Substrings | Trigram dictionary; with `fts.dict_filter: ids` (since 0.50.0, off by default) a body identifier of at least `fts.dict_id_min_runes` characters has one start entry instead of its trigrams and is found as a whole word and by its start only (see [SEARCH](#search-sort-and-thread)). |
 | Header store | The decoded header text of every message (DEFLATE, up to 64 KiB), so that header keys are checked without reading messages. |
 | IMAP matching | Substrings (RFC 9051); the index is a candidate pre-filter per key and part, candidates are verified in parallel (`fts.verify_parallel`); `fts.imap_search: word` for word semantics. The index version marker is set by `fts_rebuild` (and on a fresh index); without it the index is not used. See [SEARCH](#search-sort-and-thread). |
 | Not supported | Attachment content, CJK segmentation, other languages, `SEARCH=FUZZY`, MIME part header fields other than file names. |

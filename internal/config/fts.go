@@ -74,6 +74,37 @@ type FTS struct {
 	// DictMinTerms is reserved for the dictionary threshold (B14f); it
 	// has no effect yet.
 	DictMinTerms int `mapstructure:"dict_min_terms" validate:"gte=0"`
+	// DictFilter is the identifier filter of the substring dictionary of
+	// index generations created from now on (B14h): "none" lists every
+	// body term under each of its trigrams (exact substring search, the
+	// default), "ids" gives a body term with letters and digits of at
+	// least DictIDMinRunes runes one start entry instead, so that it is
+	// found as a whole word and by its start but not as an inner part.
+	// "ids" takes effect only while the cluster mark ("shardpostctl fts
+	// dictfilter enable") is set; existing generations change with
+	// fts_layout.
+	DictFilter string `mapstructure:"dict_filter" validate:"oneof=none ids"`
+	// DictIDMinRunes is the least length in runes of an identifier.
+	DictIDMinRunes int `mapstructure:"dict_id_min_runes" validate:"gte=13,lte=40"`
+	// AttachedHeaders is which header fields of attached messages the
+	// body text has: "all" every field (the default), "nosig" all but
+	// the signature and trace fields (DKIM-Signature, ARC-*,
+	// Authentication-Results, Received, Received-SPF, X-*-Signature).
+	// IMAP SEARCH BODY and TEXT check messages by it at once; an index
+	// generation is built with it while the cluster mark of the
+	// dictionary filter is set, existing ones change with fts_rebuild.
+	AttachedHeaders string `mapstructure:"attached_headers" validate:"oneof=all nosig"`
+}
+
+// DictIDFilter is the identifier length of the dictionary filter that
+// fts.dict_filter asks for: fts.dict_id_min_runes with "ids", 0 with
+// "none".
+func (f FTS) DictIDFilter() int {
+	if f.DictFilter != "ids" {
+		return 0
+	}
+
+	return f.DictIDMinRunes
 }
 
 // shardTargetWarn is the target key count above which the configuration

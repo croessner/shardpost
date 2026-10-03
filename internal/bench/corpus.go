@@ -9,6 +9,8 @@ import (
 	"math/rand/v2"
 	"strings"
 	"time"
+
+	"shardpost/internal/fts"
 )
 
 // The identifier corpus (temp/13 §7.2, §7.4). The plain corpus is
@@ -72,20 +74,11 @@ const (
 	base64Share = 2
 )
 
-// signatureFields are the signature and trace fields of temp/13 §3 c3
-// (lower case); X-*-Signature counts as well.
-var signatureFields = map[string]bool{
-	"dkim-signature": true, "arc-seal": true, "arc-message-signature": true, "arc-authentication-results": true,
-	"authentication-results": true, "received": true, "received-spf": true, "x-google-dkim-signature": true,
-}
-
 // SignatureField reports whether a header field is a signature or trace
-// field that the corpus "ids,nosig" leaves out of attached headers.
-func SignatureField(name string) bool {
-	n := strings.ToLower(name)
-
-	return signatureFields[n] || (strings.HasPrefix(n, "x-") && strings.HasSuffix(n, "-signature"))
-}
+// field that the corpus "ids,nosig" leaves out of attached headers: the
+// fields fts.attached_headers "nosig" leaves out of the body text
+// (fts.SignatureField), so that the corpus measures that setting.
+func SignatureField(name string) bool { return fts.SignatureField(name) }
 
 // RefID is the reference of message n of account in the identifier
 // corpus: 32 hex digits with letters and digits, in the text of the

@@ -158,18 +158,42 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 		return err
 	}
 
-	docsOf, terms, headers := termDocs(docs, ids)
-
 	w := &ftsWrite{wait: u.ftsCfg.frozenWait}
 	w.follow(lay, u.ftsShards)
 
-	return u.indexWith(w, docsOf, terms, headers)
+	return u.indexWith(w, &ftsBatch{docs: docs, ids: ids})
+}
+
+// ftsBatch are the documents of one indexing and their terms in the
+// text preparation of the generation the indexing writes to: a change
+// of generation with another preparation tokenizes them again.
+type ftsBatch struct {
+	docs []ftsDoc
+	ids  map[string]uint64
+
+	ready   bool
+	ah      string
+	docsOf  map[string][]uint64
+	terms   []string
+	headers map[string]string
+}
+
+// at prepares the terms for the generation loc.
+func (b *ftsBatch) at(loc ftsLoc) {
+	if b.ready && b.ah == loc.ah {
+		return
+	}
+
+	b.docsOf, b.terms, b.headers = termDocs(b.docs, b.ids, loc.text())
+	b.ready, b.ah = true, loc.ah
 }
 
 // indexWith runs the attempts of one indexing within its budget.
-func (u *User) indexWith(w *ftsWrite, docsOf map[string][]uint64, terms []string, headers map[string]string) error {
+func (u *User) indexWith(w *ftsWrite, b *ftsBatch) error {
 	for attempt := 0; ; attempt++ {
-		err := u.indexInto(w, docsOf, terms, headers)
+		b.at(w.loc)
+
+		err := u.indexInto(w, b.docsOf, b.terms, b.headers)
 
 		an := asAnomaly(err)
 		if an == nil {
@@ -352,7 +376,7 @@ func (u *User) addPostingsPage(w *ftsWrite, oid string, terms []string, docsOf m
 			if !ok {
 				fresh = append(fresh, t)
 				ch.terms++
-				ch.dict += int64(dictKeysOf(t))
+				ch.dict += int64(dictKeysOf(w.loc, t))
 			}
 
 			ch.set[t] = postings.AddAll(conv(p), docsOf[t])
@@ -671,6 +695,10 @@ func (u *User) dictApplyAt(loc ftsLoc, terms []string, add bool) (n int, err err
 		return 0, nil
 	}
 
+	if add {
+		countDictKeys(byShard)
+	}
+
 	end := u.trace(spanFTSDict, attrCount(n))
 	defer func() { end(err) }()
 
@@ -721,7 +749,12 @@ func (u *User) dictApplyAt(loc ftsLoc, terms []string, add bool) (n int, err err
 
 // dictEntriesAt returns the dictionary keys of the terms by object of
 // loc, and their number. Terms of fields without substring matching
-// have none.
+// have none. In a generation with the identifier filter (loc.dx) a body
+// term that is an identifier (fts.DictIdentifier) has one start entry
+// "#<tri0>:b:<token>" in the object of its first trigram instead of a
+// key per trigram (temp/13 §4.2); this is the only place of the write
+// path the filter changes, and the writers, the removals and the
+// conversion all derive their keys here.
 func dictEntriesAt(loc ftsLoc, terms []string) (map[string][]string, int) {
 	byShard := map[string][]string{}
 	n := 0
@@ -729,6 +762,15 @@ func dictEntriesAt(loc ftsLoc, terms []string) (map[string][]string, int) {
 	for _, t := range terms {
 		field, tok, _ := strings.Cut(t, ":")
 		if !fts.Substring(field) {
+			continue
+		}
+
+		if fts.DictIdentifier(t, loc.dx) {
+			tri := fts.Tri0(tok)
+			oid := loc.dictOID(tri)
+			byShard[oid] = append(byShard[oid], startEntry(tri, t))
+			n++
+
 			continue
 		}
 
@@ -746,6 +788,54 @@ func dictEntriesAt(loc ftsLoc, terms []string) (map[string][]string, int) {
 func dictEntries(terms []string) (map[string][]string, int) {
 	return dictEntriesAt(layout2Loc(DefaultFTSShards), terms)
 }
+
+// startPrefix begins every start entry: "#" (0x23) sorts before every
+// trigram (letters and digits, all from 0x30), no trigram starts with
+// it, and it is not the marker prefix "!".
+const startPrefix = "#"
+
+// startEntry is the start entry of a term whose token begins with the
+// trigram tri.
+func startEntry(tri, term string) string { return startPrefix + tri + dictSep + term }
+
+// isStartEntry reports whether a dictionary key is a start entry.
+func isStartEntry(key string) bool { return strings.HasPrefix(key, startPrefix) }
+
+// countDictKeys counts the dictionary keys a write adds, by entry
+// (imapceph_fts_dict_keys_written_total).
+func countDictKeys(byShard map[string][]string) {
+	var tri, start int64
+
+	for _, keys := range byShard {
+		for _, k := range keys {
+			if isStartEntry(k) {
+				start++
+			} else {
+				tri++
+			}
+		}
+	}
+
+	addDictKeyMetrics(tri, start)
+}
+
+// addDictKeyMetrics adds trigram keys and start entries to
+// imapceph_fts_dict_keys_written_total.
+func addDictKeyMetrics(tri, start int64) {
+	if tri > 0 {
+		metrics.FTSDictKeysWritten.WithLabelValues(dictEntryTrigram).Add(float64(tri))
+	}
+
+	if start > 0 {
+		metrics.FTSDictKeysWritten.WithLabelValues(dictEntryStart).Add(float64(start))
+	}
+}
+
+// Labels of imapceph_fts_dict_keys_written_total.
+const (
+	dictEntryTrigram = "trigram"
+	dictEntryStart   = "prefix"
+)
 
 // dictWrite sets or removes dictionary keys of one object. Neither
 // depends on what the object holds, so there is nothing to read first
@@ -892,22 +982,22 @@ func (a *docAlloc) round(cur map[string][]byte) (map[string][]byte, []string) {
 		set[ftsCountKey] = itoaMarker(c)
 		a.grow = a.u.headersDue(a.lay.H, c)
 
-		markFreshIndex3(cur, set)
+		markFreshIndex3(cur, set, curLoc(a.lay, a.u.ftsShards))
 	}
 
 	return set, nil
 }
 
-// markFreshIndex3 sets the layout 3 version marker with the first ids of
-// a layout 3 index that has none yet (no "n") and is not being rebuilt:
-// an index a conversion produced from an empty account. Every document
-// of it is then indexed by this version.
-func markFreshIndex3(cur, set map[string][]byte) {
+// markFreshIndex3 sets the layout 3 version marker of generation loc
+// with the first ids of a layout 3 index that has none yet (no "n") and
+// is not being rebuilt: an index a conversion produced from an empty
+// account. Every document of it is then indexed by this version.
+func markFreshIndex3(cur, set map[string][]byte, loc ftsLoc) {
 	_, hasN := cur["n"]
 	_, rebuilding := cur[ftsRebuildKey]
 
 	if !hasN && !rebuilding {
-		set[ftsVersionKey3] = []byte(ftsVersion)
+		set[ftsVersionKey3] = []byte(versionFor(loc))
 	}
 }
 
@@ -970,14 +1060,15 @@ func (a *docAlloc) dropGen() {
 
 // installGen writes the layout record of a prepared generation into the
 // first allocation of a fresh index (with the layout 3 version marker
-// unless a rebuild is running) and returns it.
+// of the generation, versionFor, unless a rebuild is running) and
+// returns it.
 func installGen(cur, set map[string][]byte, g ftsLoc, added int64) *ftsLayout {
-	l := &ftsLayout{F: model.FTSLayout3, G: g.g, S: g.s, D: g.d, H: g.h, Dict: true, LG: true}
+	l := newLayoutRecord(g)
 	set[ftsLayoutKey] = l.encode()
 	set[ftsCountKey] = itoaMarker(added)
 
 	if _, rebuilding := cur[ftsRebuildKey]; !rebuilding {
-		set[ftsVersionKey3] = []byte(ftsVersion)
+		set[ftsVersionKey3] = []byte(versionFor(g))
 	}
 
 	return l
@@ -991,8 +1082,13 @@ func (u *User) prepareGen() (*ftsLoc, bool, error) {
 		return nil, false, err
 	}
 
+	dx, ah, err := u.genProps()
+	if err != nil {
+		return nil, false, err
+	}
+
 	s, d, h := u.ftsCfg.sizing.shapeFor(u.ftsHint)
-	loc := ftsLoc{f: model.FTSLayout3, g: newFTSGen(), s: s, d: d, h: h}
+	loc := ftsLoc{f: model.FTSLayout3, g: newFTSGen(), s: s, d: d, h: h, dx: dx, ah: ah}
 
 	// Presence entry first (a completeness index): an account with
 	// layout 3 objects is always in it.
@@ -1116,26 +1212,49 @@ func (u *User) ftsRemoveWait(m *Meta, wait time.Duration) (err error) {
 
 	raw, rerr := u.readBlob(m)
 
-	var terms []string
+	var termsOf func(ftsLoc) []string
 	if rerr == nil {
-		terms = fts.Terms(raw)
+		termsOf = rawTerms(raw)
 	}
 
 	w := &ftsWrite{wait: wait}
 	w.follow(lay, u.ftsShards)
 
-	if err := u.removeWith(w, m.GUID, id, hasID, terms); err != nil {
+	if err := u.removeWith(w, m.GUID, id, hasID, termsOf); err != nil {
 		return err
 	}
 
 	return rerr
 }
 
-// removeWith runs the attempts of one removal within its budget.
-func (u *User) removeWith(w *ftsWrite, guid string, id uint64, hasID bool, terms []string) error {
+// rawTerms returns the terms of a message in the text preparation of a
+// generation, tokenizing it once per preparation.
+func rawTerms(raw []byte) func(ftsLoc) []string {
+	byAH := map[string][]string{}
+
+	return func(loc ftsLoc) []string {
+		t, ok := byAH[loc.ah]
+		if !ok {
+			t = fts.TermsWith(raw, loc.text())
+			byAH[loc.ah] = t
+		}
+
+		return t
+	}
+}
+
+// removeWith runs the attempts of one removal within its budget; termsOf
+// gives the message's terms in the text preparation of the generation
+// an attempt removes it from (nil: no terms, the blob could not be read).
+func (u *User) removeWith(w *ftsWrite, guid string, id uint64, hasID bool, termsOf func(ftsLoc) []string) error {
 	g, _ := hex.DecodeString(guid)
 
 	for attempt := 0; ; attempt++ {
+		var terms []string
+		if termsOf != nil {
+			terms = termsOf(w.loc)
+		}
+
 		err := u.removeFrom(w, guid, g, id, hasID, terms)
 
 		an := asAnomaly(err)
@@ -1203,7 +1322,7 @@ func (u *User) ftsRemoveShard(w *ftsWrite, oid string, terms []string, g []byte,
 				case had && len(p) == 0:
 					ch.rm = append(ch.rm, t)
 					ch.terms--
-					ch.dict -= int64(dictKeysOf(t))
+					ch.dict -= int64(dictKeysOf(w.loc, t))
 					part = append(part, t)
 				case len(p) > 0:
 					kept = append(kept, t)

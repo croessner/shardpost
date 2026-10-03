@@ -71,7 +71,8 @@ func TestFTSLayoutKeys(t *testing.T) {
 	}
 
 	want := FTS{Layout: 3, ShardsMin: 1, ShardsMax: 128, DictShardsMax: 512, ShardTargetKeys: 100000, DictTargetKeys: 100000,
-		ConvertBufferKeys: 262144, ConvertWriters: 8, AutoReshard: true, FrozenWaitSeconds: 10, ImportReshardSyncSeconds: 60}
+		ConvertBufferKeys: 262144, ConvertWriters: 8, AutoReshard: true, FrozenWaitSeconds: 10, ImportReshardSyncSeconds: 60,
+		DictFilter: "none", DictIDMinRunes: 25, AttachedHeaders: "all"}
 
 	got := c.FTS
 	got.FallbackCharset, got.HTML, got.IMAPSearch, got.VerifyParallel = "", "", "", 0
@@ -153,6 +154,40 @@ func TestFTSSeparateCaps(t *testing.T) {
 	for account, want := range map[string]bool{"bench-00001": true, "rbdpoc2@exampleserver.de": true, "de10000@srvint.net": false, "xbench-1": false} {
 		if got := f.StatsTestAccount(account); got != want {
 			t.Errorf("test account %s: %v, want %v", account, got, want)
+		}
+	}
+}
+
+// TestFTSDictFilterKeys (B14h): the defaults keep the dictionary and
+// the attached headers as before (none, all, N 25); ids, nosig and N
+// within 13 to 40 are accepted, everything else refused.
+func TestFTSDictFilterKeys(t *testing.T) {
+	c, err := Load(configFile(t, "logging:\n  level: info\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if f := c.FTS; f.DictFilter != "none" || f.DictIDMinRunes != 25 || f.AttachedHeaders != "all" || f.DictIDFilter() != 0 {
+		t.Errorf("defaults %+v", f)
+	}
+
+	c, err = Load(configFile(t, "fts:\n  dict_filter: ids\n  dict_id_min_runes: 40\n  attached_headers: nosig\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if f := c.FTS; f.DictIDFilter() != 40 || f.AttachedHeaders != "nosig" {
+		t.Errorf("fts %+v", f)
+	}
+
+	for _, body := range []string{
+		"fts:\n  dict_filter: all\n",
+		"fts:\n  dict_id_min_runes: 12\n",
+		"fts:\n  dict_id_min_runes: 41\n",
+		"fts:\n  attached_headers: basic\n",
+	} {
+		if _, err := Load(configFile(t, body)); err == nil {
+			t.Errorf("accepted %q", body)
 		}
 	}
 }

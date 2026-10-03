@@ -33,6 +33,9 @@ const (
 const (
 	mediaHTML  = "text/html"
 	mediaPlain = "text/plain"
+	// mediaRFC822Headers is the header of a returned message in a
+	// delivery status notification (RFC 6522).
+	mediaRFC822Headers = "text/rfc822-headers"
 	// MaxPartBytes bounds what is read of one part: its decoded bytes
 	// before charset conversion.
 	MaxPartBytes = MaxBodyBytes
@@ -79,15 +82,23 @@ func SetHTMLMode(mode string) error {
 // the raw body after the header is used, within the same bounds.
 //
 // The index, IMAP SEARCH matched against the message and the cached
-// preview all take the body text from here, so they agree.
-func BodyText(raw []byte) string { return bodyText(raw, false) }
+// preview all take the body text from here, so they agree. The
+// signature and trace fields of attached headers are left out when
+// SetAttachedHeaders says so (BodyTextWith).
+func BodyText(raw []byte) string { return bodyText(raw, false, DefaultTextOptions()) }
+
+// BodyTextWith is BodyText with the given text options instead of the
+// process setting: with AttachedHeadersNoSig the signature and trace
+// fields (SignatureField) of an attached message's header and of a
+// text/rfc822-headers part are left out.
+func BodyTextWith(raw []byte, opts TextOptions) string { return bodyText(raw, false, opts) }
 
 // ReadableText is BodyText without file names and attached messages:
 // the text a reader sees in the message itself, which is what its
 // preview (RFC 8970) is cut from.
-func ReadableText(raw []byte) string { return bodyText(raw, true) }
+func ReadableText(raw []byte) string { return bodyText(raw, true, TextOptions{}) }
 
-func bodyText(raw []byte, readable bool) string {
+func bodyText(raw []byte, readable bool, opts TextOptions) string {
 	ent, err := message.Read(bytes.NewReader(raw))
 	if err != nil && ent == nil {
 		if i := bytes.Index(raw, []byte("\r\n\r\n")); i >= 0 {
@@ -97,7 +108,7 @@ func bodyText(raw []byte, readable bool) string {
 		return bound(charset.ToUTF8(raw[:min(len(raw), MaxPartBytes)], ""), MaxBodyBytes)
 	}
 
-	w := &walker{read: MaxReadBytes, readable: readable}
+	w := &walker{read: MaxReadBytes, readable: readable, noSig: opts.NoSig()}
 	w.walk(ent, 0)
 
 	return w.out.String()
@@ -117,6 +128,7 @@ type walker struct {
 	out      strings.Builder
 	read     int  // what may still be read of the parts
 	readable bool // text parts only, see ReadableText
+	noSig    bool // without the signature fields of attached headers
 }
 
 func (w *walker) full() bool { return w.out.Len() >= MaxBodyBytes || w.read <= 0 }
@@ -176,7 +188,7 @@ func (w *walker) alternative(mr message.MultipartReader, depth int) {
 			break
 		}
 
-		sub := &walker{read: w.read, readable: true}
+		sub := &walker{read: w.read, readable: true, noSig: w.noSig}
 		sub.walk(p, depth+1)
 		w.read = sub.read
 
@@ -215,6 +227,8 @@ func (w *walker) leaf(e *message.Entity, depth int) {
 	switch {
 	case (ct == "message/rfc822" || ct == "message/global") && !w.readable:
 		w.attached(e, depth)
+	case ct == mediaRFC822Headers && w.noSig:
+		w.add(withoutSignatureFields(w.text(e, ct, params["charset"])))
 	case strings.HasPrefix(ct, "text/"):
 		w.add(w.text(e, ct, params["charset"]))
 	}
@@ -231,6 +245,10 @@ func (w *walker) attached(e *message.Entity, depth int) {
 
 		fields := hdr.Fields()
 		for fields.Next() {
+			if w.noSig && SignatureField(fields.Key()) {
+				continue
+			}
+
 			lines.WriteString(fields.Key())
 			lines.WriteString(": ")
 			lines.WriteString(HeaderValue(fields.Value()))
