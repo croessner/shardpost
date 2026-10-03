@@ -232,3 +232,7 @@ fts:
   # 3 is the default since 0.46.0; it stays explicit so that an image
   # rolled back to 0.45.x (default 2) keeps creating layout 3 indexes.
   layout: 3
+  # The largest account (36k messages) needs about 128 dictionary objects
+  # to stay below Ceph's large-omap threshold (temp/13, V0, 2026-10-03);
+  # the cap applies to postings and dictionary alike until B14g.
+  shards_max: 128
