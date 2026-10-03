@@ -5,6 +5,7 @@ import (
 	"path"
 
 	"shardpost/internal/charset"
+	"shardpost/internal/window"
 )
 
 // FTS configures how message text is prepared for the full-text index.
@@ -94,6 +95,55 @@ type FTS struct {
 	// generation is built with it while the cluster mark of the
 	// dictionary filter is set, existing ones change with fts_rebuild.
 	AttachedHeaders string `mapstructure:"attached_headers" validate:"oneof=all nosig"`
+
+	// The online runs of fts_layout and fts_rebuild (stage B14i): they
+	// need the cluster mark ("shardpostctl fts online enable") and run
+	// without the account's maintenance lock.
+	//
+	// OnlineBuild is what a plan of fts_layout or fts_rebuild without
+	// "online" gets: "auto" online while the mark is set, "off" offline
+	// (under the lock, as before 0.51.0).
+	OnlineBuild string `mapstructure:"online_build" validate:"oneof=auto off"`
+	// ReshardWindow ("HH:MM-HH:MM", over midnight allowed; empty: none)
+	// in the time zone ReshardWindowTZ (an IANA name) is when the fts_due
+	// worker and a batch of fts_layout or fts_rebuild start the run of an
+	// account; a run an operator plans for one account starts at once.
+	ReshardWindow   string `mapstructure:"reshard_window"`
+	ReshardWindowTZ string `mapstructure:"reshard_window_tz"`
+	// BuildMaxRunning bounds the jobs the fts_due worker has planned
+	// that have not ended (with a window).
+	BuildMaxRunning int `mapstructure:"build_max_running" validate:"gte=1,lte=64"`
+	// BuildCatchupRounds are the switch attempts of an online run before
+	// it holds new id allocations for BuildHoldMS milliseconds (0: never;
+	// the run fails after its rounds instead).
+	BuildCatchupRounds int `mapstructure:"build_catchup_rounds" validate:"gte=1,lte=50"`
+	BuildHoldMS        int `mapstructure:"build_hold_ms" validate:"gte=0,lte=5000"`
+	// BuildMsPerMessageCopy and BuildMsPerMessageReindex estimate how
+	// long a run takes per document of the account (copy: fts_layout;
+	// reindex: fts_rebuild), to tell whether it fits into the window.
+	BuildMsPerMessageCopy    float64 `mapstructure:"build_ms_per_message_copy" validate:"gte=0.1,lte=1000"`
+	BuildMsPerMessageReindex float64 `mapstructure:"build_ms_per_message_reindex" validate:"gte=1,lte=10000"`
+	// ReindexBatchDocs and ReindexBatchBytes bound a batch of messages an
+	// online rebuild indexes at once.
+	ReindexBatchDocs  int `mapstructure:"reindex_batch_docs" validate:"gte=50,lte=5000"`
+	ReindexBatchBytes int `mapstructure:"reindex_batch_bytes" validate:"gte=1048576,lte=67108864"`
+}
+
+// Values of fts.online_build.
+const (
+	OnlineBuildAuto = "auto"
+	OnlineBuildOff  = "off"
+)
+
+// Window is the reshard window of fts.reshard_window and
+// fts.reshard_window_tz.
+func (f FTS) Window() (window.Window, error) {
+	w, err := window.Parse(f.ReshardWindow, f.ReshardWindowTZ)
+	if err != nil {
+		return w, fmt.Errorf("fts.reshard_window %q (fts.reshard_window_tz %q): %w", f.ReshardWindow, f.ReshardWindowTZ, err)
+	}
+
+	return w, nil
 }
 
 // DictIDFilter is the identifier length of the dictionary filter that
@@ -176,5 +226,7 @@ func (f FTS) Validate() error {
 		}
 	}
 
-	return nil
+	_, err := f.Window()
+
+	return err
 }

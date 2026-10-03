@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
+	"shardpost/internal/window"
 )
 
 // KindFTSLayout converts the full-text index of an account between the
@@ -25,12 +27,20 @@ const KindFTSLayout = "fts_layout"
 // a change while the counts ask for the shape the index has and its
 // filter is the one asked for. Forced counts ignore fts.shards_max and
 // fts.dict_shards_max (at most 4096).
+//
+// online (stage B14i) runs it without the account's maintenance lock:
+// true needs the cluster mark fts/online and a layout 3 index; omitted,
+// the plan decides (online with the mark and fts.online_build "auto")
+// and records the answer, so that the job runs as planned. A server
+// before 0.51.0 ignores the field and runs the job offline under the
+// lock.
 type ftsLayoutParams struct {
 	Layout     int    `json:"layout,omitempty"`
 	Shards     int    `json:"shards,omitempty"`
 	Shape      string `json:"shape,omitempty"`
 	DictFilter string `json:"dict_filter,omitempty"`
 	DueOnly    bool   `json:"due_only,omitempty"`
+	Online     *bool  `json:"online,omitempty"`
 }
 
 // maxForcedShards bounds forced object counts.
@@ -104,14 +114,119 @@ func ParseFTSShape(shape string) (*model.FTSForcedShape, error) {
 
 // ftsLayoutKind runs a conversion or reshard under the maintenance lock
 // (exclusive; deliveries meet a frozen index for the whole job and
-// answer a temporary failure after fts.frozen_wait_seconds).
+// answer a temporary failure after fts.frozen_wait_seconds), or online
+// without it (stage B14i: deliveries, logins and sessions go on).
 type ftsLayoutKind struct{ kindBase }
+
+// ExclusiveFor implements exclusiveFor: an online run takes no lock. A
+// job whose parameters do not parse is exclusive (its run fails).
+func (k *ftsLayoutKind) ExclusiveFor(params json.RawMessage) bool {
+	p, err := parseFTSLayout(params)
+
+	return err != nil || !isOnline(p.Online)
+}
+
+// isOnline reports whether a normalized "online" asks for an online run.
+func isOnline(b *bool) bool { return b != nil && *b }
+
+// normalizeParams implements paramsNormalizer: "online" is decided.
+// Conversions to layout 2 run offline; online true without the cluster
+// mark is refused (409), on a layout 2 index (u, a single account) with
+// a 400; omitted, it is true with the mark, fts.online_build "auto" and
+// (for a single account) a layout 3 index.
+func (k *ftsLayoutKind) normalizeParams(m *Manager, u model.User, params json.RawMessage) (json.RawMessage, error) {
+	p, err := parseFTSLayout(params)
+	if err != nil {
+		return nil, err
+	}
+
+	if p.Layout == model.FTSLayout2 {
+		if isOnline(p.Online) {
+			return nil, fmt.Errorf("%w: a conversion to layout 2 runs offline", ErrInvalidParams)
+		}
+
+		p.Online = new(bool)
+	} else if p.Online, err = m.decideOnline(u, p.Online); err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(p)
+}
+
+// decideOnline decides "online" of fts_layout or fts_rebuild for the
+// account u (nil: a batch, whose runs report a layout 2 account as
+// unsupported).
+func (m *Manager) decideOnline(u model.User, asked *bool) (*bool, error) {
+	marked, err := m.onlineMarked()
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case asked != nil && *asked && !marked:
+		return nil, model.ErrFTSOnlineMark
+	case asked != nil && !*asked:
+		return asked, nil
+	case asked == nil && (!marked || !m.cfg.FTSBuild.OnlineAuto):
+		return new(bool), nil
+	}
+
+	// online, explicitly or by fts.online_build auto: a single account
+	// needs a layout 3 index
+	return onlineFor(u, asked != nil)
+}
+
+// onlineMarked reads the cluster mark of online runs (false without a
+// store that has one).
+func (m *Manager) onlineMarked() (bool, error) {
+	if m.env.FTSOnline == nil {
+		return false, nil
+	}
+
+	return m.env.FTSOnline.FTSOnlineEnabled()
+}
+
+// onlineFor is "online" for the account u (nil: a batch) when it may
+// run online: true with a layout 3 index; else offline, or a refusal
+// when the request asked for online explicitly.
+func onlineFor(u model.User, explicit bool) (*bool, error) {
+	if u != nil {
+		layout3, err := hasLayout3(u)
+
+		switch {
+		case err != nil:
+			return nil, err
+		case !layout3 && explicit:
+			return nil, fmt.Errorf("%w: online runs need a layout 3 index; the account has layout 2 (run it offline)", ErrInvalidParams)
+		case !layout3:
+			return new(bool), nil
+		}
+	}
+
+	on := true
+
+	return &on, nil
+}
+
+// hasLayout3 reports whether the account's index has layout 3.
+func hasLayout3(u model.User) (bool, error) {
+	lay, ok := u.(model.FTSLayouter)
+	if !ok {
+		return false, nil
+	}
+
+	st, err := lay.FTSLayout()
+
+	return st.Current.Layout == model.FTSLayout3, err
+}
 
 // ftsLayoutSummary is the plan of fts_layout.
 type ftsLayoutSummary struct {
 	State  model.FTSLayoutState  `json:"state"`
 	Target *model.FTSLayoutShape `json:"target,omitempty"`
 	Due    bool                  `json:"due"`
+	// Online is set when the job runs without the account lock (0.51.0).
+	Online bool `json:"online,omitempty"`
 }
 
 func (k *ftsLayoutKind) Plan(_ context.Context, env *Env, u model.User, _ string, params json.RawMessage) (any, string, error) {
@@ -144,7 +259,7 @@ func (k *ftsLayoutKind) Plan(_ context.Context, env *Env, u model.User, _ string
 		return nil, "", fmt.Errorf("%w: dict_filter ids needs a layout 3 target: the account has layout 2 (add layout 3)", ErrInvalidParams)
 	}
 
-	s := ftsLayoutSummary{State: st}
+	s := ftsLayoutSummary{State: st, Online: isOnline(p.Online)}
 
 	if st.Current.Layout == model.FTSLayout3 {
 		target, due, err := lay.FTSLayoutDue()
@@ -229,28 +344,80 @@ func (k *ftsLayoutKind) Run(_ context.Context, run *Run) (res any, err error) {
 	// The kind clears what it left itself (F5): after an error or a
 	// cancel request, but not after a lost lease, whose successor takes
 	// the unfinished conversion for foreign (R4.4).
-	defer func() {
-		if err == nil || errors.Is(err, ErrLeaseLost) || errors.Is(run.Fence(), ErrLeaseLost) {
-			return
-		}
-
-		if _, cerr := lay.ClearFTSLayoutNext(tok); cerr != nil {
-			run.Env.Log.Warn("fts layout: unfinished conversion not cleared", "account", run.Job.Account, "err", cerr)
-		}
-	}()
-
-	var last time.Time
+	defer run.clearOwnLayout(lay, tok, &err)
 
 	shape, _ := ParseFTSShape(p.Shape) // checked by parseFTSLayout
 
-	return lay.ConvertFTSLayout(model.FTSLayoutRequest{Layout: p.Layout, Shards: p.Shards, Shape: shape, DictFilter: p.DictFilter,
-		DueOnly: p.DueOnly, Tok: tok, Fence: run.Fence,
-		Progress: func(phase string, done, total int) {
-			if time.Since(last) > time.Second || done == total {
-				last = time.Now()
-				_ = run.Progress(phase, int64(done), int64(total))
-			}
-		}})
+	req := model.FTSLayoutRequest{Layout: p.Layout, Shards: p.Shards, Shape: shape, DictFilter: p.DictFilter,
+		DueOnly: p.DueOnly, Tok: tok, Fence: run.Fence, Progress: run.throttledProgress()}
+
+	if isOnline(p.Online) {
+		run.onlineRequest(&req)
+	}
+
+	return lay.ConvertFTSLayout(req)
+}
+
+// clearOwnLayout is the kind's clean-up of its own unfinished conversion
+// tok (deferred with the run's error): after an error or a cancel
+// request, not after a lost lease.
+func (r *Run) clearOwnLayout(lay model.FTSLayouter, tok string, err *error) {
+	if *err == nil || errors.Is(*err, ErrLeaseLost) || errors.Is(r.Fence(), ErrLeaseLost) {
+		return
+	}
+
+	if _, cerr := lay.ClearFTSLayoutNext(tok); cerr != nil {
+		r.Env.Log.Warn("fts layout: unfinished conversion not cleared", "account", r.Job.Account, "err", cerr)
+	}
+}
+
+// throttledProgress reports the progress at most once a second (and at
+// the end of each phase).
+func (r *Run) throttledProgress() func(phase string, done, total int) {
+	var last time.Time
+
+	return func(phase string, done, total int) {
+		if time.Since(last) > time.Second || done == total {
+			last = time.Now()
+			_ = r.Progress(phase, int64(done), int64(total))
+		}
+	}
+}
+
+// onlineRequest makes req an online run of this job: a foreign run is
+// judged by its job (another lease generation of this job counts as
+// ended, R4.1), and a run the fts_due worker or a batch planned is
+// admitted only when it fits into the reshard window.
+func (r *Run) onlineRequest(req *model.FTSLayoutRequest) {
+	req.Online = true
+
+	req.ForeignAlive = func(tok string, at time.Time) (bool, error) {
+		if model.TokenSession(tok) == lockSession(r.Job.ID) {
+			return false, nil
+		}
+
+		return layoutRunAlive(r.m.st.kv, tok, at, r.m.now())
+	}
+
+	if r.window || (!r.sub && r.Job.Principal == ftsDuePrincipal) {
+		req.Admit = r.m.admitBuild
+	}
+}
+
+// admitBuild is FTSLayoutRequest.Admit with the reshard window.
+func (m *Manager) admitBuild(mode string, docs int64) error {
+	b := m.cfg.FTSBuild
+
+	switch err := b.Window.Fit(m.now(), b.estimate(mode, docs)); {
+	case errors.Is(err, window.ErrTooSmall):
+		metrics.FTSBuildWindowTooSmall.Inc()
+		return model.ErrFTSWindowTooSmall
+	case err != nil:
+		metrics.FTSBuildWindowDeferred.Inc()
+		return model.ErrFTSBuildWindow
+	}
+
+	return nil
 }
 
 // clearForeignLayout removes an unfinished conversion of another run

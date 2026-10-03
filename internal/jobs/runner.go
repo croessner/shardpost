@@ -37,6 +37,9 @@ type Run struct {
 	// checkpoint and the progress belong to the batch, the Partial
 	// errors stay with the account.
 	sub bool
+	// window: an online run of this run is admitted only when it fits
+	// into the reshard window (a batch without "anytime").
+	window bool
 }
 
 // subRun is the run of one account inside a batch: the kind and its
@@ -316,15 +319,17 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 	model.UseRequest(ctx, run.User)
 	defer model.UseRequest(context.Background(), run.User)
 
-	if kind.Exclusive() && !m.lock(run, j, gen, log) {
+	excl := exclusive(kind, j.Params)
+
+	if excl && !m.lock(run, j, gen, log) {
 		return
 	}
 
-	stop := m.heartbeat(ctx, cancel, run, kind.Exclusive(), log)
+	stop := m.heartbeat(ctx, cancel, run, excl, log)
 
-	log.Info("job started", "event", "job_start", "attempt", j.Attempts)
+	log.Info("job started", "event", "job_start", "attempt", j.Attempts, "exclusive", excl)
 
-	result, err := m.settleAndRun(ctx, kind, run)
+	result, err := m.settleAndRun(ctx, kind, run, excl)
 
 	stop()
 
@@ -332,6 +337,12 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 		err = fmt.Errorf("%s: %w", reason, err)
 	}
 
+	m.conclude(parent, run, excl, result, err, log)
+}
+
+// conclude ends a run: hands the job over at shutdown, gives a waiting
+// batch back, or stores the final state.
+func (m *Manager) conclude(parent context.Context, run *Run, excl bool, result any, err error, log *slog.Logger) {
 	// Shutdown interrupted the job: hand it over (another server resumes
 	// it from its checkpoint at once) instead of failing it. The
 	// maintenance lock stays; the successor takes it over (same session).
@@ -340,20 +351,61 @@ func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 		return
 	}
 
+	// The batch waits for the reshard window: it is given back until then.
+	var later *PostponeError
+	if errors.As(err, &later) {
+		m.postponeUntil(run, later, log)
+		return
+	}
+
 	// The lock is released only by the server that stored the final
 	// state: after a takeover it belongs to the successor. Before, a
 	// conversion the run left unfinished goes (the fallback of the kind's
-	// own clean-up; single-account jobs only, a batch clears per account).
-	if m.finish(run, j, gen, result, err, log) && kind.Exclusive() {
+	// own clean-up, also after a panic and for an online run without the
+	// lock, R2.5; single-account jobs only, a batch clears per account).
+	if m.finish(run, run.Job, run.gen, result, err, log) {
 		m.clearFinished(run, log)
-		unlockAccount(run.User, j.ID)
+
+		if excl {
+			unlockAccount(run.User, run.Job.ID)
+		}
 	}
 }
+
+// PostponeError gives a job back until Until without counting the
+// attempt (a batch outside the reshard window); its checkpoint is
+// stored.
+type PostponeError struct {
+	Until  time.Time
+	Reason string
+}
+
+func (e *PostponeError) Error() string {
+	return fmt.Sprintf("postponed until %s: %s", e.Until.UTC().Format(time.RFC3339), e.Reason)
+}
+
+// postponeUntil gives the job back until p.Until; the attempt does not
+// count.
+func (m *Manager) postponeUntil(run *Run, p *PostponeError, log interface{ Info(string, ...any) }) {
+	err := run.guarded(func(j *Job) {
+		j.Attempts--
+		j.Lease.Until = p.Until
+		j.Progress.Phase = p.Reason
+	})
+	if err == nil {
+		log.Info("job waits", "event", "job_postpone", "until", p.Until, "reason", p.Reason)
+	}
+}
+
+// buildsLayout reports whether a job of the kind may leave a full-text
+// conversion behind ("next"): fts_layout, and fts_rebuild since its
+// online runs (stage B14i).
+func buildsLayout(kind string) bool { return kind == KindFTSLayout || kind == KindFTSRebuild }
 
 // clearFinished removes the unfinished full-text conversion of a run
 // whose final state is stored (exactly its token).
 func (m *Manager) clearFinished(run *Run, log interface{ Warn(string, ...any) }) {
-	if run.Job.Kind != KindFTSLayout || run.User == nil {
+	if !buildsLayout(run.Job.Kind) || run.User == nil {
 		return
 	}
 
@@ -366,8 +418,8 @@ func (m *Manager) clearFinished(run *Run, log interface{ Warn(string, ...any) })
 
 // settleAndRun lets writers that opened the account before an exclusive
 // job's lock finish (Config.Settle), then runs the kind.
-func (m *Manager) settleAndRun(ctx context.Context, kind Kind, run *Run) (any, error) {
-	if kind.Exclusive() && m.cfg.Settle > 0 {
+func (m *Manager) settleAndRun(ctx context.Context, kind Kind, run *Run, excl bool) (any, error) {
+	if excl && m.cfg.Settle > 0 {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

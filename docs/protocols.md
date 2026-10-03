@@ -241,6 +241,13 @@ of `TEXT` find (0.50.0; [storage](architecture/storage.md#full-text-identifier-f
   sessions the setting is a documented deviation, as
   `fts.imap_search: word` is. The index is shared by every session, so
   there is no switch per session.
+- While the accounts are rebuilt after `fts.attached_headers: nosig`
+  was set (with online rebuilds since 0.51.0, account by account in
+  the reshard window), an account not rebuilt yet still has an index
+  with the signature fields: IMAP `BODY` and `TEXT` already check the
+  messages without them, so a word that occurs only there is not
+  found — the new semantics, only earlier. JMAP finds it until the
+  account is rebuilt.
 
 Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267),
 `PARTIAL` (RFC 9394), `MULTISEARCH` (RFC 7377).
@@ -341,7 +348,7 @@ IMAPSieve script entry.
 | Per-IP connection limit | `server.max_conns_per_ip`, refused with `* BYE [UNAVAILABLE]`; default unlimited |
 | Per-user connection limit | `server.max_conns_per_user`, `NO [LIMIT]` at login; default unlimited |
 | Shutdown | `* BYE [UNAVAILABLE] Server shutting down, please reconnect` to every session after a short readiness pause; the server then waits up to `server.drain_seconds` (default 20) for clients to leave |
-| Maintenance lock | `* BYE [UNAVAILABLE] Mailbox maintenance…` while an import or repair holds the account |
+| Maintenance lock | `* BYE [UNAVAILABLE] Mailbox maintenance…` while an import or repair holds the account. A reshard or rebuild of the full-text index that runs online (since 0.51.0, with the cluster mark `fts/online`) takes no lock: sessions, logins and deliveries go on, a search reads the old index until the switch and starts over in the new one once; at most a delivery or `APPEND` waits up to `fts.build_hold_ms` (2 s) before the switch of an account with a steady stream of deliveries. Offline runs (without the mark, or with an older server in the cluster) lock the account as before |
 | Protocol trace | Per account and time-limited, via `shardpostctl trace` |
 
 ### Conformance
