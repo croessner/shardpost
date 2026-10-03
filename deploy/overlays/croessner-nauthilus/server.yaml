@@ -241,3 +241,11 @@ fts:
   online_build: auto
   reshard_window: "02:00-05:00"
   reshard_window_tz: Europe/Berlin
+  # Dictionary filter and text preparation (0.50.0, B14h, mark
+  # fts/dictfilter set on 2026-10-03): identifiers of 25 runes and more get
+  # a start entry instead of their trigrams; signature and trace headers of
+  # attached messages are not indexed. Existing accounts get it through an
+  # online fts_rebuild.
+  dict_filter: ids
+  dict_id_min_runes: 25
+  attached_headers: nosig
