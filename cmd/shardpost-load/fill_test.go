@@ -131,6 +131,16 @@ func TestFillAccount(t *testing.T) {
 	}
 }
 
+// TestCRLFLines (review): bare LF line ends become CRLF, so a message
+// ending in a bare LF gets no empty line before the terminator.
+func TestCRLFLines(t *testing.T) {
+	for in, want := range map[string]string{"a\nb\n": "a\r\nb\r\n", "a\r\nb\n": "a\r\nb\r\n", "a\r\n": "a\r\n", "a": "a"} {
+		if got := string(crlfLines([]byte(in))); got != want {
+			t.Errorf("%q: %q", in, got)
+		}
+	}
+}
+
 // TestDotStuff: lines starting with a dot are doubled.
 func TestDotStuff(t *testing.T) {
 	for in, want := range map[string]string{"a\r\n.b\r\n": "a\r\n..b\r\n", ".x": "..x", "plain\r\n": "plain\r\n"} {

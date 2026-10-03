@@ -180,6 +180,34 @@ type FTSDueRecord struct {
 	// Waits counts the times the worker postponed the entry for this job
 	// (the backoff doubles with each).
 	Waits int `json:"waits,omitempty"`
+	// Noops counts the jobs before this one in the generation that found
+	// nothing to do: the wait after a no-op doubles with each
+	// (FTSDueNoopWait). Idle is set once the wait after the last no-op
+	// is over and its entry gone; the next entry of the generation plans
+	// a job again (since 0.49.0).
+	Noops int  `json:"noops,omitempty"`
+	Idle  bool `json:"idle,omitempty"`
+}
+
+// FTSDueNoopMax bounds the wait after a no-op job.
+const FTSDueNoopMax = 7 * 24 * time.Hour
+
+// FTSDueNoopWait is how long the worker leaves an account alone after a
+// job that found nothing to do, when n jobs before it in the same
+// generation did not either: FTSDueNoopBackoff doubled n times, at most
+// FTSDueNoopMax. An account whose busiest object outgrew its target
+// while the sums still ask for its shape is thus planned less and less
+// often instead of every six hours for good.
+func FTSDueNoopWait(n int) time.Duration {
+	d := FTSDueNoopBackoff
+	for range min(max(n, 0), 16) {
+		d *= 2
+		if d >= FTSDueNoopMax {
+			return FTSDueNoopMax
+		}
+	}
+
+	return d
 }
 
 // FTSDueBackoff is the first backoff of the fts_due worker; it doubles

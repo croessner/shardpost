@@ -1632,10 +1632,13 @@ remembers the job in the admin record `fts_due/<account>` (deleted with
 the account). A job that switched removes entry and record; one that
 found nothing to do (the per-object trigger and the target from the sums
 can disagree) leaves the entry six hours alone, and when it fires after
-them, entry and record go (exactly the record of that job, the record
-first). A writer whose trigger still asks for a reshard then queues the
-account afresh, and the worker plans a new job: at most one no-op job
-per generation every six hours and ten minutes. Before 0.49.0 the entry
+them, the entry goes and the record (exactly that job's, changed first)
+turns idle, keeping the number of no-ops of the generation. A writer
+whose trigger still asks for a reshard then queues the account afresh,
+and the worker plans a new job; after every further no-op of the same
+generation the wait doubles, up to seven days (a skewed account below
+its cap, whose busiest object outgrew its target while the sums ask for
+the shape it has, takes the account lock less and less often). Before 0.49.0 the entry
 was moved to the same past time on every look of the worker, once a
 minute and for good, and the account was never planned again — a cap
 raised later (or real growth) needed a job by hand. The targets are
@@ -1657,6 +1660,18 @@ without identifiers) and the largest account measured (36 246 messages,
 of that last section (about 63.5 terms and 311 dictionary keys per
 message); between 5000 and 36 246 messages it is a bridge, not a
 measurement.
+
+A posting compare-and-swap sees the counters of one object only, so
+the trigger decides per object (`!n` > 1.5·T_p, `!dn` · S / D >
+1.5·T_d), while the plan of `fts_layout` (`plan -due-only`, the worker's
+job, the import reshard) decides by the sums (D′ = 2^⌈log2(Σ`!dn` /
+T_d)⌉). For an evenly spread index the sums ask for more objects about
+1.5 times earlier than the trigger fires (Σ`!dn` above D·T_d against
+1.5·D·T_d); a skewed one can make the trigger fire while the sums still
+ask for the shape it has (a no-op job, see above). A manual `plan
+-due-only` may therefore reshard an account before its writers would
+have queued it. The trigger stays per object on purpose: computing it
+against the target of the sums would need S reads per write.
 
 **What the caps do not change.** More dictionary objects keep each of
 them below Ceph's threshold, but not the sum. At about 280 dictionary

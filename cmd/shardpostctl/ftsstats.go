@@ -30,7 +30,7 @@ func ftsStatsCmd(client *adminapi.ClientWithResponses, args []string, stdout, st
 
 	fs.BoolVar(&asJSON, "json", false, "print JSON")
 	fs.BoolVar(&exact, "exact", false, "count the keys of every object page by page (thousands of reads on a large account)")
-	fs.IntVar(&parallel, "parallel", 2, "-exact: objects counted at the same time (1 to 16)")
+	fs.IntVar(&parallel, "parallel", 0, "-exact: objects counted at the same time, 1 to 16 (default 1, for a test account 2)")
 	fs.BoolVar(&classes, "classes", false, "classify the terms (test accounts of fts.stats_test_accounts only)")
 
 	rest, err := parseInterleaved(fs, args)
@@ -38,14 +38,18 @@ func ftsStatsCmd(client *adminapi.ClientWithResponses, args []string, stdout, st
 		return exUsage
 	}
 
-	if len(rest) != 1 || parallel < 1 || parallel > 16 {
+	if len(rest) != 1 || parallel < 0 || parallel > 16 {
 		sayln(stderr, ftsStatsUsage)
 		return exUsage
 	}
 
 	p := adminapi.GetFTSStatsParams{}
 	if exact {
-		p.Exact, p.Parallel = &exact, &parallel
+		p.Exact = &exact
+	}
+
+	if parallel > 0 {
+		p.Parallel = &parallel
 	}
 
 	if classes {

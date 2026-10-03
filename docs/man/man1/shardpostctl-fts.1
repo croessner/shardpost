@@ -176,11 +176,15 @@ and a layout 2 index has none at all; use
 .PP
 .B \-exact
 counts the keys of every object page by page (librados has no key
-count): about one read per thousand keys, 12 000 reads for an account
-with 12 million index keys, alongside the deliveries, so the counts are
-only roughly consistent. It runs
+count, and the client library cannot read keys without their values):
+about one read per thousand keys, 12 000 reads for an account with 12
+million index keys, alongside the deliveries, so the counts are only
+roughly consistent. The values come along, so it transfers about the
+account's whole index omap, posting lists and header texts included
+(close to a gigabyte for the largest account on croessner). It runs
 .B \-parallel
-objects at a time and ends with the 5 minute write timeout of the admin
+objects at a time (one by default, two for a test account) and ends
+with the 5 minute write timeout of the admin
 listener; raise
 .B \-timeout
 of
@@ -231,7 +235,8 @@ count the keys of every object instead of reading the counters.
 .TP
 .BI \-parallel " n"
 .BR "stats \-exact" :
-objects counted at the same time, 1 to 16 (2).
+objects counted at the same time, 1 to 16 (default 1, for a test
+account 2).
 .TP
 .B \-classes
 .BR stats :

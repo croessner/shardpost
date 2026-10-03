@@ -742,7 +742,9 @@ message, from the counters of the posting objects (S + 1 reads, no
 lock). Ceph's large omap threshold is per object: compare the mean
 dictionary keys per object and the largest posting object with 200 000.
 `-exact` counts every object's keys instead (thousands of reads on a
-large account, during deliveries; give `-timeout` room). On real
+large account, during deliveries, that transfer about its whole index
+omap with the values; one object at a time unless `-parallel` says
+otherwise; give `-timeout` room). On real
 accounts that is all: the terms themselves are never read for
 statistics. Only for test accounts named in `fts.stats_test_accounts`
 does `-classes` count the terms by field, class and length and project
@@ -785,6 +787,27 @@ trigger checks no cap. A generation whose D is above that version's
 `fts.shards_max` counts as due for it, and a `due_only` job of that
 version (its `fts_due` worker, `plan -due-only`) **shrinks** it: a full
 copy under the account lock, and objects above their target afterwards.
+
+**Upgrade without an overlay entry.** A cluster that does not set
+`fts.shards_max` gets the new default 128 (32 before): accounts whose
+posting or header objects stopped at 32 because of the old cap, and
+every account whose dictionary was capped, may now be due, and their
+writers queue them on the next delivery — each reshard locks its
+account. To choose the time:
+
+1. Set `fts.auto_reshard: false` in the overlay before the rollout.
+2. Roll out the image.
+3. Find the candidates: the plan of `shardpostctl plan -due-only
+   fts_layout <account>` is a dry run that shows the target the counts
+   ask for (`due`, `capped`); `shardpostctl fts stats <account>` shows
+   the counts (`fts layout3 list -verify` the shapes). A batch plan
+   does not list targets per account.
+4. Apply the large accounts one by one at a quiet time, then the rest
+   as a batch, `shardpostctl plan -all -due-only fts_layout`, with
+   little parallelism (`jobs.batch_parallel`; an account that is not
+   due ends as a no-op after a short lock); then set
+   `fts.auto_reshard: true` again. To keep the old behaviour instead, set
+   `fts.shards_max: 32` and `fts.dict_shards_max: 32` explicitly.
 
 **Order of overlay and image.** A version that does not know a
 configuration key refuses to start (the configuration is read strictly).

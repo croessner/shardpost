@@ -85,10 +85,11 @@ var (
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "shards_capped_total",
 		Help: "Full-text index generations whose objects outgrew their target at the shard cap, by kind (postings, dictionary, headers).",
 	}, []string{labelKind})
-	// FTSConvertBufferKeys is the number of keys a conversion of this
-	// server holds before it writes them (0 outside P5).
+	// FTSConvertBufferKeys is the number of keys the conversions of this
+	// server hold before they write them (0 outside P5), summed over the
+	// conversions running at the same time.
 	FTSConvertBufferKeys = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "convert_buffer_keys",
-		Help: "Keys a full-text conversion of this server holds in its write buffer (0 outside the copy phase).",
+		Help: "Keys the full-text conversions of this server hold in their write buffers (0 outside the copy phase).",
 	})
 )

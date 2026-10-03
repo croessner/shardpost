@@ -263,10 +263,12 @@ func TestFTSDueNoop(t *testing.T) {
 }
 
 // TestFTSDueNoopExpires (temp/13 R2.1): an entry that fires once the
-// six hours after a no-op are over is removed with the record, without
-// a move; later looks of the worker find nothing; a writer that queues
-// the account again gets a new job. Before the fix the entry was moved
-// to the same past time on every look and no job was planned again.
+// six hours after a no-op are over is removed and the record turns idle,
+// without a move; later looks of the worker find nothing; a writer that
+// queues the account again gets a new job, and after its no-op the
+// account waits twice as long (review: a skewed account below the cap
+// is planned less and less often). Before the fix the entry was moved to
+// the same past time on every look and no job was planned again.
 func TestFTSDueNoopExpires(t *testing.T) {
 	m, o, _, q := dueSetup(t, "alice")
 	o.fake("alice").gen = "g1"
@@ -274,29 +276,34 @@ func TestFTSDueNoopExpires(t *testing.T) {
 		return model.FTSLayoutReport{Noop: req.DueOnly}, nil
 	}
 
-	first, rec, entry := noopBackoff(t, m, q)
+	runManagerNoDue(t, m)
 
-	// The clock passes the backoff: the entry fires and goes, with the
-	// record.
+	fire(t, m, queueDue(t, q, "alice", "g1", time.Now()))
+
+	first, rec, entry := noopBackoff(t, m, q, model.FTSDueNoopBackoff)
+
+	// The clock passes the wait: the entry fires and goes, the record
+	// turns idle.
 	later := rec.NoopAt.Add(model.FTSDueNoopBackoff + time.Minute)
 	m.now = func() time.Time { return later }
 
 	fire(t, m, entry)
-	nothingLeft(t, m, q, "after the backoff (the entry was moved instead of removed)")
+	idleLeft(t, m, q, "after the wait (the entry was moved instead of removed)")
 
 	// Further looks of the worker do nothing.
 	for range 3 {
 		m.ftsDueOnce(context.Background(), notLost)
 	}
 
-	nothingLeft(t, m, q, "after looks without an entry")
+	idleLeft(t, m, q, "after looks without an entry")
 
-	// A writer queues the account again: a new job is planned.
+	// A writer queues the account again: a new job is planned, which
+	// finds nothing to do either; the next wait is twice as long.
 	fire(t, m, queueDue(t, q, "alice", "g1", later))
 
-	again := dueRecord(t, m, "alice")
-	if again == nil || again.JobID == first.JobID || !again.NoopAt.IsZero() {
-		t.Fatalf("no new job after a new trigger: %+v", again)
+	again, rec, _ := noopBackoff(t, m, q, 2*model.FTSDueNoopBackoff)
+	if again.JobID == first.JobID || rec.Noops != 1 {
+		t.Fatalf("second job %+v, record %+v", again, rec)
 	}
 
 	if jobs, _, _ := m.List("alice", "", "", 10); len(jobs) != 2 {
@@ -304,19 +311,26 @@ func TestFTSDueNoopExpires(t *testing.T) {
 	}
 }
 
-// noopBackoff plans a job for alice that finds nothing to do and fires
-// the entry after it: the record has noop_at, the one entry is due six
-// hours later. It returns the first record, the record after the no-op
-// and the entry.
-func noopBackoff(t *testing.T, m *Manager, q model.DueQueue) (*model.FTSDueRecord, *model.FTSDueRecord, model.DueEntry) {
+// TestFTSDueNoopWait: the wait after a no-op doubles up to seven days.
+func TestFTSDueNoopWait(t *testing.T) {
+	for n, want := range map[int]time.Duration{0: 6 * time.Hour, 1: 12 * time.Hour, 2: 24 * time.Hour, 4: 96 * time.Hour,
+		5: model.FTSDueNoopMax, 40: model.FTSDueNoopMax} {
+		if got := model.FTSDueNoopWait(n); got != want {
+			t.Errorf("wait after %d no-ops %v, want %v", n, got, want)
+		}
+	}
+}
+
+// noopBackoff waits for the job the last fire planned for alice, which
+// finds nothing to do, and fires the entry after it: the record has
+// noop_at, the one entry is due wait later. It returns the record of
+// the plan, the record after the no-op and the entry.
+func noopBackoff(t *testing.T, m *Manager, q model.DueQueue, wait time.Duration) (*model.FTSDueRecord, *model.FTSDueRecord, model.DueEntry) {
 	t.Helper()
 
-	fire(t, m, queueDue(t, q, "alice", "g1", time.Now()))
+	planned := dueRecord(t, m, "alice")
 
-	first := dueRecord(t, m, "alice")
-
-	runManagerNoDue(t, m)
-	waitState(t, m, first.JobID, StateSucceeded)
+	waitState(t, m, planned.JobID, StateSucceeded)
 	waitUnlocked(t, m, "alice")
 
 	fire(t, m, entriesOf(t, q, "alice")[0])
@@ -324,18 +338,18 @@ func noopBackoff(t *testing.T, m *Manager, q model.DueQueue) (*model.FTSDueRecor
 	rec := dueRecord(t, m, "alice")
 	left := entriesOf(t, q, "alice")
 
-	if rec == nil || rec.NoopAt.IsZero() || len(left) != 1 || !left[0].Due.Equal(rec.NoopAt.Add(model.FTSDueNoopBackoff)) {
+	if rec == nil || rec.NoopAt.IsZero() || len(left) != 1 || !left[0].Due.Equal(rec.NoopAt.Add(wait)) {
 		t.Fatalf("after the no-op: record %+v entries %+v", rec, left)
 	}
 
-	return first, rec, left[0]
+	return planned, rec, left[0]
 }
 
-// nothingLeft: alice has neither an entry nor a record.
-func nothingLeft(t *testing.T, m *Manager, q model.DueQueue, when string) {
+// idleLeft: alice has no entry and an idle record.
+func idleLeft(t *testing.T, m *Manager, q model.DueQueue, when string) {
 	t.Helper()
 
-	if e, r := entriesOf(t, q, "alice"), dueRecord(t, m, "alice"); len(e) != 0 || r != nil {
+	if e, r := entriesOf(t, q, "alice"), dueRecord(t, m, "alice"); len(e) != 0 || r == nil || !r.Idle {
 		t.Fatalf("%s: entries %+v record %+v", when, e, r)
 	}
 }

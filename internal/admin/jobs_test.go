@@ -205,3 +205,23 @@ func TestFTSStatsRefusals(t *testing.T) {
 		t.Errorf("without the role diagnose: %d", resp.StatusCode())
 	}
 }
+
+// TestFTSStatsParallelDefault (review): an exact count reads one object
+// at a time on a real account and two on a test account, unless asked.
+func TestFTSStatsParallelDefault(t *testing.T) {
+	s := &Server{o: Options{Accounts: memstore.New(), FTSStatsTestAccount: func(a string) bool { return a == "bench-000001" }}}
+
+	for _, c := range []struct {
+		account  string
+		parallel *int
+		want     int
+	}{{"alice", nil, 1}, {"bench-000001", nil, 2}, {"alice", ptr(4), 4}} {
+		rec := httptest.NewRecorder()
+
+		req, ok := s.statsRequest(rec, httptest.NewRequest(http.MethodGet, "/", nil), c.account,
+			adminapi.GetFTSStatsParams{Exact: ptr(true), Parallel: c.parallel})
+		if !ok || req.Parallel != c.want {
+			t.Errorf("%s %v: parallel %d, want %d (%d)", c.account, c.parallel, req.Parallel, c.want, rec.Code)
+		}
+	}
+}

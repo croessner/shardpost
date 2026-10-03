@@ -9,6 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
+
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 )
 
@@ -188,5 +191,55 @@ func TestLayoutParallelCopy(t *testing.T) {
 		}
 
 		sameSearches(t, fmt.Sprintf("%d writers", writers), want, searchState(t, u))
+	}
+}
+
+// bufferGauge reads imapceph_fts_convert_buffer_keys.
+func bufferGauge(t *testing.T) float64 {
+	t.Helper()
+
+	var m dto.Metric
+	if err := metrics.FTSConvertBufferKeys.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+
+	return m.GetGauge().GetValue()
+}
+
+// TestPieceWriterGauge (review): the buffer gauge is the sum over the
+// writers running in the process; a writer that stops takes its part
+// back.
+func TestPieceWriterGauge(t *testing.T) {
+	base := bufferGauge(t)
+	nop := func(piece) error { return nil }
+	a := startPieceWriter(nop, func() error { return nil }, 1<<20, 1)
+	b := startPieceWriter(nop, func() error { return nil }, 1<<20, 1)
+
+	for i := range 3 * bufferPerTarget {
+		if err := a.add(fmt.Sprintf("a%d", i%3), fmt.Sprint(i), nil); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := b.add(fmt.Sprintf("b%d", i%3), fmt.Sprint(i), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := bufferGauge(t) - base; got != float64(2*3*bufferPerTarget) {
+		t.Errorf("gauge %v over two writers", got)
+	}
+
+	a.stop()
+
+	if got := bufferGauge(t) - base; got != float64(3*bufferPerTarget) {
+		t.Errorf("gauge %v after one writer stopped", got)
+	}
+
+	if err := b.finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := bufferGauge(t) - base; got != 0 {
+		t.Errorf("gauge %v after both", got)
 	}
 }

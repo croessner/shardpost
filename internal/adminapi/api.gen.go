@@ -2075,10 +2075,13 @@ type ClientInterface interface {
 	// reads, no lock (a layout 2 index has no counters; use `exact`).
 	// There is no counter per dictionary or header object. `exact`
 	// counts the keys of every object page by page instead (librados
-	// has no key count): on a large account thousands of reads
-	// alongside the deliveries, `parallel` objects at a time (default
-	// 2, at most 16), the counts only roughly consistent; bounded by
-	// the 5 minute write timeout of the admin listener. `classes`
+	// has no key count, and the client library no read of keys alone,
+	// so the values come along: about the account's whole index omap
+	// is transferred, posting lists and header texts included): on a
+	// large account thousands of reads alongside the deliveries,
+	// `parallel` objects at a time (default 1, for a test account 2;
+	// at most 16), the counts only roughly consistent; bounded by the
+	// 5 minute write timeout of the admin listener. `classes`
 	// classifies the terms by field, class and length and projects
 	// the dictionary keys of the identifier rule for every bound 13
 	// to 40 (a body term with letters and digits of at least n runes
@@ -3310,10 +3313,13 @@ func (c *Client) ClearFTSLayout(ctx context.Context, account Account, reqEditors
 // reads, no lock (a layout 2 index has no counters; use `exact`).
 // There is no counter per dictionary or header object. `exact`
 // counts the keys of every object page by page instead (librados
-// has no key count): on a large account thousands of reads
-// alongside the deliveries, `parallel` objects at a time (default
-// 2, at most 16), the counts only roughly consistent; bounded by
-// the 5 minute write timeout of the admin listener. `classes`
+// has no key count, and the client library no read of keys alone,
+// so the values come along: about the account's whole index omap
+// is transferred, posting lists and header texts included): on a
+// large account thousands of reads alongside the deliveries,
+// `parallel` objects at a time (default 1, for a test account 2;
+// at most 16), the counts only roughly consistent; bounded by the
+// 5 minute write timeout of the admin listener. `classes`
 // classifies the terms by field, class and length and projects
 // the dictionary keys of the identifier rule for every bound 13
 // to 40 (a body term with letters and digits of at least n runes
@@ -9059,10 +9065,13 @@ type ClientWithResponsesInterface interface {
 	// reads, no lock (a layout 2 index has no counters; use `exact`).
 	// There is no counter per dictionary or header object. `exact`
 	// counts the keys of every object page by page instead (librados
-	// has no key count): on a large account thousands of reads
-	// alongside the deliveries, `parallel` objects at a time (default
-	// 2, at most 16), the counts only roughly consistent; bounded by
-	// the 5 minute write timeout of the admin listener. `classes`
+	// has no key count, and the client library no read of keys alone,
+	// so the values come along: about the account's whole index omap
+	// is transferred, posting lists and header texts included): on a
+	// large account thousands of reads alongside the deliveries,
+	// `parallel` objects at a time (default 1, for a test account 2;
+	// at most 16), the counts only roughly consistent; bounded by the
+	// 5 minute write timeout of the admin listener. `classes`
 	// classifies the terms by field, class and length and projects
 	// the dictionary keys of the identifier rule for every bound 13
 	// to 40 (a body term with letters and digits of at least n runes
@@ -13721,10 +13730,13 @@ func (c *ClientWithResponses) ClearFTSLayoutWithResponse(ctx context.Context, ac
 // reads, no lock (a layout 2 index has no counters; use `exact`).
 // There is no counter per dictionary or header object. `exact`
 // counts the keys of every object page by page instead (librados
-// has no key count): on a large account thousands of reads
-// alongside the deliveries, `parallel` objects at a time (default
-// 2, at most 16), the counts only roughly consistent; bounded by
-// the 5 minute write timeout of the admin listener. `classes`
+// has no key count, and the client library no read of keys alone,
+// so the values come along: about the account's whole index omap
+// is transferred, posting lists and header texts included): on a
+// large account thousands of reads alongside the deliveries,
+// `parallel` objects at a time (default 1, for a test account 2;
+// at most 16), the counts only roughly consistent; bounded by the
+// 5 minute write timeout of the admin listener. `classes`
 // classifies the terms by field, class and length and projects
 // the dictionary keys of the identifier rule for every bound 13
 // to 40 (a body term with letters and digits of at least n runes

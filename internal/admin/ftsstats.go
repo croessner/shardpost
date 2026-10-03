@@ -61,14 +61,32 @@ func (s *Server) statsRequest(w http.ResponseWriter, r *http.Request, account st
 	case p.Parallel != nil && (*p.Parallel < 1 || *p.Parallel > maxStatsParallel):
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, "parallel must be 1 to 16")
 		return req, false
-	case req.Classes && (s.o.FTSStatsTestAccount == nil || !s.o.FTSStatsTestAccount(strings.ToLower(account))):
+	case req.Classes && !s.testAccount(account):
 		writeError(w, http.StatusForbidden, adminapi.Forbidden, model.ErrFTSStatsClasses.Error())
 		return req, false
 	}
 
-	if p.Parallel != nil {
-		req.Parallel = *p.Parallel
-	}
+	req.Parallel = s.statsParallel(account, p.Parallel)
 
 	return req, true
+}
+
+// statsParallel is the parallelism of an exact count. It reads the
+// values with the keys (the client library has no read of keys alone):
+// about the account's whole index omap. On a real account it reads one
+// object at a time unless asked otherwise, on a test account two.
+func (s *Server) statsParallel(account string, asked *int) int {
+	switch {
+	case asked != nil:
+		return *asked
+	case s.testAccount(account):
+		return 2
+	default:
+		return 1
+	}
+}
+
+// testAccount reports whether account is one of fts.stats_test_accounts.
+func (s *Server) testAccount(account string) bool {
+	return s.o.FTSStatsTestAccount != nil && s.o.FTSStatsTestAccount(strings.ToLower(account))
 }

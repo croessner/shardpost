@@ -68,6 +68,10 @@ type pieceWriter struct {
 	keys     map[string]map[string][]byte
 	buffered int
 	peak     int
+	// reported is the part of imapceph_fts_convert_buffer_keys this
+	// writer added: the gauge is the sum over the conversions running in
+	// the process.
+	reported int
 
 	work     chan piece
 	wg       sync.WaitGroup
@@ -174,6 +178,10 @@ func (w *pieceWriter) add(oid, key string, v []byte) error {
 	if _, dup := set[key]; !dup {
 		w.buffered++
 		w.peak = max(w.peak, w.buffered)
+
+		if w.buffered-w.reported >= bufferPerTarget {
+			w.report()
+		}
 	}
 
 	set[key] = v
@@ -215,7 +223,7 @@ func (w *pieceWriter) handOver(oid string) error {
 	}
 
 	w.buffered -= len(set)
-	metrics.FTSConvertBufferKeys.Set(float64(w.buffered))
+	w.report()
 
 	select {
 	case w.work <- piece{oid: oid, set: set}:
@@ -249,7 +257,14 @@ func (w *pieceWriter) stop() {
 	w.closed = true
 	close(w.work)
 	w.wg.Wait()
-	metrics.FTSConvertBufferKeys.Set(0)
+	w.buffered = 0
+	w.report()
+}
+
+// report brings this writer's part of the buffer gauge up to date.
+func (w *pieceWriter) report() {
+	metrics.FTSConvertBufferKeys.Add(float64(w.buffered - w.reported))
+	w.reported = w.buffered
 }
 
 // chunkWriter is the copy's view of the writer for one kind of object:

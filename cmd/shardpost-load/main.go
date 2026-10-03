@@ -198,6 +198,7 @@ func lmtpDeliver(addr, rcpt string, body []byte) error {
 		}
 	}
 
+	body = crlfLines(body)
 	_, _ = nc.Write(dotStuff(body))
 
 	// The message ends with its own line end; only a message without one
@@ -215,6 +216,16 @@ func lmtpDeliver(addr, rcpt string, body []byte) error {
 	_, _ = io.WriteString(nc, "QUIT\r\n")
 
 	return nil
+}
+
+// crlfLines ends every line with CRLF (a bare LF becomes CRLF), so that
+// the terminator follows the last line without an empty one.
+func crlfLines(body []byte) []byte {
+	if !bytes.Contains(body, []byte("\n")) || bytes.Count(body, []byte("\n")) == bytes.Count(body, []byte("\r\n")) {
+		return body
+	}
+
+	return bytes.ReplaceAll(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n"), []byte("\r\n"))
 }
 
 // dotStuff doubles the dot at the start of every line (RFC 5321 4.5.2).
