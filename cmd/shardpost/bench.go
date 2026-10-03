@@ -140,6 +140,11 @@ func benchSetup(ctx context.Context, log *slog.Logger, settings *config.Config, 
 		return g, cephstore.Config{}, nil, benchRefused
 	}
 
+	if err := fts.SetAttachedHeaders(settings.FTS.AttachedHeaders); err != nil {
+		log.Error("bench: configuration", "err", err)
+		return g, cephstore.Config{}, nil, benchRefused
+	}
+
 	membudget.SetLimit(settings.Server.MemoryBudgetBytes)
 
 	// The production system pool is never taken over: the bench's is

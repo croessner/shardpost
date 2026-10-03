@@ -39,6 +39,24 @@ func EffectiveFTSLayout(configured int, marked bool) int {
 	return FTSLayout2
 }
 
+// FTSDictFilterMarkKey is the admin store record whose presence allows
+// index generations with the properties a version before 0.50.0 does
+// not know ("shardpostctl fts dictfilter enable", stage B14h): the
+// identifier filter of the dictionary (fts.dict_filter "ids") and the
+// text preparation without the signature fields of attached headers
+// (fts.attached_headers "nosig"). It is read without a cache wherever a
+// generation is created, so removing it stops new such generations at
+// once. Its value is an FTSLayoutMark.
+const FTSDictFilterMarkKey = "fts/dictfilter"
+
+// Values of the dict_filter parameter of fts_layout: the identifier
+// filter of the target generation ("": as the configuration and the
+// cluster mark say).
+const (
+	FTSDictFilterNone = "none"
+	FTSDictFilterIDs  = "ids"
+)
+
 // FTSLayoutMark is the value of FTSLayoutMarkKey.
 type FTSLayoutMark struct {
 	EnabledAt time.Time `json:"enabled_at"`
@@ -63,6 +81,10 @@ const (
 	// CapFTSLayout3 is the capability of a server that reads and writes
 	// layout 3.
 	CapFTSLayout3 = "fts_layout3"
+	// CapFTSDictFilter is the capability of a server that reads and
+	// writes generations with the identifier filter and the text
+	// preparation "nosig" (0.50.0).
+	CapFTSDictFilter = "fts_dict_filter"
 	// CapSystemPool is the capability of a process that knows the system
 	// pool (ceph.system_pool, 0.47.0): it routes the store's own
 	// namespaces by it and checks the placement fence and mark.
@@ -151,6 +173,13 @@ const (
 // FTSLayoutEntry is the value of an account in the presence index.
 type FTSLayoutEntry struct {
 	Since time.Time `json:"since"`
+	// Props is set (to when it was set) while the account has, or is
+	// about to get, a generation with the identifier filter or the text
+	// preparation "nosig" (0.50.0): it is set before such a generation
+	// is created and cleared after the account switched to one without,
+	// so that "fts dictfilter disable" reads the presence index only. A
+	// version before 0.50.0 keeps an existing value.
+	Props time.Time `json:"props,omitzero"`
 }
 
 // FTSDueGen is the queue generation of an index generation: its FNV-64a
@@ -242,8 +271,15 @@ type FTSLayoutRequest struct {
 	Shards int
 	Shape  *FTSForcedShape
 	// DueOnly ends without a change when the counts the targets come out
-	// at are the ones the index has.
+	// at are the ones the index has and the identifier filter is the one
+	// it should have.
 	DueOnly bool
+	// DictFilter is the identifier filter of a layout 3 target:
+	// FTSDictFilterIDs (fts.dict_id_min_runes; needs the cluster mark of
+	// the filter), FTSDictFilterNone, or "" for what the configuration
+	// and the mark say. The postings are copied either way; the
+	// dictionary is derived from them anew.
+	DictFilter string
 	// Tok identifies the run: "job-<id>/<lease generation>" for a job,
 	// "<session>/<nonce>" for the import reshard. A run continues an
 	// unfinished conversion only of exactly the same token.
@@ -268,6 +304,11 @@ type FTSLayoutShape struct {
 	S      int    `json:"s,omitempty"`
 	D      int    `json:"d,omitempty"`
 	H      int    `json:"h,omitempty"`
+	// DictIDMinRunes is the identifier filter of the generation's
+	// dictionary (0: none, every body term under its trigrams);
+	// AttachedHeaders its text preparation ("" for all, or "nosig").
+	DictIDMinRunes  int    `json:"dict_id_min_runes,omitempty"`
+	AttachedHeaders string `json:"attached_headers,omitempty"`
 	// Capped names the kinds of objects (postings, dictionary, headers)
 	// whose count a cap cut, in the target FTSLayoutDue reports.
 	Capped []string `json:"capped,omitempty"`
@@ -346,6 +387,16 @@ type FTSLayouter interface {
 type FTSLayoutMarked interface {
 	FTSLayout3Enabled() (bool, error)
 }
+
+// FTSDictFilterMarked is implemented by stores that read the cluster
+// mark of the dictionary filter (FTSDictFilterMarkKey).
+type FTSDictFilterMarked interface {
+	FTSDictFilterEnabled() (bool, error)
+}
+
+// ErrFTSDictFilterMark refuses a target with the identifier filter
+// without the cluster mark of the filter.
+var ErrFTSDictFilterMark = errors.New("the dictionary filter is not enabled in this cluster (shardpostctl fts dictfilter enable)")
 
 // ErrIndexUnavailable is wrapped by the errors of a full-text index
 // that cannot be used now: an object of the generation its layout record

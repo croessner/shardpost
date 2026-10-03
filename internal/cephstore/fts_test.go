@@ -72,16 +72,78 @@ func TestFinishedScan(t *testing.T) {
 	full := &dictScan{found: make([]string, maxCandidates)}
 	done := &dictScan{done: true}
 
-	if finishedScan([]*dictScan{open}) != nil {
+	if finishedScan([]*dictScan{open}, nil) != nil {
 		t.Error("an unfinished scan ended the search")
 	}
 
-	if finishedScan([]*dictScan{open, full}) != full {
+	if a := finishedScan([]*dictScan{open, full}, nil); a == nil || a.complete || len(a.found) != maxCandidates {
 		t.Error("the candidate limit did not end the search")
 	}
 
-	if finishedScan([]*dictScan{full, open, done}) != done {
+	if a := finishedScan([]*dictScan{full, open, done}, nil); a == nil || !a.complete || len(a.found) != 0 {
 		t.Error("a complete range must win over a truncated one")
+	}
+}
+
+// TestFinishedScanStart (B14h, temp/13 §4.5): with a start entry range
+// the answer needs a trigram range and the start range both read to
+// their end and is their union. An empty start range (a generation
+// without the filter) changes nothing.
+func TestFinishedScanStart(t *testing.T) {
+	done := &dictScan{done: true, found: []string{"b:abc1", "b:xabc"}}
+	startOpen := &dictScan{start: true, found: []string{"b:abc1234567890123456789012345"}}
+	startDone := &dictScan{start: true, done: true, found: []string{"b:abc1234567890123456789012345", "b:abc1"}}
+	emptyStart := &dictScan{start: true, done: true}
+
+	if finishedScan([]*dictScan{done}, startOpen) != nil {
+		t.Error("the start range was not read to its end")
+	}
+
+	a := finishedScan([]*dictScan{done}, startDone)
+	if a == nil || !a.complete || !reflect.DeepEqual(a.found, []string{"b:abc1", "b:xabc", "b:abc1234567890123456789012345"}) {
+		t.Fatalf("union %+v", a)
+	}
+
+	if a := finishedScan([]*dictScan{done}, emptyStart); a == nil || !a.complete || !reflect.DeepEqual(a.found, done.found) {
+		t.Fatalf("empty start range %+v", a)
+	}
+}
+
+// TestFinishedScanStartLimit: the candidate limit counts the trigram and
+// the start range together; a start range over the limit makes the word
+// incomplete, also beside a finished trigram range.
+func TestFinishedScanStartLimit(t *testing.T) {
+	done := &dictScan{done: true, found: []string{"b:abc1", "b:xabc"}}
+	half := &dictScan{found: make([]string, maxCandidates/2)}
+	startHalf := &dictScan{start: true, found: make([]string, maxCandidates/2)}
+
+	if a := finishedScan([]*dictScan{half}, startHalf); a == nil || a.complete {
+		t.Fatalf("both together at the limit: %+v", a)
+	}
+
+	big := &dictScan{start: true, found: make([]string, maxCandidates)}
+	if a := finishedScan([]*dictScan{done}, big); a == nil || a.complete {
+		t.Fatalf("start range over the limit beside a finished one: %+v", a)
+	}
+
+	if a := finishedScan([]*dictScan{{}}, big); a == nil || a.complete {
+		t.Fatalf("start range over the limit: %+v", a)
+	}
+}
+
+// TestStartScan: the start entry scan takes every key of its exact
+// range, as the term behind "#<tri0>:".
+func TestStartScan(t *testing.T) {
+	s := newStartScan("d0", "abc", "b", "abc12")
+	if s.prefix != "#abc:b:abc12" || !s.start {
+		t.Fatalf("scan %+v", s)
+	}
+
+	s.take("#abc:b:abc1234567890123456789012345", "abc12")
+	s.take("#abc:b:abc12zz", "abc12")
+
+	if want := []string{"b:abc1234567890123456789012345", "b:abc12zz"}; !reflect.DeepEqual(s.found, want) {
+		t.Fatalf("found %q, want %q", s.found, want)
 	}
 }
 

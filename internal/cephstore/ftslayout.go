@@ -109,6 +109,42 @@ type ftsGen struct {
 	// (Unix seconds; 0 for a job), in "next" and, after the switch, in
 	// "old".
 	At int64 `json:"at,omitempty"`
+	// DX and AH are the generation's properties (see ftsLayout).
+	DX *ftsDX `json:"dx,omitempty"`
+	AH string `json:"ah,omitempty"`
+}
+
+// ftsDX is the identifier filter of a generation's dictionary (B14h,
+// temp/13 §4.3): a body term that fts.DictIdentifier names for N runes
+// has one start entry "#<tri0>:b:<token>" instead of its trigram keys.
+// V is the version of the rule (1).
+type ftsDX struct {
+	V int `json:"v"`
+	N int `json:"n"`
+}
+
+// dxRule is the version of the identifier rule ftsDX.V names.
+const dxRule = 1
+
+// newDX is the filter of n runes (nil for 0).
+func newDX(n int) *ftsDX {
+	if n <= 0 {
+		return nil
+	}
+
+	return &ftsDX{V: dxRule, N: n}
+}
+
+// dxRunes is the identifier length of a filter (0: none). A filter of a
+// rule this version does not know counts as none here: its writers then
+// write trigram keys (a superset), and its readers read the start
+// entries anyway.
+func dxRunes(d *ftsDX) int {
+	if d == nil || d.V != dxRule {
+		return 0
+	}
+
+	return d.N
 }
 
 // ftsLayout is the layout record "L" of the id map.
@@ -125,6 +161,16 @@ type ftsLayout struct {
 	LG   bool     `json:"lg,omitempty"`
 	Next *ftsGen  `json:"next,omitempty"`
 	Old  []ftsGen `json:"old,omitempty"`
+	// DX is the identifier filter of the generation's dictionary (nil:
+	// none). AH is its text preparation: "" every header field of
+	// attached messages, fts.AttachedHeadersNoSig without the signature
+	// and trace fields. Both are fixed for the life of the generation:
+	// writers, removals and conversions take them from here, never from
+	// the configuration (temp/13 §2, §4.3). A version before 0.50.0
+	// drops both when it rewrites the record; the version marker
+	// ftsVersionText keeps "nosig" known to the readers then.
+	DX *ftsDX `json:"dx,omitempty"`
+	AH string `json:"ah,omitempty"`
 }
 
 // parseLayout decodes the layout record; nil for none.
@@ -155,6 +201,11 @@ type ftsLoc struct {
 	f       int    // layout
 	g       string // generation (layout 3)
 	s, d, h int    // posting, dictionary and header objects
+	// dx is the identifier filter of the dictionary in runes (0: none),
+	// ah the text preparation ("" or fts.AttachedHeadersNoSig); layout 2
+	// has neither.
+	dx int
+	ah string
 }
 
 // layout2Loc is layout 2 with n posting and header objects.
@@ -168,7 +219,7 @@ func genLoc(g ftsGen, n int) ftsLoc {
 		return layout2Loc(n)
 	}
 
-	return ftsLoc{f: model.FTSLayout3, g: g.G, s: g.S, d: g.D, h: g.H}
+	return ftsLoc{f: model.FTSLayout3, g: g.G, s: g.S, d: g.D, h: g.H, dx: dxRunes(g.DX), ah: g.AH}
 }
 
 // curLoc is the current generation of a record (nil: layout 2).
@@ -177,7 +228,7 @@ func curLoc(l *ftsLayout, n int) ftsLoc {
 		return layout2Loc(n)
 	}
 
-	return ftsLoc{f: model.FTSLayout3, g: l.G, s: l.S, d: l.D, h: l.H}
+	return ftsLoc{f: model.FTSLayout3, g: l.G, s: l.S, d: l.D, h: l.H, dx: dxRunes(l.DX), ah: l.AH}
 }
 
 // same reports whether two locations are the same generation.
@@ -190,7 +241,25 @@ func (l ftsLoc) shape() model.FTSLayoutShape {
 		return model.FTSLayoutShape{Layout: model.FTSLayout2, S: l.s, D: l.d, H: l.h}
 	}
 
-	return model.FTSLayoutShape{Layout: l.f, Gen: l.g, S: l.s, D: l.d, H: l.h}
+	return model.FTSLayoutShape{Layout: l.f, Gen: l.g, S: l.s, D: l.d, H: l.h, DictIDMinRunes: l.dx, AttachedHeaders: l.ah}
+}
+
+// text are the text options of the generation's terms.
+func (l ftsLoc) text() fts.TextOptions { return fts.TextOptions{AttachedHeaders: l.ah} }
+
+// newLayoutRecord is the layout record of a fresh layout 3 generation
+// (a fresh index, a rebuild).
+func newLayoutRecord(loc ftsLoc) *ftsLayout {
+	return &ftsLayout{F: model.FTSLayout3, G: loc.g, S: loc.s, D: loc.d, H: loc.h, Dict: true, LG: true, DX: newDX(loc.dx), AH: loc.ah}
+}
+
+// sameProps reports whether two generations have the same identifier
+// filter and text preparation.
+func (l ftsLoc) sameProps(o ftsLoc) bool { return l.dx == o.dx && l.ah == o.ah }
+
+// gen is the generation as a record entry (without a run token).
+func (l ftsLoc) gen() ftsGen {
+	return ftsGen{F: l.f, G: l.g, S: l.s, D: l.d, H: l.h, DX: newDX(l.dx), AH: l.ah}
 }
 
 func (l ftsLoc) postingOIDn(i int) string {
@@ -420,10 +489,11 @@ func atoiMarker(v []byte) int64 {
 
 func itoaMarker(n int64) []byte { return []byte(strconv.FormatInt(max(n, 0), 10)) }
 
-// dictKeysOf is the number of dictionary keys a term has: one per
-// distinct trigram of its token, none in a field without substring
-// matching (fts.DictKeys without the identifier rule).
-func dictKeysOf(term string) int { return fts.DictKeys(term, 0) }
+// dictKeysOf is the number of dictionary keys a term has in the
+// generation loc: one per distinct trigram of its token, none in a field
+// without substring matching, one (the start entry) for an identifier
+// in a generation with the filter (fts.DictKeys).
+func dictKeysOf(loc ftsLoc, term string) int { return fts.DictKeys(term, loc.dx) }
 
 // --- sizes --------------------------------------------------------------------
 
@@ -631,13 +701,25 @@ func (u *User) deleteObjects(oids []string) error {
 // cluster mark "fts/layout3" of the admin store exists. It is read
 // without a cache (one stat).
 func (s *Store) FTSLayout3Enabled() (bool, error) {
+	return s.markSet(model.FTSLayoutMarkKey, "fts layout mark")
+}
+
+// FTSDictFilterEnabled implements model.FTSDictFilterMarked: whether the
+// cluster mark "fts/dictfilter" of the admin store exists (one stat, no
+// cache).
+func (s *Store) FTSDictFilterEnabled() (bool, error) {
+	return s.markSet(model.FTSDictFilterMarkKey, "fts dictionary filter mark")
+}
+
+// markSet reports whether the admin store record key exists.
+func (s *Store) markSet(key, what string) (bool, error) {
 	u, err := s.User(adminNamespace)
 	if err != nil {
 		return false, err
 	}
 	defer u.Close()
 
-	_, err = u.idx.Stat(adminOID(model.FTSLayoutMarkKey))
+	_, err = u.idx.Stat(adminOID(key))
 
 	switch {
 	case err == nil:
@@ -645,8 +727,35 @@ func (s *Store) FTSLayout3Enabled() (bool, error) {
 	case errCode(err) == syscall.ENOENT:
 		return false, nil
 	default:
-		return false, fmt.Errorf("fts layout mark: %w", err)
+		return false, fmt.Errorf("%s: %w", what, err)
 	}
+}
+
+// genProps returns the identifier filter and the text preparation a new
+// layout 3 generation gets (a fresh index, a rebuild, a conversion that
+// follows the configuration): those of fts.dict_filter and
+// fts.attached_headers while the cluster mark of the filter is set,
+// read now; none without it. A configuration that asks for neither
+// reads no mark.
+func (u *User) genProps() (dx int, ah string, err error) {
+	if !u.ftsCfg.dictFilter && u.ftsCfg.ah == "" {
+		return 0, "", nil
+	}
+
+	if u.store == nil {
+		return 0, "", nil
+	}
+
+	ok, err := u.store.FTSDictFilterEnabled()
+	if err != nil || !ok {
+		return 0, "", err
+	}
+
+	if u.ftsCfg.dictFilter {
+		dx = u.ftsCfg.dictID
+	}
+
+	return dx, u.ftsCfg.ah, nil
 }
 
 // FTSLayoutIndex returns the presence index of the accounts with a
@@ -698,6 +807,62 @@ func (u *User) unmarkLayout3() error {
 	defer release()
 
 	if err := ix.Remove(u.name); err != nil {
+		return fmt.Errorf("fts layout index: %w", err)
+	}
+
+	return nil
+}
+
+// hasProps reports whether a generation has the identifier filter or
+// the text preparation "nosig" (the properties a version before 0.50.0
+// must not search).
+func (l ftsLoc) hasProps() bool { return l.dx > 0 || l.ah != "" }
+
+// markLayoutProps sets (on) or clears the presence entry's Props: set
+// before a generation with properties comes into being, cleared after
+// the account switched to one without (temp/13 §5.3; "fts dictfilter
+// disable" reads the presence index only). An account without an entry
+// gets one only when on. A creator that loses its race may leave Props
+// set for a generation that never came; the scrub clears it after its
+// grace period.
+func (u *User) markLayoutProps(on bool) error {
+	if u.store == nil {
+		return nil
+	}
+
+	ix, release, err := u.store.FTSLayoutIndex()
+	if err != nil {
+		return fmt.Errorf("fts layout index: %w", err)
+	}
+	defer release()
+
+	err = ix.Update(u.name, func(cur []byte) ([]byte, error) {
+		if cur == nil && !on {
+			return nil, nil
+		}
+
+		var e model.FTSLayoutEntry
+		if cur != nil {
+			_ = json.Unmarshal(cur, &e)
+		}
+
+		switch {
+		case e.Since.IsZero():
+			e.Since = time.Now().UTC()
+		case on == !e.Props.IsZero():
+			return cur, nil
+		}
+
+		e.Props = time.Time{}
+		if on {
+			e.Props = time.Now().UTC()
+		}
+
+		b, _ := json.Marshal(e)
+
+		return b, nil
+	})
+	if err != nil {
 		return fmt.Errorf("fts layout index: %w", err)
 	}
 
@@ -1008,6 +1173,9 @@ func (u *User) reportCapped(gen, kind string) {
 		"gen", gen, "kind", kind, "cap", limit)
 }
 
+// defaultDictIDRunes is the default of fts.dict_id_min_runes.
+const defaultDictIDRunes = 25
+
 // ftsUserCfg are the layout settings of a view.
 type ftsUserCfg struct {
 	layout      int
@@ -1015,6 +1183,13 @@ type ftsUserCfg struct {
 	convert     convertCfg
 	autoReshard bool
 	frozenWait  time.Duration
+	// dictFilter asks for the identifier filter of dictID runes and ah
+	// for the text preparation ("" or fts.AttachedHeadersNoSig) that new
+	// generations get while the cluster mark of the filter is set; ah
+	// also decides which generations the searches trust (ftsTrusted).
+	dictFilter bool
+	dictID     int
+	ah         string
 }
 
 // ftsUserConfig derives the view settings from the store configuration.
@@ -1024,7 +1199,20 @@ func ftsUserConfig(c FTSConfig) ftsUserCfg {
 		layout = model.FTSLayout2
 	}
 
+	ah := ""
+	if c.AttachedHeaders == fts.AttachedHeadersNoSig {
+		ah = fts.AttachedHeadersNoSig
+	}
+
+	// The configuration validates fts.dict_id_min_runes; a store
+	// configured without it (tests, tools) gets the default 25.
+	dictID := defaultDictIDRunes
+	if c.DictIDMinRunes > 0 {
+		dictID = min(max(c.DictIDMinRunes, fts.IdentMinRunesLow), fts.IdentMinRunesHigh)
+	}
+
 	return ftsUserCfg{layout: layout, autoReshard: c.AutoReshard, frozenWait: max(c.FrozenWait, 0),
+		dictFilter: c.DictFilter, dictID: dictID, ah: ah,
 		sizing: ftsSizing{min: c.ShardsMin, max: c.ShardsMax, target: c.ShardTargetKeys,
 			dictMax: c.DictShardsMax, dictTarget: c.DictTargetKeys}.withDefaults(),
 		convert: convertCfg{bufferKeys: c.ConvertBufferKeys, writers: c.ConvertWriters}.withDefaults()}

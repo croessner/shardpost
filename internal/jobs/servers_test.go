@@ -150,6 +150,38 @@ func TestLayout3Ready(t *testing.T) {
 	readyLater(t, kv, now)
 }
 
+// TestDictFilterReady (B14h): the mark of the dictionary filter needs
+// every fresh server to report fts_dict_filter; a server of 0.49.0
+// knows layout 3 but not the filter.
+func TestDictFilterReady(t *testing.T) {
+	kv := memstore.NewAdminKVMode(model.KVIndexWrite)
+	now := time.Now()
+
+	if err := RegisterServer(kv, "pod-new", "0.50.0", now); err != nil {
+		t.Fatal(err)
+	}
+
+	old, _ := json.Marshal(model.ServerRecord{Version: "0.49.0", Caps: []string{model.CapFTSLayout3, model.CapSystemPool}, Seen: now.UTC(),
+		Role: model.RoleServe})
+
+	if err := kv.Update(model.ServersPrefix+"pod-old", func([]byte) ([]byte, error) { return old, nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	servers, err := Servers(kv, now)
+	if err != nil || len(servers) != 2 {
+		t.Fatalf("servers %+v %v", servers, err)
+	}
+
+	if err := CapReady(servers, 2, model.CapFTSLayout3); err != nil {
+		t.Errorf("layout 3: %v", err)
+	}
+
+	if err := CapReady(servers, 2, model.CapFTSDictFilter); !errors.Is(err, ErrNotReady) || !strings.Contains(err.Error(), "1 with fts_dict_filter") {
+		t.Errorf("dictionary filter with a 0.49.0 server: %v", err)
+	}
+}
+
 // readyLater: three minutes on, with pod-a and pod-b renewed, the
 // predecessor is stale and the check passes for two pods only.
 func readyLater(t *testing.T, kv *memstore.AdminKV, now time.Time) {

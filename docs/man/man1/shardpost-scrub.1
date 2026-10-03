@@ -1,4 +1,4 @@
-.TH SHARDPOST-SCRUB 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
+.TH SHARDPOST-SCRUB 1 "2026-10-03" "ShardPost 0.50.0" "ShardPost Manual"
 .SH NAME
 shardpost-scrub \- scrub accounts, submit the nightly batch scrub, sweep the pools for debris
 .SH SYNOPSIS
@@ -82,6 +82,34 @@ It enters an account with layout 3 in the presence index
 when it is missing there and removes an entry older than the grace
 period whose account has no layout 3 any more
 .RB ( FTSPresenceFixed ).
+It reports a version marker of the index that does not fit its
+generation
+.RB ( FTSVersionDrift ,
+.BR fts_version_drift ,
+since 0.50.0): the marker
+.B 3
+of a dictionary without the identifier filter, which a version before
+0.50.0 leaves when it converts a filtered generation (back to layout 2,
+or a reshard that drops the filter from the layout record), is set to
+.B 2
+unless the run only reports (the dictionary is whole); a marker
+.B 2
+on a generation with the filter or the text preparation
+.BR nosig ,
+which a version before 0.50.0 writes when it gives such a generation
+its first document ids while it is empty, is set to the marker of the
+generation
+.RB ( 3
+or
+.BR 4 ),
+so that such a version no longer trusts it; a marker
+.B 4
+whose layout record lost its text preparation is only reported
+.RB ( fts_layout
+writes the record anew). It also keeps the
+.B props
+of the presence entry in step with the generations (counted in
+.BR FTSPresenceFixed ).
 The scrub job of the job system
 .RB ( "shardpost scrub \-\-batch" ,
 .BR "shardpostctl plan scrub" )

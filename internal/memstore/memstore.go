@@ -34,6 +34,7 @@ type Store struct {
 	users  map[string]*User
 	ix     indexes
 	limits model.Limits // see SetLimits
+	fts    FTSOptions   // see SetFTSOptions
 	// dueLocks is the worker lease of the reshard queue (FTSDueQueue).
 	dueLocks *memLocks
 }
@@ -555,7 +556,7 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 	}
 
 	u.blobs[guid] = raw
-	for _, t := range fts.Terms(raw) {
+	for _, t := range u.ftsTerms(raw) {
 		if u.terms[t] == nil {
 			u.terms[t] = map[string]bool{}
 		}
@@ -894,8 +895,9 @@ func (u *User) Move(src string, metas []model.Meta, dest string) ([]model.Meta, 
 // substring of the term — a prefix for a token shorter than a trigram,
 // and on a field without substring matching (fts.Substring), where a
 // longer token is also a substring of a term of one of the fields that
-// stand in for it.
-func termMatches(field, tok string, exp []string, term string) bool {
+// stand in for it. A body identifier of a store with the identifier
+// filter is matched by its start only (infixMatch).
+func (u *User) termMatches(field, tok string, exp []string, term string) bool {
 	fld, t, _ := strings.Cut(term, ":")
 	short := fts.ShortToken(tok)
 
@@ -907,7 +909,7 @@ func termMatches(field, tok string, exp []string, term string) bool {
 			return strings.HasPrefix(t, tok)
 		}
 
-		return strings.Contains(t, tok)
+		return u.infixMatch(fld, t, tok)
 	}
 
 	return !fts.Substring(field) && !short && slices.Contains(fts.HeaderSubstringFields, fld) && strings.Contains(t, tok)
@@ -927,7 +929,7 @@ func (u *User) SearchFields(fields []string, query string) (map[string]bool, err
 
 		for _, f := range fields {
 			for term, guids := range u.terms {
-				if termMatches(f, tok, exp, term) {
+				if u.termMatches(f, tok, exp, term) {
 					for g := range guids {
 						hits[g] = true
 					}
@@ -997,7 +999,7 @@ func (u *User) spanHits(fields []string, sp fts.Span) (map[string]bool, bool) {
 		markers := fts.Markers(sp)
 
 		for term, guids := range u.terms {
-			if fld, t, _ := strings.Cut(term, ":"); fld == f && (fts.SpanTerm(sp, t) || slices.Contains(markers, t)) {
+			if fld, t, _ := strings.Cut(term, ":"); fld == f && (u.spanTerm(f, sp, t) || slices.Contains(markers, t)) {
 				for g := range guids {
 					hits[g] = true
 				}
@@ -1006,6 +1008,17 @@ func (u *User) spanHits(fields []string, sp fts.Span) (map[string]bool, bool) {
 	}
 
 	return hits, true
+}
+
+// spanTerm is fts.SpanTerm with the identifier filter of the store: an
+// inner part (MatchInfix) of a body identifier is matched by its start
+// only.
+func (u *User) spanTerm(field string, sp fts.Span, t string) bool {
+	if !fts.SpanTerm(sp, t) {
+		return false
+	}
+
+	return sp.Match != fts.MatchInfix || u.infixMatch(field, t, sp.Token)
 }
 
 // HeaderTexts implements model.HeaderTexts from the stored messages.

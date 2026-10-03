@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -273,6 +274,61 @@ func TestFTSLayoutParams(t *testing.T) {
 
 	if _, err := m.CreatePlan(context.Background(), k, "alice", json.RawMessage(`{"layout":2}`), "tester", nil); err != nil {
 		t.Errorf("layout 2 without the mark: %v", err)
+	}
+}
+
+// filterMarked is a store whose layout 3 mark is set and whose mark of
+// the dictionary filter is f.
+type filterMarked bool
+
+func (m filterMarked) FTSLayout3Enabled() (bool, error)    { return true, nil }
+func (m filterMarked) FTSDictFilterEnabled() (bool, error) { return bool(m), nil }
+
+// TestFTSLayoutDictFilter (B14h): dict_filter is none or ids, layout 3
+// only; ids needs the mark of the filter (409), none and the default do
+// not; the run gets the filter of its parameters.
+func TestFTSLayoutDictFilter(t *testing.T) {
+	m, o := layoutManager(t)
+	k, _ := m.Kind(KindFTSLayout)
+
+	for _, p := range []string{`{"dict_filter":"all"}`, `{"dict_filter":"ids","layout":2}`, `{"dict_filter":1}`} {
+		if _, err := m.CreatePlan(context.Background(), k, "alice", json.RawMessage(p), "tester", nil); !errors.Is(err, ErrInvalidParams) {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+
+	// marked(true) knows no filter mark: refused
+	if _, err := m.CreatePlan(context.Background(), k, "alice", json.RawMessage(`{"dict_filter":"ids"}`), "tester", nil); !errors.Is(err, model.ErrFTSDictFilterMark) {
+		t.Errorf("ids without a filter mark: %v", err)
+	}
+
+	m.env.Layout3 = filterMarked(false)
+
+	if _, err := m.CreatePlan(context.Background(), k, "alice", json.RawMessage(`{"dict_filter":"ids"}`), "tester", nil); !errors.Is(err, model.ErrFTSDictFilterMark) {
+		t.Errorf("ids without the mark: %v", err)
+	}
+
+	for _, p := range []string{`{"dict_filter":"none"}`, `{}`, `{"dict_filter":"none","layout":3}`} {
+		if _, err := m.CreatePlan(context.Background(), k, "alice", json.RawMessage(p), "tester", nil); err != nil {
+			t.Errorf("%s without the mark: %v", p, err)
+		}
+	}
+
+	m.env.Layout3 = filterMarked(true)
+
+	got := make(chan string, 1)
+
+	o.fake("alice").convert = func(req model.FTSLayoutRequest) (model.FTSLayoutReport, error) {
+		got <- fmt.Sprint(req.DictFilter, " ", req.DueOnly)
+		return model.FTSLayoutReport{}, nil
+	}
+
+	runManager(t, m)
+
+	waitState(t, m, applyLayout(t, m, "alice", `{"dict_filter":"ids","due_only":true}`).ID, StateSucceeded)
+
+	if req := <-got; req != "ids true" {
+		t.Errorf("request %q", req)
 	}
 }
 

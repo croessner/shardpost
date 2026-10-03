@@ -610,6 +610,9 @@ exceed a limit by one entry each.
 | `fts.frozen_wait_seconds` | 10 | how long one indexing (a delivery, an import batch, a removal) waits, once, for a conversion that froze the account's index before it fails with a temporary error (0–60; the undo of a delivery, the upload expiry and the scrubber's orphans never wait) |
 | `fts.import_reshard_sync_seconds` | 60 | how long `POST /admin/v1/accounts/{account}/import/fts-reshard` works before it answers 202 and goes on in the background (1–90; below the 2 minute default client timeout of `shardpostctl`) |
 | `fts.dict_min_terms` | 0 | reserved for a later stage (dictionary only from a vocabulary size); no effect yet |
+| `fts.dict_filter` | `none` | identifier filter of the substring dictionary of new layout 3 index generations (since 0.50.0): `none` lists every body word under each of its trigrams (exact substring search), `ids` gives a body word with letters and digits of at least `fts.dict_id_min_runes` characters one start entry instead, so that it is found as a whole word and by its start but not by a part from its inside (see [storage](architecture/storage.md#full-text-identifier-filter), [protocols](protocols.md#search-sort-and-thread)). `ids` takes effect only while the cluster mark is set (`shardpostctl fts dictfilter enable`); existing generations change with `fts_layout` (`-dict-filter`, or `plan -all -due-only fts_layout`) |
+| `fts.dict_id_min_runes` | 25 | least length in characters of such an identifier (13–40, since 0.50.0); also the length `fts_layout -dict-filter ids` uses. A generation keeps the length it was built with, so a change makes every filtered generation due for `plan -all -due-only fts_layout`: a full copy of each under its account lock. Choose it once |
+| `fts.attached_headers` | `all` | which header fields of attached messages (`message/rfc822`, `message/global`, `text/rfc822-headers`) belong to the body text (since 0.50.0): `all` every field, `nosig` all but the signature and trace fields `DKIM-Signature`, `ARC-Seal`, `ARC-Message-Signature`, `ARC-Authentication-Results`, `Authentication-Results`, `Received`, `Received-SPF`, `X-Google-DKIM-Signature` and every `X-*-Signature`. IMAP `SEARCH` checks messages by it at once; new index generations are built with it while the cluster mark of the dictionary filter is set, existing ones change with `fts_rebuild`. A server with `all` does not trust an index built with `nosig` (IMAP reads the messages instead). Practically one-way at scale: back to `all` takes `fts_rebuild` of every account built with `nosig`, each reading all its messages under its account lock |
 
 YAML only. `server.fts_shards` keeps the object count of layout 2, which
 is also the target of a conversion back from layout 3.
@@ -635,7 +638,10 @@ preview, so they agree:
   `Content-Disposition` `filename`, RFC 2231 in any charset, RFC 2047
   words) and an attached message (`message/rfc822`,
   `message/global`) — its header as `Name: value` lines and its body
-  text — belong to the body text. Other MIME part header fields do not.
+  text — belong to the body text, as does the text of a
+  `text/rfc822-headers` part; with `fts.attached_headers: nosig`
+  without their signature and trace fields. Other MIME part header
+  fields do not.
 - Bounds: at most 4 MiB of text per message; a part is read up to
   4 MiB, a part other than HTML only as far as there is room left for
   its text, and all parts of a message together up to 8 MiB, before

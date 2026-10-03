@@ -1,6 +1,6 @@
-.TH SHARDPOSTCTL-FTS 1 "2026-10-03" "ShardPost 0.49.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-FTS 1 "2026-10-03" "ShardPost 0.50.0" "ShardPost Manual"
 .SH NAME
-shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accounts with layout 3, the layout record and the key counts of an account
+shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the dictionary filter mark, the accounts with layout 3, the layout record and the key counts of an account
 .SH SYNOPSIS
 .B shardpostctl fts layout3 status
 .RB [ \-json ]
@@ -11,6 +11,17 @@ shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accou
 .RB [ \-json ]
 .br
 .B shardpostctl fts layout3 disable
+.RB [ \-json ]
+.br
+.B shardpostctl fts dictfilter status
+.RB [ \-json ]
+.br
+.B shardpostctl fts dictfilter enable \-pods
+.I n
+.RB [ \-force ]
+.RB [ \-json ]
+.br
+.B shardpostctl fts dictfilter disable
 .RB [ \-json ]
 .br
 .B shardpostctl fts layout3 list
@@ -120,12 +131,68 @@ before 0.45.0 is not possible: convert them back first with
 .BR "shardpostctl plan \-all \-layout 2 fts_layout" .
 Role:
 .BR repair .
+.SS fts dictfilter status
+Shows whether the cluster mark of the dictionary filter
+.RB ( fts/dictfilter ,
+since 0.50.0) is set, with the registrations as
+.BR "layout3 status" .
+The mark allows index generations that a version before 0.50.0 must
+not search: with the identifier filter of the substring dictionary
+.RI ( "fts.dict_filter: ids" :
+a body word with letters and digits of at least
+.I fts.dict_id_min_runes
+characters has one start entry instead of a key per trigram, so it is
+found as a whole word and by its start, not by a part from its inside)
+and with the text preparation without the signature and trace fields of
+attached headers
+.RI ( "fts.attached_headers: nosig" ).
+Without the mark new generations get neither, whatever the
+configuration says; existing ones change with
+.B fts_layout
+(the filter, see
+.BR shardpostctl-job (1))
+or
+.B fts_rebuild
+(the text preparation). Role:
+.BR diagnose .
+.SS fts dictfilter enable
+Sets the mark when exactly
+.I n
+fresh registrations of servers report the capability
+.BR fts_dict_filter ;
+otherwise as
+.BR "layout3 enable" .
+Role:
+.BR repair .
+.SS fts dictfilter disable
+Removes the mark, waits five seconds, then lists the accounts whose
+entry in the presence index says that a generation of theirs, current
+or under way, has the filter or the text preparation
+.B nosig
+(set before such a generation is created, cleared after the account
+switched to one without, kept in step by the scrub; an entry that
+cannot be read is listed as well). It reads the presence index only, as
+.B "layout3 disable"
+does. While there
+are any, a downgrade to a version before 0.50.0 is not possible: convert
+them with
+.B "fts_layout \-dict\-filter none"
+and rebuild those with
+.B nosig
+with
+.BR fts_rebuild ,
+under settings that ask for neither. Role:
+.BR repair .
 .SS fts layout3 list
 Lists the presence index of the accounts with a layout 3 index (or a
 conversion to it), a page at a time, with the time each was entered.
 With
 .B \-verify
-each account's layout record is read, an entry whose account has no
+each account's layout record is read (its shape shows
+.BI "dict_filter ids/" n
+and
+.B attached_headers nosig
+for a generation that has them), an entry whose account has no
 layout 3 index is marked
 .BR MISMATCH ,
 and the largest number of dictionary objects D on the page is printed
@@ -139,7 +206,11 @@ Export the list before an emergency downgrade. Role:
 with the scope of all accounts.
 .SS fts layout show
 Prints the layout record of an account: the current generation (layout
-2 without a record) with its object counts, a conversion in progress
+2 without a record) with its object counts, its identifier filter
+.RB ( "dict_filter ids/25" )
+and its text preparation
+.RB ( "attached_headers nosig" )
+when it has them, a conversion in progress
 .RB ( next ,
 the token of its run and, for an import reshard, its last heartbeat) and
 sources not removed yet
@@ -162,7 +233,8 @@ until it is cleared; the job itself, a job or import that takes the
 account lock and the jobs scrub clear it as well. Role:
 .BR repair .
 .SS fts stats
-Prints the key counts of an account's index: its shape, the documents,
+Prints the key counts of an account's index: its shape (with the
+identifier filter and the text preparation), the documents,
 the terms (posting keys) and dictionary keys, in total and per message,
 and the mean number of dictionary keys per dictionary object. Without
 options it reads the counters
@@ -293,6 +365,43 @@ shardpostctl fts layout3 disable
 .RE
 .fi
 .PP
+After the rollout of 0.50.0 to all three pods and the overlay with
+.IR "fts.dict_filter: ids" ,
+.I fts.dict_id_min_runes: 25
+and
+.IR "fts.attached_headers: nosig" ,
+allow the dictionary filter, rebuild the test account and check its
+generation and key counts, then the other accounts at a quiet time:
+.PP
+.nf
+.RS
+shardpostctl fts dictfilter status
+shardpostctl fts dictfilter enable -pods 3
+shardpostctl plan fts_rebuild rbdpoc2@exampleserver.de
+shardpostctl fts layout show rbdpoc2@exampleserver.de
+shardpostctl fts stats rbdpoc2@exampleserver.de
+shardpostctl plan -all fts_rebuild
+.RE
+.fi
+.PP
+Way back: with
+.I fts.dict_filter: none
+and
+.I fts.attached_headers: all
+in the configuration, find the accounts, rebuild those with
+.BR nosig ,
+convert the others, then remove the mark (exit status 0 only when no
+generation has either property any more):
+.PP
+.nf
+.RS
+shardpostctl fts layout3 list -verify
+shardpostctl plan fts_rebuild user@example.org
+shardpostctl plan -all -due-only fts_layout
+shardpostctl fts dictfilter disable
+.RE
+.fi
+.PP
 How many dictionary keys per message does an account have, and how full
 are its posting objects (counters only)?
 .PP
@@ -333,9 +442,13 @@ no
 .BR enable :
 the registrations do not show exactly
 .I n
-fresh servers with layout 3;
-.BR disable :
-the mark is removed, but accounts still have layout 3.
+fresh servers with the capability of the mark;
+.BR "layout3 disable" :
+the mark is removed, but accounts still have layout 3;
+.BR "dictfilter disable" :
+the mark is removed, but generations still have the dictionary filter
+or the text preparation
+.BR nosig .
 .TP
 .B 67
 No such account.

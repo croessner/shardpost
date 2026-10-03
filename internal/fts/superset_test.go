@@ -151,6 +151,69 @@ func TestSpansSuperset(t *testing.T) {
 	}
 }
 
+// coveredFiltered is covered for a dictionary with the identifier
+// filter of n runes (B14h): in the body an inner part matches an
+// identifier term only at its start.
+func coveredFiltered(field string, terms map[string]bool, sp Span, n int) bool {
+	if !SpanIndexed(field, sp) {
+		return true
+	}
+
+	for t := range terms {
+		if !SpanTerm(sp, t) {
+			continue
+		}
+
+		if sp.Match != MatchInfix || !DictIdentifier(field+":"+t, n) || strings.HasPrefix(t, sp.Token) {
+			return true
+		}
+	}
+
+	for _, m := range Markers(sp) {
+		if terms[m] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// TestSpansSupersetFiltered checks the guarantee of the identifier
+// filter (temp/13 §5.1) on random texts: a query that begins where a
+// word of the text begins is found also when the body's identifiers
+// have their start entries only — the start of a word is the start of
+// its term or of its first window. The other fields are not filtered.
+func TestSpansSupersetFiltered(t *testing.T) {
+	r := rand.New(rand.NewSource(2))
+
+	for iter := 0; iter < 20000 && !t.Failed(); iter++ {
+		text := randText(r)
+		words := Words(text)
+
+		if len(words) == 0 {
+			continue
+		}
+
+		w := words[r.Intn(len(words))]
+		rs := []rune(text[w.Start:])
+		query := string(rs[:min(len(rs), 2+r.Intn(60))])
+
+		if !strings.Contains(strings.ToLower(text), strings.ToLower(query)) {
+			continue
+		}
+
+		for _, n := range []int{IdentMinRunesLow, 25, IdentMinRunesHigh} {
+			terms := fieldTerms(FieldBody, text)
+
+			for _, sp := range Spans(query) {
+				if !coveredFiltered(FieldBody, terms, sp, n) {
+					t.Errorf("n=%d: text %q query %q span %+v not covered", n, text, query, sp)
+				}
+			}
+		}
+	}
+}
+
 // checkCovered checks every span of query against the terms of text.
 func checkCovered(t *testing.T, field, text, query string) {
 	t.Helper()

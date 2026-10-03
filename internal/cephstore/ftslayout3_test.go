@@ -21,6 +21,12 @@ import (
 // setLayoutMark sets or removes the cluster mark.
 func setLayoutMark(t *testing.T, s *Store, on bool) {
 	t.Helper()
+	setMark(t, s, model.FTSLayoutMarkKey, on)
+}
+
+// setMark sets or removes a cluster mark of the admin store.
+func setMark(t *testing.T, s *Store, key string, on bool) {
+	t.Helper()
 
 	kv, err := s.AdminKV()
 	if err != nil {
@@ -28,7 +34,7 @@ func setLayoutMark(t *testing.T, s *Store, on bool) {
 	}
 	defer kv.Close()
 
-	err = kv.Update(model.FTSLayoutMarkKey, func([]byte) ([]byte, error) {
+	err = kv.Update(key, func([]byte) ([]byte, error) {
 		if !on {
 			return nil, nil
 		}
@@ -489,11 +495,10 @@ func staleIndex(t *testing.T, u *User, l *ftsLayout, guid string, raw []byte) er
 		t.Fatal(err)
 	}
 
-	docsOf, terms, headers := termDocs([]ftsDoc{{guid: guid, raw: raw}}, ids)
 	w := &ftsWrite{wait: u.ftsCfg.frozenWait}
 	w.follow(l, u.ftsShards)
 
-	return u.indexWith(w, docsOf, terms, headers)
+	return u.indexWith(w, &ftsBatch{docs: []ftsDoc{{guid: guid, raw: raw}}, ids: ids})
 }
 
 // staleRemove is a removal that read the record l before a conversion.
@@ -508,7 +513,7 @@ func staleRemove(t *testing.T, u *User, l *ftsLayout, guid string, raw []byte) e
 	w := &ftsWrite{wait: u.ftsCfg.frozenWait}
 	w.follow(l, u.ftsShards)
 
-	err = u.removeWith(w, guid, id, hasID, fts.Terms(raw))
+	err = u.removeWith(w, guid, id, hasID, rawTerms(raw))
 	if err == nil && hasID {
 		err = u.dropDocID(guid, id)
 	}
@@ -948,7 +953,7 @@ func TestLayoutHeaderBeforePostings(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		docsOf, terms, headers := termDocs([]ftsDoc{{guid: guid, raw: []byte("Subject: headerfirst\r\n\r\nbody\r\n")}}, ids)
+		docsOf, terms, headers := termDocs([]ftsDoc{{guid: guid, raw: []byte("Subject: headerfirst\r\n\r\nbody\r\n")}}, ids, fts.TextOptions{})
 		w := &ftsWrite{}
 		w.follow(lay, u.ftsShards)
 

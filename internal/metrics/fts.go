@@ -92,4 +92,18 @@ var (
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "convert_buffer_keys",
 		Help: "Keys the full-text conversions of this server hold in their write buffers (0 outside the copy phase).",
 	})
+	// FTSDictKeysWritten counts the substring dictionary keys writers and
+	// conversions add, by entry: "trigram" (one per trigram of a term)
+	// and "prefix" (the one start entry of an identifier in a generation
+	// with the identifier filter, B14h). Removals are not counted.
+	FTSDictKeysWritten = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemFTS, Name: "dict_keys_written_total",
+		Help: "Substring dictionary keys added by writers and conversions, by entry (trigram, prefix).",
+	}, []string{"entry"})
+	// FTSVersionDrift counts index version markers the scrub found that
+	// do not fit the layout record (fts_version_drift).
+	FTSVersionDrift = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: subsystemFTS, Name: "version_drift_total",
+		Help: "Full-text version markers the scrub found that do not fit the index generation (fts_version_drift).",
+	})
 )

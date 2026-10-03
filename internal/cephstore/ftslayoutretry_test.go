@@ -187,11 +187,11 @@ func TestLayout2WithoutRecordCreates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	docsOf, terms, headers := termDocs([]ftsDoc{{guid: guid, raw: []byte("Subject: createdagain\r\n\r\nbody\r\n")}}, ids)
+	b := &ftsBatch{docs: []ftsDoc{{guid: guid, raw: []byte("Subject: createdagain\r\n\r\nbody\r\n")}}, ids: ids}
 	w := &ftsWrite{wait: u.ftsCfg.frozenWait}
 	w.follow(nil, u.ftsShards)
 
-	if err := u.indexWith(w, docsOf, terms, headers); err != nil {
+	if err := u.indexWith(w, b); err != nil {
 		t.Fatal(err)
 	}
 

@@ -3,6 +3,7 @@ package cephstore
 import (
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -56,7 +57,7 @@ func (u *User) ftsState() (*ftsReadState, error) {
 	}
 
 	loc := curLoc(lay, u.ftsShards)
-	u.ftsRS = &ftsReadState{lay: lay, loc: loc, current: indexCurrentIn(vals, loc.v3())}
+	u.ftsRS = &ftsReadState{lay: lay, loc: loc, current: ftsTrusted(vals, loc, u.ftsCfg.ah)}
 
 	return u.ftsRS, nil
 }
@@ -561,6 +562,13 @@ func newDictScan(oid, tri, field string) *dictScan {
 	return &dictScan{oid: oid, prefix: tri + dictSep + field + ":", skip: len(tri) + len(dictSep)}
 }
 
+// newStartScan is the scan of the start entries of the identifiers of
+// field that begin with tok, in the object of tok's first trigram tri:
+// the range "#<tri>:<field>:<tok>", an exact prefix.
+func newStartScan(oid, tri, field, tok string) *dictScan {
+	return &dictScan{oid: oid, prefix: startEntry(tri, field+":"+tok), skip: len(startPrefix) + len(tri) + len(dictSep), start: true}
+}
+
 // dictMatches returns the terms of field that contain tok, at most about
 // maxCandidates of them, and whether they are all of them.
 //
@@ -572,53 +580,84 @@ func newDictScan(oid, tri, field string) *dictScan {
 // round for a token with any trigram that is not among the most common
 // ones. The ranges of one dictionary object go in one read, so a round
 // costs one read per object the trigrams fall into (one with D = 1).
+//
+// An identifier of a generation with the identifier filter (B14h) is
+// not under its trigrams but has one start entry: in the body the range
+// of the start entries that begin with tok is read as well, in the same
+// object as the range of tok's first trigram and so in the same read,
+// and its terms join the answer (finishedScan). The reader does not
+// need to know whether the generation has the filter: without it the
+// range is empty.
 func dictMatches(ix candidateIndex, field, tok string, tris []string) ([]string, bool, error) {
 	scans := make([]*dictScan, len(tris))
 	for i, tri := range tris {
 		scans[i] = newDictScan(ix.dictOID(tri), tri, field)
 	}
 
+	var start *dictScan
+	if field == fts.FieldBody && len(tris) > 0 {
+		start = newStartScan(ix.dictOID(tris[0]), tris[0], field, tok)
+	}
+
 	for {
-		byOID := map[string][]*dictScan{}
-		for _, s := range scans {
-			byOID[s.oid] = append(byOID[s.oid], s)
-		}
-
-		groups := make(map[string][]string, len(byOID))
-		for oid := range byOID {
-			groups[oid] = nil
-		}
-
-		err := parallel(groups, func(oid string, _ []string) error {
-			group := byOID[oid]
-			reqs := make([]*scanReq, len(group))
-
-			for i, s := range group {
-				reqs[i] = &scanReq{after: s.after, prefix: s.prefix, limit: omapPageSize, fn: func(key string) { s.take(key, tok) }}
-			}
-
-			if err := ix.scan(oid, reqs); err != nil {
-				if asAnomaly(err) != nil {
-					return err
-				}
-
-				return fmt.Errorf("fts dictionary shard %s: %w", oid, err)
-			}
-
-			for i, s := range group {
-				s.done = !reqs[i].more
-			}
-
-			return nil
-		})
-		if err != nil {
+		if err := scanRound(ix, roundScans(scans, start), tok); err != nil {
 			return nil, false, err
 		}
 
-		if s := finishedScan(scans); s != nil {
-			return s.found, s.done, nil
+		if a := finishedScan(scans, start); a != nil {
+			return a.found, a.complete, nil
 		}
 	}
+}
+
+// roundScans are the scans the next round reads, by object: the trigram
+// ranges until one is exhausted, the start range until it is.
+func roundScans(scans []*dictScan, start *dictScan) map[string][]*dictScan {
+	byOID := map[string][]*dictScan{}
+
+	if !slices.ContainsFunc(scans, func(s *dictScan) bool { return s.done }) {
+		for _, s := range scans {
+			byOID[s.oid] = append(byOID[s.oid], s)
+		}
+	}
+
+	if start != nil && !start.done {
+		byOID[start.oid] = append(byOID[start.oid], start)
+	}
+
+	return byOID
+}
+
+// scanRound reads a page of every scan, the ranges of one object in one
+// read, the objects in parallel.
+func scanRound(ix candidateIndex, byOID map[string][]*dictScan, tok string) error {
+	groups := make(map[string][]string, len(byOID))
+	for oid := range byOID {
+		groups[oid] = nil
+	}
+
+	return parallel(groups, func(oid string, _ []string) error {
+		group := byOID[oid]
+		reqs := make([]*scanReq, len(group))
+
+		for i, s := range group {
+			reqs[i] = &scanReq{after: s.after, prefix: s.prefix, limit: omapPageSize, fn: func(key string) { s.take(key, tok) }}
+		}
+
+		if err := ix.scan(oid, reqs); err != nil {
+			if asAnomaly(err) != nil {
+				return err
+			}
+
+			return fmt.Errorf("fts dictionary shard %s: %w", oid, err)
+		}
+
+		for i, s := range group {
+			s.done = !reqs[i].more
+		}
+
+		return nil
+	})
 }
 
 // listOmapKeys calls fn for up to limit keys of the object that start

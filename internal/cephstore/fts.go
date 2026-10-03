@@ -174,15 +174,16 @@ func docGUIDs(docs []ftsDoc) (guids []string, size int, err error) {
 	return guids, size, nil
 }
 
-// termDocs tokenizes the messages and returns, for every term, the ids
-// of the messages that contain it, the terms, and the header text of
-// every message (fts.IndexText decodes the header once for both).
-func termDocs(docs []ftsDoc, ids map[string]uint64) (map[string][]uint64, []string, map[string]string) {
+// termDocs tokenizes the messages with the text options of a generation
+// and returns, for every term, the ids of the messages that contain it,
+// the terms, and the header text of every message (fts.IndexTextWith
+// decodes the header once for both).
+func termDocs(docs []ftsDoc, ids map[string]uint64, opts fts.TextOptions) (map[string][]uint64, []string, map[string]string) {
 	docsOf := map[string][]uint64{}
 	headers := make(map[string]string, len(docs))
 
 	for _, d := range docs {
-		terms, header := fts.IndexText(d.raw)
+		terms, header := fts.IndexTextWith(d.raw, opts)
 		headers[d.guid] = header
 
 		for _, t := range terms {
@@ -276,11 +277,13 @@ func splitTerms(v []byte) map[string]struct{} {
 // --- queries ----------------------------------------------------------------
 
 // dictScan is the scan of one trigram's key range for the terms of a
-// field that contain a token.
+// field that contain a token, or (start) of the start entries of the
+// identifiers of a field that begin with a token.
 type dictScan struct {
 	oid    string
-	prefix string // "<trigram>:<field>:"
-	skip   int    // length of "<trigram>:", what precedes the term in a key
+	prefix string // "<trigram>:<field>:", or "#<tri0>:<field>:<token>" (start)
+	skip   int    // length of "<trigram>:" or "#<tri0>:", what precedes the term in a key
+	start  bool   // a start entry scan: every key of the range is a match
 	after  string
 	found  []string
 	done   bool
@@ -290,27 +293,91 @@ type dictScan struct {
 func (s *dictScan) take(key, tok string) {
 	s.after = key
 
-	if strings.Contains(key[len(s.prefix):], tok) {
+	if s.start || strings.Contains(key[len(s.prefix):], tok) {
 		s.found = append(s.found, key[s.skip:])
 	}
 }
 
-// finishedScan returns a scan that has the answer: one that reached the
-// end of its range, else one that has collected maxCandidates terms.
-func finishedScan(scans []*dictScan) *dictScan {
-	var full *dictScan
+// scanAnswer is what the scans of a word found, once they found it.
+type scanAnswer struct {
+	found    []string
+	complete bool
+}
 
+// finishedScan returns the answer of the scans of a word once there is
+// one (nil: read another page). The trigram ranges answer as before
+// B14h: the first range read to its end has every term that contains
+// the word but the identifiers of a filtered generation, else a range
+// that collected maxCandidates terms ends the search incomplete. The
+// identifiers that begin with the word are in the start entry range
+// (start; nil for a word without one), which must be read to its end as
+// well: the answer is the union of both, and maxCandidates counts both
+// together (temp/13 §4.5). In a generation without the filter the start
+// range is empty and the answer that of the trigram ranges alone.
+func finishedScan(scans []*dictScan, start *dictScan) *scanAnswer {
+	var startFound []string
+
+	startDone := true
+	if start != nil {
+		startFound, startDone = start.found, start.done
+	}
+
+	done, full := trigramScans(scans, len(startFound))
+
+	switch {
+	case done != nil && startDone:
+		return &scanAnswer{found: union(done.found, startFound), complete: true}
+	case done != nil && len(startFound) >= maxCandidates:
+		return &scanAnswer{found: union(done.found, startFound)}
+	case done != nil:
+		return nil // the start range goes on alone
+	case full != nil:
+		return &scanAnswer{found: union(full.found, startFound)}
+	case !startDone && len(startFound) >= maxCandidates:
+		return &scanAnswer{found: startFound}
+	}
+
+	return nil
+}
+
+// trigramScans returns the first trigram scan read to its end, else
+// (nil) one that collected maxCandidates terms together with the startN
+// of the start range.
+func trigramScans(scans []*dictScan, startN int) (done, full *dictScan) {
 	for _, s := range scans {
 		if s.done {
-			return s
+			return s, nil
 		}
 
-		if len(s.found) >= maxCandidates {
+		if len(s.found)+startN >= maxCandidates {
 			full = s
 		}
 	}
 
-	return full
+	return nil, full
+}
+
+// union is a followed by the terms of b it lacks.
+func union(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+
+	seen := make(map[string]bool, len(a))
+	out := append(make([]string, 0, len(a)+len(b)), a...)
+
+	for _, t := range a {
+		seen[t] = true
+	}
+
+	for _, t := range b {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+
+	return out
 }
 
 // Whether the account still has objects of the old dictionary layout.
