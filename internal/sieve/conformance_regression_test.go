@@ -4,22 +4,18 @@ import (
 	"context"
 	"errors"
 	"net/textproto"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestInterpreterBudgetReturnsWithoutActions(t *testing.T) {
-	script, err := os.ReadFile("../../third_party/go-sieve/pigeonhole/tests/execute/errors/cpu-limit.sieve")
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := cpuHeavyScript()
 
 	raw := []byte(msg)
 	start := time.Now()
 
-	d, err := RunWithHooks(context.Background(), string(script), "sender@example.org", "me@example.org", "me@example.org", raw, Hooks{Config: map[string]string{"sieve_max_cpu_time": "20ms"}})
+	d, err := RunWithHooks(context.Background(), script, "sender@example.org", "me@example.org", "me@example.org", raw, Hooks{Config: map[string]string{"sieve_max_cpu_time": "20ms"}})
 	if !errors.Is(err, context.DeadlineExceeded) || d != nil {
 		t.Fatalf("delivery=%v error=%v", d, err)
 	}
@@ -31,6 +27,31 @@ func TestInterpreterBudgetReturnsWithoutActions(t *testing.T) {
 	if string(raw) != msg {
 		t.Fatal("original message changed on timeout")
 	}
+}
+
+// cpuHeavyScript builds a script that spends far more than the 20 ms
+// budget in regex matching: a long alternation matched against a long
+// subject, many times over, for every MIME part.
+func cpuHeavyScript() string {
+	var alt []string
+	for i := 1; i <= 18; i++ {
+		alt = append(alt, "("+strings.Repeat("AB", i)+")")
+	}
+
+	var b strings.Builder
+
+	b.WriteString(`require ["mime", "foreverypart", "variables", "regex"];` + "\n")
+	b.WriteString(`set "exp" "^((` + strings.Join(alt, "|") + `)|(C))+$";` + "\n")
+	b.WriteString(`set "subject" "` + strings.Repeat("ABABC", 20000) + `@";` + "\n")
+	b.WriteString("foreverypart {\n")
+
+	for range 200 {
+		b.WriteString(`  if string :regex "${subject}" "${exp}" { discard; }` + "\n")
+	}
+
+	b.WriteString("}\n")
+
+	return b.String()
 }
 
 func TestMIMEPartBudgetRejectsBeforeDelivery(t *testing.T) {
