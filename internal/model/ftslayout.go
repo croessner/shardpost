@@ -207,9 +207,12 @@ const FTSDueNoopBackoff = 6 * time.Hour
 type FTSLayoutRequest struct {
 	// Layout is the target layout (2 or 3; 0 keeps the account's).
 	Layout int
-	// Shards forces the object counts of a layout 3 target (0: from the
-	// key counts and fts.shard_target_keys).
+	// Shards forces the object counts of a layout 3 target, the same
+	// for postings, dictionary and header texts; Shape forces each of
+	// them (neither: from the key counts and the targets). Both ignore
+	// the caps (at most 4096).
 	Shards int
+	Shape  *FTSForcedShape
 	// DueOnly ends without a change when the counts the targets come out
 	// at are the ones the index has.
 	DueOnly bool
@@ -222,6 +225,12 @@ type FTSLayoutRequest struct {
 	Fence func() error
 	// Progress reports the phase and the progress inside it (optional).
 	Progress func(phase string, done, total int)
+}
+
+// FTSForcedShape are forced object counts of a layout 3 target:
+// postings, dictionary, header texts.
+type FTSForcedShape struct {
+	S, D, H int
 }
 
 // FTSLayoutShape is one generation of the index.

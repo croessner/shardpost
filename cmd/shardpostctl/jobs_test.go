@@ -47,6 +47,18 @@ func TestJobCommandErrors(t *testing.T) {
 	if code, _, _ := call(socket, "", "job", "show", "nope"); code != exNoUser {
 		t.Errorf("unknown job: exit %d", code)
 	}
+
+	for _, v := range []string{"0", "4097", "x", "1/2", "1/0/1", "1/2/3/4"} {
+		if code, _, _ := call(socket, "", "plan", "-shards", v, "fts_layout", "alice"); code != exUsage {
+			t.Errorf("-shards %s: exit %d", v, code)
+		}
+	}
+
+	for _, v := range []string{"4", "1/8/2"} {
+		if code, out, errOut := call(socket, "", "plan", "-shards", v, "fts_layout", "alice"); code != exOK {
+			t.Errorf("-shards %s: exit %d %s %s", v, code, out, errOut)
+		}
+	}
 }
 
 // TestBatchCommands: plan -all plans a batch over every account; apply

@@ -265,3 +265,24 @@ func TestLayoutSeparateCaps(t *testing.T) {
 		t.Errorf("reshard %+v, want D %d", rep, target.D)
 	}
 }
+
+// TestLayoutForcedShape (§4.6, R2.8): shape forces each count, shards
+// all three alike; both ignore the caps; the searches stay the same.
+func TestLayoutForcedShape(t *testing.T) {
+	s := layout3Store(t, func(c *FTSConfig) { c.ShardsMax, c.DictShardsMax = 1, 1 })
+	u := testUser(t, s)
+	mustMailbox(t, u, "INBOX")
+	deliverDocs(t, u, layoutDocs(30))
+
+	want := searchState(t, u)
+
+	rep := convert(t, u, model.FTSLayoutRequest{Layout: 3, Shape: &model.FTSForcedShape{S: 2, D: 8, H: 3}})
+	if rep.To.S != 2 || rep.To.D != 8 || rep.To.H != 3 {
+		t.Fatalf("shape 2/8/3 above the caps: %+v", rep)
+	}
+
+	mustExist(t, u, true, curLoc(layoutOf(t, u), u.ftsShards).objects()...)
+	sameSearches(t, "shape 2/8/3", want, searchState(t, u))
+
+	reshardTo(t, u, 4, want)
+}

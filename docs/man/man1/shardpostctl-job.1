@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-JOB 1 "2026-10-02" "ShardPost 0.45.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-JOB 1 "2026-10-03" "ShardPost 0.49.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-job \- plan, apply and watch maintenance jobs
 .SH SYNOPSIS
@@ -12,7 +12,7 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-layout
 .IR n ]
 .RB [ \-shards
-.IR n ]
+.IR n | s/d/h ]
 .RB [ \-due-only ]
 .RB [ \-\-json ]
 .I kind account
@@ -24,7 +24,7 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-layout
 .IR n ]
 .RB [ \-shards
-.IR n ]
+.IR n | s/d/h ]
 .RB [ \-due-only ]
 .RB [ \-\-json ]
 .I kind
@@ -297,10 +297,29 @@ layout 3, or reshards a layout 3 index (see
 .B \-layout
 2 or 3 is the target (default the account's layout);
 .B \-shards
-forces the object counts of a layout 3 target, otherwise they follow the
-key counts and
+forces the object counts of a layout 3 target: one count for the
+posting, dictionary and header objects alike, or
+.I s/d/h
+for each (the parameters
+.I shards
+and
+.IR shape ,
+which exclude each other). Forced counts ignore
+.I fts.shards_max
+and
+.I fts.dict_shards_max
+(at most 4096). Otherwise the counts follow the key counts:
+posting and header objects from
 .I fts.shard_target_keys
-(a conversion from layout 2 estimates them from the number of messages);
+up to
+.IR fts.shards_max ,
+dictionary objects from
+.I fts.dict_target_keys
+up to
+.I fts.dict_shards_max
+(a conversion from layout 2 estimates them from the number of messages;
+the plan names the kinds a cap cut in its target,
+.IR capped );
 .B \-due-only
 ends without a change while the key counts ask for the shape the index
 has (the fts_due worker plans the job so). Converting to layout 3 needs
@@ -481,9 +500,16 @@ skips the accounts unchanged since their last clean batch scrub.
 .BR fts_layout :
 the target layout, 2 or 3.
 .TP
-.BI \-shards " n"
+.BI \-shards " n\fR|\fPs/d/h"
 .BR fts_layout :
-forced object counts of a layout 3 target (1 to 4096).
+forced object counts of a layout 3 target, 1 to 4096 each: one count
+for postings, dictionary and header texts, or each of them as
+.IR s/d/h .
+The caps
+.I fts.shards_max
+and
+.I fts.dict_shards_max
+do not apply.
 .TP
 .B \-due-only
 .BR fts_layout :
@@ -590,6 +616,15 @@ mark is set), then reshard it to four objects of each kind:
 shardpostctl plan -layout 3 fts_layout user@example.org
 shardpostctl apply -wait <plan-id>
 shardpostctl plan -layout 3 -shards 4 fts_layout user@example.org
+.RE
+.fi
+.PP
+Reshard a large account to 32 posting objects, 128 dictionary objects
+and one header object, whatever the caps say:
+.PP
+.nf
+.RS
+shardpostctl plan -shards 32/128/1 fts_layout user@example.org
 .RE
 .fi
 .PP

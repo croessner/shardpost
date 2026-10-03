@@ -508,8 +508,8 @@ type BatchPlanRequest struct {
 	Kind string `json:"kind"`
 
 	// Params Parameters of the kind for every account; scrub: `classes`
-	// (empty = all); fts_layout: `layout`, `shards`, `due_only`. The
-	// other kinds take none.
+	// (empty = all); fts_layout: `layout`, `shards` or `shape`,
+	// `due_only` (see `FTSLayoutParams`). The other kinds take none.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
 	// SkipIdle scrub only: skip the accounts whose last batch scrub was
@@ -1142,10 +1142,8 @@ type PlanRequest struct {
 
 	// Params scrub: `classes` (deliveries, moves, retired, uncovered, entries,
 	// refs, orphans, unknown, quota; empty = all); fts_layout:
-	// `layout` (2 or 3; omitted: the account's), `shards` (forced
-	// object counts of a layout 3 target; 0: from the key counts),
-	// `due_only` (end without a change while the key counts ask for
-	// the shape the index has); mailbox_delete:
+	// `layout`, `shards` or `shape`, `due_only` (see
+	// `FTSLayoutParams`); mailbox_delete:
 	// `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
 	// `deleted: true` (every message flagged \Deleted when planned).
 	Params *map[string]interface{} `json:"params,omitempty"`

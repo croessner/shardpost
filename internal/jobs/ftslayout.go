@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,14 +17,20 @@ import (
 const KindFTSLayout = "fts_layout"
 
 // ftsLayoutParams are the parameters of fts_layout: the target layout (0:
-// the account's), forced object counts (0: from the key counts) and
-// due_only, which ends without a change while the counts ask for the
-// shape the index has.
+// the account's), forced object counts — shards one count for the
+// posting, dictionary and header objects alike, shape "s/d/h" each its
+// own (neither: from the key counts) — and due_only, which ends without
+// a change while the counts ask for the shape the index has. Forced
+// counts ignore fts.shards_max and fts.dict_shards_max (at most 4096).
 type ftsLayoutParams struct {
-	Layout  int  `json:"layout,omitempty"`
-	Shards  int  `json:"shards,omitempty"`
-	DueOnly bool `json:"due_only,omitempty"`
+	Layout  int    `json:"layout,omitempty"`
+	Shards  int    `json:"shards,omitempty"`
+	Shape   string `json:"shape,omitempty"`
+	DueOnly bool   `json:"due_only,omitempty"`
 }
+
+// maxForcedShards bounds forced object counts.
+const maxForcedShards = 4096
 
 func parseFTSLayout(params json.RawMessage) (ftsLayoutParams, error) {
 	var p ftsLayoutParams
@@ -36,13 +43,45 @@ func parseFTSLayout(params json.RawMessage) (ftsLayoutParams, error) {
 	switch {
 	case p.Layout != 0 && p.Layout != model.FTSLayout2 && p.Layout != model.FTSLayout3:
 		return p, fmt.Errorf("%w: layout must be 2 or 3", ErrInvalidParams)
-	case p.Shards < 0 || p.Shards > 4096:
+	case p.Shards < 0 || p.Shards > maxForcedShards:
 		return p, fmt.Errorf("%w: shards must be 0 to 4096", ErrInvalidParams)
-	case p.Shards > 0 && p.Layout == model.FTSLayout2:
-		return p, fmt.Errorf("%w: shards apply to layout 3 only", ErrInvalidParams)
+	case p.Shards > 0 && p.Shape != "":
+		return p, fmt.Errorf("%w: shards and shape exclude each other", ErrInvalidParams)
+	case (p.Shards > 0 || p.Shape != "") && p.Layout == model.FTSLayout2:
+		return p, fmt.Errorf("%w: shards and shape apply to layout 3 only", ErrInvalidParams)
+	}
+
+	if _, err := ParseFTSShape(p.Shape); err != nil {
+		return p, fmt.Errorf("%w: %v", ErrInvalidParams, err)
 	}
 
 	return p, nil
+}
+
+// ParseFTSShape parses the forced shape "s/d/h" of fts_layout: three
+// counts of 1 to 4096 ("" is none: nil).
+func ParseFTSShape(shape string) (*model.FTSForcedShape, error) {
+	if shape == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(shape, "/")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("shape %q is not s/d/h", shape)
+	}
+
+	var n [3]int
+
+	for i, part := range parts {
+		v, err := strconv.Atoi(part)
+		if err != nil || v < 1 || v > maxForcedShards || strings.TrimLeft(part, "0123456789") != "" {
+			return nil, fmt.Errorf("shape %q: every count must be 1 to 4096", shape)
+		}
+
+		n[i] = v
+	}
+
+	return &model.FTSForcedShape{S: n[0], D: n[1], H: n[2]}, nil
 }
 
 // ftsLayoutKind runs a conversion or reshard under the maintenance lock
@@ -146,7 +185,9 @@ func (k *ftsLayoutKind) Run(_ context.Context, run *Run) (res any, err error) {
 
 	var last time.Time
 
-	return lay.ConvertFTSLayout(model.FTSLayoutRequest{Layout: p.Layout, Shards: p.Shards, DueOnly: p.DueOnly, Tok: tok, Fence: run.Fence,
+	shape, _ := ParseFTSShape(p.Shape) // checked by parseFTSLayout
+
+	return lay.ConvertFTSLayout(model.FTSLayoutRequest{Layout: p.Layout, Shards: p.Shards, Shape: shape, DueOnly: p.DueOnly, Tok: tok, Fence: run.Fence,
 		Progress: func(phase string, done, total int) {
 			if time.Since(last) > time.Second || done == total {
 				last = time.Now()

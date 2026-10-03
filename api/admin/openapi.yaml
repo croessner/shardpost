@@ -2336,8 +2336,8 @@ components:
           additionalProperties: true
           description: |
             Parameters of the kind for every account; scrub: `classes`
-            (empty = all); fts_layout: `layout`, `shards`, `due_only`. The
-            other kinds take none.
+            (empty = all); fts_layout: `layout`, `shards` or `shape`,
+            `due_only` (see `FTSLayoutParams`). The other kinds take none.
         skip_idle:
           type: boolean
           description: |
@@ -2968,6 +2968,40 @@ components:
     JobState:
       type: string
       enum: [queued, running, succeeded, partially_failed, failed, cancel_requested, cancelled]
+    FTSLayoutParams:
+      type: object
+      description: |
+        The parameters of the kind `fts_layout` in `params` of a plan or a
+        batch plan. `shards` and `shape` exclude each other (both: 400);
+        forced counts ignore `fts.shards_max` and `fts.dict_shards_max`.
+        Without either the counts follow the key counts: posting and
+        header objects from `fts.shard_target_keys` up to
+        `fts.shards_max`, dictionary objects from `fts.dict_target_keys`
+        up to `fts.dict_shards_max`.
+      properties:
+        layout:
+          type: integer
+          enum: [2, 3]
+          description: The target layout; omitted, the account's.
+        shards:
+          type: integer
+          minimum: 1
+          maximum: 4096
+          description: |
+            Forced object counts of a layout 3 target, the same for the
+            posting, dictionary and header objects.
+        shape:
+          type: string
+          pattern: "^[0-9]+/[0-9]+/[0-9]+$"
+          description: |
+            Forced object counts of a layout 3 target, each its own:
+            posting/dictionary/header objects, 1 to 4096 each (since
+            0.49.0).
+        due_only:
+          type: boolean
+          description: |
+            End without a change while the key counts ask for the shape
+            the index has (how the `fts_due` worker plans the job).
     PlanRequest:
       type: object
       required: [kind]
@@ -2981,10 +3015,8 @@ components:
           description: |
             scrub: `classes` (deliveries, moves, retired, uncovered, entries,
             refs, orphans, unknown, quota; empty = all); fts_layout:
-            `layout` (2 or 3; omitted: the account's), `shards` (forced
-            object counts of a layout 3 target; 0: from the key counts),
-            `due_only` (end without a change while the key counts ask for
-            the shape the index has); mailbox_delete:
+            `layout`, `shards` or `shape`, `due_only` (see
+            `FTSLayoutParams`); mailbox_delete:
             `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
             `deleted: true` (every message flagged \Deleted when planned).
     Plan:

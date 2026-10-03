@@ -257,7 +257,9 @@ func TestFTSLayoutParams(t *testing.T) {
 	m, _ := layoutManager(t)
 	k, _ := m.Kind(KindFTSLayout)
 
-	for _, p := range []string{`{"layout":4}`, `{"shards":-1}`, `{"layout":2,"shards":4}`, `{"shards":5000}`} {
+	for _, p := range []string{`{"layout":4}`, `{"shards":-1}`, `{"layout":2,"shards":4}`, `{"shards":5000}`,
+		`{"shards":4,"shape":"1/2/3"}`, `{"shape":"1/2"}`, `{"shape":"0/1/1"}`, `{"shape":"1/1/4097"}`, `{"shape":"+1/1/1"}`,
+		`{"shape":"1/a/1"}`, `{"layout":2,"shape":"1/1/1"}`, `{"shape":4}`} {
 		if _, err := m.CreatePlan(context.Background(), k, "alice", json.RawMessage(p), "tester", nil); !errors.Is(err, ErrInvalidParams) {
 			t.Errorf("%s: %v", p, err)
 		}
@@ -560,5 +562,37 @@ func TestFTSDictConvertLayout3(t *testing.T) {
 	_, err := m.CreatePlan(context.Background(), k, "alice", nil, "tester", nil)
 	if !errors.Is(err, model.ErrFTSDictLayout3) || !strings.Contains(err.Error(), "legacy") {
 		t.Fatalf("plan on layout 3: %v", err)
+	}
+}
+
+// TestFTSLayoutShape (temp/13 §4.6, R2.8): shape "s/d/h" forces each
+// count of the target; shards stays one count for all three, so plans
+// of older clients stay valid.
+func TestFTSLayoutShape(t *testing.T) {
+	m, o := layoutManager(t)
+
+	var got []model.FTSLayoutRequest
+
+	o.fake("alice").convert = func(req model.FTSLayoutRequest) (model.FTSLayoutReport, error) {
+		got = append(got, req)
+		return model.FTSLayoutReport{}, nil
+	}
+
+	runManager(t, m)
+
+	waitState(t, m, applyLayout(t, m, "alice", `{"layout":3,"shape":"1/512/2"}`).ID, StateSucceeded)
+	waitUnlocked(t, m, "alice")
+	waitState(t, m, applyLayout(t, m, "alice", `{"shards":4}`).ID, StateSucceeded)
+
+	if len(got) != 2 {
+		t.Fatalf("%d runs", len(got))
+	}
+
+	if s := got[0].Shape; s == nil || *s != (model.FTSForcedShape{S: 1, D: 512, H: 2}) || got[0].Shards != 0 {
+		t.Errorf("shape run %+v", got[0])
+	}
+
+	if got[1].Shape != nil || got[1].Shards != 4 {
+		t.Errorf("shards run %+v", got[1])
 	}
 }

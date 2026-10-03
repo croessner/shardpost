@@ -402,8 +402,10 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 	t := ftsLoc{f: model.FTSLayout3, g: newFTSGen()}
 
 	switch {
+	case req.Shape != nil:
+		t.s, t.d, t.h = forcedCount(req.Shape.S), forcedCount(req.Shape.D), forcedCount(req.Shape.H)
 	case req.Shards > 0:
-		n := min(req.Shards, 4096)
+		n := forcedCount(req.Shards)
 		t.s, t.d, t.h = n, n, n
 	case src.v3():
 		shape, _, err := u.reshardTarget(src)
@@ -423,6 +425,10 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 
 	return t, nil
 }
+
+// forcedCount is a forced object count within 1 to 4096; the caps do
+// not apply.
+func forcedCount(n int) int { return min(max(n, 1), 4096) }
 
 // liveDocCount counts the documents of the id map ("i:" keys).
 func (u *User) liveDocCount() (int, error) {

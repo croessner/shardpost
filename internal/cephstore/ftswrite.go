@@ -857,8 +857,8 @@ type docAlloc struct {
 	gen *ftsLoc
 
 	// what the last round found
-	lay                            *ftsLayout
-	perr                           error
+	lay                       *ftsLayout
+	perr                      error
 	lookup, create, installed bool
 	grow                      growth
 }

@@ -149,3 +149,33 @@ func TestJobErrorLayoutRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestFTSLayoutShapeOrShards (temp/13 §4.6): fts_layout takes shards or
+// shape, both together are a bad request.
+func TestFTSLayoutShapeOrShards(t *testing.T) {
+	_, c := serveDiag(t, nil, RoleDiagnose, jobs.RoleRepair)
+	ctx := context.Background()
+
+	plan := func(params map[string]any) int {
+		resp, err := c.CreatePlanWithResponse(ctx, "alice", adminapi.PlanRequest{Kind: adminapi.PlanRequestKind(jobs.KindFTSLayout), Params: &params})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return resp.StatusCode()
+	}
+
+	if code := plan(map[string]any{"shards": 4, "shape": "1/2/1"}); code != http.StatusBadRequest {
+		t.Errorf("shards and shape: %d", code)
+	}
+
+	if code := plan(map[string]any{"shape": "1/2"}); code != http.StatusBadRequest {
+		t.Errorf("bad shape: %d", code)
+	}
+
+	for _, params := range []map[string]any{{"shape": "1/2/1"}, {"shards": 4}} {
+		if code := plan(params); code != http.StatusCreated {
+			t.Errorf("%v: %d", params, code)
+		}
+	}
+}
