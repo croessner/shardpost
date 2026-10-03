@@ -308,26 +308,34 @@ type loadConfig struct {
 }
 
 func parseFlags() loadConfig {
-	imapAddr := flag.String("imap", "shardpost:143", "IMAP address")
+	imapAddr := flag.String("imap", "shardpost:143", "load mode: IMAP address")
 	lmtpAddr := flag.String("lmtp", "shardpost:24", "LMTP address")
-	users := flag.Int("users", 10, "number of users")
-	sessions := flag.Int("sessions", 2, "concurrent IMAP sessions per user")
-	duration := flag.Duration("duration", 30*time.Second, "test duration")
-	pattern := flag.String("user-pattern", "load%03d", "user name pattern")
-	domain := flag.String("domain", "example.org", "recipient domain")
-	password := flag.String("password", "test", "password for all users")
-	rate := flag.Float64("deliver-rate", 10, "LMTP deliveries per second (total)")
+	users := flag.Int("users", 10, "load mode: number of users")
+	sessions := flag.Int("sessions", 2, "load mode: concurrent IMAP sessions per user")
+	duration := flag.Duration("duration", 30*time.Second, "load mode: test duration")
+	pattern := flag.String("user-pattern", "load%03d", "load mode: user name pattern")
+	domain := flag.String("domain", "example.org", "load mode: recipient domain")
+	password := flag.String("password", "test", "load mode: password for all users")
+	rate := flag.Float64("deliver-rate", 10, "load mode: LMTP deliveries per second over all users (-corpus uses -rate)")
 
 	var c loadConfig
 
 	flag.StringVar(&c.corpus, "corpus", "", "fill one account with the bench corpus: plain, ids or ids,nosig (needs -rcpt and -count)")
 	flag.StringVar(&c.rcpt, "rcpt", "", "-corpus: the account (recipient) to fill; also the account the generator draws for")
 	flag.IntVar(&c.count, "count", 0, "-corpus: messages to deliver")
-	flag.IntVar(&c.first, "first", 0, "-corpus: number of the first message (to continue a run)")
+	flag.IntVar(&c.first, "first", 0, "-corpus: number of the first message, to continue a run (not a rate)")
 	flag.Uint64Var(&c.seed, "seed", 1, "-corpus: seed of the generator")
 	flag.StringVar(&c.sizes, "sizes", bench.DefaultSizes, "-corpus: message size distribution <weight>:<min>-<max>,...")
-	flag.Float64Var(&c.fillRate, "rate", 20, "-corpus: deliveries per second")
+	flag.Float64Var(&c.fillRate, "rate", 20, "-corpus: deliveries per second (the load mode uses -deliver-rate)")
 	flag.IntVar(&c.parallel, "parallel", 4, "-corpus: LMTP connections at the same time")
+
+	flag.Usage = func() {
+		_, _ = fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n"+
+			"  load mode (default): IMAP sessions and LMTP deliveries for -users test users, -deliver-rate per second\n"+
+			"  corpus mode (-corpus): fill the account -rcpt with -count messages from -first on, -rate per second\n", os.Args[0])
+
+		flag.PrintDefaults()
+	}
 
 	flag.Parse()
 
