@@ -185,6 +185,7 @@ func newJobsManager(log *slog.Logger, settings *config.Config, store *cephstore.
 		QuotaOnlineAuto:         settings.Quota.OnlineRecount == config.OnlineAuto,
 		MailboxDeleteOnlineAuto: settings.Jobs.MailboxDeleteOnline == config.OnlineAuto,
 		MailboxLockBarrier:      sec(c.MailboxLockBarrierSeconds),
+		MailboxLockSettle:       max(sec(c.SettleSeconds), jobs.MinLockSettle),
 		DeadIntent:              sec(settings.Quota.RecountDeadIntentSeconds)},
 		instance, jobs.Kinds(time.Duration(settings.Scrub.GraceSeconds)*time.Second)...)
 

@@ -419,12 +419,13 @@ func (l *lockedRun) lockPhase(locks []model.MailboxLockTarget) (err error) {
 	return nil
 }
 
-// minLockSettle is the shortest settle time of a locked run: IMAP
+// MinLockSettle is the shortest settle time of a locked run: IMAP
 // sessions see the lock within the mailbox lookup cache (2 s) and the
 // lock probe interval (model.LockCheckInterval). The configuration
-// enforces it for mailbox_delete_online auto; a run planned online
-// explicitly gets it here.
-const minLockSettle = 2*time.Second + model.LockCheckInterval
+// enforces it for mailbox_delete_online auto; the server sets
+// Config.MailboxLockSettle to at least it for a run planned online
+// explicitly as well.
+const MinLockSettle = 2*time.Second + model.LockCheckInterval
 
 // settleAndCheck is M2 to M4: the settle time (IMAP sessions see the
 // lock within registryTTL and the lock probe interval), the barrier and
@@ -432,7 +433,7 @@ const minLockSettle = 2*time.Second + model.LockCheckInterval
 func (l *lockedRun) settleAndCheck(locks []model.MailboxLockTarget) error {
 	run, m := l.run, l.run.m
 
-	time.Sleep(max(m.cfg.Settle, minLockSettle))
+	time.Sleep(m.cfg.MailboxLockSettle)
 
 	_ = run.Progress("barrier", 0, int64(len(l.targets)))
 

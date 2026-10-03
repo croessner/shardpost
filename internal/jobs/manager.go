@@ -141,6 +141,10 @@ type Config struct {
 	// 0).
 	MailboxDeleteOnlineAuto bool
 	MailboxLockBarrier      time.Duration
+	// MailboxLockSettle is the settle time of a run under the mailbox
+	// lock (M2): Settle, but at least the time IMAP sessions take to see
+	// the lock (the server sets it; tests may go below).
+	MailboxLockSettle time.Duration
 	// DeadIntent is how old a reservation intent may be before the
 	// barrier of the mailbox lock takes it for abandoned
 	// (quota.recount_dead_intent_seconds; 600 s when 0).
@@ -227,6 +231,7 @@ func (c Config) withDefaults() Config {
 	c.ScrubInterval = cmpDur(c.ScrubInterval, 7*24*time.Hour)
 	c.FTSBuild = c.FTSBuild.withDefaults()
 	c.MailboxLockBarrier = cmpDur(c.MailboxLockBarrier, 120*time.Second)
+	c.MailboxLockSettle = cmpDur(c.MailboxLockSettle, c.Settle)
 
 	return c
 }
