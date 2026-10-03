@@ -4,8 +4,8 @@ resources:
   - ../../base
 images:
   - name: docker.io/chrroessner/shardpost
-    newTag: 0.51.0
-    digest: sha256:2c7eaf5c224afb7c161c2e53ae3d6bdf6ffffbd1986031b0d090d8c057d22b66
+    newTag: 0.52.0
+    digest: sha256:c7878bd2f63361f8c5ccbc1c603955020d4df15e2179271045019b715c94acbd
   - name: docker.io/chrroessner/shardpost-tools
     newTag: 0.13.0
     digest: sha256:68323de9ec7403ee1c3d54bc3fc698cc4511f8431a494b40cb8911127642f3f3
