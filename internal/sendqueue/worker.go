@@ -2,9 +2,11 @@ package sendqueue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -25,21 +27,17 @@ import (
 // lost lease, servers with different partition counts) cannot send one
 // submission twice.
 
-// Run is the worker: it runs until ctx ends.
+// Run is the worker: it runs until ctx ends. At the end it hands its
+// partitions over: it releases them and notifies the queue with their
+// numbers, so that another worker takes them at once instead of at its
+// next poll (stage B18b, F9).
 func (s *Service) Run(ctx context.Context) {
 	w := &worker{s: s, held: map[int]model.Lease{}, start: rand.IntN(s.o.Partitions)} //nolint:gosec // spreads the partitions, no secret
 
-	defer w.releaseAll()
+	defer w.handOver()
 
-	var events <-chan struct{}
-
-	if watch, err := s.q.Watch(); err != nil {
-		s.o.Log.Warn("sendqueue: watch the submission queue; polling only", "err", err)
-	} else {
-		defer watch.Close()
-
-		events = watch.Events()
-	}
+	events, closeWatch := w.watch()
+	defer closeWatch()
 
 	timer := time.NewTimer(s.o.Poll)
 	defer timer.Stop()
@@ -47,7 +45,9 @@ func (s *Service) Run(ctx context.Context) {
 	for {
 		// Free partitions are taken over on the poll only: a notify
 		// wakes every worker, and trying every lock then would cost
-		// partitions × servers lock operations per submission.
+		// partitions × servers lock operations per submission. The
+		// partitions a worker handed over are the exception: they are
+		// named in its notify and tried at once.
 		take := w.lastTake.IsZero() || time.Since(w.lastTake) >= s.o.Poll
 		if take {
 			w.lastTake = time.Now()
@@ -65,9 +65,111 @@ func (s *Service) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-events:
+		case data := <-events:
+			w.takeReleased(releasedPartitions(data))
 		case <-timer.C:
 		}
+	}
+}
+
+// payloadQueue is a queue whose notifies carry data (sortedindex.Queue).
+type payloadQueue interface {
+	WatchPayload() (model.PayloadWatch, error)
+	NotifyPayload(data []byte)
+}
+
+// watch watches the queue, with the data of the notifies when the queue
+// offers it; nil without a watch (the poll remains).
+func (w *worker) watch() (<-chan []byte, func()) {
+	if pq, ok := w.s.q.(payloadQueue); ok {
+		if watch, err := pq.WatchPayload(); err == nil {
+			return watch.Events(), watch.Close
+		}
+	}
+
+	watch, err := w.s.q.Watch()
+	if err != nil {
+		w.s.o.Log.Warn("sendqueue: watch the submission queue; polling only", "err", err)
+
+		return nil, func() {}
+	}
+
+	// A plain watch: its events are forwarded without data.
+	out := make(chan []byte)
+	stop := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-watch.Events():
+				select {
+				case out <- nil:
+				case <-stop:
+					return
+				}
+			}
+		}
+	}()
+
+	return out, func() { close(stop); watch.Close() }
+}
+
+// handoverNotice is the payload of the notify a worker sends when it
+// hands its partitions over.
+type handoverNotice struct {
+	Released []int `json:"released"`
+}
+
+// releasedPartitions are the partitions a notify names (none for a
+// notify without data: a new submission).
+func releasedPartitions(data []byte) []int {
+	if len(data) == 0 {
+		return nil
+	}
+
+	var n handoverNotice
+	if json.Unmarshal(data, &n) != nil {
+		return nil
+	}
+
+	return n.Released
+}
+
+// takeReleased tries the partitions another worker handed over, up to
+// the bound.
+func (w *worker) takeReleased(ps []int) {
+	limit := w.s.limit()
+
+	for _, p := range ps {
+		if _, ok := w.held[p]; ok || p < 0 || p >= w.s.o.Partitions || len(w.held) >= limit {
+			continue
+		}
+
+		w.take(p)
+	}
+}
+
+// handOver gives the leases back at shutdown and tells the other
+// workers which partitions are free now.
+func (w *worker) handOver() {
+	released := make([]int, 0, len(w.held))
+
+	for p := range w.held {
+		released = append(released, p)
+	}
+
+	slices.Sort(released)
+	w.releaseAll()
+
+	if len(released) == 0 {
+		return
+	}
+
+	if pq, ok := w.s.q.(payloadQueue); ok {
+		data, _ := json.Marshal(handoverNotice{Released: released})
+		pq.NotifyPayload(data)
 	}
 }
 
@@ -108,10 +210,7 @@ func (w *worker) leases(take bool) {
 		return
 	}
 
-	limit := w.s.o.MaxPartitions
-	if limit <= 0 || limit > w.s.o.Partitions {
-		limit = w.s.o.Partitions
-	}
+	limit := w.s.limit()
 
 	for i := 0; i < w.s.o.Partitions && len(w.held) < limit; i++ {
 		p := (w.start + i) % w.s.o.Partitions
@@ -119,15 +218,30 @@ func (w *worker) leases(take bool) {
 			continue
 		}
 
-		l, err := w.s.o.KV.LockQueue(lockName(p), leaseTTL)
+		w.take(p)
+	}
+}
 
-		switch {
-		case err == nil:
-			w.held[p] = l
-			w.s.o.Log.Info("sendqueue: partition lease taken", "partition", p, "event", "submission_lease")
-		case !errors.Is(err, model.ErrLocked):
-			w.s.o.Log.Warn("sendqueue: partition lease", "partition", p, "err", err)
-		}
+// limit is how many partitions this worker holds at most.
+func (s *Service) limit() int {
+	limit := s.o.MaxPartitions
+	if limit <= 0 || limit > s.o.Partitions {
+		limit = s.o.Partitions
+	}
+
+	return limit
+}
+
+// take tries the lease of one partition.
+func (w *worker) take(p int) {
+	l, err := w.s.o.KV.LockQueue(lockName(p), leaseTTL)
+
+	switch {
+	case err == nil:
+		w.held[p] = l
+		w.s.o.Log.Info("sendqueue: partition lease taken", "partition", p, "event", "submission_lease")
+	case !errors.Is(err, model.ErrLocked):
+		w.s.o.Log.Warn("sendqueue: partition lease", "partition", p, "err", err)
 	}
 }
 

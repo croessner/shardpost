@@ -54,6 +54,9 @@ type Registration struct {
 	// watched (the push worker, stage B18a); it is called at every
 	// heartbeat. nil for the other roles.
 	Status func() (partitions, watched int)
+	// Workers, when set, records whether a server runs the background
+	// workers (workers.run, stage B18b).
+	Workers *bool
 }
 
 // record is the value of the registration at now.
@@ -66,6 +69,8 @@ func (r Registration) record(now time.Time) model.ServerRecord {
 		partitions, watched := r.Status()
 		rec.Partitions, rec.Watched = &partitions, &watched
 	}
+
+	rec.Workers = r.Workers
 
 	return rec
 }
@@ -230,26 +235,28 @@ func (m *Manager) expireServer(e model.DueEntry, now time.Time) error {
 var ErrNotReady = errors.New("the cluster is not ready for the mark")
 
 // Layout3Ready checks the registrations for "fts layout3 enable --pods
-// n": exactly n fresh registrations of servers (role serve, or none:
-// before 0.47.0), each with the layout 3 capability. The push worker,
-// scrubs and backfills register too and are not counted. A pod replaced
-// within model.ServerFresh that did not record its end still has its
-// predecessor's fresh record: wait until it is older (F12).
+// n": exactly n fresh registrations of the processes that write account
+// data under the mark — servers (role serve, or none: before 0.47.0)
+// and, since 0.53.0, job runners — each with the layout 3 capability.
+// The push worker, scrubs and backfills register too and are not
+// counted. A pod replaced within model.ServerFresh that did not record
+// its end still has its predecessor's fresh record: wait until it is
+// older (F12).
 func Layout3Ready(servers []Server, pods int) error {
 	return CapReady(servers, pods, model.CapFTSLayout3)
 }
 
 // CapReady checks the registrations for an enable of a cluster mark
-// with --pods n: exactly n fresh registrations of servers, each with
-// the capability c ("fts layout3 enable": model.CapFTSLayout3, "fts
-// dictfilter enable": model.CapFTSDictFilter).
+// with --pods n: exactly n fresh registrations of servers and runners,
+// each with the capability c ("fts layout3 enable": model.CapFTSLayout3,
+// "fts dictfilter enable": model.CapFTSDictFilter).
 func CapReady(servers []Server, pods int, c string) error {
 	var fresh []string
 
 	capable := 0
 
 	for _, s := range servers {
-		if !s.Fresh || !s.IsServe() {
+		if !s.Fresh || !s.IsStoreWriter() {
 			continue
 		}
 
@@ -261,8 +268,8 @@ func CapReady(servers []Server, pods int, c string) error {
 	}
 
 	if len(fresh) != pods || capable != pods {
-		return fmt.Errorf("%w: %d fresh registrations (%d with %s), expected --pods %d: %s; a replaced pod's record stays fresh for %s",
-			ErrNotReady, len(fresh), capable, c, pods, strings.Join(fresh, ", "), model.ServerFresh)
+		return fmt.Errorf("%w: %d fresh registrations of servers and runners (%d with %s), expected --pods %d: %s; "+
+			"a replaced pod's record stays fresh for %s", ErrNotReady, len(fresh), capable, c, pods, strings.Join(fresh, ", "), model.ServerFresh)
 	}
 
 	return nil

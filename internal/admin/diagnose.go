@@ -112,7 +112,7 @@ func serverRegistrations(servers []jobs.Server) []adminapi.ServerRegistration {
 			reg.StoppedAt = &at
 		}
 
-		reg.Partitions, reg.Watched = sv.Partitions, sv.Watched
+		reg.Partitions, reg.Watched, reg.Workers = sv.Partitions, sv.Watched, sv.Workers
 
 		out = append(out, reg)
 	}

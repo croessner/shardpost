@@ -125,6 +125,9 @@ const (
 	RoleScrub    = "scrub"
 	RoleBackfill = "backfill"
 	RoleSweep    = "sweep"
+	// RoleRunner is a job runner pod ("shardpost runner", stage B18b):
+	// the background workers without listeners.
+	RoleRunner = "runner"
 )
 
 // PoolRef names a pool by its id (what placement checks compare: a pool
@@ -154,11 +157,21 @@ type ServerRecord struct {
 	// (stage B18a); nil for the other roles.
 	Partitions *int `json:"partitions,omitempty"`
 	Watched    *int `json:"watched,omitempty"`
+	// Workers reports whether a server runs the background workers
+	// (workers.run, stage B18b); nil before 0.53.0 and for the other
+	// roles.
+	Workers *bool `json:"workers,omitempty"`
 }
 
 // IsServe reports whether the record is the one of a server ("shardpost
 // serve"): role serve, or no role (a record before 0.47.0).
 func (r ServerRecord) IsServe() bool { return r.Role == "" || r.Role == RoleServe }
+
+// IsStoreWriter reports whether the process writes account data under
+// the cluster marks: a server, or a job runner (stage B18b), which runs
+// the jobs, the online builds and the reshards. The marks of the
+// full-text index count these.
+func (r ServerRecord) IsStoreWriter() bool { return r.IsServe() || r.Role == RoleRunner }
 
 // Running reports whether the record counts as a running process at
 // now: seen within ServerFresh and not stopped.

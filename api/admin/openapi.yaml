@@ -2909,9 +2909,9 @@ components:
         role:
           type: string
           description: |
-            What the process is: `serve`, `push`, `scrub`, `backfill` or
-            `sweep`; missing in registrations before 0.47.0, which are
-            servers.
+            What the process is: `serve`, `push`, `scrub`, `backfill`,
+            `sweep` or `runner` (a job runner pod, since 0.53.0); missing
+            in registrations before 0.47.0, which are servers.
         system_pool:
           $ref: "#/components/schemas/PoolRef"
         started_at:
@@ -2932,6 +2932,11 @@ components:
           description: |
             The accounts with push subscriptions a push worker watches
             (role `push`, since 0.52.0); missing for the other roles.
+        workers:
+          type: boolean
+          description: |
+            Whether a server runs the background workers (`workers.run`,
+            since 0.53.0); missing before and for the other roles.
     ServerRegistrationList:
       type: object
       required: [servers]

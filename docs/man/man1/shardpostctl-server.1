@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-SERVER 1 "2026-10-03" "ShardPost 0.52.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-SERVER 1 "2026-10-03" "ShardPost 0.53.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-server \- version, state and registrations of ShardPost servers
 .SH SYNOPSIS
@@ -60,8 +60,8 @@ Requires the role
 .BR diagnose .
 .SS server list
 Lists the registrations of the processes that use the store, one line
-per instance: every server, the JMAP push worker, scrubs, sweeps and
-backfills register at startup and every minute
+per instance: every server, every job runner, the JMAP push workers,
+scrubs, sweeps and backfills register at startup and every minute
 .RB ( servers/<instance>
 in the admin store) and record their orderly end. Columns:
 .TP
@@ -74,6 +74,9 @@ for the other processes, which may run in a server's pod.
 .TP
 .B ROLE
 .BR serve ,
+.B runner
+(a job runner pod,
+.BR "shardpost runner" ),
 .BR push ,
 .BR scrub ,
 .B backfill
@@ -101,6 +104,17 @@ for up to three minutes after its last heartbeat.
 The last heartbeat, the start of the process and its orderly end
 .RB ( \-
 while it runs or after a crash).
+.TP
+.B WORKERS
+For a server: whether it runs the background workers (the job runner,
+the expiry workers, the delayed submission worker, the learning
+worker), that is
+.I workers.run
+.RB ( WORKERS_RUN ).
+.B false
+is a front-end in a deployment with job runners;
+.B \-
+for the other roles and for servers before 0.53.0.
 .TP
 .BR PARTITIONS ", " WATCHED
 For the JMAP push worker: the push partitions it holds (of 64) and

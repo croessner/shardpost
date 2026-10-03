@@ -772,6 +772,51 @@ func TestRunWakesOnNotify(t *testing.T) {
 	<-done
 }
 
+// TestHandoverNotifiesReleased (stage B18b, F9): a worker that ends
+// names the partitions it released in its notify, and another worker
+// takes them at once instead of at its next poll.
+func TestHandoverNotifiesReleased(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.Poll = time.Hour; o.Now = time.Now; o.Partitions = 4 })
+
+	first, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+
+	go func() { defer close(firstDone); e.svc.Run(first) }()
+
+	waitFor(t, func() bool { return e.kv.Locks().Held(lockName(0)) && e.kv.Locks().Held(lockName(3)) })
+
+	// A second worker over the same queue: its first look finds every
+	// partition held, and its poll is an hour away.
+	second, err := New(e.svc.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondDone := make(chan struct{})
+
+	go func() { defer close(secondDone); second.Run(secondCtx) }()
+
+	defer func() { cancelSecond(); <-secondDone }()
+
+	time.Sleep(100 * time.Millisecond)
+
+	cancelFirst()
+	<-firstDone
+
+	// The hand-over: the second worker holds the partitions within a
+	// second, not an hour, and sends what is due.
+	waitFor(t, func() bool { return e.kv.Locks().Held(lockName(0)) && e.kv.Locks().Held(lockName(3)) })
+
+	u := e.user(t, "alice")
+	if _, err := second.Schedule(u, Spec{Account: "alice", ID: newID(), Release: time.Now(),
+		MailFrom: "alice", RcptTo: []string{"bob@example.net"}, Raw: []byte("x\r\n")}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, func() bool { return e.relay.count() == 1 })
+}
+
 // TestNoQueueWithoutIndexes: without the admin store indexes there is no
 // queue.
 func TestNoQueueWithoutIndexes(t *testing.T) {

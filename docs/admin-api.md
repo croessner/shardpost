@@ -184,7 +184,7 @@ role or scope.
 | API | Contents | Cost |
 | --- | --- | --- |
 | `GET /admin/v1/server` | version, instance (pod), start time, `config_fingerprint`, store ping, `placement` (where the store's own namespaces live as this server's last placement check found it: `state` `none`, `native`, `migrated` or `unknown`, and the `system_pool` by id and name) | one ping |
-| `GET /admin/v1/servers` | the process registrations (`servers/<instance>` in the admin store): `role` (`serve`, `push`, `scrub`, `backfill`, `sweep`; none before 0.47.0), version, capabilities, `system_pool`, `started_at`, last heartbeat (`seen`), `stopped_at` after an orderly end, `fresh` (seen within three minutes and not stopped); for a push worker `partitions` (the push partitions it holds) and `watched` (the accounts it watches), since 0.52.0 | a listing of the admin namespace unless `admin.kv_index: read` |
+| `GET /admin/v1/servers` | the process registrations (`servers/<instance>` in the admin store): `role` (`serve`, `runner` since 0.53.0, `push`, `scrub`, `backfill`, `sweep`; none before 0.47.0), version, capabilities, `system_pool`, `started_at`, last heartbeat (`seen`), `stopped_at` after an orderly end, `fresh` (seen within three minutes and not stopped); for a push worker `partitions` (the push partitions it holds) and `watched` (the accounts it watches), since 0.52.0; for a server `workers` (whether it runs the background workers, `workers.run`), since 0.53.0 | a listing of the admin namespace unless `admin.kv_index: read` |
 | `GET /admin/v1/accounts/{account}` | Nauthilus lookup (`canonical`, `alias` with the canonical account, `unknown`, `unavailable`), store present, number of mailboxes, quota, import lock, trace | registry, quota |
 | `GET …/mailboxes?after=&limit=&name=` | mailboxes in name order: ID, UIDVALIDITY, UIDNEXT, HIGHESTMODSEQ, shard size, subscription, special-use, number of ACL entries; `next` for the following page | one registry excerpt, one header per mailbox |
 | `GET …/mailboxes/{id}` | additionally messages, unseen, marked deleted, size, shards, start of the log (QRESYNC horizon), keywords | reads all index shards of the mailbox |
@@ -291,9 +291,12 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
 
 ## Maintenance jobs (stage 8c)
 
-Long-running and dangerous changes run as durable jobs. Every server runs
-one runner; jobs live in the shared admin storage (namespace `~admin` in
-the index pool, one object per job and per plan) and survive restarts.
+Long-running and dangerous changes run as durable jobs. Every server with
+`workers.run` (the default) runs one runner, and a deployment with job
+runner pods (`shardpost runner`, 0.53.0) runs them there instead; jobs
+live in the shared admin storage (namespace `~admin` in the index pool,
+one object per job and per plan) and survive restarts. The jobs API
+(submit, list, cancel, plans) is a server's in every case.
 
 ```sh
 shardpostctl check -wait user@example.org                  # check without repair (role diagnose)

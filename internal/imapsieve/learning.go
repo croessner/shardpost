@@ -39,6 +39,30 @@ const DefaultLockRetry = 20 * time.Second
 var learningWakeups = promauto.NewCounter(prometheus.CounterOpts{Name: "imap_imapsieve_learning_wakeups_total",
 	Help: "Learning worker passes started by a queue notify."})
 
+// The metrics of the holder (stage B18b): the duration of a job by
+// result (delivered, retry, dead, lost, canceled, deferred), the jobs
+// due at the last pass, and the age of the oldest of them.
+var (
+	learningJobSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{Name: "imap_imapsieve_learning_job_seconds",
+		Help:    "Duration of a learning job in the holder, by result.",
+		Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
+	}, []string{labelResult})
+	learningDue = promauto.NewGauge(prometheus.GaugeOpts{Name: "imap_imapsieve_learning_due",
+		Help: "Learning jobs due at the holder's last pass (up to the page of 100)."})
+	learningLag = promauto.NewGauge(prometheus.GaugeOpts{Name: "imap_imapsieve_learning_lag_seconds",
+		Help: "Age of the oldest learning job due at the holder's last pass."})
+)
+
+// Results of learningJobSeconds.
+const (
+	resultDelivered = "delivered"
+	resultRetry     = "retry"
+	resultDead      = "dead"
+	resultLost      = "lost"
+	resultCanceled  = "canceled"
+	resultDeferred  = "deferred"
+)
+
 // Job owns an independent copy of the message, so EXPUNGE cannot invalidate a retry.
 type Job struct {
 	Delivered        bool
@@ -98,6 +122,16 @@ type Programs interface {
 // LearningWorker sends queued learning jobs to their programs, with
 // retries and dead-lettering. One worker of the cluster holds the queue
 // lease at a time and keeps it while it runs.
+//
+// With Config.Concurrency above 1 (stage B18b) the holder runs jobs in
+// goroutines: jobs of different accounts in parallel, jobs of one
+// account one after the other in due order (a semaphore per owner,
+// tried without waiting: a job whose owner is busy is skipped and
+// offered again at the next pass), never the same job twice at once (a
+// set of the jobs in flight). The runners live on a context of their
+// own: at shutdown they get Config.ShutdownSeconds to end, then they
+// are cut off and the next holder runs their jobs again. With a
+// concurrency of 1 a pass runs its jobs one after the other, as before.
 type LearningWorker struct {
 	Config   config.Learning
 	Queue    Queue
@@ -113,12 +147,49 @@ type LearningWorker struct {
 	// the lease is one object all servers lock, so they try every
 	// LockRetrySeconds with jitter, not on every pass.
 	nextTry time.Time
+	// inflight are the jobs being run, owners the semaphore per owner
+	// (an entry is removed at 0), slots the bound of the runners, wg
+	// waits for them; jobCtx is their context, cut off by cancelJobs at
+	// the end of the shutdown grace.
+	inflight   map[string]struct{}
+	owners     map[string]int
+	slots      chan struct{}
+	wg         sync.WaitGroup
+	jobCtx     context.Context
+	cancelJobs context.CancelFunc
 }
 
 // NewLearningWorker builds a worker for queue q.
 func NewLearningWorker(c config.Learning, q Queue, programs Programs) *LearningWorker {
-	return &LearningWorker{Config: c, Queue: q, Programs: programs}
+	w := &LearningWorker{Config: c, Queue: q, Programs: programs, inflight: map[string]struct{}{}, owners: map[string]int{}}
+
+	if n := w.concurrency(); n > 1 {
+		w.slots = make(chan struct{}, n)
+	}
+
+	w.jobCtx, w.cancelJobs = context.WithCancel(context.Background())
+
+	return w
 }
+
+// concurrency is the number of runners (1: the pass runs its jobs
+// itself).
+func (w *LearningWorker) concurrency() int {
+	return int(max(w.Config.Concurrency, 1))
+}
+
+// shutdownGrace is how long running jobs get at the end.
+func (w *LearningWorker) shutdownGrace() time.Duration {
+	if w.Config.ShutdownSeconds <= 0 {
+		return DefaultShutdownGrace
+	}
+
+	return time.Duration(w.Config.ShutdownSeconds) * time.Second
+}
+
+// DefaultShutdownGrace is how long running learning jobs get at the end
+// when the configuration names nothing.
+const DefaultShutdownGrace = 10 * time.Second
 
 // Enqueue stores a learning job for the event's message; the job ID is
 // derived from the message and action, so a repeated event is one job.
@@ -146,16 +217,25 @@ func (w *LearningWorker) Enqueue(ctx context.Context, e Event, action string, ra
 }
 
 // Run processes the queue until ctx ends: once a second and, when the
-// queue can be watched, whenever a writer notifies it. A watch that
-// breaks (the OSD dropped it, the store rotated its key) is set up again
-// at the next poll. The lease is released when Run returns.
+// queue can be watched, whenever a writer notifies it. Only the holder
+// of the lease watches (stage B18b, F5): an enqueue wakes one process,
+// not every server. A watch that breaks (the OSD dropped it, the store
+// rotated its key) is set up again at the next poll. At the end the
+// running jobs get the shutdown grace, then they are cut off; the lease
+// is released when Run returns.
 func (w *LearningWorker) Run(ctx context.Context) {
 	defer w.Release()
+	defer w.drain()
 
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 
-	events, errs, unwatch := w.watch()
+	var (
+		events  <-chan struct{}
+		errs    <-chan error
+		unwatch = func() {}
+	)
+
 	defer func() { unwatch() }()
 
 	for {
@@ -163,9 +243,6 @@ func (w *LearningWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if events == nil {
-				events, errs, unwatch = w.watch()
-			}
 		case <-events:
 			learningWakeups.Inc()
 		case <-errs:
@@ -174,7 +251,38 @@ func (w *LearningWorker) Run(ctx context.Context) {
 			events, errs, unwatch = nil, nil, func() {}
 		}
 
-		w.Step(ctx)
+		lease := w.holdLease()
+
+		switch {
+		case lease != nil && events == nil:
+			events, errs, unwatch = w.watch()
+		case lease == nil && events != nil:
+			unwatch()
+
+			events, errs, unwatch = nil, nil, func() {}
+		}
+
+		if lease != nil {
+			w.step(ctx, lease)
+		}
+	}
+}
+
+// drain is the end of Run: the running jobs get the shutdown grace,
+// then they are cut off (the next holder runs them again).
+func (w *LearningWorker) drain() {
+	done := make(chan struct{})
+
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(w.shutdownGrace()):
+		w.cancelJobs()
+		<-done
 	}
 }
 
@@ -266,32 +374,141 @@ func (w *LearningWorker) Release() {
 }
 
 // Step processes due jobs once while holding the queue lease; it takes
-// the lease when this worker does not hold it and keeps it.
+// the lease when this worker does not hold it and keeps it. With a
+// concurrency above 1 it returns once the jobs are handed to runners.
 func (w *LearningWorker) Step(ctx context.Context) {
-	lease := w.holdLease()
-	if lease == nil {
-		return
+	if lease := w.holdLease(); lease != nil {
+		w.step(ctx, lease)
 	}
+}
 
+// step is one pass under the lease.
+func (w *LearningWorker) step(ctx context.Context, lease model.Lease) {
 	jobs, err := w.Queue.List()
 	if err != nil {
 		learningResults.WithLabelValues("queue_error").Inc()
 		return
 	}
 
+	w.gauges(jobs)
+
 	for _, j := range jobs {
 		if ctx.Err() != nil || lease.Lost() {
 			return
 		}
 
-		if !w.stepJob(ctx, lease, j) {
+		if j.Dead || time.Now().Before(j.Next) {
+			continue
+		}
+
+		if w.slots == nil {
+			if !w.stepJob(ctx, lease, j) {
+				return
+			}
+
+			continue
+		}
+
+		if !w.dispatch(ctx, lease, j) {
 			return
 		}
 	}
 }
 
+// gauges publishes what a pass found due: the count and the age of the
+// oldest.
+func (w *LearningWorker) gauges(jobs []Job) {
+	now := time.Now()
+	due, lag := 0, time.Duration(0)
+
+	for _, j := range jobs {
+		if j.Dead || now.Before(j.Next) {
+			continue
+		}
+
+		due++
+
+		if age := now.Sub(j.Next); age > lag {
+			lag = age
+		}
+	}
+
+	learningDue.Set(float64(due))
+	learningLag.Set(lag.Seconds())
+}
+
+// dispatch hands a job to a runner: not when it is in flight already,
+// not when another job of its owner runs (tried without waiting; the
+// next pass offers it again, in due order), and only once a slot is
+// free (waiting for one bounds the pass, which has nothing to gain by
+// listing more). It reports whether the pass goes on.
+func (w *LearningWorker) dispatch(ctx context.Context, lease model.Lease, j Job) bool {
+	if !w.admit(j) {
+		return true
+	}
+
+	select {
+	case w.slots <- struct{}{}:
+	case <-ctx.Done():
+		w.done(j)
+
+		return false
+	}
+
+	w.wg.Add(1)
+
+	go func() {
+		defer w.wg.Done()
+		defer func() { <-w.slots }()
+		defer w.done(j)
+
+		w.stepJob(w.jobCtx, lease, j)
+	}()
+
+	return true
+}
+
+// admit takes the job into the in-flight set and its owner's semaphore
+// (count 1), or reports that it cannot run now.
+func (w *LearningWorker) admit(j Job) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if _, running := w.inflight[j.ID]; running || w.owners[j.Owner] > 0 {
+		return false
+	}
+
+	w.inflight[j.ID] = struct{}{}
+	w.owners[j.Owner]++
+
+	return true
+}
+
+// done takes the job out of the in-flight set and its owner's semaphore
+// (removed at 0, so the map does not grow with the accounts).
+func (w *LearningWorker) done(j Job) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	delete(w.inflight, j.ID)
+
+	if w.owners[j.Owner]--; w.owners[j.Owner] <= 0 {
+		delete(w.owners, j.Owner)
+	}
+}
+
+// Running counts the jobs in flight and the owners with one (tests).
+func (w *LearningWorker) Running() (jobs, owners int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return len(w.inflight), len(w.owners)
+}
+
 // stepJob processes one job; it returns false when the pass must stop
-// (lease lost or ctx ended during delivery).
+// (lease lost or ctx ended during delivery). A job that ran under a
+// cut-off context is left in the queue, as after a lost lease: the next
+// holder runs it again (at-least-once, as before).
 func (w *LearningWorker) stepJob(ctx context.Context, lease model.Lease, j Job) bool {
 	if j.Dead || time.Now().Before(j.Next) {
 		return true
@@ -310,27 +527,39 @@ func (w *LearningWorker) stepJob(ctx context.Context, lease model.Lease, j Job) 
 		return true
 	}
 
+	start := time.Now()
+
 	tried, err := w.attempt(ctx, j)
 	if !tried {
+		w.observe(start, resultDeferred)
+
 		return true
 	}
 
-	if lease.Lost() {
-		return false
-	}
+	switch {
+	case lease.Lost():
+		w.observe(start, resultLost)
 
-	if err == nil {
+		return false
+	case err == nil:
 		w.completeJob(j)
-		return true
-	}
+		w.observe(start, resultDelivered)
 
-	if ctx.Err() != nil {
+		return true
+	case ctx.Err() != nil:
+		w.observe(start, resultCanceled)
+
 		return false
 	}
 
-	w.failJob(j, err)
+	w.observe(start, w.failJob(j, err))
 
 	return true
+}
+
+// observe records the duration of a job by result.
+func (w *LearningWorker) observe(start time.Time, result string) {
+	learningJobSeconds.WithLabelValues(result).Observe(time.Since(start).Seconds())
 }
 
 // removeDelivered finishes a job whose program already succeeded.
@@ -429,8 +658,8 @@ func (w *LearningWorker) completeJob(j Job) {
 }
 
 // failJob schedules a retry with exponential backoff or marks the job
-// dead (attempts exhausted or a permanent error).
-func (w *LearningWorker) failJob(j Job, err error) {
+// dead (attempts exhausted or a permanent error); it reports which.
+func (w *LearningWorker) failJob(j Job, err error) string {
 	j.Attempts++
 
 	j.Dead = j.Attempts >= int(w.Config.MaxAttempts)
@@ -439,13 +668,19 @@ func (w *LearningWorker) failJob(j Job, err error) {
 	}
 
 	j.Next = time.Now().Add(time.Duration(1<<min(j.Attempts, 10)) * time.Second)
-	if err = w.Queue.Update(j); err != nil {
+
+	switch err = w.Queue.Update(j); {
+	case err != nil:
 		learningResults.WithLabelValues("queue_error").Inc()
-	} else if j.Dead {
-		learningResults.WithLabelValues("dead").Inc()
-	} else {
-		learningResults.WithLabelValues("retry").Inc()
+	case j.Dead:
+		learningResults.WithLabelValues(resultDead).Inc()
+
+		return resultDead
+	default:
+		learningResults.WithLabelValues(resultRetry).Inc()
 	}
+
+	return resultRetry
 }
 
 // send hands the message to the rule's program. Exit 0 is done, 75

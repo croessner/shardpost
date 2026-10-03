@@ -161,6 +161,19 @@ var (
 		Namespace: namespace, Name: "job_wakeups_total",
 		Help: "Job runner looks for claimable jobs by cause (poll, notify).",
 	}, []string{labelCause})
+	// JobClaimWait is the time a job waited from the moment it became
+	// claimable to its claim (stage B18b): whether the runners' slots
+	// suffice.
+	JobClaimWait = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Name: "job_claim_wait_seconds",
+		Help:    "Time from a job becoming claimable to its claim.",
+		Buckets: []float64{.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600},
+	})
+	// JobRunning is the number of jobs this process runs, by kind.
+	JobRunning = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "job_running",
+		Help: "Jobs this process runs, by kind.",
+	}, []string{labelKind})
 	// BatchAccounts counts the accounts a batch job (a kind over every
 	// account of the directory) handled, by kind and outcome: done,
 	// skipped (idle, scrub), gone (purged meanwhile), deferred (locked,

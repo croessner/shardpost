@@ -303,8 +303,8 @@ func readRecord(t *testing.T, kv model.AdminKV, instance string) (model.ServerRe
 }
 
 // TestLayout3ReadyCountsServers: the push worker, scrubs and backfills
-// register too; only servers (role serve, or none before 0.47.0) count
-// for "fts layout3 enable --pods".
+// register too; only servers (role serve, or none before 0.47.0) and job
+// runners (stage B18b) count for "fts layout3 enable --pods".
 func TestLayout3ReadyCountsServers(t *testing.T) {
 	kv := memstore.NewAdminKVMode(model.KVIndexOff)
 	now := time.Now()
@@ -337,5 +337,31 @@ func TestLayout3ReadyCountsServers(t *testing.T) {
 
 	if err := Layout3Ready(servers, 6); !errors.Is(err, ErrNotReady) {
 		t.Errorf("the other roles were counted: %v", err)
+	}
+
+	expectRunnerCounted(t, kv, now)
+}
+
+// expectRunnerCounted registers a job runner beside the records of kv
+// (two servers and four other processes) and checks that it counts: it
+// writes account data under the mark.
+func expectRunnerCounted(t *testing.T, kv model.AdminKV, now time.Time) {
+	t.Helper()
+
+	if err := Register(kv, Registration{Instance: "runner-0", Version: "0.53.0", Role: model.RoleRunner, StartedAt: now}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	servers, err := Servers(kv, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Layout3Ready(servers, 3); err != nil {
+		t.Errorf("two servers and a runner: %v", err)
+	}
+
+	if err := Layout3Ready(servers, 2); !errors.Is(err, ErrNotReady) {
+		t.Errorf("the runner was not counted: %v", err)
 	}
 }

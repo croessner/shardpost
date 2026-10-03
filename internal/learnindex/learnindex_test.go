@@ -38,7 +38,26 @@ func (b *wakingBackend) Watch(oid string) (model.Watch, error) {
 	b.subs[oid] = append(b.subs[oid], ch)
 	b.mu.Unlock()
 
-	return &memWatch{ch: ch}, nil
+	return &memWatch{ch: ch, close: func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+
+		subs := b.subs[oid]
+		for i, c := range subs {
+			if c == ch {
+				b.subs[oid] = append(subs[:i:i], subs[i+1:]...)
+				break
+			}
+		}
+	}}, nil
+}
+
+// watchers counts the watches on oid.
+func (b *wakingBackend) watchers(oid string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return len(b.subs[oid])
 }
 
 func (b *wakingBackend) Notify(oid string) {
@@ -53,11 +72,23 @@ func (b *wakingBackend) Notify(oid string) {
 	}
 }
 
-type memWatch struct{ ch chan struct{} }
+// NotifyPayload and WatchPayload complete sortedindex.Waker; the
+// learning queue uses neither (its notifies carry no data).
+func (b *wakingBackend) NotifyPayload(oid string, _ []byte) { b.Notify(oid) }
+
+func (b *wakingBackend) WatchPayload(string) (model.PayloadWatch, error) {
+	return nil, errors.New("not watched with payload in this test")
+}
+
+type memWatch struct {
+	ch    chan struct{}
+	once  sync.Once
+	close func()
+}
 
 func (w *memWatch) Events() <-chan struct{} { return w.ch }
 func (w *memWatch) Errors() <-chan error    { return nil }
-func (w *memWatch) Close()                  {}
+func (w *memWatch) Close()                  { w.once.Do(w.close) }
 
 // programs records learning runs and answers with scripted exit codes.
 type programs struct {
@@ -374,6 +405,47 @@ func TestWorkerWokenByNotify(t *testing.T) {
 	if f.rec.Held() {
 		t.Fatal("the lease outlived the worker")
 	}
+}
+
+// TestWatchOnlyWithLease (stage B18b, F5): a running worker without the
+// lease does not watch the queue; the holder alone does, so an enqueue
+// wakes one process. Once the holder is gone the other takes the lease
+// and watches.
+func TestWatchOnlyWithLease(t *testing.T) {
+	f := newFixture(t, model.KVIndexRead)
+	p1, p2 := &programs{}, &programs{}
+	w1, w2 := worker(f.q, p1), worker(f.q, p2)
+	w2.Config.LockRetrySeconds = 1
+	w2.Jitter = func() float64 { return 0.1 }
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan struct{})
+
+	go func() { w1.Run(ctx1); close(done1) }()
+
+	waitFor(t, f.rec.Held)
+	waitFor(t, func() bool { return f.b.watchers(sortedindex.ShardOID(model.LearningQueue, 0)) == 1 })
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+
+	go func() { w2.Run(ctx2); close(done2) }()
+
+	defer func() { cancel2(); <-done2 }()
+
+	time.Sleep(300 * time.Millisecond)
+
+	if n := f.b.watchers(sortedindex.ShardOID(model.LearningQueue, 0)); n != 1 {
+		t.Fatalf("%d watchers with one holder, want 1 (a worker without the lease does not watch)", n)
+	}
+
+	cancel1()
+	<-done1
+
+	waitFor(t, func() bool { return f.rec.Held() && f.b.watchers(sortedindex.ShardOID(model.LearningQueue, 0)) == 1 })
+
+	enqueue(t, w2, "alice", 1, "a")
+	waitFor(t, func() bool { return p2.count() == 1 })
 }
 
 // TestWorkerLease: the worker keeps its lease between passes, a second
