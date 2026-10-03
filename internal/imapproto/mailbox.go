@@ -1312,7 +1312,7 @@ func (c *conn) cmdStatus(tag string) error {
 		return nil
 	}
 
-	if !c.needRight(tag, st, 'r') {
+	if !c.needRight(tag, st, 'r') || c.lockedTarget(tag, st) {
 		return nil
 	}
 
@@ -1847,6 +1847,11 @@ func (c *conn) openSelected(tag, name string, examine bool) (string, *target, bo
 	mb, err := st.u.Lookup(st.name)
 	if err != nil {
 		c.storeErr(tag, err)
+		return "", nil, false
+	}
+
+	if mb.Lock.Held("", time.Now()) {
+		c.storeErr(tag, model.ErrMailboxLocked)
 		return "", nil, false
 	}
 

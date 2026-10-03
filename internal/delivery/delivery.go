@@ -285,6 +285,12 @@ func (r *run) checkExplicit(name string) error {
 
 	t, err := r.target(name)
 	if err != nil {
+		if model.MailboxLockedError(err) {
+			// The mailbox is being deleted: in seconds it is gone, and
+			// that is the answer the caller gets.
+			return ErrNoMailbox
+		}
+
 		return err
 	}
 

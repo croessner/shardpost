@@ -1,8 +1,10 @@
 package imapproto
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"shardpost/internal/membudget"
 	"shardpost/internal/metrics"
@@ -24,6 +26,10 @@ import (
 func (c *conn) poll(allowExpunge bool) error {
 	if c.mbox == nil {
 		return nil
+	}
+
+	if gone, err := c.selectedRecord(); gone || err != nil {
+		return err
 	}
 
 	info, err := c.mu.Info(c.mbox.Name)
@@ -61,9 +67,17 @@ func (c *conn) poll(allowExpunge bool) error {
 	if err := c.mergePrivateSeen(uids); err != nil {
 		return c.pollReload(allowExpunge)
 	}
-	// A UID announced by a committed change but not readable was either
-	// expunged by a change beyond "reached" (announced there) or lost by
-	// a crashed writer (pending expired): skip it, never stall on it.
+
+	c.pollAnnounce(info, fresh, gone, reached)
+
+	return nil
+}
+
+// pollAnnounce announces what an incremental poll read. A UID announced
+// by a committed change but not readable was either expunged by a
+// change beyond "reached" (announced there) or lost by a crashed writer
+// (pending expired): skip it, never stall on it.
+func (c *conn) pollAnnounce(info *model.MailboxInfo, fresh []model.Meta, gone map[uint32]bool, reached uint64) {
 	// 1. expunges
 	if len(gone) > 0 {
 		c.pollExpunges(gone)
@@ -86,8 +100,6 @@ func (c *conn) poll(allowExpunge bool) error {
 	metrics.Commands.WithLabelValues(protoIMAP, "poll", "incremental").Inc()
 
 	c.notifyAppended(oldLen)
-
-	return nil
 }
 
 // scanChanges walks the change log from modseq from on and returns the
@@ -932,6 +944,10 @@ func (c *conn) copyDest(tag, dest string) (*target, *model.MailboxInfo, bool) {
 		return nil, nil, false
 	}
 
+	if c.lockedTarget(tag, dt) {
+		return nil, nil, false
+	}
+
 	info, err := dt.u.Info(dt.name)
 	if err != nil {
 		if err == model.ErrNoMailbox {
@@ -1176,4 +1192,70 @@ func (c *conn) announceKeywords(oldKeywords, keywords []string) {
 	if !c.readOnly {
 		c.w.untagged(`OK [PERMANENTFLAGS (%s \*)] Flags permitted`, flagList(flags))
 	}
+}
+
+// errSelectedGone ends a command (and IDLE) after the session was closed
+// because its selected mailbox is being deleted or was deleted; the BYE
+// was written already, so the connection loop just ends.
+var errSelectedGone = errors.New("selected mailbox gone")
+
+// selectedGone closes the session when err is authoritative: the
+// selected mailbox is locked by a mailbox_delete (model.ErrMailboxLocked)
+// or no longer registered (model.ErrNoMailbox, confirmed by a registry
+// read). Any other error leaves the session alone.
+func (c *conn) selectedGone(err error) bool {
+	var text, reason string
+
+	switch {
+	case errors.Is(err, model.ErrMailboxLocked):
+		text, reason = "Selected mailbox is being deleted", metrics.ReasonMailboxLocked
+	case errors.Is(err, model.ErrNoMailbox):
+		text, reason = "Selected mailbox was deleted", metrics.ReasonMailboxDeleted
+	default:
+		return false
+	}
+
+	metrics.IMAPSessionsClosed.WithLabelValues(reason).Inc()
+	c.log.Info("session closed, selected mailbox gone", "event", "session_closed", "mailbox", c.mbox.Name, "reason", reason)
+	c.w.untagged("BYE [UNAVAILABLE] %s", text)
+	c.state = stateLogout
+
+	return true
+}
+
+// selectedRecord looks at the record of the selected mailbox (the lookup
+// cache, no extra read) before a poll: a mailbox lock closes the
+// session at once; a mailbox that is gone does so only after a fresh
+// registry read confirmed it (RFC 2180 3.3). Every other error is
+// transient: gone is false and the poll goes on.
+func (c *conn) selectedRecord() (bool, error) {
+	mb, err := c.mu.Lookup(c.mbox.Name)
+
+	switch {
+	case err == nil && mb.Lock.Held("", time.Now()):
+		err = model.ErrMailboxLocked
+	case errors.Is(err, model.ErrNoMailbox):
+		err = model.SelectedMailboxState(c.mu, c.mbox.Name)
+	default:
+		return false, nil
+	}
+
+	if c.selectedGone(err) {
+		return true, errSelectedGone
+	}
+
+	return false, nil
+}
+
+// lockedTarget answers NO [UNAVAILABLE] when a mailbox_delete locks the
+// target (its record from the lookup cache); ok is false then.
+func (c *conn) lockedTarget(tag string, st *target) bool {
+	mb, err := st.u.Lookup(st.name)
+	if err != nil || !mb.Lock.Held("", time.Now()) {
+		return false
+	}
+
+	c.storeErr(tag, model.ErrMailboxLocked)
+
+	return true
 }

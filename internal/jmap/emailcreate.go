@@ -115,7 +115,7 @@ func storeEmail(sess *session, t *tree, msg []byte, boxes, keywords map[string]b
 
 	m, err := sess.user.Deliver(t.byID[ids[0]].Name, msg, flags, receivedAt)
 	if err != nil {
-		return nil, storeFailed(err)
+		return nil, placementFailed(err, "email_create")
 	}
 
 	stored := []placement{{mailbox: t.byID[ids[0]].Name, meta: *m}}
@@ -129,7 +129,7 @@ func storeEmail(sess *session, t *tree, msg []byte, boxes, keywords map[string]b
 				}
 			}
 
-			return nil, storeFailed(err)
+			return nil, placementFailed(err, "email_create")
 		}
 
 		stored = append(stored, placed(t.byID[id].Name, copied)...)

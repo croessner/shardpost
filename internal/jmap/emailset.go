@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 )
 
@@ -621,7 +622,7 @@ func applyBoxes(sess *session, t *tree, f *found, target map[string]bool) ([]pla
 
 		moved, err := sess.user.Move(src[0].mailbox, metas, t.byID[add[0]].Name)
 		if err != nil {
-			return nil, storeFailed(err)
+			return nil, placementFailed(err, "email_set")
 		}
 
 		byBox[add[0]] = placed(t.byID[add[0]].Name, moved)
@@ -638,7 +639,7 @@ func applyBoxes(sess *session, t *tree, f *found, target map[string]bool) ([]pla
 
 		copied, err := sess.user.Copy([]model.Meta{src}, t.byID[id].Name)
 		if err != nil {
-			return nil, storeFailed(err)
+			return nil, placementFailed(err, "email_set")
 		}
 
 		byBox[id] = placed(t.byID[id].Name, copied)
@@ -926,7 +927,33 @@ func storeFailed(err error) *setError {
 		return limitFailed(err)
 	}
 
+	if errors.Is(err, model.ErrMailboxLocked) {
+		// A mailbox_delete job is about to remove the mailbox (stage
+		// B17): the keywords or the destruction are refused, not
+		// failed by the server.
+		metrics.MailboxLockRefusals.WithLabelValues("jmap", "email_set").Inc()
+
+		return &setError{Type: setForbidden, Description: descMailboxDeleting}
+	}
+
 	return &setError{Type: setServerFail, Description: err.Error()}
+}
+
+// descMailboxDeleting is the description of a refusal because of a
+// mailbox lock.
+const descMailboxDeleting = "the mailbox is being deleted"
+
+// placementFailed maps a store error of a creation, copy or import onto
+// the /set error: a mailbox of mailboxIds that is being deleted makes
+// mailboxIds invalid (RFC 8621 4.6), everything else is storeFailed.
+func placementFailed(err error, op string) *setError {
+	if errors.Is(err, model.ErrMailboxLocked) {
+		metrics.MailboxLockRefusals.WithLabelValues("jmap", op).Inc()
+
+		return &setError{Type: setInvalidProperties, Properties: []string{propMailboxIDs}, Description: descMailboxDeleting}
+	}
+
+	return storeFailed(err)
 }
 
 // limitFailed maps a per-account limit (model.Limits) onto a set error:
