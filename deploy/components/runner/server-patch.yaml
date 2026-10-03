@@ -1,0 +1,17 @@
+# The servers become front-ends: no background worker runs in them
+# (workers.run false, which takes precedence over
+# jmap.submission.delayed.worker). Set through the environment, not the
+# configmap, so that a way back to an image before 0.53.0 does not break
+# on an unknown key.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: WORKERS_RUN
+              value: "false"

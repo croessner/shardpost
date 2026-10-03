@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"shardpost/internal/config"
 	"shardpost/internal/jobs"
+	"shardpost/internal/learnindex"
 	"shardpost/internal/logging"
 	"strings"
 	"sync/atomic"
@@ -127,6 +128,9 @@ const (
 	commandScrubSweep = "scrub --sweep"
 	commandCheck      = "check"
 	commandPush       = "push"
+	// commandRunner runs the background workers without listeners
+	// ("shardpost runner", stage B18b).
+	commandRunner = "runner"
 	// commandBackfillAccounts fills the account directory and repairs it
 	// ("shardpost index backfill accounts [--restart]").
 	commandBackfillAccounts = "index backfill accounts"
@@ -209,16 +213,17 @@ func run(log *slog.Logger, settings *config.Config, command string) error {
 	}
 }
 
-// watchPlacement makes a server and the push worker check the placement
-// of the store's own namespaces every minute: a contradiction read
-// positively (a migration began, the system pool was withdrawn) turns
-// readiness off, cancels the run (the server drains) and is reported on
-// the returned channel, so that the process ends with an error. The
-// short-lived commands check it once, when the store opens.
+// watchPlacement makes a server, the push worker and the job runner
+// check the placement of the store's own namespaces every minute: a
+// contradiction read positively (a migration began, the system pool was
+// withdrawn) turns readiness off, cancels the run (the server drains)
+// and is reported on the returned channel, so that the process ends
+// with an error. The short-lived commands check it once, when the store
+// opens.
 func watchPlacement(cfg *cephstore.Config, command string, cancel func()) <-chan error {
 	lost := make(chan error, 1)
 
-	if command != commandServe && command != commandPush {
+	if command != commandServe && command != commandPush && command != commandRunner {
 		return lost
 	}
 
@@ -269,6 +274,16 @@ func dispatch(ctx context.Context, log *slog.Logger, settings *config.Config, co
 		})
 	}
 
+	// "shardpost runner" runs the background workers without listeners.
+	if command == commandRunner {
+		return runRunner(ctx, log, settings, store, programs)
+	}
+
+	// "shardpost runner" runs the background workers without listeners.
+	if command == commandRunner {
+		return runRunner(ctx, log, settings, store, programs)
+	}
+
 	logFTSLayout(log, settings, store)
 
 	return serve(ctx, log, settings, store, programs, quotaSvc)
@@ -283,7 +298,7 @@ func registered(ctx context.Context, log *slog.Logger, store *cephstore.Store, r
 func registeredWith(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string,
 	status func() (partitions, watched int), fn func() error,
 ) error {
-	_, stop, err := startRegistration(ctx, log, store, role, status)
+	_, stop, err := startRegistration(ctx, log, store, role, status, nil)
 	if err != nil {
 		return err
 	}
@@ -430,30 +445,16 @@ func certConfig(log *slog.Logger, cert, key string, settings *config.Config) (*t
 
 // newIMAPSieve builds the IMAPSieve engine and, when enabled, starts the
 // learning worker. The returned function stops the worker and waits for it.
-func newIMAPSieve(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store,
-	programs *extprograms.Runner, sieveCfg map[string]string,
-) (*imapsieve.Engine, func(), error) {
+func newIMAPSieve(log *slog.Logger, settings *config.Config, store *cephstore.Store, programs *extprograms.Runner,
+	sieveCfg map[string]string, learner *imapsieve.LearningWorker,
+) *imapsieve.Engine {
 	imapSieve := imapsieve.New(settings.IMAPSieve, storeAdapter{store}, log)
-	stopWorker := func() {}
-
 	imapSieve.Programs = programs
 
-	if settings.IMAPSieve.Enabled && settings.IMAPSieve.Learning.Enabled {
-		queue, err := store.LearningQueue()
-		if err != nil {
-			return nil, nil, fmt.Errorf("learning queue: %w", err)
-		}
-
-		queue.Mode() // logs at startup when read mode waits for the backfill
-
-		worker := imapsieve.NewLearningWorker(settings.IMAPSieve.Learning, queue, programs)
-		imapSieve.Learner = worker
-		workerCtx, workerCancel := context.WithCancel(ctx)
-
-		workerDone := make(chan struct{})
-		go func() { defer close(workerDone); worker.Run(workerCtx) }()
-
-		stopWorker = func() { workerCancel(); <-workerDone }
+	// The learner enqueues and prepares; whether this process also runs
+	// the queue is the workers' business (startLearning).
+	if learner != nil {
+		imapSieve.Learner = learner
 	}
 
 	imapSieve.Sender = &outbound.Relay{Addr: settings.SMTP.Addr, HELO: settings.SMTP.Helo, StartTLS: settings.SMTP.Starttls, Implicit: settings.SMTP.TLS, User: settings.SMTP.User, Password: settings.SMTP.Password, ServerName: settings.SMTP.ServerName, Timeout: time.Duration(settings.IMAPSieve.TimeoutMS) * time.Millisecond}
@@ -461,7 +462,7 @@ func newIMAPSieve(ctx context.Context, log *slog.Logger, settings *config.Config
 	imapSieve.SharedPrefix = settings.Server.SharedPrefix
 	imapSieve.SieveConfig = sieveCfg
 
-	return imapSieve, stopWorker, nil
+	return imapSieve
 }
 
 // autocreate maps the configured mailboxes to what the IMAP server
@@ -556,6 +557,11 @@ type servers struct {
 	jmapFront *jmap.Server
 	// jmapKV is the admin store the JMAP push subscriptions are kept in.
 	jmapKV *cephstore.AdminKV
+	// jobs is the job manager of the admin API (nil without the job
+	// system), learning the learning queue it administers; both are the
+	// background's (startBackground).
+	jobs     *jobs.Manager
+	learning *learnindex.Queue
 	// kv is the admin store of the server registration, the full-text
 	// layout mark and the admin API (open for the server's lifetime).
 	kv *cephstore.AdminKV
@@ -617,7 +623,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	defer bg.stop()
 
 	srv := newServers(log, settings, store, authn, tlsCfg, bg.imapSieve, programs, sieveCfg)
-	srv.sendq, srv.kv = bg.sendq, bg.kv
+	srv.sendq, srv.kv, srv.jobs, srv.learning = bg.sendq, bg.kv, bg.jobs, bg.learning
 
 	logRelay(log, settings)
 
@@ -696,7 +702,7 @@ func registrationInstance(role string) string {
 // heartbeat, records the orderly end and closes the admin store; serve
 // defers it, so all of it happens before the store closes.
 func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.Store, role string,
-	status func() (partitions, watched int),
+	status func() (partitions, watched int), workers *bool,
 ) (*cephstore.AdminKV, func(), error) {
 	pool, err := store.SystemPool()
 	if err != nil {
@@ -709,7 +715,7 @@ func startRegistration(ctx context.Context, log *slog.Logger, store *cephstore.S
 	}
 
 	reg := jobs.Registration{Instance: registrationInstance(role), Version: version.Version, Role: role, SystemPool: pool,
-		StartedAt: processStart, Status: status}
+		StartedAt: processStart, Status: status, Workers: workers}
 	// The heartbeat goes on until the returned function is called, not
 	// until the signal: a server that drains still writes.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))

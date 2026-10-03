@@ -579,6 +579,18 @@ func (s *Store) runRotateHooks() {
 	}
 }
 
+// LockHolders is the number of holders of the cls_lock name on oid in
+// the view's index context (a diagnostic; the worker locks have one or
+// none).
+func (u *User) LockHolders(oid, name string) (int, error) {
+	info, err := u.idx.ListLockers(oid, name)
+	if err != nil {
+		return 0, err
+	}
+
+	return info.NumLockers, nil
+}
+
 // Cluster is the fsid the directory records for new entries.
 func (s *Store) Cluster() string {
 	s.mu.RLock()

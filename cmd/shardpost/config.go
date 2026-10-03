@@ -26,7 +26,7 @@ func loadConfig(args []string) (*config.Config, string, error) {
 			}
 
 			path = args[i]
-		case commandScrub, commandPush, flagBatch, flagSweep, flagRepair, flagRestart:
+		case commandScrub, commandPush, commandRunner, flagBatch, flagSweep, flagRepair, flagRestart:
 			var err error
 			if command, err = runCommand(command, args[i]); err != nil {
 				return nil, "", err
@@ -51,9 +51,20 @@ func loadConfig(args []string) (*config.Config, string, error) {
 		}
 	}
 
-	c, err := config.Load(path)
+	c, err := loadFor(command, path)
 
 	return c, command, err
+}
+
+// loadFor loads the configuration for a command: the runner reads the
+// servers' configuration without its authentication secrets
+// (config.LoadRunner).
+func loadFor(command, path string) (*config.Config, error) {
+	if command == commandRunner {
+		return config.LoadRunner(path)
+	}
+
+	return config.Load(path)
 }
 
 // Flags of scrub: --batch submits the batch job (commandScrubBatch),
@@ -67,7 +78,8 @@ const (
 	flagRestart = "--restart"
 )
 
-// runCommand applies a command word: scrub, push, or a flag of scrub.
+// runCommand applies a command word: scrub, push, runner, or a flag of
+// scrub.
 func runCommand(command, arg string) (string, error) {
 	switch arg {
 	case flagBatch, flagSweep:

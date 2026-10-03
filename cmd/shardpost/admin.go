@@ -32,18 +32,16 @@ type adminServers struct {
 	// api is the handler behind them; its import reshard runs stop at
 	// shutdown, before the store closes.
 	api *admin.Server
-
-	// jobs is the maintenance job runner (nil when disabled).
-	jobs      *jobs.Manager
-	jobsKV    *cephstore.AdminKV
-	jobsStop  context.CancelFunc
-	jobsEnded chan struct{}
 }
 
 // newAdminServers builds the admin API listeners from the configuration;
 // nothing is opened when neither the socket nor the TLS address is set.
+// The job manager and the learning queue are the background's (the job
+// system runs there, or in a runner pod); the API submits, lists and
+// cancels through them.
 func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authenticator, deliverer *delivery.Service, store *cephstore.Store,
 	notices *sharenotice.Recorder, flushLog *auth.FlushLog, sendq *sendqueue.Service, kv *cephstore.AdminKV,
+	jobsMgr *jobs.Manager, learning *learnindex.Queue,
 ) (*adminServers, error) {
 	c := settings.Admin
 	a := &adminServers{}
@@ -53,19 +51,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	}
 
 	clients, scopes, all := adminClients(c.Clients)
-	importer := importStore{store}
 	instance, _ := os.Hostname()
-
-	learning, err := store.LearningQueue()
-	if err != nil {
-		return nil, fmt.Errorf("learning queue: %w", err)
-	}
-
-	if settings.Jobs.Enabled {
-		if err := a.newJobs(log, settings, store, importer, instance, learning, sendq); err != nil {
-			return nil, err
-		}
-	}
 
 	// A typed nil would not compare equal to nil in the interface.
 	var flusher admin.AuthFlusher
@@ -73,7 +59,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		flusher = flushLog
 	}
 
-	s := admin.New(adminOptions(log, settings, authn, deliverer, store, notices, flusher, sendq, kv, a.jobs, learning, clients, scopes, all, instance))
+	s := admin.New(adminOptions(log, settings, authn, deliverer, store, notices, flusher, sendq, kv, jobsMgr, learning, clients, scopes, all, instance))
 	a.api = s
 
 	if c.Addr != "" {
@@ -150,24 +136,28 @@ func adminClients(cs []config.AdminClient) (clients, scopes map[string][]string,
 	return clients, scopes, all
 }
 
-// newJobs builds the maintenance job system (roadmap 8c).
-func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store *cephstore.Store, importer importStore, instance string,
-	learning *learnindex.Queue, sendq *sendqueue.Service,
-) error {
+// newJobsManager builds the maintenance job system (roadmap 8c): the
+// manager over an admin store of its own (closed by the caller after
+// the manager stopped), for a server's background or a runner pod.
+func newJobsManager(log *slog.Logger, settings *config.Config, store *cephstore.Store, learning *learnindex.Queue,
+	sendq *sendqueue.Service,
+) (*jobs.Manager, *cephstore.AdminKV, error) {
 	kv, err := store.AdminKV()
 	if err != nil {
-		return fmt.Errorf("admin store: %w", err)
+		return nil, nil, fmt.Errorf("admin store: %w", err)
 	}
 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
-	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store,
+	instance, _ := os.Hostname()
+	env := &jobs.Env{Accounts: importStore{store}, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store,
 		FTSOnline: store}
 
 	// validated with the configuration
 	win, err := settings.FTS.Window()
 	if err != nil {
-		return err
+		kv.Close()
+		return nil, nil, err
 	}
 
 	if sendq != nil {
@@ -179,14 +169,13 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 		q, lock, err := store.FTSDueQueue()
 		if err != nil {
 			kv.Close()
-			return fmt.Errorf("fts reshard queue: %w", err)
+			return nil, nil, fmt.Errorf("fts reshard queue: %w", err)
 		}
 
 		env.FTSDue = &jobs.FTSDue{Queue: q, Lock: lock}
 	}
 
-	a.jobsKV = kv
-	a.jobs = jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),
+	mgr := jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),
 		Retention: time.Duration(c.RetentionDays) * 24 * time.Hour, PlanTTL: sec(c.PlanTTLSeconds), MaxParallel: c.MaxParallel,
 		Settle: sec(c.SettleSeconds), ExpiryPoll: sec(c.ExpirySeconds), BatchParallel: c.BatchParallel,
 		ScrubParallel: settings.Scrub.Parallel, ScrubInterval: time.Duration(settings.Scrub.IntervalDays) * 24 * time.Hour,
@@ -197,7 +186,7 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 
 	warnUnbackfilled(log, kv)
 
-	return nil
+	return mgr, kv, nil
 }
 
 // warnUnbackfilled reports at startup how admin.kv_index=read is met.
@@ -216,13 +205,6 @@ func warnUnbackfilled(log *slog.Logger, kv *cephstore.AdminKV) {
 
 // start serves the configured listeners; fatal errors go to errc.
 func (a *adminServers) start(errc chan<- error) {
-	if a.jobs != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		a.jobsStop, a.jobsEnded = cancel, make(chan struct{})
-
-		go func() { a.jobs.Run(ctx); close(a.jobsEnded) }()
-	}
-
 	if a.unixSrv != nil {
 		go func() { errc <- fmt.Errorf("admin socket: %w", a.unixSrv.Serve(a.unixLn)) }()
 	}
@@ -233,20 +215,10 @@ func (a *adminServers) start(errc chan<- error) {
 	}
 }
 
-// shutdown stops accepting and waits for running requests until ctx ends;
-// running jobs are handed over to the other servers.
+// shutdown stops accepting and waits for running requests until ctx ends
+// (the job runner, if this process runs one, stops with the background
+// and hands its jobs over).
 func (a *adminServers) shutdown(ctx context.Context) {
-	if a.jobsStop != nil {
-		a.jobsStop()
-
-		select {
-		case <-a.jobsEnded:
-		case <-ctx.Done():
-		}
-
-		a.jobsKV.Close()
-	}
-
 	for _, srv := range []*http.Server{a.unixSrv, a.tlsSrv} {
 		if srv != nil {
 			_ = srv.Shutdown(ctx)

@@ -1,0 +1,132 @@
+# The job runners: the background workers without listeners (stage
+# B18b). Four pods for a large cluster (up to eight), with
+# jobs.max_parallel 8 each through JOBS_MAX_PARALLEL; the real bounds
+# are cluster-wide anyway (fts.build_max_running, the account locks, the
+# batch fan-out in the pod). No HPA on CPU: jobs come in bursts, and a
+# scale-down in the middle of a batch costs a hand-over. A runner that
+# ends hands its jobs over (release plus notify) within
+# terminationGracePeriodSeconds, and its delayed submission partitions
+# with a notify that names them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardpost-runner
+  namespace: shardpost
+  labels:
+    app.kubernetes.io/name: shardpost-runner
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shardpost-runner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: shardpost-server
+      automountServiceAccountToken: true # needed to fetch the cephx key from Rook
+      # Running jobs are handed over (release); running learning jobs get
+      # imapsieve.learning.shutdown_seconds (10).
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shardpost-runner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 167
+        runAsGroup: 167
+        fsGroup: 167
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runner
+          image: docker.io/chrroessner/shardpost:0.51.0@sha256:2c7eaf5c224afb7c161c2e53ae3d6bdf6ffffbd1986031b0d090d8c057d22b66
+          imagePullPolicy: IfNotPresent
+          args: ["runner"]
+          env:
+            - name: SHARDPOST_CONFIG
+              value: /etc/shardpost/server.yaml
+            - name: CEPH_USER
+              value: shardpost
+            - name: CEPH_INDEX_POOL
+              value: shardpost-index
+            - name: CEPH_DATA_POOL
+              value: shardpost-data
+            # ceph.system_pool: the same as the servers' (the configmap or
+            # this variable, which wins over it).
+            - name: CEPH_SYSTEM_POOL
+              value: ""
+            - name: ROOK_NAMESPACE
+              value: rook-ceph
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: KEY_POLL_SECONDS
+              value: "60"
+            # The jobs one runner runs at once (jobs.max_parallel; the
+            # configmap's value would reach the front-ends as well, where it
+            # is without effect under WORKERS_RUN=false).
+            - name: JOBS_MAX_PARALLEL
+              value: "8"
+            # imapsieve.learning.concurrency 8 and the learning programs'
+            # max_parallel of at least 8 belong into the configmap once every
+            # pod runs 0.53.0 (an older image refuses an unknown key).
+            - name: GOMEMLIMIT
+              value: "1800MiB"
+            - name: MALLOC_ARENA_MAX
+              value: "2"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: server-config
+              mountPath: /etc/shardpost
+              readOnly: true
+            - name: learning
+              mountPath: /run/secrets/learning
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: server-config
+          configMap:
+            name: shardpost-server-config
+        - name: learning
+          secret:
+            secretName: shardpost-learning
+            defaultMode: 0440
+            optional: true

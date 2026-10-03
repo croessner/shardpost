@@ -33,10 +33,25 @@ The actual store types and adapters are in
 [memstore.go](../../internal/memstore/memstore.go) and
 [main.go](../../cmd/shardpost/main.go).
 
+## Processes
+
+One image, three long-running commands: `shardpost serve` is the server
+with every protocol listener, the admin API and — with `workers.run`
+(the default) — the background workers; with `workers.run: false` it is
+a front-end that keeps the APIs and the writers of the queues and runs
+no worker. `shardpost runner` (0.53.0) is the background workers without
+listeners: the job runner with the expiry and `fts_due` workers, the
+upload expiry, the delayed submission worker and the learning worker,
+registered with the role `runner`. `shardpost push` (0.52.0, partitioned)
+is the JMAP push worker, a deployment of its own. The short-lived
+commands (scrub, backfills, the system tools) register for their run.
+
 ## Startup and shutdown
 
 1. `loadConfig` selects the file and the subcommand; `config.Load` merges
-   defaults, YAML and explicitly set environment values and validates them.
+   defaults, YAML and explicitly set environment values and validates them
+   (`config.LoadRunner` for the runner leaves the authentication secrets
+   unread).
 2. Once the configuration is valid, the JSON logger is set up with the chosen
    level. `config check` ends here without opening any services.
 3. `run` sets up signal handling and telemetry. Ceph access comes from the

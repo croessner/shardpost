@@ -1,0 +1,12 @@
+# One runner may be down at a time (a node drain): the others take its
+# leases and its jobs.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shardpost-runner
+  namespace: shardpost
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-runner

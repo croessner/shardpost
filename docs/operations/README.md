@@ -174,6 +174,81 @@ the future: the marker of the partitioned pods counts like the lease of
 the single one, so the runbook of the migration ("push to 0, exit 2
 right after is normal") holds unchanged.
 
+## Job runners
+
+Since 0.53.0 the background workers of the servers — the job runner
+with the expiry and `fts_due` workers, the upload expiry, the delayed
+submission worker and the learning worker — can run in pods of their
+own: `shardpost runner` (role `runner`), component
+`deploy/components/runner` (four pods, up to eight, a disruption budget
+of one, a network policy that admits the health and metrics port alone).
+The servers then run with `WORKERS_RUN=false` and are front-ends: they
+keep the jobs API, the registration, the auth flush and every writer of
+the queues ([configuration](../configuration.md#background-workers-workersrun)).
+The push workers stay a deployment of their own (another egress, the
+VAPID secret, a scale of their own). croessner keeps its two combined
+pods and no runner: with two pods a third brings no relief, and a single
+runner would be a new single point. The separated topology is checked
+with `make test-docker` and a time-boxed smoke test.
+
+**What the runner is.** It reads the servers' configmap and the learning
+Secret, needs no TLS, VAPID or Nauthilus secrets (its load leaves the
+authentication secrets unread), opens no protocol listener and no admin
+listener, and registers with the role `runner`. Diagnosis runs through a
+server pod as before: `kubectl exec ... shardpostctl job list`,
+`shardpostctl server list` (the runners' registrations show there, with
+`WORKERS true` on combined servers and `false` on front-ends). It checks
+the placement of the store's own namespaces every minute like a server
+and drains when it is lost. Its termination grace period is 60 s: jobs
+are handed over (`event=job_release`), running learning jobs get
+`imapsieve.learning.shutdown_seconds`, and its delayed submission
+partitions are named in a notify so that another worker takes them at
+once instead of at its next poll.
+
+**Switching an existing cluster.** First apply the `runner` component
+(two to four pods): the runners take the leases beside the servers;
+nothing moves yet. Then the servers roll out with `WORKERS_RUN=false`:
+each old pod hands its jobs over (release plus notify, the runners take
+them at once), the leases of the expiry, `fts_due` and upload workers go
+to the runners at their next cadence (within a minute), the learning
+lease after `lock_retry_seconds`, and the submission partitions at once
+(the notify names them). Nothing is lost: the queues are durable, and a
+delayed submission goes at most one poll late. A new cluster starts
+separated. **The way back** is the reverse: remove `WORKERS_RUN` from
+the servers (they take the workers up again), then scale the runner
+deployment to 0. Always "able to take first, then give up".
+
+**Mixed versions and the way back of 0.53.0.** `--pods` of `shardpostctl
+fts layout3|dictfilter|online enable` counts servers and runners since
+0.53.0. A server before 0.53.0 that answers the check counts runners
+not: it reports too few and refuses, the safe side; so runners come
+only when every server has 0.53.0. After an image rollback of the
+servers `--pods` counts servers alone again, and an enable that was
+computed with runners refuses: determine `n` anew (front-ends alone).
+Delete the runner deployment before the rollback: an older image does
+not know the command `runner` and refuses to start.
+`imapsieve.learning.concurrency` goes into the configmap only once every
+pod runs 0.53.0, and out of it before a rollback.
+
+**Sizing.** `jobs.max_parallel` 8 per runner through `JOBS_MAX_PARALLEL`
+(the configmap's value would reach the front-ends, where it is without
+effect); the real bounds stay cluster-wide (`fts.build_max_running`, the
+account locks, the batch fan-out in the pod). Whether the slots suffice
+shows `imapceph_job_claim_wait_seconds`. The learning programs'
+`extprograms` `max_parallel` has to reach `imapsieve.learning.concurrency`
+(8 on a large cluster), or the program phase bounds the jobs; the server
+warns at startup. Delayed sending with 16 partitions keeps
+`max_partitions` 0, so that a failed runner's partitions are taken by
+the others.
+
+**HPA.** Front-ends may scale on CPU once `workers.run` is false (their
+CPU follows the sessions); a scale-down waits for the drain
+(`DRAIN_SECONDS`). Runners get no HPA on CPU: jobs come in bursts, and a
+scale-down in the middle of a batch costs a hand-over; a later scaling
+on backlog (due jobs, `imap_imapsieve_learning_lag_seconds`) with a
+stabilization of 15 minutes or more is possible. Push gets no HPA either
+(see [Push partitions](#push-partitions)).
+
 ## Delayed submissions
 
 Delayed JMAP sending (0.43.0, [JMAP](../jmap.md#delayed-sending),
@@ -181,7 +256,9 @@ Delayed JMAP sending (0.43.0, [JMAP](../jmap.md#delayed-sending),
 `jmap.submission.delayed.max_delay_seconds` is set. It needs the admin
 store indexes (`admin.kv_index` `write` or `read`) and a relay; every
 server with a relay runs the worker unless
-`jmap.submission.delayed.worker` is `false`.
+`jmap.submission.delayed.worker` is `false` or the server is a front-end
+(`workers.run: false`, see [Job runners](#job-runners)), in which case
+the runners send.
 
 **Rollout.** Roll the release out to every server first, then set
 `max_delay_seconds`. A server before 0.43.0 refuses `HOLDFOR` and
@@ -230,8 +307,9 @@ hold are overdue` show it.
 **Stopping a server.** A server that stops starts no new conversation,
 waits for the running ones (up to the relay's timeouts, ten minutes for
 its answer to a message; give the pod a grace period to match, or
-accept the next point), and gives its partition leases back; another
-server takes them on its next poll. A server that is killed while
+accept the next point), and gives its partition leases back with a
+notify that names them; another worker takes them at once (before
+0.53.0 at its next poll). A server that is killed while
 sending (SIGKILL) is safe for at most once: the submission ends as
 unknown after the sending timeout and is not sent again. A server that
 dies keeps its leases until the cls_lock runs out (three minutes).
