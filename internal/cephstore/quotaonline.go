@@ -721,8 +721,8 @@ func (r *quotaRecount) noteRemovals(b *listedMailbox, modseq uint64) error {
 }
 
 // noteIntents reads the removal intents of shard 0 once: an intent with
-// d and without f of an entry not seen counts; the UIDs only announced
-// (no d) are returned.
+// d and without f of an entry not seen and not marked by this run
+// counts; the UIDs only announced (no d) are returned.
 func (r *quotaRecount) noteIntents(b *listedMailbox) (map[uint32]bool, error) {
 	removals, err := r.u.removeIntents(b.id)
 	if err != nil {
@@ -733,7 +733,9 @@ func (r *quotaRecount) noteIntents(b *listedMailbox) (map[uint32]bool, error) {
 
 	for k, ri := range removals {
 		uid := uidOfKey(strings.Replace(k, keyRemovePrefix, keyMsgPrefix, 1))
-		if _, ok := b.seen[uid]; ok {
+		if _, ok := b.seen[uid]; ok || (ri.QuotaTag != "" && ri.QuotaTag == r.h) {
+			// Seen, or captured on arrival by this run: its arrival is
+			// in the captured sum already (as with a marked entry).
 			continue
 		}
 

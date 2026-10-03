@@ -474,7 +474,7 @@ func tombstoneUnreleased(v []byte) bool {
 // (or needs not be) released.
 func removalValue(now int64, m *Meta, removed bool, nonce string, released bool) []byte {
 	return encode(removeIntent{Time: now, blobRef: blobRef{GUID: m.GUID, Size: m.Size, Chunks: m.Chunks},
-		Removed: removed, Nonce: nonce, Released: released})
+		Removed: removed, Nonce: nonce, Released: released, QuotaTag: m.QuotaTag})
 }
 
 // refreshRemoval returns an existing "r:" value with a fresh time and

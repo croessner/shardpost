@@ -146,6 +146,10 @@ type removeIntent struct {
 	Removed  bool   `json:"d,omitempty"`
 	Nonce    string `json:"n,omitempty"`
 	Released bool   `json:"f,omitempty"`
+	// QuotaTag is the entry's run tag (qt): an online recount leaves a
+	// removed entry it captured on arrival out of its listing, as it does
+	// with the entry itself.
+	QuotaTag string `json:"qt,omitempty"`
 }
 
 func blobIntentKey(guid string) string { return regBlobPrefix + guid }
