@@ -19,6 +19,7 @@ import (
 //	fts layout3 list [-verify] [-after a] [-limit n] [-json]  role diagnose, scope of all accounts
 //	fts layout show [-json] <account>                  role diagnose
 //	fts layout clear [-json] <account>                 role repair
+//	fts stats [-exact] [-parallel n] [-classes] [-json] <account>  role diagnose (ftsstats.go)
 
 // Verbs and labels shared with other commands.
 const (
@@ -31,7 +32,7 @@ const (
 const (
 	cmdFTS   = "fts"
 	ftsUsage = "usage: shardpostctl fts layout3 status|enable -pods n [-force]|disable|list [-verify] [-after a] [-limit n] [-json] | " +
-		"fts layout show|clear [-json] <account>"
+		"fts layout show|clear [-json] <account> | fts stats [-exact] [-parallel n] [-classes] [-json] <account>"
 )
 
 // ftsArgs are the flags of the fts commands.
@@ -44,6 +45,10 @@ type ftsArgs struct {
 
 // ftsCmd dispatches the fts commands.
 func ftsCmd(client *adminapi.ClientWithResponses, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "stats" {
+		return ftsStatsCmd(client, args[1:], stdout, stderr)
+	}
+
 	if len(args) < 2 {
 		sayln(stderr, ftsUsage)
 		return exUsage
@@ -188,12 +193,51 @@ func layout3List(ctx context.Context, c *adminapi.ClientWithResponses, a ftsArgs
 			sayln(stdout, layoutAccountLine(it))
 		}
 
+		if a.verify {
+			if account, d := largestDict(page.Items); d > 0 {
+				sayf(stdout, "largest D on this page: %d (%s)\n", d, account)
+			}
+		}
+
 		if page.Next != nil {
 			sayf(stdout, "more: -after %s\n", *page.Next)
 		}
 
 		return exOK
 	})
+}
+
+// largestDict is the account with the most dictionary objects among
+// verified items and their number (0: none). Before a way back to a
+// version before 0.49.0, fts.shards_max must be at least the largest D
+// in the store, or that version shrinks the dictionary (temp/13 §5.4).
+func largestDict(items []adminapi.FTSLayoutAccount) (string, int) {
+	var (
+		account string
+		top     int
+	)
+
+	for _, it := range items {
+		if it.Layout == nil {
+			continue
+		}
+
+		for _, sh := range append([]adminapi.FTSLayoutShape{it.Layout.Current}, derefShapes(it.Layout.Next)...) {
+			if sh.D != nil && *sh.D > top {
+				account, top = it.Account, *sh.D
+			}
+		}
+	}
+
+	return account, top
+}
+
+func derefShapes(s *adminapi.FTSLayoutShape) []adminapi.FTSLayoutShape {
+	if s == nil {
+		return nil
+	}
+
+	return []adminapi.FTSLayoutShape{*s}
 }
 
 // layoutAccountLine is one account of the presence index.

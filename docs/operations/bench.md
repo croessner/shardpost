@@ -321,7 +321,11 @@ higher `--messages`; to measure a part of many accounts, use
   delivery. Every probe account answers `K` queries from a fixed set
   drawn from the generator's vocabulary (whole words, word starts and
   inner parts of 3 to 6 characters; frequent and rare words; `TEXT`,
-  `BODY`, `SUBJECT`, `FROM`), each in a view of its own: the candidates
+  `BODY`, `SUBJECT`, `FROM`; with `--corpus ids` every second query is
+  an identifier query instead — the reference of one of the account's
+  first five messages whole, its start or an inner part, `id-whole`,
+  `id-start`, `id-inner` — and `latency_by_kind` gives the latency per
+  kind), each in a view of its own: the candidates
   of the IMAP substring search (`SearchCandidates`, `TEXT` as header
   and body) and the word search (`SearchFields`). `ops_per_call` and
   the latency are per query, the view's first check of the index
@@ -363,6 +367,61 @@ The operations are counted in the bench rather than with the
 `imapceph_rados_op_seconds` histogram: that histogram times four store
 paths only (header read and CAS, entry list and get), so its `_count`
 cannot add up to the operations of a delivery.
+
+## The identifier corpus and the dictionary measurement
+
+The plain corpus is natural vocabulary only, and its dictionary grows
+sublinearly. Real accounts grow by about 280 dictionary keys per message
+(the largest account on croessner, 36 000 messages), because
+identifiers — tracking tokens, hashes, base64, the signatures of
+forwarded and bounced headers — are new in every message. The
+measurement of the dictionary (temp/13 §7) therefore runs on
+`--corpus ids` and `--corpus ids,nosig`, never on real accounts:
+
+- `populate --corpus ids` and `populate --corpus ids,nosig` with the same
+  seed fill two sets of accounts with the same messages, the second
+  without the signature and trace fields of the attached headers.
+  Their difference is what those fields cost.
+- `shardpostctl fts stats -classes <account>` counts the terms of a test
+  account by field, class (letters, digits, mixed) and length, and
+  projects the dictionary keys for every identifier bound n from 13 to
+  40: what the dictionary would hold if a body term with letters and
+  digits of at least n runes had one key. It works only for the
+  accounts in `fts.stats_test_accounts` (for example `bench-*`); on
+  real accounts `fts stats` gives key counts only.
+- The corpus is calibrated by counts only: an account of 12 000 messages
+  has about 50 terms and 325 dictionary keys per message with `ids`,
+  45 and 230 with `ids,nosig`.
+
+### Filling a test account through the production path
+
+`populate` writes into the bench pools. To measure the delivery path of
+the production cluster — director or LMTP listener, recipient check,
+quota, Sieve, push, full-text index — `shardpost-load` delivers the same
+generated messages over LMTP into one test account (for example
+`rbdpoc2@exampleserver.de`):
+
+```sh
+shardpost-load -lmtp <lmtp host>:24 -corpus ids -rcpt rbdpoc2@exampleserver.de \
+  -count 36000 -seed 1 -rate 20 -parallel 4
+```
+
+Message `n` is byte for byte what `populate` generates for an account of
+that name with the same seed and corpus. A failed message is reported
+with its number; `-first n` continues a run. Before the run:
+
+- check (or raise) the account's quota: 36 000 messages of the default
+  sizes are about 1.8 GB;
+- an empty Sieve script, or one without redirects and vacation;
+- no push subscriptions on the account;
+- choose the rate (20 per second fill 36 000 messages in about 30
+  minutes) and a quiet time;
+- name the account in `fts.stats_test_accounts` of the servers, so that
+  `fts stats -classes` may classify it afterwards.
+
+The import through the admin API (`shardpostctl migrate`, batches with
+one index write each) is faster and skips Sieve, but does not measure
+the delivery path; use it only when LMTP takes too long.
 
 ## RocksDB and onode caches
 

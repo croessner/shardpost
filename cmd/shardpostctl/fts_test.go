@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"shardpost/internal/admin"
+	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
@@ -105,5 +106,66 @@ func TestFTSLayoutCommands(t *testing.T) {
 
 	if code, out, _ := call(socket, "", "fts", "layout3", "list"); code != exOK || !strings.Contains(out, "alice  since 2026-10-01") {
 		t.Errorf("list: %d %q", code, out)
+	}
+}
+
+// TestFTSStatsCommand (temp/13 §7.1): the key counts of any account;
+// classes only for a test account, otherwise exit 77; no term printed.
+func TestFTSStatsCommand(t *testing.T) {
+	socket := serveFilled(t, admin.RoleDiagnose)
+
+	for _, c := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"fts", "stats", "alice"}, []string{"dict_keys", "per message"}},
+		{[]string{"fts", "stats", "-classes", "alice"}, []string{"identifier bound", "letters"}},
+		{[]string{"fts", "stats", "-classes", "-exact", "-json", "alice"}, []string{`"by_ident_min_runes"`}},
+	} {
+		code, out, errOut := call(socket, "", c.args...)
+		if code != exOK || !containsAll(out, c.want) || strings.Contains(out, "body") {
+			t.Errorf("%v: %d %s %s (no term of the account may be printed)", c.args, code, out, errOut)
+		}
+	}
+
+	if code, _, errOut := call(socket, "", "fts", "stats", "-classes", "bob"); code != exNoPerm || !strings.Contains(errOut, "fts.stats_test_accounts") {
+		t.Errorf("classes of a real account: %d %s", code, errOut)
+	}
+
+	for _, args := range [][]string{{"fts", "stats"}, {"fts", "stats", "-parallel", "17", "-exact", "alice"}, {"fts", "stats", "a", "b"}} {
+		if code, _, _ := call(socket, "", args...); code != exUsage {
+			t.Errorf("%v: exit %d", args, code)
+		}
+	}
+}
+
+func containsAll(s string, parts []string) bool {
+	for _, p := range parts {
+		if !strings.Contains(s, p) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// TestLargestDict (temp/13 §5.4): list -verify names the account with
+// the most dictionary objects on the page, the conversion target
+// included.
+func TestLargestDict(t *testing.T) {
+	n := func(v int) *int { return &v }
+	items := []adminapi.FTSLayoutAccount{
+		{Account: "a", Layout: &adminapi.FTSLayoutState{Current: adminapi.FTSLayoutShape{Layout: 3, S: n(32), D: n(128), H: n(1)}}},
+		{Account: "b", Layout: &adminapi.FTSLayoutState{Current: adminapi.FTSLayoutShape{Layout: 3, S: n(1), D: n(1), H: n(1)},
+			Next: &adminapi.FTSLayoutShape{Layout: 3, S: n(1), D: n(256), H: n(1)}}},
+		{Account: "c"},
+	}
+
+	if account, d := largestDict(items); account != "b" || d != 256 {
+		t.Errorf("largest %s %d", account, d)
+	}
+
+	if _, d := largestDict(items[2:]); d != 0 {
+		t.Errorf("without layouts %d", d)
 	}
 }

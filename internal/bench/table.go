@@ -41,7 +41,7 @@ func WritePopulateTable(w io.Writer, r *PopulateReport) error {
 	p.table(0, func(t *printer) {
 		t.f("accounts\t%s%06d .. %s%06d (%d, %d already complete, %d failed)\n",
 			r.Prefix, r.First, r.Prefix, r.First+r.Accounts-1, r.Accounts, r.AccountsComplete, r.AccountsFailed)
-		t.f("messages per account\t%d into %v, sizes %s, seed %d\n", r.MessagesPerAccount, r.Mailboxes, r.Sizes, r.Seed)
+		t.f("messages per account\t%d into %v, sizes %s, seed %d, corpus %s\n", r.MessagesPerAccount, r.Mailboxes, r.Sizes, r.Seed, r.Corpus)
 		t.f("deliveries\t%d (%d failed), %s in %.1f s, %.1f/s\n", r.Deliveries, r.Failures, human(r.Bytes), r.Seconds, r.PerSecond)
 		t.latency("delivery latency\t", r.Latency)
 		t.f("CAS retries\t%.0f (%.3f per delivery) by kind %v, by class %v\n",
@@ -184,6 +184,11 @@ func (p *printer) search(r *SearchReport) {
 	}
 
 	p.f("\n")
+
+	for _, kind := range sortedKeys(r.ByKind) {
+		p.latency("  latency "+kind+" ", r.ByKind[kind])
+	}
+
 	p.table(tabwriter.AlignRight, func(t *printer) {
 		t.f("  key\tkind\trare\ttext\tcandidates\tnot narrowed\twords\tfingerprint\t\n")
 

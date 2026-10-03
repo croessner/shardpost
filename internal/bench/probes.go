@@ -45,12 +45,21 @@ func ExpungeOldest(u model.User, mailbox string) error {
 }
 
 // Kinds of search queries: a whole word, the start of a word and a part
-// from inside a word (3 to 6 characters).
+// from inside a word (3 to 6 characters); with the identifier corpus
+// also an identifier (the reference of a message, 32 hex digits) as a
+// whole, its first 8 characters and 8 characters from inside it.
 const (
-	QueryWord   = "word"
-	QueryPrefix = "prefix"
-	QueryInfix  = "infix"
+	QueryWord    = "word"
+	QueryPrefix  = "prefix"
+	QueryInfix   = "infix"
+	QueryIDWhole = "id-whole"
+	QueryIDStart = "id-start"
+	QueryIDInner = "id-inner"
 )
+
+// idQueryMessages are the messages whose references the identifier
+// queries take (every account has at least these).
+const idQueryMessages = 5
 
 // IMAP search keys of the queries.
 const (
@@ -68,6 +77,9 @@ type SearchQuery struct {
 	Text string `json:"text"`
 	// Rare is set for a word drawn from the tail of the vocabulary.
 	Rare bool `json:"rare"`
+	// Msg is the message whose reference an identifier query takes; its
+	// text is resolved per account (ResolveQuery).
+	Msg int `json:"msg,omitempty"`
 }
 
 var (
@@ -99,6 +111,63 @@ func SearchQueries(k int) []SearchQuery {
 	}
 
 	return out
+}
+
+// SearchQueriesFor returns k queries for a corpus: the queries of
+// SearchQueries for the plain corpus; for the identifier corpus every
+// second query is an identifier query (whole, start, inner in turn, of
+// BODY and TEXT), the others are SearchQueries's.
+func SearchQueriesFor(k int, c Corpus) []SearchQuery {
+	if !c.IDs {
+		return SearchQueries(k)
+	}
+
+	words := SearchQueries((k + 1) / 2)
+	idKinds := []string{QueryIDWhole, QueryIDStart, QueryIDInner}
+	out := make([]SearchQuery, 0, k)
+
+	for i := range k {
+		if i%2 == 0 {
+			out = append(out, words[i/2])
+			continue
+		}
+
+		j := i / 2
+
+		key := KeyBody
+		if (j/len(idKinds))%2 == 1 {
+			key = KeyText
+		}
+
+		out = append(out, SearchQuery{Kind: idKinds[j%len(idKinds)], Key: key, Msg: j % idQueryMessages})
+	}
+
+	return out
+}
+
+// ResolveQuery gives an identifier query its text in account: the
+// reference of message q.Msg, whole or cut. Other queries are returned
+// as they are.
+func ResolveQuery(g Generator, account string, q SearchQuery) SearchQuery {
+	id := ""
+
+	switch q.Kind {
+	case QueryIDWhole, QueryIDStart, QueryIDInner:
+		id = g.RefID(account, q.Msg)
+	default:
+		return q
+	}
+
+	switch q.Kind {
+	case QueryIDStart:
+		q.Text = id[:8]
+	case QueryIDInner:
+		q.Text = id[12:20]
+	default:
+		q.Text = id
+	}
+
+	return q
 }
 
 // queryText cuts the query of a kind out of word w: 3 to 6 characters,

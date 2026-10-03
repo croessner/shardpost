@@ -7,16 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"shardpost/internal/adminapi"
+	"shardpost/internal/jobs"
 )
 
 // Maintenance jobs (roadmap 8c):
 //
-//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n] [-due-only] <kind> <account>   dry run, prints the plan
-//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n] [-due-only] <kind>   a batch of the kind over every account
+//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind> <account>   dry run, prints the plan
+//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind>   a batch of the kind over every account
 //	plan show <plan-id>
 //	apply [-wait] [-idempotency-key K] <plan-id>        run the plan as a job
 //	check [-wait] <account>                             read-only index check
@@ -26,8 +28,8 @@ import (
 // With -wait (and for job wait) the exit code is the job's outcome: 0
 // succeeded, 1 partially failed, 69 failed or cancelled.
 
-const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n] [-due-only] <kind> <account> |
-  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n] [-due-only] <kind> | plan show <plan-id> |
+const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind> <account> |
+  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
   kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, fts_layout, mailbox_name_convert,
@@ -43,7 +45,8 @@ type jobArgs struct {
 	deleted          bool
 	all, skipIdle    bool
 	dueOnly          bool
-	layout, shards   int
+	layout           int
+	shards           string
 	uids             string
 	classes, mailbox string
 	idemKey, account string
@@ -67,7 +70,7 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 	fs.BoolVar(&a.all, "all", false, "plan: a batch of the kind over every account")
 	fs.BoolVar(&a.skipIdle, "skip-idle", false, "plan -all scrub: skip the accounts unchanged since their last clean scrub")
 	fs.IntVar(&a.layout, "layout", 0, "fts_layout: the target layout (2 or 3; default the account's)")
-	fs.IntVar(&a.shards, "shards", 0, "fts_layout: forced object counts of a layout 3 target (default from the key counts)")
+	fs.StringVar(&a.shards, "shards", "", "fts_layout: forced object counts of a layout 3 target, n for all or s/d/h (default from the key counts; the caps do not apply)")
 	fs.BoolVar(&a.dueOnly, "due-only", false, "fts_layout: no change while the key counts ask for the shape the index has")
 	fs.StringVar(&a.idemKey, "idempotency-key", "", "reuse the job of an earlier identical request")
 	fs.StringVar(&a.account, "account", "", "job list: only this account")
@@ -81,7 +84,26 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 		return a, false
 	}
 
+	if err := checkShards(a.shards); err != nil {
+		sayln(stderr, "shardpostctl: -shards:", err)
+		return a, false
+	}
+
 	return a, true
+}
+
+// checkShards checks -shards: a count of 1 to 4096 or a shape s/d/h.
+func checkShards(v string) error {
+	if v == "" || strings.Contains(v, "/") {
+		_, err := jobs.ParseFTSShape(v)
+		return err
+	}
+
+	if n, err := strconv.Atoi(v); err != nil || n < 1 || n > 4096 {
+		return fmt.Errorf("%q is neither a count of 1 to 4096 nor s/d/h", v)
+	}
+
+	return nil
 }
 
 // jobsCmd dispatches plan, apply, check and job.
@@ -241,8 +263,12 @@ func layoutParams(a jobArgs, params map[string]any) {
 		params["layout"] = a.layout
 	}
 
-	if a.shards != 0 {
-		params["shards"] = a.shards
+	switch {
+	case strings.Contains(a.shards, "/"):
+		params["shape"] = a.shards
+	case a.shards != "":
+		n, _ := strconv.Atoi(a.shards) // checked by checkShards
+		params["shards"] = n
 	}
 
 	if a.dueOnly {

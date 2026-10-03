@@ -83,34 +83,45 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 		return cur.shape(), false, nil
 	}
 
-	target, err := u.reshardTarget(cur)
+	target, capped, err := u.reshardTarget(cur)
 	if err != nil {
 		return model.FTSLayoutShape{}, false, err
 	}
 
-	return target.shape(), target.s != cur.s || target.d != cur.d || target.h != cur.h, nil
+	shape := target.shape()
+	shape.Capped = capped
+
+	return shape, target.s != cur.s || target.d != cur.d || target.h != cur.h, nil
 }
 
 // reshardTarget computes the shape the counters of a layout 3
-// generation ask for (§4.6 "Ziele").
-func (u *User) reshardTarget(cur ftsLoc) (ftsLoc, error) {
+// generation ask for (temp/13 §4.6): S′ and H′ within fts.shards_max
+// from fts.shard_target_keys, D′ within fts.dict_shards_max from
+// fts.dict_target_keys. capped names the kinds a cap cut; it is only
+// reported, never counted (the writers count a generation at its cap).
+func (u *User) reshardTarget(cur ftsLoc) (ftsLoc, []string, error) {
 	terms, dict, docs, err := u.layoutCounts(cur)
 	if err != nil {
-		return ftsLoc{}, err
+		return ftsLoc{}, nil, err
 	}
 
 	z := u.ftsCfg.sizing
 	s, c1 := z.count(terms)
-	d, c2 := z.count(dict)
+	d, c2 := z.dictCount(dict)
 	h, c3 := z.count(docs)
 
-	if c1 || c2 || c3 {
-		metrics.FTSShardsCapped.Inc()
-		u.log.Warn("fts shard counts capped at fts.shards_max: objects grow beyond fts.shard_target_keys",
-			"terms", terms, "dict", dict, "docs", docs, "max", z.max)
+	var capped []string
+
+	for _, c := range []struct {
+		cut  bool
+		kind string
+	}{{c1, kindPostings}, {c2, kindDictionary}, {c3, kindHeaders}} {
+		if c.cut {
+			capped = append(capped, c.kind)
+		}
 	}
 
-	return ftsLoc{f: model.FTSLayout3, s: s, d: d, h: h}, nil
+	return ftsLoc{f: model.FTSLayout3, s: s, d: d, h: h}, capped, nil
 }
 
 // layoutCounts reads the term and dictionary key counters of the posting
@@ -217,6 +228,7 @@ func (u *User) runPhases(req model.FTSLayoutRequest, rep *model.FTSLayoutReport,
 	}
 
 	rep.Terms, rep.Dict, rep.Headers, rep.Docs = stats.terms, stats.dict, stats.headers, stats.docs
+	rep.Writes, rep.BufferKeys = stats.writes, stats.buffer
 
 	if err := u.phase6(req, src, target, stats); err != nil {
 		return err
@@ -391,11 +403,13 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 	t := ftsLoc{f: model.FTSLayout3, g: newFTSGen()}
 
 	switch {
+	case req.Shape != nil:
+		t.s, t.d, t.h = forcedCount(req.Shape.S), forcedCount(req.Shape.D), forcedCount(req.Shape.H)
 	case req.Shards > 0:
-		n := min(req.Shards, 4096)
+		n := forcedCount(req.Shards)
 		t.s, t.d, t.h = n, n, n
 	case src.v3():
-		shape, err := u.reshardTarget(src)
+		shape, _, err := u.reshardTarget(src)
 		if err != nil {
 			return t, err
 		}
@@ -412,6 +426,10 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 
 	return t, nil
 }
+
+// forcedCount is a forced object count within 1 to 4096; the caps do
+// not apply.
+func forcedCount(n int) int { return min(max(n, 1), 4096) }
 
 // liveDocCount counts the documents of the id map ("i:" keys).
 func (u *User) liveDocCount() (int, error) {
@@ -649,79 +667,12 @@ func (u *User) phase3(req model.FTSLayoutRequest, src ftsLoc) error {
 // convertStats count what P5 wrote.
 type convertStats struct {
 	terms, dict, headers, docs int64
+	// writes are the writes of the copy, buffer the most keys it held.
+	writes int64
+	buffer int
 	// nextID is the id map's next id when P5 read the documents (P6
 	// counts the documents indexed after it).
 	nextID uint64
-}
-
-// chunkWriter collects the keys of target objects and writes them in
-// pieces of at most dictWriteChunk keys, fenced.
-type chunkWriter struct {
-	u      *User
-	exists bool
-	fence  func() error
-	keys   map[string]map[string][]byte
-	sizes  map[string]int64
-}
-
-func (w *chunkWriter) add(oid, key string, v []byte) error {
-	if w.keys[oid] == nil {
-		w.keys[oid] = map[string][]byte{}
-	}
-
-	w.keys[oid][key] = v
-	w.sizes[oid]++
-
-	if len(w.keys[oid]) >= dictWriteChunk {
-		return w.flush(oid)
-	}
-
-	return nil
-}
-
-func (w *chunkWriter) flush(oid string) error {
-	set := w.keys[oid]
-	if len(set) == 0 {
-		return nil
-	}
-
-	if err := w.fence(); err != nil {
-		return err
-	}
-
-	op := rados.CreateWriteOp()
-	defer op.Release()
-
-	if w.exists {
-		op.AssertExists()
-	}
-
-	op.SetOmap(set)
-
-	if err := op.Operate(w.u.idx, oid, rados.OperationNoFlag); err != nil {
-		return fmt.Errorf("write %s: %w", oid, err)
-	}
-
-	delete(w.keys, oid)
-
-	return nil
-}
-
-func (w *chunkWriter) flushAll() error {
-	oids := make([]string, 0, len(w.keys))
-	for oid := range w.keys {
-		oids = append(oids, oid)
-	}
-
-	slices.Sort(oids)
-
-	for _, oid := range oids {
-		if err := w.flush(oid); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // phase5 builds the target from the frozen sources.
@@ -750,14 +701,24 @@ func (u *User) phase5(req model.FTSLayoutRequest, src, target ftsLoc) (convertSt
 
 	st.docs, st.nextID = int64(len(live)), next
 
+	w := u.newPieceWriter(target, req.Fence)
+	defer w.stop()
+
 	c := &copier{u: u, target: target, live: live, byGUID: byGUID, st: &st, terms: map[string]int64{}, dicts: map[string]int64{},
-		posts: newChunkWriter(u, target, req.Fence), dict: newChunkWriter(u, target, req.Fence), heads: newChunkWriter(u, target, req.Fence)}
+		posts: newChunkWriter(w), dict: newChunkWriter(w), heads: newChunkWriter(w)}
 
 	if err := c.postings(req, src); err != nil {
 		return st, err
 	}
 
 	if err := c.headers(src); err != nil {
+		return st, err
+	}
+
+	err = w.finish()
+	st.writes, st.buffer = w.writes.Load(), w.peak
+
+	if err != nil {
 		return st, err
 	}
 
@@ -798,11 +759,7 @@ func (c *copier) postings(req model.FTSLayoutRequest, src ftsLoc) error {
 		}
 	}
 
-	if err := c.posts.flushAll(); err != nil {
-		return err
-	}
-
-	return c.dict.flushAll()
+	return nil
 }
 
 // term writes one term's list and dictionary keys.
@@ -847,12 +804,7 @@ func (c *copier) headers(src ftsLoc) error {
 		}
 	}
 
-	return c.heads.flushAll()
-}
-
-// newChunkWriter is a chunkWriter into the objects of target.
-func newChunkWriter(u *User, target ftsLoc, fence func() error) *chunkWriter {
-	return &chunkWriter{u: u, exists: target.v3(), fence: fence, keys: map[string]map[string][]byte{}, sizes: map[string]int64{}}
+	return nil
 }
 
 // shardGauge records the largest object of a kind.

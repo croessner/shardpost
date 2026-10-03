@@ -1604,13 +1604,25 @@ operations of the index plus the blob read. A small account has 4
 full-text objects instead of 284; the keys are the same.
 
 <a id="full-text-reshard"></a>
-**Growth and reshard.** A posting compare-and-swap that finds more than
-1.5 × `fts.shard_target_keys` (T, 100 000) terms in its object, or more
-than that many dictionary keys per dictionary object (`!dn` · S / D),
-and an id map compare-and-swap with more than 1.5 T documents per header
-object, queue the account in `ix.fts_due` (in `~accounts`; id the
-account, generation the FNV-64 of the index generation, due now); a
-server queues a generation at most once per ten minutes. The worker
+**Growth and reshard.** Posting and header objects have the target
+T_p = `fts.shard_target_keys` and the cap `fts.shards_max` (128),
+dictionary objects the target T_d = `fts.dict_target_keys` and the cap
+`fts.dict_shards_max` (512): the dictionary has about five times as many
+keys as the postings (280 against 57 per message on the largest account
+measured), so one cap for all three either starves the dictionary or
+lets the postings fan out (0.49.0; before, `fts.shards_max` 32 applied
+to all three). A posting compare-and-swap that finds more than
+1.5 × T_p (100 000) terms in its object while S is below its cap, or
+more than 1.5 × T_d dictionary keys per dictionary object (`!dn` · S /
+D) while D is below its cap, and an id map compare-and-swap with more
+than 1.5 T_p documents per header object while H is below its cap,
+queue the account in `ix.fts_due` (in `~accounts`; id the account,
+generation the FNV-64 of the index generation, due now); a server
+queues a generation at most once per ten minutes. At a cap the trigger
+is silent: no queue entry, no job and no account lock; instead the
+writer counts `imapceph_fts_shards_capped_total{kind}` and logs a
+warning, once per generation, kind and server (a memory of 65 536
+generations without expiry, oldest out first). The worker
 `fts_due` runs with the job system on the server that holds its lease
 (`fts.auto_reshard`) and owns the entries: an entry of a purged account
 or of a generation that was replaced goes; a locked account and a job
@@ -1619,14 +1631,61 @@ otherwise it plans and applies `fts_layout {"due_only": true}` and
 remembers the job in the admin record `fts_due/<account>` (deleted with
 the account). A job that switched removes entry and record; one that
 found nothing to do (the per-object trigger and the target from the sums
-can disagree) leaves the entry six hours alone. The targets are
-S′ = 2^⌈log2(Σ`!n` / T)⌉, D′ from Σ`!dn`, H′ from `c`, each at least
-`fts.shards_min` and at most `fts.shards_max` (32). Beyond 32 × T, 3.2
-million terms or dictionary keys per account with the defaults, the
-objects grow past T (`imapceph_fts_shards_capped_total` and a log line
-say when); Ceph reports large omap objects from 200 000 keys per object
-(`osd_deep_scrub_large_omap_object_key_threshold`), 6.4 million per
-account.
+can disagree) leaves the entry six hours alone, and when it fires after
+them, the entry goes and the record (exactly that job's, changed first)
+turns idle, keeping the number of no-ops of the generation. A writer
+whose trigger still asks for a reshard then queues the account afresh,
+and the worker plans a new job; after every further no-op of the same
+generation the wait doubles, up to seven days (a skewed account below
+its cap, whose busiest object outgrew its target while the sums ask for
+the shape it has, takes the account lock less and less often). Before 0.49.0 the entry
+was moved to the same past time on every look of the worker, once a
+minute and for good, and the account was never planned again — a cap
+raised later (or real growth) needed a job by hand. The targets are
+S′ = 2^⌈log2(Σ`!n` / T_p)⌉ and H′ from `c`, each at most
+`fts.shards_max`, and D′ = 2^⌈log2(Σ`!dn` / T_d)⌉, at most
+`fts.dict_shards_max`; all at least `fts.shards_min`. `FTSLayoutDue`
+(the plan of `fts_layout`, `plan -due-only`, the import reshard) uses
+the same caps and names the kinds a cap cut (`capped` in the plan's
+target); it counts nothing. Beyond 128 × T_p, 12.8 million terms, and
+512 × T_d, 51.2 million dictionary keys per account with the defaults,
+the objects grow past their targets; Ceph reports large omap objects
+from 200 000 keys per object
+(`osd_deep_scrub_large_omap_object_key_threshold`). A fresh index is
+sized from the import hint (or, for a rebuild, the documents) with
+`estimateKeys`: linear between calibration points of the bench corpus
+up to 5000 messages (about 85 dictionary keys per message, a corpus
+without identifiers) and the largest account measured (36 246 messages,
+2 069 828 terms, 10 138 532 dictionary keys), beyond it with the slope
+of that last section (about 63.5 terms and 311 dictionary keys per
+message); between 5000 and 36 246 messages it is a bridge, not a
+measurement.
+
+A posting compare-and-swap sees the counters of one object only, so
+the trigger decides per object (`!n` > 1.5·T_p, `!dn` · S / D >
+1.5·T_d), while the plan of `fts_layout` (`plan -due-only`, the worker's
+job, the import reshard) decides by the sums (D′ = 2^⌈log2(Σ`!dn` /
+T_d)⌉). For an evenly spread index the sums ask for more objects about
+1.5 times earlier than the trigger fires (Σ`!dn` above D·T_d against
+1.5·D·T_d); a skewed one can make the trigger fire while the sums still
+ask for the shape it has (a no-op job, see above). A manual `plan
+-due-only` may therefore reshard an account before its writers would
+have queued it. The trigger stays per object on purpose: computing it
+against the target of the sums would need S reads per write.
+
+**What the caps do not change.** More dictionary objects keep each of
+them below Ceph's threshold, but not the sum. At about 280 dictionary
+keys per message and an estimated 50 to 60 bytes of omap each (the
+index pool holds about 65 bytes per key on average, postings and
+header texts included), a dictionary costs 14 to 17 KB of NVMe per
+message; 10¹⁰ messages, an upper estimate for a provider with a million
+accounts, would be about 2.8·10¹² keys and 140 to 170 TB before
+replication. The identifiers — new in every message — are most of it;
+the bench corpus `ids` and `shardpostctl fts stats -classes` on test
+accounts measure how much, and a later stage may give them one key each
+instead of one per trigram. The next limit of large accounts is the
+fan-out of a delivery: with about 650 terms it touches nearly every
+posting object, 2·S operations.
 
 <a id="full-text-conversion"></a>
 **Conversion.** The job `fts_layout` (role `repair`, exclusive, also as
@@ -1638,7 +1697,7 @@ holds the account lock (deliveries fail temporarily for the whole job):
 |---|---|
 | P2 | fence; `L.next` = target generation and token. A `next` of exactly this token is continued; any other is foreign — also one of the same job with another lease generation, which may still be writing — its targets are deleted and it is replaced. Sources a crashed run left in `old` are deleted. 2→3 enters the presence index first. |
 | P3 | `!s` = `frozen:<tok>` on every source posting object (a missing layout 2 one is created frozen). |
-| P5 | the targets are created afresh; the sources are read page by page, markers and dead ids left out, lists of GUIDs from before document ids converted; the dictionary is derived from the terms, the header texts of live documents copied; written blindly in pieces of at most 2048 keys asserting the objects exist, fenced before each; then the counters. |
+| P5 | the targets are created afresh; the sources are read page by page, markers and dead ids left out, lists of GUIDs from before document ids converted; the dictionary is derived from the terms, the header texts of live documents copied; written blindly in pieces of at most 2048 keys asserting the objects exist, fenced before each; then the counters. Since 0.49.0 the copy hands every full piece to `fts.convert_writers` (8) writers and goes on reading; its buffer holds at most max(`fts.convert_buffer_keys`, 1024 × target objects) keys, and above it the largest pending piece is written early (`imapceph_fts_convert_buffer_keys`). The result counts the writes (`writes`) and the largest buffer (`buffer_keys`). |
 | P6 | fence; `L` names the target (only while `next` carries exactly this token), the source goes to `old`; 2→3 moves `v` to `V`, 3→2 removes `L` (and moves `V` back to `v`) and the account from the presence index. |
 | P7 | fence; the sources are deleted (only while `old` names this run), then the `old` entry; 2→3 sets `lg`. |
 
@@ -1716,6 +1775,18 @@ safe for a cluster that has not switched. The way back:
 In an emergency (an older server already runs): export
 `shardpostctl fts layout3 list`, run `fts_rebuild` for those accounts
 under the older version, and the sweep later under 0.45.0 or newer.
+
+**The separate caps (0.49.0) and older versions.** The shape of a
+generation is in `L`, so a version before 0.49.0 reads and writes a
+generation of any D. But it computes the target D with
+`fts.shards_max` and its trigger has no cap: a generation whose D is
+above that version's `fts.shards_max` counts as due for its `due_only`
+jobs (`sameShape` compares the counts only) and would be shrunk. While
+such a version holds the `fts_due` worker (a rolling update) and on the
+way back, either `fts.auto_reshard: false` on every pod or
+`fts.shards_max` at least the largest D in the store (`shardpostctl fts
+layout3 list -verify` prints it per page) prevents it; see
+[operations](../operations/README.md#separate-dictionary-caps-0490-rollout-and-way-back).
 
 ## Repair and its limits
 

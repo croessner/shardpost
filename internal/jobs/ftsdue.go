@@ -109,7 +109,11 @@ func (m *Manager) ftsDueByJob(ctx context.Context, e model.DueEntry, gen string,
 		return err
 	}
 
+	noops, idle := noopsOf(rec, gen)
+
 	switch {
+	case idle:
+		return m.ftsDuePlan(ctx, e, gen, noops+1, lost) // the wait after the last no-op is over
 	case j != nil && !j.Terminal():
 		return m.ftsDueLater(e, gen, lost)
 	case j != nil && j.State == StateSucceeded && !ftsLayoutNoop(j):
@@ -122,7 +126,17 @@ func (m *Manager) ftsDueByJob(ctx context.Context, e model.DueEntry, gen string,
 		return m.ftsDueNoop(e, rec, lost)
 	}
 
-	return m.ftsDuePlan(ctx, e, gen, lost)
+	return m.ftsDuePlan(ctx, e, gen, noops, lost) // a failed job keeps the count
+}
+
+// noopsOf is the number of no-op jobs the record counts for generation
+// gen and whether the wait after the last one is over (idle).
+func noopsOf(rec *model.FTSDueRecord, gen string) (int, bool) {
+	if rec == nil || rec.Gen != gen {
+		return 0, false
+	}
+
+	return rec.Noops, rec.Idle
 }
 
 // accountLocked reports whether the account's import (maintenance) lock
@@ -208,10 +222,21 @@ func ftsLayoutNoop(j *Job) bool {
 
 // ftsDueNoop handles an account whose job found nothing to do (R4.6):
 // the per-object trigger and the target from the sum can disagree, so
-// the entry waits FTSDueNoopBackoff instead of planning a job every time
-// the writers' memory of it expires.
+// the entry waits FTSDueNoopWait(rec.Noops) — six hours, doubling with
+// every further no-op of the generation up to seven days — instead of
+// planning a job every time the writers' memory of it expires. An entry
+// that fires when the wait is over goes, and the record turns idle
+// (temp/13 R2.1): a writer whose trigger still asks for a reshard queues
+// the account afresh, and the worker plans a new job then. Before 0.49.0
+// the entry was moved to the same past time on every look, once a
+// minute, and never planned again.
 func (m *Manager) ftsDueNoop(e model.DueEntry, rec *model.FTSDueRecord, lost func() bool) error {
 	now := m.now()
+	wait := model.FTSDueNoopWait(rec.Noops)
+
+	if !rec.NoopAt.IsZero() && !now.Before(rec.NoopAt.Add(wait)) {
+		return m.ftsDueForget(e, rec, lost)
+	}
 
 	if rec.NoopAt.IsZero() {
 		if lost() {
@@ -235,7 +260,35 @@ func (m *Manager) ftsDueNoop(e model.DueEntry, rec *model.FTSDueRecord, lost fun
 		rec.NoopAt = now
 	}
 
-	return m.ftsDueMove(e, &model.DueKey{Due: rec.NoopAt.Add(model.FTSDueNoopBackoff), Gen: e.Gen}, lost)
+	return m.ftsDueMove(e, &model.DueKey{Due: rec.NoopAt.Add(wait), Gen: e.Gen}, lost)
+}
+
+// ftsDueForget marks the record of a no-op job idle, exactly that one,
+// and then removes the entry that fired; nothing after a lost lease. The
+// record changes first: an entry left behind by a failed removal fires
+// again and plans a job, while a record left behind without the mark
+// would answer every later entry of the generation with this branch
+// again. The idle record keeps the count of no-ops for the next wait.
+func (m *Manager) ftsDueForget(e model.DueEntry, rec *model.FTSDueRecord, lost func() bool) error {
+	if lost() {
+		return nil
+	}
+
+	err := m.st.kv.Update(model.FTSDueRecordKey(e.ID), func(cur []byte) ([]byte, error) {
+		var c model.FTSDueRecord
+		if cur == nil || json.Unmarshal(cur, &c) != nil || c.JobID != rec.JobID || c.Gen != rec.Gen {
+			return cur, nil
+		}
+
+		c.Idle = true
+
+		return json.Marshal(c)
+	})
+	if err != nil {
+		return err
+	}
+
+	return m.ftsDueMove(e, nil, lost)
 }
 
 // ftsDueLater postpones the entry by the record's backoff.
@@ -265,8 +318,9 @@ func (m *Manager) ftsDueLater(e model.DueEntry, gen string, lost func() bool) er
 }
 
 // ftsDuePlan plans and applies fts_layout {"due_only": true} without an
-// idempotency key, records the job and postpones the entry.
-func (m *Manager) ftsDuePlan(ctx context.Context, e model.DueEntry, gen string, lost func() bool) error {
+// idempotency key, records the job (with the no-ops of the generation
+// before it) and postpones the entry.
+func (m *Manager) ftsDuePlan(ctx context.Context, e model.DueEntry, gen string, noops int, lost func() bool) error {
 	kind, ok := m.kinds[KindFTSLayout]
 	if !ok || lost() {
 		return nil
@@ -288,7 +342,7 @@ func (m *Manager) ftsDuePlan(ctx context.Context, e model.DueEntry, gen string, 
 		return err
 	}
 
-	b, _ := json.Marshal(model.FTSDueRecord{JobID: j.ID, Gen: gen})
+	b, _ := json.Marshal(model.FTSDueRecord{JobID: j.ID, Gen: gen, Noops: noops})
 
 	if err := m.st.kv.Update(model.FTSDueRecordKey(e.ID), func([]byte) ([]byte, error) { return b, nil }); err != nil {
 		return err

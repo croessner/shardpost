@@ -123,12 +123,12 @@ func TestLayoutTakenOverRunFails(t *testing.T) {
 
 	ftsLayoutHook = nil
 
-	w := newChunkWriter(u, targetA, func() error { return nil })
+	w := u.newPieceWriter(targetA, func() error { return nil })
 	if err := w.add(targetA.postingOIDn(0), "b:late", nil); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.flushAll(); err == nil {
+	if err := w.finish(); err == nil {
 		t.Error("A's late write into its deleted target succeeded")
 	}
 

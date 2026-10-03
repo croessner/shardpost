@@ -1,15 +1,24 @@
 // Command shardpost-load is a load generator for the mail server: it delivers
 // messages via LMTP and drives IMAP sessions (LOGIN, SELECT, FETCH, SEARCH,
 // STORE, IDLE-less polling) for many users concurrently and prints latency
-// percentiles. It is deliberately dependency-free so it can run from the
-// tools pod.
+// percentiles. It needs nothing beyond the standard library and the
+// pure-Go bench generator, so it can run from the tools pod.
 //
 //	shardpost-load -imap shardpost:143 -lmtp shardpost:24 -users 50 -sessions 4 -duration 60s \
 //	         -user-pattern 'load%03d' -password test -deliver-rate 20
+//
+// With -corpus it fills one test account through LMTP instead: count
+// messages of the bench generator (internal/bench, deterministic in
+// seed, account and number: the bytes "shardpost bench populate" stores
+// for an account of that name), delivered at -rate per second through
+// the production path (temp/13 §7.3).
+//
+//	shardpost-load -lmtp shardpost-lmtp:24 -corpus ids -rcpt rbdpoc2@exampleserver.de -count 36000 -seed 1 -rate 20
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +30,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"shardpost/internal/bench"
 )
 
 type stats struct {
@@ -187,8 +198,16 @@ func lmtpDeliver(addr, rcpt string, body []byte) error {
 		}
 	}
 
-	_, _ = nc.Write(body)
-	_, _ = io.WriteString(nc, "\r\n.\r\n")
+	body = crlfLines(body)
+	_, _ = nc.Write(dotStuff(body))
+
+	// The message ends with its own line end; only a message without one
+	// gets one before the final dot.
+	if bytes.HasSuffix(body, []byte("\r\n")) {
+		_, _ = io.WriteString(nc, ".\r\n")
+	} else {
+		_, _ = io.WriteString(nc, "\r\n.\r\n")
+	}
 
 	if err := lmtpExpect(br, "250"); err != nil {
 		return err
@@ -197,6 +216,30 @@ func lmtpDeliver(addr, rcpt string, body []byte) error {
 	_, _ = io.WriteString(nc, "QUIT\r\n")
 
 	return nil
+}
+
+// crlfLines ends every line with CRLF (a bare LF becomes CRLF), so that
+// the terminator follows the last line without an empty one.
+func crlfLines(body []byte) []byte {
+	if !bytes.Contains(body, []byte("\n")) || bytes.Count(body, []byte("\n")) == bytes.Count(body, []byte("\r\n")) {
+		return body
+	}
+
+	return bytes.ReplaceAll(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n"), []byte("\r\n"))
+}
+
+// dotStuff doubles the dot at the start of every line (RFC 5321 4.5.2).
+func dotStuff(body []byte) []byte {
+	if !bytes.HasPrefix(body, []byte(".")) && !bytes.Contains(body, []byte("\n.")) {
+		return body
+	}
+
+	out := bytes.ReplaceAll(body, []byte("\n."), []byte("\n.."))
+	if bytes.HasPrefix(out, []byte(".")) {
+		out = append([]byte("."), out...)
+	}
+
+	return out
 }
 
 // lmtpExpect reads one (possibly multi-line) LMTP reply and checks its code.
@@ -255,6 +298,13 @@ type loadConfig struct {
 	domain   string
 	password string
 	rate     float64
+
+	// The corpus mode (-corpus).
+	corpus, rcpt, sizes string
+	count, first        int
+	parallel            int
+	seed                uint64
+	fillRate            float64
 }
 
 func parseFlags() loadConfig {
@@ -268,19 +318,23 @@ func parseFlags() loadConfig {
 	password := flag.String("password", "test", "password for all users")
 	rate := flag.Float64("deliver-rate", 10, "LMTP deliveries per second (total)")
 
+	var c loadConfig
+
+	flag.StringVar(&c.corpus, "corpus", "", "fill one account with the bench corpus: plain, ids or ids,nosig (needs -rcpt and -count)")
+	flag.StringVar(&c.rcpt, "rcpt", "", "-corpus: the account (recipient) to fill; also the account the generator draws for")
+	flag.IntVar(&c.count, "count", 0, "-corpus: messages to deliver")
+	flag.IntVar(&c.first, "first", 0, "-corpus: number of the first message (to continue a run)")
+	flag.Uint64Var(&c.seed, "seed", 1, "-corpus: seed of the generator")
+	flag.StringVar(&c.sizes, "sizes", bench.DefaultSizes, "-corpus: message size distribution <weight>:<min>-<max>,...")
+	flag.Float64Var(&c.fillRate, "rate", 20, "-corpus: deliveries per second")
+	flag.IntVar(&c.parallel, "parallel", 4, "-corpus: LMTP connections at the same time")
+
 	flag.Parse()
 
-	return loadConfig{
-		imapAddr: *imapAddr,
-		lmtpAddr: *lmtpAddr,
-		users:    *users,
-		sessions: *sessions,
-		duration: *duration,
-		pattern:  *pattern,
-		domain:   *domain,
-		password: *password,
-		rate:     *rate,
-	}
+	c.imapAddr, c.lmtpAddr, c.users, c.sessions, c.duration = *imapAddr, *lmtpAddr, *users, *sessions, *duration
+	c.pattern, c.domain, c.password, c.rate = *pattern, *domain, *password, *rate
+
+	return c
 }
 
 // deliverLoop delivers messages at a fixed rate, round-robin over users,
@@ -420,6 +474,10 @@ func imapRunOps(c *imapClient, st *stats, stop <-chan struct{}) bool {
 
 func main() {
 	cfg := parseFlags()
+
+	if cfg.corpus != "" {
+		os.Exit(fillAccount(cfg, os.Stdout))
+	}
 
 	st := &stats{lat: map[string][]time.Duration{}, errs: map[string]int64{}}
 	stop := make(chan struct{})

@@ -57,6 +57,9 @@ type SearchReport struct {
 	RoundReport
 
 	Queries []SearchQueryResult `json:"queries"`
+	// ByKind is the latency of the queries by kind (word, prefix, infix
+	// and, with the identifier corpus, id-whole, id-start, id-inner).
+	ByKind map[string]LatencySummary `json:"latency_by_kind,omitempty"`
 	// Fingerprint covers the results of all queries in all probe
 	// accounts; two runs on unchanged accounts give the same one.
 	Fingerprint string `json:"fingerprint"`

@@ -151,6 +151,9 @@ type Options struct {
 	// LayoutDisableWait is how long layout 3 disable waits before it
 	// reads the presence index (0: five seconds).
 	LayoutDisableWait time.Duration
+	// FTSStatsTestAccount reports whether the terms of an account (lower
+	// case) may be classified (fts.stats_test_accounts; nil: none).
+	FTSStatsTestAccount func(account string) bool
 }
 
 // Server implements the generated adminapi.ServerInterface.

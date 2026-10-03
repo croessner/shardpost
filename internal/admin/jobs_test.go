@@ -149,3 +149,79 @@ func TestJobErrorLayoutRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestFTSLayoutShapeOrShards (temp/13 §4.6): fts_layout takes shards or
+// shape, both together are a bad request.
+func TestFTSLayoutShapeOrShards(t *testing.T) {
+	_, c := serveDiag(t, nil, RoleDiagnose, jobs.RoleRepair)
+	ctx := context.Background()
+
+	plan := func(params map[string]any) int {
+		resp, err := c.CreatePlanWithResponse(ctx, "alice", adminapi.PlanRequest{Kind: adminapi.PlanRequestKind(jobs.KindFTSLayout), Params: &params})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return resp.StatusCode()
+	}
+
+	if code := plan(map[string]any{"shards": 4, "shape": "1/2/1"}); code != http.StatusBadRequest {
+		t.Errorf("shards and shape: %d", code)
+	}
+
+	if code := plan(map[string]any{"shape": "1/2"}); code != http.StatusBadRequest {
+		t.Errorf("bad shape: %d", code)
+	}
+
+	for _, params := range []map[string]any{{"shape": "1/2/1"}, {"shards": 4}} {
+		if code := plan(params); code != http.StatusCreated {
+			t.Errorf("%v: %d", params, code)
+		}
+	}
+}
+
+// TestFTSStatsRefusals (temp/13 §7.1): classes are refused for an
+// account that is not a test account, a bad parallelism is a bad
+// request, the counts need the role diagnose.
+func TestFTSStatsRefusals(t *testing.T) {
+	_, c := serveDiag(t, nil, RoleDiagnose)
+	ctx := context.Background()
+
+	stats, err := c.GetFTSStatsWithResponse(ctx, "alice", &adminapi.GetFTSStatsParams{})
+	if err != nil || stats.JSON200 == nil || stats.JSON200.Terms == 0 || stats.JSON200.Docs != 3 || stats.JSON200.Classes != nil {
+		t.Fatalf("counts: %v %+v", err, stats.JSON200)
+	}
+
+	if resp, _ := c.GetFTSStatsWithResponse(ctx, "alice", &adminapi.GetFTSStatsParams{Classes: ptr(true)}); resp.StatusCode() != http.StatusForbidden {
+		t.Errorf("classes without test accounts: %d", resp.StatusCode())
+	}
+
+	if resp, _ := c.GetFTSStatsWithResponse(ctx, "alice", &adminapi.GetFTSStatsParams{Exact: ptr(true), Parallel: ptr(0)}); resp.StatusCode() != http.StatusBadRequest {
+		t.Errorf("parallel 0: %d", resp.StatusCode())
+	}
+
+	_, other := serveDiag(t, nil, RoleImport)
+	if resp, _ := other.GetFTSStatsWithResponse(ctx, "alice", &adminapi.GetFTSStatsParams{}); resp.StatusCode() != http.StatusForbidden {
+		t.Errorf("without the role diagnose: %d", resp.StatusCode())
+	}
+}
+
+// TestFTSStatsParallelDefault (review): an exact count reads one object
+// at a time on a real account and two on a test account, unless asked.
+func TestFTSStatsParallelDefault(t *testing.T) {
+	s := &Server{o: Options{Accounts: memstore.New(), FTSStatsTestAccount: func(a string) bool { return a == "bench-000001" }}}
+
+	for _, c := range []struct {
+		account  string
+		parallel *int
+		want     int
+	}{{"alice", nil, 1}, {"bench-000001", nil, 2}, {"alice", ptr(4), 4}} {
+		rec := httptest.NewRecorder()
+
+		req, ok := s.statsRequest(rec, httptest.NewRequest(http.MethodGet, "/", nil), c.account,
+			adminapi.GetFTSStatsParams{Exact: ptr(true), Parallel: c.parallel})
+		if !ok || req.Parallel != c.want {
+			t.Errorf("%s %v: parallel %d, want %d (%d)", c.account, c.parallel, req.Parallel, c.want, rec.Code)
+		}
+	}
+}

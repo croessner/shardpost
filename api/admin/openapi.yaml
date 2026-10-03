@@ -1705,6 +1705,59 @@ paths:
                 $ref: "#/components/schemas/FTSLayoutClear"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/accounts/{account}/fts/stats:
+    parameters:
+      - $ref: "#/components/parameters/Account"
+    get:
+      operationId: getFTSStats
+      summary: Key counts of the account's full-text index
+      description: |
+        Without parameters the counters of the posting objects (`!n`,
+        `!dn`) and the document count `c` of a layout 3 index: S + 1
+        reads, no lock (a layout 2 index has no counters; use `exact`).
+        There is no counter per dictionary or header object. `exact`
+        counts the keys of every object page by page instead (librados
+        has no key count, and the client library no read of keys alone,
+        so the values come along: about the account's whole index omap
+        is transferred, posting lists and header texts included): on a
+        large account thousands of reads alongside the deliveries,
+        `parallel` objects at a time (default 1, for a test account 2;
+        at most 16), the counts only roughly consistent; bounded by the
+        5 minute write timeout of the admin listener. `classes`
+        classifies the terms by field, class and length and projects
+        the dictionary keys of the identifier rule for every bound 13
+        to 40 (a body term with letters and digits of at least n runes
+        counted as one key): only for the test accounts the server's
+        `fts.stats_test_accounts` names, otherwise refused with
+        `forbidden` (403). The answer never contains a term. Requires
+        the role `diagnose` (since 0.49.0).
+      parameters:
+        - name: exact
+          in: query
+          required: false
+          schema:
+            type: boolean
+        - name: parallel
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 16
+        - name: classes
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: The counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSStats"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/accounts/{account}/import/fts-reshard:
     parameters:
       - $ref: "#/components/parameters/Account"
@@ -2336,8 +2389,8 @@ components:
           additionalProperties: true
           description: |
             Parameters of the kind for every account; scrub: `classes`
-            (empty = all); fts_layout: `layout`, `shards`, `due_only`. The
-            other kinds take none.
+            (empty = all); fts_layout: `layout`, `shards` or `shape`,
+            `due_only` (see `FTSLayoutParams`). The other kinds take none.
         skip_idle:
           type: boolean
           description: |
@@ -2471,6 +2524,109 @@ components:
         h:
           type: integer
           description: Header text objects.
+    FTSStats:
+      type: object
+      required: [shape, docs, exact, terms, dict_keys, header_keys, objects]
+      properties:
+        shape:
+          $ref: "#/components/schemas/FTSLayoutShape"
+        docs:
+          type: integer
+          format: int64
+          description: |
+            Documents of the index: the counter `c` of layout 3; for
+            layout 2 only with `exact` (the id map), else 0.
+        exact:
+          type: boolean
+          description: The keys were counted, not the counters read.
+        terms:
+          type: integer
+          format: int64
+          description: Posting keys (terms), the sum of `!n` or counted.
+        dict_keys:
+          type: integer
+          format: int64
+          description: Dictionary keys, the sum of `!dn` or counted.
+        header_keys:
+          type: integer
+          format: int64
+          description: Header texts (counted with `exact` only).
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/FTSObjectStats"
+        classes:
+          $ref: "#/components/schemas/FTSTermClasses"
+    FTSObjectStats:
+      type: object
+      required: [object, kind, keys]
+      properties:
+        object:
+          type: string
+        kind:
+          type: string
+          enum: [postings, dictionary, headers, legacy]
+        keys:
+          type: integer
+          format: int64
+          description: Keys without the markers; for a posting object without `exact` its counter `!n`.
+        dict_keys:
+          type: integer
+          format: int64
+          description: The counter `!dn` of a posting object (without `exact`).
+    FTSTermClasses:
+      type: object
+      required: [terms, dict_keys, rows, by_ident_min_runes]
+      properties:
+        terms:
+          type: integer
+          format: int64
+        dict_keys:
+          type: integer
+          format: int64
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/FTSTermClass"
+        by_ident_min_runes:
+          type: array
+          description: |
+            For every bound n from 13 to 40: the dictionary keys if body
+            terms with letters and digits of at least n runes had one key
+            each, and how many terms that are.
+          items:
+            $ref: "#/components/schemas/FTSIdentBound"
+    FTSTermClass:
+      type: object
+      required: [field, class, length, terms, dict_keys]
+      properties:
+        field:
+          type: string
+          description: s, f, t, h or b.
+        class:
+          type: string
+          enum: [letters, digits, mixed, other]
+        length:
+          type: string
+          description: Length range in runes (2-3, 4-8, 9-12, 13-16, 17-24, 25-32, 33-39, 40).
+        terms:
+          type: integer
+          format: int64
+        dict_keys:
+          type: integer
+          format: int64
+    FTSIdentBound:
+      type: object
+      required: [min_runes, dict_keys, identifiers]
+      properties:
+        min_runes:
+          type: integer
+        dict_keys:
+          type: integer
+          format: int64
+        identifiers:
+          type: integer
+          format: int64
     FTSLayoutState:
       type: object
       required: [current]
@@ -2968,6 +3124,40 @@ components:
     JobState:
       type: string
       enum: [queued, running, succeeded, partially_failed, failed, cancel_requested, cancelled]
+    FTSLayoutParams:
+      type: object
+      description: |
+        The parameters of the kind `fts_layout` in `params` of a plan or a
+        batch plan. `shards` and `shape` exclude each other (both: 400);
+        forced counts ignore `fts.shards_max` and `fts.dict_shards_max`.
+        Without either the counts follow the key counts: posting and
+        header objects from `fts.shard_target_keys` up to
+        `fts.shards_max`, dictionary objects from `fts.dict_target_keys`
+        up to `fts.dict_shards_max`.
+      properties:
+        layout:
+          type: integer
+          enum: [2, 3]
+          description: The target layout; omitted, the account's.
+        shards:
+          type: integer
+          minimum: 1
+          maximum: 4096
+          description: |
+            Forced object counts of a layout 3 target, the same for the
+            posting, dictionary and header objects.
+        shape:
+          type: string
+          pattern: "^[0-9]+/[0-9]+/[0-9]+$"
+          description: |
+            Forced object counts of a layout 3 target, each its own:
+            posting/dictionary/header objects, 1 to 4096 each (since
+            0.49.0).
+        due_only:
+          type: boolean
+          description: |
+            End without a change while the key counts ask for the shape
+            the index has (how the `fts_due` worker plans the job).
     PlanRequest:
       type: object
       required: [kind]
@@ -2981,10 +3171,8 @@ components:
           description: |
             scrub: `classes` (deliveries, moves, retired, uncovered, entries,
             refs, orphans, unknown, quota; empty = all); fts_layout:
-            `layout` (2 or 3; omitted: the account's), `shards` (forced
-            object counts of a layout 3 target; 0: from the key counts),
-            `due_only` (end without a change while the key counts ask for
-            the shape the index has); mailbox_delete:
+            `layout`, `shards` or `shape`, `due_only` (see
+            `FTSLayoutParams`); mailbox_delete:
             `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
             `deleted: true` (every message flagged \Deleted when planned).
     Plan:

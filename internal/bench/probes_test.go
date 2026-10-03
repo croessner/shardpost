@@ -188,6 +188,51 @@ func TestSearchAndExpungeProbes(t *testing.T) {
 	}
 }
 
+// TestIdentifierSearch (temp/13 §7.7): in an account of the identifier
+// corpus every identifier query — whole, start, inner — finds the
+// message whose reference it took (unfiltered, as today).
+func TestIdentifierSearch(t *testing.T) {
+	store := memstore.New()
+	sizes, _ := ParseSizes("1:1KiB-4KiB")
+	o := PopulateOptions{Prefix: "bench-i-", Accounts: 1, Messages: 8, Mailboxes: []string{"INBOX"},
+		InboxShare: 1, Gen: Generator{Seed: 5, Sizes: sizes, Corpus: Corpus{IDs: true}}, Parallel: 1}
+
+	if _, err := Populate(context.Background(), o, store, &delivery.Service{Store: store, Log: discard()}); err != nil {
+		t.Fatal(err)
+	}
+
+	account := AccountName(o.Prefix, 0)
+
+	u, err := store.User(account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+
+	for _, q := range SearchQueriesFor(12, o.Gen.Corpus) {
+		if q.Msg == 0 && q.Text != "" {
+			continue // a word query
+		}
+
+		r := ResolveQuery(o.Gen, account, q)
+
+		h, err := Search(u, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(h.Words) == 0 {
+			t.Errorf("%s %q found nothing", r.Kind, r.Text)
+		}
+
+		for _, c := range h.Candidates {
+			if c != nil && len(c) == 0 {
+				t.Errorf("%s %q: no candidate", r.Kind, r.Text)
+			}
+		}
+	}
+}
+
 func inboxUIDs(t *testing.T, u model.User) []uint32 {
 	t.Helper()
 

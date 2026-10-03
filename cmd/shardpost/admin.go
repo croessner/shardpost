@@ -116,7 +116,7 @@ func adminOptions(log *slog.Logger, settings *config.Config, authn auth.Authenti
 		StorePing: store.Ping, Placement: store.Placement, Jobs: jobsMgr, Directory: store, Learning: learning, Submissions: submissionAdmin(sendq), SearchScanLimit: c.SearchScanLimit,
 		SharedPrefix: settings.Server.SharedPrefix, PublicPrefix: settings.Server.PublicPrefix, ShareNotices: notices,
 		KV: kv, FTSLayouts: store, ImportReshardSettle: time.Duration(settings.Jobs.SettleSeconds) * time.Second,
-		ImportReshardSync: time.Duration(settings.FTS.ImportReshardSyncSeconds) * time.Second}
+		ImportReshardSync: time.Duration(settings.FTS.ImportReshardSyncSeconds) * time.Second, FTSStatsTestAccount: settings.FTS.StatsTestAccount}
 }
 
 // submissionAdmin is the queue as the admin API's interface (nil, not a

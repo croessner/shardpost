@@ -180,6 +180,34 @@ type FTSDueRecord struct {
 	// Waits counts the times the worker postponed the entry for this job
 	// (the backoff doubles with each).
 	Waits int `json:"waits,omitempty"`
+	// Noops counts the jobs before this one in the generation that found
+	// nothing to do: the wait after a no-op doubles with each
+	// (FTSDueNoopWait). Idle is set once the wait after the last no-op
+	// is over and its entry gone; the next entry of the generation plans
+	// a job again (since 0.49.0).
+	Noops int  `json:"noops,omitempty"`
+	Idle  bool `json:"idle,omitempty"`
+}
+
+// FTSDueNoopMax bounds the wait after a no-op job.
+const FTSDueNoopMax = 7 * 24 * time.Hour
+
+// FTSDueNoopWait is how long the worker leaves an account alone after a
+// job that found nothing to do, when n jobs before it in the same
+// generation did not either: FTSDueNoopBackoff doubled n times, at most
+// FTSDueNoopMax. An account whose busiest object outgrew its target
+// while the sums still ask for its shape is thus planned less and less
+// often instead of every six hours for good.
+func FTSDueNoopWait(n int) time.Duration {
+	d := FTSDueNoopBackoff
+	for range min(max(n, 0), 16) {
+		d *= 2
+		if d >= FTSDueNoopMax {
+			return FTSDueNoopMax
+		}
+	}
+
+	return d
 }
 
 // FTSDueBackoff is the first backoff of the fts_due worker; it doubles
@@ -207,9 +235,12 @@ const FTSDueNoopBackoff = 6 * time.Hour
 type FTSLayoutRequest struct {
 	// Layout is the target layout (2 or 3; 0 keeps the account's).
 	Layout int
-	// Shards forces the object counts of a layout 3 target (0: from the
-	// key counts and fts.shard_target_keys).
+	// Shards forces the object counts of a layout 3 target, the same
+	// for postings, dictionary and header texts; Shape forces each of
+	// them (neither: from the key counts and the targets). Both ignore
+	// the caps (at most 4096).
 	Shards int
+	Shape  *FTSForcedShape
 	// DueOnly ends without a change when the counts the targets come out
 	// at are the ones the index has.
 	DueOnly bool
@@ -224,6 +255,12 @@ type FTSLayoutRequest struct {
 	Progress func(phase string, done, total int)
 }
 
+// FTSForcedShape are forced object counts of a layout 3 target:
+// postings, dictionary, header texts.
+type FTSForcedShape struct {
+	S, D, H int
+}
+
 // FTSLayoutShape is one generation of the index.
 type FTSLayoutShape struct {
 	Layout int    `json:"layout"`
@@ -231,6 +268,9 @@ type FTSLayoutShape struct {
 	S      int    `json:"s,omitempty"`
 	D      int    `json:"d,omitempty"`
 	H      int    `json:"h,omitempty"`
+	// Capped names the kinds of objects (postings, dictionary, headers)
+	// whose count a cap cut, in the target FTSLayoutDue reports.
+	Capped []string `json:"capped,omitempty"`
 }
 
 // FTSLayoutReport is what a conversion did.
@@ -247,6 +287,10 @@ type FTSLayoutReport struct {
 	Dict    int64  `json:"dict_keys"`
 	Headers int64  `json:"headers"`
 	Docs    int64  `json:"docs"`
+	// Writes are the writes of the copy (each fenced first), BufferKeys
+	// the most keys its write buffer held (since 0.49.0).
+	Writes     int64 `json:"writes,omitempty"`
+	BufferKeys int   `json:"buffer_keys,omitempty"`
 }
 
 // FTSLayoutState is the layout record of an account as an operator sees

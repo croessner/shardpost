@@ -422,22 +422,43 @@ func itoaMarker(n int64) []byte { return []byte(strconv.FormatInt(max(n, 0), 10)
 
 // dictKeysOf is the number of dictionary keys a term has: one per
 // distinct trigram of its token, none in a field without substring
-// matching.
-func dictKeysOf(term string) int {
-	field, tok, _ := strings.Cut(term, ":")
-	if !fts.Substring(field) {
-		return 0
-	}
-
-	return len(fts.Trigrams(tok))
-}
+// matching (fts.DictKeys without the identifier rule).
+func dictKeysOf(term string) int { return fts.DictKeys(term, 0) }
 
 // --- sizes --------------------------------------------------------------------
 
-// ftsSizing are the bounds of the layout 3 object counts
-// (configuration fts.shards_min, fts.shards_max, fts.shard_target_keys).
+// Kinds of layout 3 objects (metric labels, plan results) and their
+// index in objectKinds.
+const (
+	kindPostings   = "postings"
+	kindDictionary = "dictionary"
+	kindHeaders    = "headers"
+
+	kindIndexPostings   = 0
+	kindIndexDictionary = 1
+	kindIndexHeaders    = 2
+)
+
+// objectKinds are the kinds of layout 3 objects.
+var objectKinds = [...]string{kindPostings, kindDictionary, kindHeaders}
+
+// The caps withDefaults gives a sizing whose cap is below its lower
+// bound (a configuration that sets none): the default of fts.shards_max
+// before 0.49.0 for the postings and header texts, the default of
+// fts.dict_shards_max for the dictionary; and the default target.
+const (
+	defaultShardsCap     = 32
+	defaultDictShardsCap = 512
+	defaultTargetKeys    = 100000
+)
+
+// ftsSizing are the bounds of the layout 3 object counts (configuration
+// fts.shards_min; fts.shards_max and fts.shard_target_keys for the
+// postings and header texts; fts.dict_shards_max and
+// fts.dict_target_keys for the dictionary).
 type ftsSizing struct {
-	min, max, target int
+	min, max, target    int
+	dictMax, dictTarget int
 }
 
 func (z ftsSizing) withDefaults() ftsSizing {
@@ -446,28 +467,46 @@ func (z ftsSizing) withDefaults() ftsSizing {
 	}
 
 	if z.max < z.min {
-		z.max = max(32, z.min)
+		z.max = max(defaultShardsCap, z.min)
+	}
+
+	if z.dictMax < z.min {
+		z.dictMax = max(defaultDictShardsCap, z.min)
 	}
 
 	if z.target <= 0 {
-		z.target = 100000
+		z.target = defaultTargetKeys
+	}
+
+	if z.dictTarget <= 0 {
+		z.dictTarget = defaultTargetKeys
 	}
 
 	return z
 }
 
-// count is the object count for keys keys: the next power of two of
-// keys/target, within the bounds; capped reports a count that the upper
-// bound cut.
+// count is the posting (or header) object count for keys keys: the next
+// power of two of keys/target, within the bounds; capped reports a count
+// that the upper bound cut.
 func (z ftsSizing) count(keys int64) (n int, capped bool) {
-	need := (keys + int64(z.target) - 1) / int64(z.target)
+	return countWithin(keys, z.target, z.min, z.max)
+}
+
+// dictCount is count for the dictionary objects.
+func (z ftsSizing) dictCount(keys int64) (n int, capped bool) {
+	return countWithin(keys, z.dictTarget, z.min, z.dictMax)
+}
+
+// countWithin is the next power of two of keys/target within [lo, hi].
+func countWithin(keys int64, target, lo, hi int) (n int, capped bool) {
+	need := (keys + int64(target) - 1) / int64(target)
 	n = pow2(need)
 
-	if n > z.max {
-		return z.max, true
+	if n > hi {
+		return hi, true
 	}
 
-	return max(n, z.min), false
+	return max(n, lo), false
 }
 
 // pow2 is the smallest power of two at least n (1 for n <= 1).
@@ -479,13 +518,31 @@ func pow2(n int64) int {
 	return 1 << bits.Len64(uint64(n-1))
 }
 
+// estimatePoints are the calibration points of estimateKeys: messages,
+// terms, dictionary keys. Up to 5000 messages they come from the
+// simulation of the bench corpus without identifiers (plan B14 §1.2:
+// about 85 dictionary keys per message at 5000); the last one is the
+// count of the largest account on croessner (2026-10-02: 36246
+// messages, 2069828 terms, 10138532 dictionary keys, about 280 per
+// message; key counts only, temp/13 §1.1).
+var estimatePoints = [...][3]float64{
+	{0, 0, 0}, {50, 12731, 68045}, {500, 45007, 258988}, {5000, 86693, 424610}, {36246, 2069828, 10138532},
+}
+
 // estimateKeys estimates the vocabulary (terms) and the dictionary keys
-// of an account of m messages from the simulation of the bench corpus
-// (plan §1.2): 50 messages 12731 terms and 68045 dictionary keys, 500
-// 45007 and 258988, 5000 86693 and 424610; interpolated linearly between
-// the points and beyond the last with its slope.
+// of an account of m messages, interpolated linearly between the
+// calibration points and beyond the last with the slope of the last
+// section: (2069828 − 86693)/31246 ≈ 63.5 terms and (10138532 −
+// 424610)/31246 ≈ 310.9 dictionary keys per message, above the 57 and
+// 280 of the account itself, so that a fresh index rather starts too
+// large. The section from 5000 to 36246 messages bridges the bench
+// corpus without identifiers and a real account (the knee at 5000;
+// 10000 messages come out at about 1.98 million dictionary keys, 198
+// per message): an estimate, not a measurement. Below 5000 messages
+// the function underestimates accounts with identifiers; their trigger
+// corrects it after the first growth.
 func estimateKeys(m int) (terms, dict int64) {
-	pts := [][3]float64{{0, 0, 0}, {50, 12731, 68045}, {500, 45007, 258988}, {5000, 86693, 424610}}
+	pts := estimatePoints
 	x := float64(max(m, 0))
 
 	for i := 1; i < len(pts); i++ {
@@ -509,7 +566,7 @@ func (z ftsSizing) shapeFor(m int) (s, d, h int) {
 
 	terms, dict := estimateKeys(m)
 	s, _ = z.count(terms)
-	d, _ = z.count(dict)
+	d, _ = z.dictCount(dict)
 	h, _ = z.count(int64(m))
 
 	return s, d, h
@@ -823,18 +880,139 @@ func (u *User) queueReshard(gen string) {
 	metrics.FTSReshardDue.Inc()
 }
 
-// reshardDue reports whether the counters of one posting object ask for
-// a reshard.
-func (u *User) reshardDue(loc ftsLoc, terms, dict int64) bool {
-	t := float64(u.ftsCfg.sizing.target)
+// ftsCappedMax bounds the generations ftsCappedMemo remembers.
+const ftsCappedMax = 65536
 
-	return float64(terms) > reshardFactor*t || float64(dict)*float64(loc.s)/float64(max(loc.d, 1)) > reshardFactor*t
+// ftsCappedMemo is the per-server memory of the index generations whose
+// objects of a kind outgrew their target at the cap, so that the metric
+// and the log line come once per generation and kind (until the entry
+// is pushed out, oldest first, or the server restarts; then at most once
+// more). It has no TTL: unlike ftsDueMemo it does not stand for an
+// action to repeat.
+type ftsCappedMemo struct {
+	mu    sync.Mutex
+	seen  map[string]bool
+	order []string
+}
+
+// once reports whether key is new and remembers it.
+func (m *ftsCappedMemo) once(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.seen[key] {
+		return false
+	}
+
+	if m.seen == nil {
+		m.seen = map[string]bool{}
+	}
+
+	if len(m.order) >= ftsCappedMax {
+		delete(m.seen, m.order[0])
+		m.order = m.order[1:]
+	}
+
+	m.seen[key] = true
+	m.order = append(m.order, key)
+
+	return true
+}
+
+// growth is what the counters of an index generation say: a reshard is
+// due, or the objects of a kind (by its index in objectKinds) outgrew
+// their target at the cap.
+type growth struct {
+	due    bool
+	capped [len(objectKinds)]bool
+}
+
+// note records object kind k over its threshold: due below the cap,
+// capped at it.
+func (g *growth) note(below bool, k int) {
+	if below {
+		g.due = true
+	} else {
+		g.capped[k] = true
+	}
+}
+
+// reshardDue reports what the counters of one posting object say: more
+// than 1.5·T_p terms with fewer than fts.shards_max posting objects, or
+// more than 1.5·T_d dictionary keys per dictionary object (!dn · S / D)
+// with fewer than fts.dict_shards_max, ask for a reshard. At a cap the
+// trigger is silent — no queue entry, no job, no lock — and the kind is
+// reported as capped instead (temp/13 §4.6).
+func (u *User) reshardDue(loc ftsLoc, terms, dict int64) growth {
+	z := u.ftsCfg.sizing
+
+	var g growth
+
+	if float64(terms) > reshardFactor*float64(z.target) {
+		g.note(loc.s < z.max, kindIndexPostings)
+	}
+
+	if float64(dict)*float64(loc.s)/float64(max(loc.d, 1)) > reshardFactor*float64(z.dictTarget) {
+		g.note(loc.d < z.dictMax, kindIndexDictionary)
+	}
+
+	return g
+}
+
+// headersDue is reshardDue for the document count c over h header
+// objects.
+func (u *User) headersDue(h int, c int64) growth {
+	z := u.ftsCfg.sizing
+
+	var g growth
+
+	if float64(c)/float64(max(h, 1)) > reshardFactor*float64(z.target) {
+		g.note(h < z.max, kindIndexHeaders)
+	}
+
+	return g
+}
+
+// act queues the account for a reshard of generation gen when one is
+// due and reports a kind at its cap once per generation and server.
+func (u *User) act(gen string, g growth) {
+	if g.due {
+		u.queueReshard(gen)
+	}
+
+	for k, capped := range g.capped {
+		if capped {
+			u.reportCapped(gen, objectKinds[k])
+		}
+	}
+}
+
+// reportCapped counts and logs a generation whose objects of kind
+// outgrew their target at the cap: once per generation, kind and server
+// (ftsCappedMemo).
+func (u *User) reportCapped(gen, kind string) {
+	if u.store == nil || !u.store.ftsCappedSeen.once(u.name+"\x00"+gen+"\x00"+kind) {
+		return
+	}
+
+	metrics.FTSShardsCapped.WithLabelValues(kind).Inc()
+
+	z := u.ftsCfg.sizing
+
+	key, limit := "fts.shards_max", z.max
+	if kind == kindDictionary {
+		key, limit = "fts.dict_shards_max", z.dictMax
+	}
+
+	u.log.Warn("fts objects outgrow their target at the shard cap; raise "+key+" and reshard with fts_layout",
+		"gen", gen, "kind", kind, "cap", limit)
 }
 
 // ftsUserCfg are the layout settings of a view.
 type ftsUserCfg struct {
 	layout      int
 	sizing      ftsSizing
+	convert     convertCfg
 	autoReshard bool
 	frozenWait  time.Duration
 }
@@ -847,7 +1025,9 @@ func ftsUserConfig(c FTSConfig) ftsUserCfg {
 	}
 
 	return ftsUserCfg{layout: layout, autoReshard: c.AutoReshard, frozenWait: max(c.FrozenWait, 0),
-		sizing: ftsSizing{min: c.ShardsMin, max: c.ShardsMax, target: c.ShardTargetKeys}.withDefaults()}
+		sizing: ftsSizing{min: c.ShardsMin, max: c.ShardsMax, target: c.ShardTargetKeys,
+			dictMax: c.DictShardsMax, dictTarget: c.DictTargetKeys}.withDefaults(),
+		convert: convertCfg{bufferKeys: c.ConvertBufferKeys, writers: c.ConvertWriters}.withDefaults()}
 }
 
 // SetImportHint implements model.ImportHinter: a fresh index of this
