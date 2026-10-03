@@ -400,6 +400,30 @@ func (ix *Index) List(cursor string, limit int) ([]model.IndexEntry, string, err
 	return out, "", nil
 }
 
+// ListShard returns up to limit entries of shard n whose ids sort after
+// after, and whether more follow in that shard. It reads that one shard
+// object and never the next one: a reader that owns a shard (the push
+// worker's partition, stage B18a) pages through it alone. The caller
+// checks the head itself (shard count and phase); n beyond the index's
+// shards reads as empty.
+func (ix *Index) ListShard(n int, after string, limit int) ([]model.IndexEntry, bool, error) {
+	if limit < 1 {
+		limit = 1
+	}
+
+	page, more, err := ix.b.ReadPage(ShardOID(ix.name, n), after, limit)
+	if err != nil {
+		return nil, false, err
+	}
+
+	out := make([]model.IndexEntry, 0, len(page))
+	for _, kv := range page {
+		out = append(out, model.IndexEntry{ID: kv.Key, Value: kv.Value})
+	}
+
+	return out, more, nil
+}
+
 // backoff waits a random time below 1 ms << attempt (at most 32 ms)
 // after a lost compare-and-swap, so that writers of one hot shard do not
 // collide again in lockstep. The backend counts the conflict

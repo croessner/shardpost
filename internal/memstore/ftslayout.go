@@ -74,7 +74,7 @@ func (u *User) SetImportHint(model.ImportHint) {}
 func (s *Store) FTSDueQueue() (model.DueQueue, func(ttl time.Duration) (model.Lease, error), error) {
 	s.mu.Lock()
 	if s.dueLocks == nil {
-		s.dueLocks = &memLocks{held: map[string]*memLease{}}
+		s.dueLocks = newMemLocks()
 	}
 
 	locks := s.dueLocks

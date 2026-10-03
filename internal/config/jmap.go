@@ -281,12 +281,84 @@ type JMAPPush struct {
 	PollSeconds       int64 `mapstructure:"poll_seconds" env:"JMAP_PUSH_POLL_SECONDS" validate:"gte=0"`
 	TimeoutSeconds    int64 `mapstructure:"timeout_seconds" env:"JMAP_PUSH_TIMEOUT_SECONDS" validate:"gte=0"`
 	MessageTTLSeconds int64 `mapstructure:"message_ttl_seconds" env:"JMAP_PUSH_MESSAGE_TTL_SECONDS" validate:"gte=0"`
+	// The partitions of the worker (stage B18a). The accounts are split
+	// into as many partitions as the hint index of the subscriptions has
+	// shards (64), each with a lease of its own, and the push pods share
+	// them out among themselves by their membership record. The defaults
+	// are in the defaults table (config.go); none of these is "0 takes
+	// the default".
+	//
+	// MaxPartitions bounds how many partitions one pod holds (0: all).
+	MaxPartitions int64 `mapstructure:"max_partitions" env:"JMAP_PUSH_MAX_PARTITIONS" validate:"gte=0,lte=64"`
+	// LeaseSeconds is the TTL of a partition lease (30), renewed every
+	// third of it; a holder that could not renew stops the partition
+	// itself five seconds before the TTL is up and releases it. A
+	// member's entry in the membership expires after the same time.
+	LeaseSeconds int64 `mapstructure:"lease_seconds" env:"JMAP_PUSH_LEASE_SECONDS" validate:"gte=15,lte=300"`
+	// TakeSeconds is the cadence of taking and shedding partitions (5,
+	// ± 20 %), and the deadline of one lock or membership operation;
+	// RetrySeconds (2) the faster cadence for partitions whose holder is
+	// gone or that are contested.
+	TakeSeconds  int64 `mapstructure:"take_seconds" env:"JMAP_PUSH_TAKE_SECONDS" validate:"gte=1,lte=60"`
+	RetrySeconds int64 `mapstructure:"retry_seconds" env:"JMAP_PUSH_RETRY_SECONDS" validate:"gte=1,lte=60"`
+	// OrphanHoldSeconds (600) is how long a pod keeps a partition it took
+	// as a replacement (orphaned or contested) before it may shed it to
+	// even the load.
+	OrphanHoldSeconds int64 `mapstructure:"orphan_hold_seconds" env:"JMAP_PUSH_ORPHAN_HOLD_SECONDS" validate:"gte=0,lte=3600"`
+	// FullScanSeconds (3600) is how often a scan reads every subscription
+	// record of a partition whatever the checksum in the index says, the
+	// safety net for index values written by older servers; 0 never.
+	FullScanSeconds int64 `mapstructure:"full_scan_seconds" env:"JMAP_PUSH_FULL_SCAN_SECONDS" validate:"gte=0"`
+	// RebalanceSeconds (10) is the pause between two partitions a pod
+	// sheds; RebalanceSettleSeconds (60) how long the set of pods has to
+	// stand still before one sheds at all.
+	RebalanceSeconds       int64 `mapstructure:"rebalance_seconds" env:"JMAP_PUSH_REBALANCE_SECONDS" validate:"gte=1,lte=600"`
+	RebalanceSettleSeconds int64 `mapstructure:"rebalance_settle_seconds" env:"JMAP_PUSH_REBALANCE_SETTLE_SECONDS" validate:"gte=0,lte=3600"`
+	// HandoffSeconds (5) is how long the watchers of a partition get to
+	// end their round when it is shed, and the period of the waves in
+	// which a pod gives its partitions up at shutdown; it stays below
+	// the pod's termination grace period.
+	HandoffSeconds int64 `mapstructure:"handoff_seconds" env:"JMAP_PUSH_HANDOFF_SECONDS" validate:"gte=1,lte=30"`
+	// MaxWatchedAccounts (50000) bounds the accounts one pod watches: it
+	// takes no partition that would put it over, by the estimate the
+	// membership gives. StartRate (5000) bounds the watchers a pod starts
+	// per second when it takes a partition.
+	MaxWatchedAccounts int64 `mapstructure:"max_watched_accounts" env:"JMAP_PUSH_MAX_WATCHED_ACCOUNTS" validate:"gte=100"`
+	StartRate          int64 `mapstructure:"start_rate" env:"JMAP_PUSH_START_RATE" validate:"gte=10,lte=100000"`
 }
+
+// The defaults of the worker's partition settings (the defaults table
+// of config.go takes them; the worker reads the loaded values).
+const (
+	DefaultPushLeaseSeconds           = 30
+	DefaultPushTakeSeconds            = 5
+	DefaultPushRetrySeconds           = 2
+	DefaultPushOrphanHoldSeconds      = 600
+	DefaultPushFullScanSeconds        = 3600
+	DefaultPushRebalanceSeconds       = 10
+	DefaultPushRebalanceSettleSeconds = 60
+	DefaultPushHandoffSeconds         = 5
+	DefaultPushMaxWatchedAccounts     = 50000
+	DefaultPushStartRate              = 5000
+	// defaultPushScanSeconds is what scan_seconds 0 means (the worker
+	// fills it in).
+	defaultPushScanSeconds = 30
+	// PushSelfStopMargin is how many seconds before its TTL is up a
+	// holder stops a partition it could not renew.
+	PushSelfStopMargin = 5
+)
 
 // Enabled reports whether push subscriptions are configured.
 func (p JMAPPush) Enabled() bool { return p.VAPIDKeyFile != "" }
 
-// Validate checks the VAPID settings.
+// Validate checks the VAPID settings and the relations between the
+// partition settings: the lease has to outlast three cadences (a
+// partition free for two of them is contested), a member's entry has to
+// expire before another pod sheds to it, a hand-over has to end before
+// the holder would stop the partition itself, the fast cadence may not
+// exceed the slow one, and a full pass is at least one scan apart. They
+// are checked whenever the key is set: the push pods have the same
+// configuration as the front-ends.
 func (p JMAPPush) Validate() error {
 	if !p.Enabled() {
 		return nil
@@ -294,6 +366,24 @@ func (p JMAPPush) Validate() error {
 
 	if !strings.HasPrefix(p.VAPIDSubject, "mailto:") && !strings.HasPrefix(p.VAPIDSubject, "https:") {
 		return fmt.Errorf("jmap.push.vapid_subject must be a mailto: or https: URI")
+	}
+
+	scan := p.ScanSeconds
+	if scan <= 0 {
+		scan = defaultPushScanSeconds
+	}
+
+	switch {
+	case p.LeaseSeconds < 3*p.TakeSeconds:
+		return fmt.Errorf("jmap.push.lease_seconds (%d) must be at least three times take_seconds (%d)", p.LeaseSeconds, p.TakeSeconds)
+	case p.RebalanceSettleSeconds < p.LeaseSeconds:
+		return fmt.Errorf("jmap.push.rebalance_settle_seconds (%d) must not be below lease_seconds (%d)", p.RebalanceSettleSeconds, p.LeaseSeconds)
+	case p.HandoffSeconds >= p.LeaseSeconds-PushSelfStopMargin:
+		return fmt.Errorf("jmap.push.handoff_seconds (%d) must be below lease_seconds - %d", p.HandoffSeconds, PushSelfStopMargin)
+	case p.RetrySeconds > p.TakeSeconds:
+		return fmt.Errorf("jmap.push.retry_seconds (%d) must not exceed take_seconds (%d)", p.RetrySeconds, p.TakeSeconds)
+	case p.FullScanSeconds != 0 && p.FullScanSeconds < scan:
+		return fmt.Errorf("jmap.push.full_scan_seconds (%d) must be 0 or at least scan_seconds (%d)", p.FullScanSeconds, scan)
 	}
 
 	return nil

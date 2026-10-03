@@ -148,6 +148,25 @@ func (h *userHandle) close() {
 // watch creates oid if needed (a watch needs the object) and watches it
 // on the current view; a rotation fails the watch.
 func (h *userHandle) watch(oid string) (model.Watch, error) {
+	return h.watchData(oid, nil)
+}
+
+// watchPayload is watch with the data of every notify.
+func (h *userHandle) watchPayload(oid string) (model.PayloadWatch, error) {
+	data := sortedindex.NewPayloadPump()
+
+	w, err := h.watchData(oid, data)
+	if err != nil {
+		data.Close()
+
+		return nil, err
+	}
+
+	return payloadWatch{Watch: w}, nil
+}
+
+// watchData is watch with an optional pump for the data of the notifies.
+func (h *userHandle) watchData(oid string, data *sortedindex.PayloadPump) (*Watch, error) {
 	u, done, err := h.get()
 	if err != nil {
 		return nil, err
@@ -163,7 +182,7 @@ func (h *userHandle) watch(oid string) (model.Watch, error) {
 		return nil, fmt.Errorf("create %s: %w", oid, err)
 	}
 
-	w, err := u.watchObj(oid)
+	w, err := u.watchObjData(oid, data)
 	if err != nil {
 		return nil, err
 	}
@@ -192,8 +211,9 @@ func (h *userHandle) track(u *User, w *Watch) {
 	}
 }
 
-// notify wakes the watchers of oid in the background (best effort).
-func (h *userHandle) notify(oid string) {
+// notify wakes the watchers of oid in the background (best effort),
+// with data for the payload watchers (nil: none).
+func (h *userHandle) notify(oid string, data []byte) {
 	u, done, err := h.get()
 	if err != nil {
 		return
@@ -202,7 +222,7 @@ func (h *userHandle) notify(oid string) {
 	go func() {
 		defer done()
 
-		if _, _, err := u.idx.NotifyWithTimeout(oid, nil, notifyTimeout); err != nil && errCode(err) != syscall.ENOENT {
+		if _, _, err := u.idx.NotifyWithTimeout(oid, data, notifyTimeout); err != nil && errCode(err) != syscall.ENOENT {
 			u.log.Debug("queue notify failed", "object", oid, "err", err)
 		}
 	}()
@@ -318,4 +338,12 @@ func (b *handleOmap) Write(oid string, ver uint64, set map[string][]byte, rm []s
 func (b *handleOmap) Watch(oid string) (model.Watch, error) { return b.h.watch(oid) }
 
 // Notify implements sortedindex.Waker.
-func (b *handleOmap) Notify(oid string) { b.h.notify(oid) }
+func (b *handleOmap) Notify(oid string) { b.h.notify(oid, nil) }
+
+// NotifyPayload implements sortedindex.Waker.
+func (b *handleOmap) NotifyPayload(oid string, data []byte) { b.h.notify(oid, data) }
+
+// WatchPayload implements sortedindex.Waker.
+func (b *handleOmap) WatchPayload(oid string) (model.PayloadWatch, error) {
+	return b.h.watchPayload(oid)
+}

@@ -3,6 +3,7 @@ package backfill
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -15,6 +16,10 @@ import (
 )
 
 const retention = 14 * 24 * time.Hour
+
+// pushRec is the push subscription record of the legacy store; its
+// index value carries the record's checksum.
+var pushRec = []byte(`{"account":"alice","subs":[{"id":"s","verified":true}]}`)
 
 // legacyKV has admin records written by servers without indexes.
 func legacyKV(t *testing.T, now time.Time) *memstore.AdminKV {
@@ -41,7 +46,7 @@ func legacyKV(t *testing.T, now time.Time) *memstore.AdminKV {
 	put("idem/k1", map[string]string{"job_id": "d1", "request_hash": "h"})
 	put("idem/orphan", map[string]string{"job_id": "never", "request_hash": "h"})
 	put("plan/p1", jobs.Plan{ID: "p1", Kind: "wipe", Account: "alice", Expires: now.Add(time.Hour)})
-	put("jmap/push/acct/alice", map[string]any{"account": "alice", "subs": []map[string]any{{"id": "s", "verified": true}}})
+	put("jmap/push/acct/alice", json.RawMessage(pushRec))
 	put("jmap/push/lease", map[string]any{"holder": "x"})
 
 	if objs := old.Objects(); len(objs) != 0 {
@@ -101,7 +106,7 @@ func TestKVBackfillFillsIndexesAndQueues(t *testing.T) {
 	want := []string{
 		"ix idem/k1 " + `{"job_id":"d1"}`,
 		"ix idem/orphan " + `{"job_id":"never"}`,
-		"ix jmap/push/acct/alice " + `{"verified":true}`,
+		"ix jmap/push/acct/alice " + fmt.Sprintf(`{"verified":true,"sum":%d}`, kvindex.PushSum(pushRec)),
 		"ix job/d1 " + `{"state":"succeeded","account":"alice","kind":"count","finished":"2026-10-01T11:00:00Z"}`,
 		"ix job/q1 " + `{"state":"queued","account":"alice","kind":"count"}`,
 		"ix job/r1 " + `{"state":"running","account":"bob","kind":"count"}`,

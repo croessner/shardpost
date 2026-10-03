@@ -3566,14 +3566,38 @@ func (u *User) lockNamed(id, lockName string, ttl time.Duration) (model.Lease, e
 	return l, nil
 }
 
+// lease is a held cls_lock: a maildrop lock (lockNamed), or a worker
+// lock (holdLockOn), which carries what Retake needs to move it to
+// another connection.
 type lease struct {
+	// mu guards stop, done, u and cookie, which Retake replaces.
+	mu   sync.Mutex
 	stop chan struct{}
 	// done is closed when the renewal goroutine ended (nil: none).
-	done   chan struct{}
-	once   sync.Once
-	lost   atomic.Bool
-	unlock func()
+	done     chan struct{}
+	once     sync.Once
+	released bool
+	lost     atomic.Bool
+	unlock   func()
+
+	// The worker lock: the view and cookie it holds the lock with, the
+	// lock's object, name, description and TTL, how to open a view on
+	// the current connection (Retake), the deadline of the last
+	// successful take (ValidUntil) and an observer of the durations of
+	// its operations (nil: none).
+	u               *User
+	oid, name, desc string
+	cookie          string
+	ttl             time.Duration
+	reopen          func() (*User, error)
+	validUntil      atomic.Pointer[time.Time]
+	observer        func(op string, d time.Duration)
 }
+
+var (
+	_ model.LeaseDeadline = (*lease)(nil)
+	_ model.LeaseRetaker  = (*lease)(nil)
+)
 
 func (l *lease) Lost() bool { return l.lost.Load() }
 
@@ -3581,10 +3605,15 @@ func (l *lease) Lost() bool { return l.lost.Load() }
 // would otherwise take the lock again after the unlock) and unlocks.
 func (l *lease) Release() {
 	l.once.Do(func() {
-		close(l.stop)
+		l.mu.Lock()
+		l.released = true
+		stop, done := l.stop, l.done
+		l.mu.Unlock()
 
-		if l.done != nil {
-			<-l.done
+		close(stop)
+
+		if done != nil {
+			<-done
 		}
 
 		l.unlock()

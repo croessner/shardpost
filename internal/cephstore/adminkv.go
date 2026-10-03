@@ -11,6 +11,7 @@ import (
 	"github.com/ceph/go-ceph/rados"
 
 	"shardpost/internal/kvindex"
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 	"shardpost/internal/sortedindex"
 )
@@ -70,6 +71,22 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 		RequireBackfill: true,
 		Lock: func(name string, ttl time.Duration) (model.Lease, error) {
 			return s.holdLock(adminNamespace, sortedindex.LockOID(name), "worker", name+" worker", ttl, true)
+		},
+		// The push worker's partition leases stand through a key rotation
+		// (holdLock); their lock operations are measured for its metrics.
+		LockKeep: func(name string, ttl time.Duration) (model.Lease, error) {
+			start := time.Now()
+
+			l, err := s.holdLock(adminNamespace, sortedindex.LockOID(name), "worker", name+" worker", ttl, false)
+			metrics.PushLockOp.WithLabelValues("take").Observe(time.Since(start).Seconds())
+
+			if err != nil {
+				return nil, err
+			}
+
+			l.observer = func(op string, d time.Duration) { metrics.PushLockOp.WithLabelValues(op).Observe(d.Seconds()) }
+
+			return l, nil
 		}})
 
 	return &AdminKV{Store: st, recs: recs, omap: b}, nil

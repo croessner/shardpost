@@ -260,13 +260,27 @@ func (s *Store) LockKVBackfill(ttl time.Duration) (model.Lease, error) {
 // before that connection's key is withdrawn, and reports Lost, so its
 // holder takes it again on the new connection. Without that the lock
 // would stay held until its TTL ran out.
+//
+// A lock taken without onRotate stands through a rotation; its holder
+// moves it to the new connection with Retake (model.LeaseRetaker) when
+// the rotation hook (Store.OnRotate) tells it, and until then it renews
+// through the old connection, whose key is still valid for a while. The
+// push worker's partition leases are taken that way (stage B18a), so
+// that a rotation does not stop its watchers.
 func (s *Store) holdLock(ns, oid, name, desc string, ttl time.Duration, onRotate bool) (model.Lease, error) {
 	u, err := s.User(ns)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.holdLockOn(u, oid, name, desc, ttl, onRotate)
+	l, err := s.holdLockOn(u, oid, name, desc, ttl, onRotate)
+	if err != nil {
+		return nil, err
+	}
+
+	l.reopen = func() (*User, error) { return s.User(ns) }
+
+	return l, nil
 }
 
 // holdLockIn is holdLock on namespace ns of pool, whatever pool
@@ -282,38 +296,21 @@ func (s *Store) holdLockIn(pool, ns, oid, name, desc string, ttl time.Duration, 
 }
 
 // holdLockOn is holdLock on the index context of view u, which the lease
-// closes when it is released.
-func (s *Store) holdLockOn(u *User, oid, name, desc string, ttl time.Duration, onRotate bool) (model.Lease, error) {
-	cookie := newGUID()
+// closes when it is released (or replaces, on Retake).
+func (s *Store) holdLockOn(u *User, oid, name, desc string, ttl time.Duration, onRotate bool) (*lease, error) {
+	l := &lease{stop: make(chan struct{}), u: u, oid: oid, name: name, desc: desc, ttl: ttl, cookie: newGUID()}
 
-	take := func(flags *byte) error {
-		ret, err := u.idx.LockExclusive(oid, name, cookie, desc, ttl, flags)
-		if err != nil {
-			return err
-		}
-
-		if ret != 0 {
-			if syscall.Errno(-ret) == syscall.EBUSY || syscall.Errno(-ret) == syscall.EEXIST {
-				return ErrLocked
-			}
-
-			return fmt.Errorf("lock: ret=%d", ret)
-		}
-
-		return nil
-	}
-
-	if err := take(nil); err != nil {
+	sent := time.Now()
+	if err := l.take(nil); err != nil {
 		u.Close()
 		return nil, err
 	}
 
-	l := &lease{stop: make(chan struct{})}
-	u.keepLock(l, ttl/3, take)
+	l.setValidUntil(sent)
+	u.keepLock(l, ttl/3, l.take)
 
 	l.unlock = func() {
-		_, _ = u.idx.Unlock(oid, name, cookie)
-		u.Close()
+		l.unlockOn(l.view())
 
 		if onRotate {
 			s.forgetHeld(l)
@@ -325,6 +322,133 @@ func (s *Store) holdLockOn(u *User, oid, name, desc string, ttl time.Duration, o
 	}
 
 	return l, nil
+}
+
+// take takes or renews (flags) the lock through the lease's current
+// view and cookie.
+func (l *lease) take(flags *byte) error {
+	u, cookie := l.view()
+
+	ret, err := u.idx.LockExclusive(l.oid, l.name, cookie, l.desc, l.ttl, flags)
+	if err != nil {
+		return err
+	}
+
+	if ret != 0 {
+		if syscall.Errno(-ret) == syscall.EBUSY || syscall.Errno(-ret) == syscall.EEXIST {
+			return ErrLocked
+		}
+
+		return fmt.Errorf("lock: ret=%d", ret)
+	}
+
+	return nil
+}
+
+// view is the view and the cookie the lease holds its lock with.
+func (l *lease) view() (*User, string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.u, l.cookie
+}
+
+// unlockOn unlocks through u with cookie and closes u.
+func (l *lease) unlockOn(u *User, cookie string) {
+	start := time.Now()
+	_, _ = u.idx.Unlock(l.oid, l.name, cookie)
+	l.observe("release", start)
+	u.Close()
+}
+
+// setValidUntil records a take or renewal that was sent at sent and
+// succeeded.
+func (l *lease) setValidUntil(sent time.Time) {
+	until := sent.Add(l.ttl)
+	l.validUntil.Store(&until)
+}
+
+// ValidUntil implements model.LeaseDeadline: the time the last
+// successful take or renewal was sent plus the TTL (zero for a maildrop
+// lock, which has no renewal of that kind).
+func (l *lease) ValidUntil() time.Time {
+	if t := l.validUntil.Load(); t != nil {
+		return *t
+	}
+
+	return time.Time{}
+}
+
+// observe reports the duration of a lock operation to the lease's
+// observer, if it has one.
+func (l *lease) observe(op string, start time.Time) {
+	if l.observer != nil {
+		l.observer(op, time.Since(start))
+	}
+}
+
+// Retake implements model.LeaseRetaker: the renewal is stopped, the lock
+// is unlocked through the view it was taken with (the old connection),
+// a new view is opened on the current connection, the lock is taken
+// there with a new cookie, and the renewal goes on through it. The old
+// view is closed, so the old connection loses its reference and can be
+// shut down. An error (another holder was quicker in the gap, or the
+// new view cannot be opened) marks the lease lost; what is held through
+// the old connection has been unlocked by then.
+func (l *lease) Retake() error {
+	if l.reopen == nil {
+		return errors.New("the lease cannot be retaken")
+	}
+
+	l.mu.Lock()
+	if l.released {
+		l.mu.Unlock()
+
+		return errors.New("the lease is released")
+	}
+
+	stop, done := l.stop, l.done
+	l.stop = make(chan struct{})
+	l.mu.Unlock()
+
+	close(stop)
+
+	if done != nil {
+		<-done
+	}
+
+	old, oldCookie := l.view()
+
+	nu, err := l.reopen()
+	if err != nil {
+		l.unlockOn(old, oldCookie)
+		l.lost.Store(true)
+
+		return err
+	}
+
+	l.mu.Lock()
+	l.u, l.cookie = nu, newGUID()
+	l.mu.Unlock()
+
+	// The old lock goes before the new one is taken: the same holder
+	// may not hold a cls_lock under two cookies.
+	l.unlockOn(old, oldCookie)
+
+	sent := time.Now()
+	if err := l.take(nil); err != nil {
+		l.observe("take", sent)
+		l.lost.Store(true)
+		nu.Close()
+
+		return err
+	}
+
+	l.observe("take", sent)
+	l.setValidUntil(sent)
+	nu.keepLock(l, l.ttl/3, l.take)
+
+	return nil
 }
 
 // rememberHeld and forgetHeld track the locks Rotate gives up.
@@ -368,15 +492,22 @@ func (s *Store) releaseHeld() {
 }
 
 // keepLock renews a cls_lock taken with take every interval until the
-// lease is released; a failed renewal marks the lease lost.
+// lease is released; a failed renewal marks the lease lost. The time a
+// renewal was sent is taken before the call, so that the deadline the
+// lease reports (ValidUntil) is never later than the lock's expiry in
+// the cluster.
 func (u *User) keepLock(l *lease, every time.Duration, take func(flags *byte) error) {
 	u.inflight.Add(1)
 
-	l.done = make(chan struct{})
+	l.mu.Lock()
+	stop := l.stop
+	done := make(chan struct{})
+	l.done = done
+	l.mu.Unlock()
 
 	go func() {
 		defer u.inflight.Done()
-		defer close(l.done)
+		defer close(done)
 
 		renew := byte(1) // LIBRADOS_LOCK_FLAG_MAY_RENEW
 
@@ -385,18 +516,63 @@ func (u *User) keepLock(l *lease, every time.Duration, take func(flags *byte) er
 
 		for {
 			select {
-			case <-l.stop:
+			case <-stop:
 				return
 			case <-t.C:
-				if err := take(&renew); err != nil {
+				sent := time.Now()
+				err := take(&renew)
+				l.observe("renew", sent)
+
+				if err != nil {
 					u.log.Warn("lock renewal failed", "err", err)
 					l.lost.Store(true)
 
 					return
 				}
+
+				l.setValidUntil(sent)
 			}
 		}
 	}()
+}
+
+// OnRotate registers fn to run after every key rotation (Store.Rotate),
+// once the admin store and User() hand out the new connection; the
+// returned function removes it. A holder of leases that stand through
+// a rotation (LockQueueKeep) retakes them in it.
+func (s *Store) OnRotate(fn func()) func() {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	if s.rotateHooks == nil {
+		s.rotateHooks = map[int]func(){}
+	}
+
+	s.rotateHook++
+	id := s.rotateHook
+	s.rotateHooks[id] = fn
+
+	return func() {
+		s.heldMu.Lock()
+		defer s.heldMu.Unlock()
+
+		delete(s.rotateHooks, id)
+	}
+}
+
+// runRotateHooks runs the rotation hooks (Store.Rotate).
+func (s *Store) runRotateHooks() {
+	s.heldMu.Lock()
+	hooks := make([]func(), 0, len(s.rotateHooks))
+
+	for _, fn := range s.rotateHooks {
+		hooks = append(hooks, fn)
+	}
+	s.heldMu.Unlock()
+
+	for _, fn := range hooks {
+		fn()
+	}
 }
 
 // Cluster is the fsid the directory records for new entries.

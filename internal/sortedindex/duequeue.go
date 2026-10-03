@@ -19,6 +19,10 @@ type Waker interface {
 	// Notify wakes the watchers of oid (best effort, may return before
 	// they are woken).
 	Notify(oid string)
+	// NotifyPayload is Notify with data for the payload watchers.
+	NotifyPayload(oid string, data []byte)
+	// WatchPayload watches oid with the data of every notify.
+	WatchPayload(oid string) (model.PayloadWatch, error)
 }
 
 // ErrNoWatch is returned by Queue.Watch on a backend without Waker.

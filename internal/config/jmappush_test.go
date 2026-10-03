@@ -25,6 +25,53 @@ func TestJMAPPushFromEnvironment(t *testing.T) {
 	}
 }
 
+// TestJMAPPushPartitionSettings: the partition settings of the worker
+// (stage B18a) have their defaults, come from the environment, and the
+// relations between them are checked.
+func TestJMAPPushPartitionSettings(t *testing.T) {
+	t.Setenv("JMAP_PUSH_VAPID_KEY_FILE", "/k.pem")
+	t.Setenv("JMAP_PUSH_VAPID_SUBJECT", "mailto:a@b")
+
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := c.JMAP.Push
+	if p.LeaseSeconds != 30 || p.TakeSeconds != 5 || p.RetrySeconds != 2 || p.OrphanHoldSeconds != 600 ||
+		p.FullScanSeconds != 3600 || p.RebalanceSeconds != 10 || p.RebalanceSettleSeconds != 60 ||
+		p.HandoffSeconds != 5 || p.MaxWatchedAccounts != 50000 || p.StartRate != 5000 || p.MaxPartitions != 0 {
+		t.Fatalf("defaults %+v", p)
+	}
+
+	t.Setenv("JMAP_PUSH_MAX_PARTITIONS", "8")
+	t.Setenv("JMAP_PUSH_START_RATE", "10000")
+	t.Setenv("JMAP_PUSH_FULL_SCAN_SECONDS", "0")
+
+	if c, err = Load(""); err != nil || c.JMAP.Push.MaxPartitions != 8 || c.JMAP.Push.StartRate != 10000 || c.JMAP.Push.FullScanSeconds != 0 {
+		t.Fatalf("from the environment: %+v %v", c.JMAP.Push, err)
+	}
+
+	for _, bad := range []struct{ key, value string }{
+		{"JMAP_PUSH_LEASE_SECONDS", "14"},            // below 3 × take
+		{"JMAP_PUSH_TAKE_SECONDS", "11"},             // lease 30 < 33
+		{"JMAP_PUSH_RETRY_SECONDS", "6"},             // above take
+		{"JMAP_PUSH_REBALANCE_SETTLE_SECONDS", "20"}, // below the lease
+		{"JMAP_PUSH_HANDOFF_SECONDS", "25"},          // not below lease - 5
+		{"JMAP_PUSH_FULL_SCAN_SECONDS", "10"},        // below the scan
+		{"JMAP_PUSH_MAX_WATCHED_ACCOUNTS", "50"},     // below 100
+		{"JMAP_PUSH_MAX_PARTITIONS", "65"},           // above 64
+	} {
+		t.Run(bad.key, func(t *testing.T) {
+			t.Setenv(bad.key, bad.value)
+
+			if _, err := Load(""); err == nil {
+				t.Fatalf("%s=%s accepted", bad.key, bad.value)
+			}
+		})
+	}
+}
+
 // TestJMAPSubmissionDefaults: XCLIENT and the sender check are on unless
 // switched off, and both off is refused.
 func TestJMAPSubmissionDefaults(t *testing.T) {

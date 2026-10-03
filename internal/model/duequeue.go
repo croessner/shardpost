@@ -189,8 +189,32 @@ type IndexedKV interface {
 	ListIndex(prefix, after string, limit int) ([]KVEntry, error)
 	// LockQueue takes the exclusive worker lease of a queue (a cls_lock
 	// that is renewed while held). ErrLocked when another worker holds
-	// it.
+	// it. A key rotation of the store gives the lease up and marks it
+	// lost; its holder takes it again.
 	LockQueue(name string, ttl time.Duration) (Lease, error)
+	// LockQueueKeep is LockQueue for a lease that outlives a key rotation
+	// (the push worker's partitions, stage B18a): the store leaves it
+	// standing, and its holder moves it to the new connection itself
+	// (LeaseRetaker) when the store tells it (a rotation hook). The lease
+	// implements LeaseDeadline.
+	LockQueueKeep(name string, ttl time.Duration) (Lease, error)
+}
+
+// LeaseDeadline is implemented by a lease that knows until when it
+// holds: the time its last successful take or renewal was sent plus the
+// TTL, measured on the holder's monotonic clock. A holder that stops
+// its work before that time is up can never overlap with a successor.
+type LeaseDeadline interface {
+	ValidUntil() time.Time
+}
+
+// LeaseRetaker is implemented by a lease that can be moved to a new
+// connection after a key rotation: Retake unlocks through the old
+// connection, locks again through the new one with a new cookie and
+// renews there on. An error means the lease is lost (another holder
+// was quicker in the gap).
+type LeaseRetaker interface {
+	Retake() error
 }
 
 // ErrNotIndexed is returned by ListIndex for a prefix that is not an

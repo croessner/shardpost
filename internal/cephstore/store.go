@@ -187,6 +187,9 @@ type Store struct {
 	heldMu  sync.Mutex
 	held    map[*lease]struct{}
 	handles map[*userHandle]struct{}
+	// rotateHooks run after a rotation moved the handles (OnRotate).
+	rotateHooks map[int]func()
+	rotateHook  int
 
 	// learnQ is the learning queue of the process (LearningQueue).
 	learnOnce sync.Once
@@ -312,6 +315,11 @@ func (s *Store) Rotate(key, monHost string) error {
 	// Long-lived views (the admin store) move to the new connection;
 	// their requests that run finish on the old one.
 	s.rotateHandles()
+
+	// Only now do the admin store and User() give out the new
+	// connection: the holders of locks that stood through the rotation
+	// (holdLock without onRotate) move them with Retake.
+	s.runRotateHooks()
 
 	old.old = true
 	go func() {

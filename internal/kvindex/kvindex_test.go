@@ -1,6 +1,7 @@
 package kvindex
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,8 +209,18 @@ func TestPushValue(t *testing.T) {
 	}})
 
 	var v PushValue
-	if err := json.Unmarshal(pushValue(rec), &v); err != nil || !v.Verified || !v.Expires.Equal(e2) {
+	if err := json.Unmarshal(pushValue(rec), &v); err != nil || !v.Verified || !v.Expires.Equal(e2) || v.Sum != PushSum(rec) {
 		t.Fatalf("push value %+v %v", v, err)
+	}
+
+	// A record that differs only in what the value does not carry still
+	// changes the value: the push worker reads it again on its scan.
+	rec2, _ := json.Marshal(map[string]any{"account": "a", "subs": []map[string]any{
+		{"id": "1", "expires": e2, "verified": false, "url": "x"}, {"id": "2", "expires": e1, "verified": true},
+	}})
+
+	if bytes.Equal(pushValue(rec), pushValue(rec2)) {
+		t.Fatal("a changed record kept its push value")
 	}
 }
 

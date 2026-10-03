@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"strings"
 	"sync"
@@ -129,11 +130,28 @@ func idemValue(rec []byte) []byte {
 }
 
 // PushValue is the index value of an account's push subscriptions:
-// whether one is verified and when the last one expires.
+// whether one is verified, when the last one expires, and a checksum of
+// the record (PushSum), so that the push worker's scan reads only the
+// records that changed (stage B18a). A value written by a server before
+// 0.52.0 has no sum; the worker reads such a record on every scan.
 type PushValue struct {
 	Verified bool      `json:"verified"`
 	Expires  time.Time `json:"expires,omitzero"`
+	Sum      uint64    `json:"sum,omitempty"`
 }
+
+// PushSum is the checksum of a push subscription record in its index
+// value: FNV-1a (64 bit) of the record.
+func PushSum(rec []byte) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(rec)
+
+	return h.Sum64()
+}
+
+// PushCollection is the collection of the push subscription records,
+// whose shard count is the partition count of the push worker.
+func PushCollection() *Collection { return collections[3] }
 
 func pushValue(rec []byte) []byte {
 	var pa struct {
@@ -145,7 +163,7 @@ func pushValue(rec []byte) []byte {
 
 	_ = json.Unmarshal(rec, &pa)
 
-	var v PushValue
+	v := PushValue{Sum: PushSum(rec)}
 
 	for _, s := range pa.Subs {
 		v.Verified = v.Verified || s.Verified
@@ -191,9 +209,11 @@ type Options struct {
 	QueueShards int
 	// Backend is the omap access to the admin namespace.
 	Backend sortedindex.Backend
-	// Lock takes a worker lease (model.IndexedKV.LockQueue).
-	Lock func(name string, ttl time.Duration) (model.Lease, error)
-	Log  *slog.Logger
+	// Lock takes a worker lease (model.IndexedKV.LockQueue); LockKeep one
+	// that outlives a key rotation (model.IndexedKV.LockQueueKeep).
+	Lock     func(name string, ttl time.Duration) (model.Lease, error)
+	LockKeep func(name string, ttl time.Duration) (model.Lease, error)
+	Log      *slog.Logger
 	// RequireBackfill gates read mode on the completion marker of
 	// "shardpost index backfill kv" (MarkerKV): while it is missing the
 	// store behaves as in write mode (readers list the namespace) and
@@ -312,6 +332,15 @@ func (s *Store) LockQueue(name string, ttl time.Duration) (model.Lease, error) {
 	}
 
 	return s.o.Lock(name, ttl)
+}
+
+// LockQueueKeep implements model.IndexedKV.
+func (s *Store) LockQueueKeep(name string, ttl time.Duration) (model.Lease, error) {
+	if s.o.LockKeep == nil {
+		return nil, errors.New("the store has no queue lock that outlives a key rotation")
+	}
+
+	return s.o.LockKeep(name, ttl)
 }
 
 // Get implements model.AdminKV.
