@@ -45,6 +45,7 @@ are documented as [manual pages](man/README.md).
 ## Evidence and history
 
 - [ShardPost 0.51.0](reports/2026-10-03-shardpost-0.51.0.md): online reshard and rebuild of the full-text index without account lock, night window (stage B14i).
+- [ShardPost 0.52.0](reports/2026-10-03-shardpost-0.52.0.md): JMAP push partitions, job runner pods, online quota recount, mailbox lock (stages B16, B17, B18).
 - [ShardPost 0.50.0](reports/2026-10-03-shardpost-0.50.0.md): identifier dictionary filter and attached-header text preparation, off by default (stage B14h).
 - [ShardPost 0.49.0](reports/2026-10-03-shardpost-0.49.0.md): separate full-text caps, worker no-op fix, parallel conversions, fts stats; offline measurement for B14h (stage B14g).
 - [Full-text dictionary V0](reports/2026-10-03-fts-dictionary-v0.md): the largest account resharded to 128 dictionary objects, large-omap warning cleared.
