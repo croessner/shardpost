@@ -243,6 +243,11 @@ func (u *User) startFTSRebuild(m int) (string, error) {
 			return "", err
 		}
 
+		// the old index is gone (DeleteFTS): Props follows the new one
+		if err := u.markLayoutProps(loc.hasProps()); err != nil {
+			return "", err
+		}
+
 		if err := u.createGen(loc); err != nil {
 			_ = u.deleteObjects(loc.objects())
 			return "", err

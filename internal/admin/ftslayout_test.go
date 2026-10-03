@@ -323,16 +323,21 @@ func enableDictFilter(t *testing.T, fx *layoutFixture) {
 	}
 }
 
-// disableDictFilter: disable lists the accounts whose generation has the
-// filter (none when none has), list --verify shows it.
+// disableDictFilter: disable lists the accounts whose presence entry
+// has Props, from the presence index alone (none when none has);
+// list --verify shows the filter of a generation.
 func disableDictFilter(t *testing.T, fx *layoutFixture) {
 	t.Helper()
 
 	ctx := context.Background()
 
 	ix, _, _ := fx.layout.FTSLayoutIndex()
-	for _, a := range []string{"alice", "bob"} {
-		if err := ix.Set(a, []byte(`{"since":"2026-10-01T00:00:00Z"}`)); err != nil {
+	for a, v := range map[string]string{
+		"alice": `{"since":"2026-10-01T00:00:00Z","props":"2026-10-02T00:00:00Z"}`,
+		"bob":   `{"since":"2026-10-01T00:00:00Z","props":"2026-10-02T00:00:00Z"}`,
+		"carol": `{"since":"2026-10-01T00:00:00Z"}`,
+	} {
+		if err := ix.Set(a, []byte(v)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -349,7 +354,12 @@ func disableDictFilter(t *testing.T, fx *layoutFixture) {
 	}
 
 	verifiedFilter(t, fx, 25)
-	fx.setDX(0)
+
+	for _, a := range []string{"alice", "bob"} {
+		if err := ix.Set(a, []byte(`{"since":"2026-10-01T00:00:00Z"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	if dis, _ := fx.c.DisableFTSDictFilterWithResponse(ctx); dis.JSON200 == nil || len(dis.JSON200.Accounts) != 0 {
 		t.Fatalf("disable without filtered generations: %d %+v", dis.StatusCode(), dis.JSON200)

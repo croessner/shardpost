@@ -813,6 +813,62 @@ func (u *User) unmarkLayout3() error {
 	return nil
 }
 
+// hasProps reports whether a generation has the identifier filter or
+// the text preparation "nosig" (the properties a version before 0.50.0
+// must not search).
+func (l ftsLoc) hasProps() bool { return l.dx > 0 || l.ah != "" }
+
+// markLayoutProps sets (on) or clears the presence entry's Props: set
+// before a generation with properties comes into being, cleared after
+// the account switched to one without (temp/13 §5.3; "fts dictfilter
+// disable" reads the presence index only). An account without an entry
+// gets one only when on. A creator that loses its race may leave Props
+// set for a generation that never came; the scrub clears it after its
+// grace period.
+func (u *User) markLayoutProps(on bool) error {
+	if u.store == nil {
+		return nil
+	}
+
+	ix, release, err := u.store.FTSLayoutIndex()
+	if err != nil {
+		return fmt.Errorf("fts layout index: %w", err)
+	}
+	defer release()
+
+	err = ix.Update(u.name, func(cur []byte) ([]byte, error) {
+		if cur == nil && !on {
+			return nil, nil
+		}
+
+		var e model.FTSLayoutEntry
+		if cur != nil {
+			_ = json.Unmarshal(cur, &e)
+		}
+
+		switch {
+		case e.Since.IsZero():
+			e.Since = time.Now().UTC()
+		case on == !e.Props.IsZero():
+			return cur, nil
+		}
+
+		e.Props = time.Time{}
+		if on {
+			e.Props = time.Now().UTC()
+		}
+
+		b, _ := json.Marshal(e)
+
+		return b, nil
+	})
+	if err != nil {
+		return fmt.Errorf("fts layout index: %w", err)
+	}
+
+	return nil
+}
+
 // layout3Wanted reports whether a new index of this account gets layout
 // 3: fts.layout is 3 and the cluster mark is set (read now).
 func (u *User) layout3Wanted() (bool, error) {

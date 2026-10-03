@@ -92,7 +92,9 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 		return model.FTSLayoutShape{}, false, err
 	}
 
-	target, capped, err := u.reshardTarget(cur, dx)
+	// The plan (and the import reshard's check) samples one object; the
+	// run, under the lock, samples its own (dictFactor).
+	target, capped, err := u.reshardTarget(cur, dx, 1)
 	if err != nil {
 		return model.FTSLayoutShape{}, false, err
 	}
@@ -108,18 +110,19 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 // filter dx: S′ and H′ within fts.shards_max from fts.shard_target_keys,
 // D′ within fts.dict_shards_max from fts.dict_target_keys. The counters
 // count the dictionary keys by the source's filter; for another filter
-// they are scaled by the factor of a sample (dictFactor, temp/13 §4.8).
+// they are scaled by the factor of a sample of at most sample posting
+// objects (dictFactor, temp/13 §4.8).
 // The target keeps the text preparation of the source (versionText).
 // capped names the kinds a cap cut; it is only reported, never counted
 // (the writers count a generation at its cap).
-func (u *User) reshardTarget(cur ftsLoc, dx int) (ftsLoc, []string, error) {
+func (u *User) reshardTarget(cur ftsLoc, dx, sample int) (ftsLoc, []string, error) {
 	terms, dict, docs, v, err := u.layoutCounts(cur)
 	if err != nil {
 		return ftsLoc{}, nil, err
 	}
 
 	if dx != cur.dx {
-		f, err := u.dictFactor(cur, dx)
+		f, err := u.dictFactor(cur, dx, sample)
 		if err != nil {
 			return ftsLoc{}, nil, err
 		}
@@ -148,13 +151,14 @@ func (u *User) reshardTarget(cur ftsLoc, dx int) (ftsLoc, []string, error) {
 
 // dictFactor estimates how the dictionary keys of generation cur change
 // with the identifier filter dx (temp/13 §4.8): over the posting keys of
-// max(1, S/8) posting objects (keys only, in the job's memory), the sum
+// at most sample posting objects (only the keys are kept; the client
+// library has no read of keys alone, so the values come along), the sum
 // of the keys each term has with dx divided by the sum it has with the
 // filter of cur. The terms are spread over the objects by fnv1a, so the
 // sample stands for the whole. Only the factor is used and logged,
 // never a term; the copy (P5) writes the exact counters afterwards.
-func (u *User) dictFactor(cur ftsLoc, dx int) (float64, error) {
-	objects := max(1, cur.s/8)
+func (u *User) dictFactor(cur ftsLoc, dx, sample int) (float64, error) {
+	objects := min(max(1, sample), cur.s)
 	to := ftsLoc{dx: dx}
 
 	var was, will int64
@@ -474,8 +478,13 @@ func sameShape(t, src ftsLoc) bool {
 
 // layout2Target decides a request for layout 2 (done): nothing to do for
 // a layout 2 index, the layout 2 objects for a layout 3 one; an unknown
-// layout is an error. A request for layout 3 is not done.
+// layout and dict_filter ids for a layout 2 target are errors. A
+// request for layout 3 is not done.
 func (u *User) layout2Target(req model.FTSLayoutRequest, src ftsLoc) (bool, *ftsLoc, error) {
+	if dictFilterOnLayout2(req, src) {
+		return true, nil, errDictFilterLayout2
+	}
+
 	layout := req.Layout
 	if layout == 0 {
 		layout = src.f
@@ -534,7 +543,7 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 		n := forcedCount(req.Shards)
 		t.s, t.d, t.h = n, n, n
 	case src.v3():
-		shape, _, err := u.reshardTarget(src, dx)
+		shape, _, err := u.reshardTarget(src, dx, runSample(src))
 		if err != nil {
 			return t, err
 		}
@@ -551,6 +560,20 @@ func (u *User) layout3Target(req model.FTSLayoutRequest, src ftsLoc) (ftsLoc, er
 
 	return t, nil
 }
+
+// dictFilterOnLayout2 reports a request for the filter whose target is
+// layout 2.
+func dictFilterOnLayout2(req model.FTSLayoutRequest, src ftsLoc) bool {
+	return req.DictFilter == model.FTSDictFilterIDs && (req.Layout == model.FTSLayout2 || (req.Layout == 0 && !src.v3()))
+}
+
+// runSample is the sample of the run's estimate: max(1, S/8) posting
+// objects (the plan takes one).
+func runSample(src ftsLoc) int { return max(1, src.s/8) }
+
+// errDictFilterLayout2 refuses dict_filter ids for a layout 2 target;
+// "none" there is what layout 2 has anyway.
+var errDictFilterLayout2 = errors.New("fts layout: dict_filter ids needs a layout 3 target (layout 3, or an account with a layout 3 index); layout 2 has no filter")
 
 // forcedCount is a forced object count within 1 to 4096; the caps do
 // not apply.
@@ -627,6 +650,13 @@ func (u *User) phase2(req model.FTSLayoutRequest, rep *model.FTSLayoutReport, l 
 
 	if target.v3() && !src.v3() {
 		if err := u.markLayout3(); err != nil {
+			return err
+		}
+	}
+
+	// Props before a target with properties is created (and named).
+	if target.hasProps() {
+		if err := u.markLayoutProps(true); err != nil {
 			return err
 		}
 	}
@@ -1178,6 +1208,10 @@ func (u *User) phase6(req model.FTSLayoutRequest, src, target ftsLoc, st convert
 		if err := u.unmarkLayout3(); err != nil {
 			return err
 		}
+	} else if err := u.markLayoutProps(target.hasProps()); err != nil {
+		// a Props too many after a switch to a target without them: the
+		// scrub clears it
+		u.log.Warn("fts layout index: properties not recorded", "err", err)
 	}
 
 	return u.hook(phaseP6)
@@ -1321,15 +1355,23 @@ func (u *User) clearNext(match func(tok string) bool) (string, error) {
 		return next.Tok, err
 	}
 
-	// An account that got its presence entry for a conversion that did
-	// not happen leaves the presence index again.
+	return next.Tok, u.presenceAfterClear(next, rest)
+}
+
+// presenceAfterClear brings the presence entry back to the record after
+// a conversion that did not happen: an account that got its entry for
+// it leaves the index again, Props set for its target follows the
+// current generation again.
+func (u *User) presenceAfterClear(next ftsGen, rest *ftsLayout) error {
 	if next.F == model.FTSLayout3 && !ftsLayout3(rest) {
-		if err := u.unmarkLayout3(); err != nil {
-			return next.Tok, err
-		}
+		return u.unmarkLayout3()
 	}
 
-	return next.Tok, nil
+	if genLoc(next, u.ftsShards).hasProps() && !curLoc(rest, u.ftsShards).hasProps() {
+		return u.markLayoutProps(false)
+	}
+
+	return nil
 }
 
 // ftsLayout3 reports whether a record names a layout 3 generation as

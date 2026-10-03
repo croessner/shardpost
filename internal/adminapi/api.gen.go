@@ -2903,13 +2903,15 @@ type ClientInterface interface {
 	// Removes the cluster mark of the dictionary filter, so that no
 	// new generation gets the identifier filter or the text
 	// preparation `nosig`; waits five seconds (creators read the mark
-	// when they create) and then reads the layout record of every
-	// account of the layout 3 presence index (one read each) and lists
-	// those whose current or next generation still has either. A
-	// downgrade to a version before 0.50.0 is possible only when that
-	// list is empty: convert them with `fts_layout`
-	// `dict_filter: none` and rebuild those with `nosig` with
-	// `fts_rebuild` first. Requires the role `repair`.
+	// when they create) and then lists the accounts whose entry in the
+	// layout 3 presence index says that a generation of theirs has
+	// either (`props`: set before such a generation is created,
+	// cleared after the account switched to one without, kept in step
+	// by the scrub) — the presence index alone, as the layout 3
+	// disable reads it. A downgrade to a version before 0.50.0 is
+	// possible only when that list is empty: convert them with
+	// `fts_layout` `dict_filter: none` and rebuild those with `nosig`
+	// with `fts_rebuild` first. Requires the role `repair`.
 	//
 	// Corresponds with POST /admin/v1/fts/dictfilter/disable (the `DisableFTSDictFilter` operationId).
 	DisableFTSDictFilter(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4885,13 +4887,15 @@ func (c *Client) GetFTSDictFilter(ctx context.Context, reqEditors ...RequestEdit
 // Removes the cluster mark of the dictionary filter, so that no
 // new generation gets the identifier filter or the text
 // preparation `nosig`; waits five seconds (creators read the mark
-// when they create) and then reads the layout record of every
-// account of the layout 3 presence index (one read each) and lists
-// those whose current or next generation still has either. A
-// downgrade to a version before 0.50.0 is possible only when that
-// list is empty: convert them with `fts_layout`
-// `dict_filter: none` and rebuild those with `nosig` with
-// `fts_rebuild` first. Requires the role `repair`.
+// when they create) and then lists the accounts whose entry in the
+// layout 3 presence index says that a generation of theirs has
+// either (`props`: set before such a generation is created,
+// cleared after the account switched to one without, kept in step
+// by the scrub) — the presence index alone, as the layout 3
+// disable reads it. A downgrade to a version before 0.50.0 is
+// possible only when that list is empty: convert them with
+// `fts_layout` `dict_filter: none` and rebuild those with `nosig`
+// with `fts_rebuild` first. Requires the role `repair`.
 //
 // Corresponds with POST /admin/v1/fts/dictfilter/disable (the `DisableFTSDictFilter` operationId).
 func (c *Client) DisableFTSDictFilter(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -10225,13 +10229,15 @@ type ClientWithResponsesInterface interface {
 	// Removes the cluster mark of the dictionary filter, so that no
 	// new generation gets the identifier filter or the text
 	// preparation `nosig`; waits five seconds (creators read the mark
-	// when they create) and then reads the layout record of every
-	// account of the layout 3 presence index (one read each) and lists
-	// those whose current or next generation still has either. A
-	// downgrade to a version before 0.50.0 is possible only when that
-	// list is empty: convert them with `fts_layout`
-	// `dict_filter: none` and rebuild those with `nosig` with
-	// `fts_rebuild` first. Requires the role `repair`.
+	// when they create) and then lists the accounts whose entry in the
+	// layout 3 presence index says that a generation of theirs has
+	// either (`props`: set before such a generation is created,
+	// cleared after the account switched to one without, kept in step
+	// by the scrub) — the presence index alone, as the layout 3
+	// disable reads it. A downgrade to a version before 0.50.0 is
+	// possible only when that list is empty: convert them with
+	// `fts_layout` `dict_filter: none` and rebuild those with `nosig`
+	// with `fts_rebuild` first. Requires the role `repair`.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -15514,13 +15520,15 @@ func (c *ClientWithResponses) GetFTSDictFilterWithResponse(ctx context.Context, 
 // Removes the cluster mark of the dictionary filter, so that no
 // new generation gets the identifier filter or the text
 // preparation `nosig`; waits five seconds (creators read the mark
-// when they create) and then reads the layout record of every
-// account of the layout 3 presence index (one read each) and lists
-// those whose current or next generation still has either. A
-// downgrade to a version before 0.50.0 is possible only when that
-// list is empty: convert them with `fts_layout`
-// `dict_filter: none` and rebuild those with `nosig` with
-// `fts_rebuild` first. Requires the role `repair`.
+// when they create) and then lists the accounts whose entry in the
+// layout 3 presence index says that a generation of theirs has
+// either (`props`: set before such a generation is created,
+// cleared after the account switched to one without, kept in step
+// by the scrub) — the presence index alone, as the layout 3
+// disable reads it. A downgrade to a version before 0.50.0 is
+// possible only when that list is empty: convert them with
+// `fts_layout` `dict_filter: none` and rebuild those with `nosig`
+// with `fts_rebuild` first. Requires the role `repair`.
 //
 // Returns a wrapper object for the known response body format(s).
 //

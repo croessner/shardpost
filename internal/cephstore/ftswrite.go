@@ -1035,7 +1035,13 @@ func (a *docAlloc) next() (bool, error) {
 	}
 
 	if a.installed {
-		a.gen = nil // the record names it now
+		// The record names it now; Props of the presence entry follows
+		// it (a failure leaves at most a Props too many, the scrub's).
+		if err := a.u.markLayoutProps(a.gen.hasProps()); err != nil {
+			a.u.log.Warn("fts layout index: properties not recorded", "err", err)
+		}
+
+		a.gen = nil
 	}
 
 	a.u.ftsHasIDs.Store(true)
@@ -1091,9 +1097,16 @@ func (u *User) prepareGen() (*ftsLoc, bool, error) {
 	loc := ftsLoc{f: model.FTSLayout3, g: newFTSGen(), s: s, d: d, h: h, dx: dx, ah: ah}
 
 	// Presence entry first (a completeness index): an account with
-	// layout 3 objects is always in it.
+	// layout 3 objects is always in it, with Props before a generation
+	// with properties exists.
 	if err := u.markLayout3(); err != nil {
 		return nil, false, err
+	}
+
+	if loc.hasProps() {
+		if err := u.markLayoutProps(true); err != nil {
+			return nil, false, err
+		}
 	}
 
 	if err := u.createGen(loc); err != nil {

@@ -173,6 +173,13 @@ const (
 // FTSLayoutEntry is the value of an account in the presence index.
 type FTSLayoutEntry struct {
 	Since time.Time `json:"since"`
+	// Props is set (to when it was set) while the account has, or is
+	// about to get, a generation with the identifier filter or the text
+	// preparation "nosig" (0.50.0): it is set before such a generation
+	// is created and cleared after the account switched to one without,
+	// so that "fts dictfilter disable" reads the presence index only. A
+	// version before 0.50.0 keeps an existing value.
+	Props time.Time `json:"props,omitzero"`
 }
 
 // FTSDueGen is the queue generation of an index generation: its FNV-64a

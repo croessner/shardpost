@@ -229,7 +229,8 @@ of `TEXT` find (0.50.0; [storage](architecture/storage.md#full-text-identifier-f
   token, a hash, a base64 run — no trigram keys in the index of an
   account whose index generation was built with it. Such a word is
   found as a whole word and by its start (and a word of more than 40
-  characters also by the start of each 20-character window), not as a
+  characters also by the start of each of its 40-character windows:
+  offsets 0, 20, 40, … and the last one), not as a
   part from its inside: a message is missing from a `BODY` or `TEXT`
   result exactly when a word of the search occurs in its body only as
   an inner or end piece of such identifiers. `SUBJECT`, `FROM`, `TO`,

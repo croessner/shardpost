@@ -1867,7 +1867,17 @@ tokenizes the blob the same way. New generations get the settings only
 while the cluster mark `fts/dictfilter` is set (`shardpostctl fts
 dictfilter enable --pods n`, the servers since 0.50.0 register the
 capability `fts_dict_filter`); it is read without a cache wherever a
-generation is created, and without either setting it is not read.
+generation is created, and without either setting it is not read. The
+account's entry in the presence index `ix.fts_layout` carries `props`
+while a generation of the account, current or under way, has either
+property: set before such a generation is created (a fresh index, a
+rebuild, P2 of a conversion), cleared after the account switched to a
+generation without (the first ids of a fresh index, P6, the clear of
+a conversion that did not happen; 3→2 removes the entry). The scrub
+keeps it in step with `L` (a `props` it clears must be older than its
+grace: it may belong to a generation being created).
+`shardpostctl fts dictfilter disable` therefore reads the presence
+index only.
 
 **Changing an existing index.**
 
@@ -1878,9 +1888,12 @@ generation is created, and without either setting it is not read.
   directions are exact: after the way back a generation is the one that
   was never filtered, also for the messages delivered meanwhile. The
   dictionary keys of the target are estimated before P5 from a sample:
-  the posting keys of max(1, S/8) objects give the factor by which the
-  keys change, applied to Σ`!dn` (logged, no term); P5 writes the exact
-  counters. The worker `fts_due` does not plan because of the filter;
+  the posting keys of max(1, S/8) objects (the plan and the import
+  reshard's check: one object) give the factor by which the keys
+  change, applied to Σ`!dn` (logged, no term); P5 writes the exact
+  counters. The client library reads no keys without their values, so
+  a sampled object costs its whole omap. `dict_filter: ids` on a layout
+  2 index without a layout 3 target is refused. The worker `fts_due` does not plan because of the filter;
   a job it plans for the size takes the configured filter along.
 - *Text preparation*: `fts_rebuild`, which reads every message again
   (`fts_layout` keeps the source's preparation: it copies the
@@ -1923,7 +1936,13 @@ converts it back to layout 2 copies `3` into `v`. Both are exact
 dictionaries: this version trusts them, and the scrub reports the
 marker (`fts_version_drift`) and sets it to `2`. A marker `4` whose `L`
 lost `ah` the same way is only reported: readers take `nosig` from the
-marker, and the next `fts_layout` writes `L` anew. The way back is in
+marker, and the next `fts_layout` writes `L` anew. The other way round,
+an older writer that gives a filtered or `nosig` generation its first
+document ids while it is empty (a conversion of an empty account)
+writes `V` = `2`, which an older reader would trust although
+identifiers lack their trigram keys; the scrub reports it as
+`fts_version_drift` and sets the marker of the generation (`3` or `4`;
+the older writers wrote a superset since). The way back is in
 [operations](../operations/README.md#dictionary-filter-and-attached-headers-0500).
 
 ## Repair and its limits

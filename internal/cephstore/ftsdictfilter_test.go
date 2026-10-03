@@ -586,22 +586,27 @@ func TestVersionDrift(t *testing.T) {
 	rec := func(l *ftsLayout) []byte { return l.encode() }
 	plain := &ftsLayout{F: 3, G: "0123456789abcdef", S: 1, D: 1, H: 1}
 	filt := &ftsLayout{F: 3, G: "0123456789abcdef", S: 1, D: 1, H: 1, DX: newDX(25)}
+	nosig := &ftsLayout{F: 3, G: "0123456789abcdef", S: 1, D: 1, H: 1, AH: fts.AttachedHeadersNoSig}
 
 	for _, c := range []struct {
-		cur  map[string][]byte
-		kind int
-		key  string
+		cur        map[string][]byte
+		kind       int
+		key, value string
 	}{
-		{map[string][]byte{ftsVersionKey: []byte("3")}, driftFixable, ftsVersionKey},
-		{map[string][]byte{ftsVersionKey: []byte("2")}, driftNone, ""},
-		{map[string][]byte{ftsVersionKey: []byte("4")}, driftNone, ""},
-		{map[string][]byte{ftsLayoutKey: rec(plain), ftsVersionKey3: []byte("3")}, driftFixable, ftsVersionKey3},
-		{map[string][]byte{ftsLayoutKey: rec(filt), ftsVersionKey3: []byte("3")}, driftNone, ""},
-		{map[string][]byte{ftsLayoutKey: rec(plain), ftsVersionKey3: []byte("4")}, driftReport, ftsVersionKey3},
-		{map[string][]byte{ftsLayoutKey: rec(plain), ftsVersionKey3: []byte("2")}, driftNone, ""},
+		{map[string][]byte{ftsVersionKey: []byte("3")}, driftFixable, ftsVersionKey, "2"},
+		{map[string][]byte{ftsVersionKey: []byte("2")}, driftNone, "", ""},
+		{map[string][]byte{ftsVersionKey: []byte("4")}, driftNone, "", ""},
+		{map[string][]byte{ftsLayoutKey: rec(plain), ftsVersionKey3: []byte("3")}, driftFixable, ftsVersionKey3, "2"},
+		{map[string][]byte{ftsLayoutKey: rec(filt), ftsVersionKey3: []byte("3")}, driftNone, "", ""},
+		{map[string][]byte{ftsLayoutKey: rec(plain), ftsVersionKey3: []byte("4")}, driftReport, ftsVersionKey3, ""},
+		{map[string][]byte{ftsLayoutKey: rec(plain), ftsVersionKey3: []byte("2")}, driftNone, "", ""},
+		// a version before 0.50.0 marked an empty filtered or nosig generation
+		{map[string][]byte{ftsLayoutKey: rec(filt), ftsVersionKey3: []byte("2")}, driftFixable, ftsVersionKey3, "3"},
+		{map[string][]byte{ftsLayoutKey: rec(nosig), ftsVersionKey3: []byte("2")}, driftFixable, ftsVersionKey3, "4"},
+		{map[string][]byte{ftsLayoutKey: rec(nosig), ftsVersionKey3: []byte("4")}, driftNone, "", ""},
 	} {
-		if kind, key := versionDrift(c.cur, 16); kind != c.kind || key != c.key {
-			t.Errorf("versionDrift(%q) = %d %q, want %d %q", c.cur, kind, key, c.kind, c.key)
+		if kind, key, value := versionDrift(c.cur, 16); kind != c.kind || key != c.key || value != c.value {
+			t.Errorf("versionDrift(%q) = %d %q %q, want %d %q %q", c.cur, kind, key, value, c.kind, c.key, c.value)
 		}
 	}
 }

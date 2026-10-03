@@ -138,6 +138,12 @@ func (k *ftsLayoutKind) Plan(_ context.Context, env *Env, u model.User, _ string
 		return nil, "", err
 	}
 
+	// dict_filter ids on a layout 2 index without a layout 3 target
+	// would do nothing at all
+	if p.DictFilter == model.FTSDictFilterIDs && p.Layout == 0 && st.Current.Layout != model.FTSLayout3 {
+		return nil, "", fmt.Errorf("%w: dict_filter ids needs a layout 3 target: the account has layout 2 (add layout 3)", ErrInvalidParams)
+	}
+
 	s := ftsLayoutSummary{State: st}
 
 	if st.Current.Layout == model.FTSLayout3 {

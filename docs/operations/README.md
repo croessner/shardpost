@@ -896,6 +896,14 @@ Way back: first the keys out, then the image.
    fields of attached headers; the existing indexes still have them (a
    superset, still trusted). New generations stay unfiltered until the
    mark is set.
+
+   Choose `fts.dict_id_min_runes` once: a generation keeps the N it was
+   built with, so a later change makes every filtered generation due for
+   `plan -all -due-only fts_layout` — a full copy (P5) of each, under its
+   account lock. And `nosig` is practically one-way at scale: going back
+   to `all` means `fts_rebuild` of every account built with `nosig`,
+   each reading all its messages under the account lock, and until then
+   IMAP reads the messages of those accounts.
 4. `shardpostctl fts dictfilter enable -pods <number of running pods>`.
    New accounts get both properties from now on.
 5. Convert the existing accounts. `nosig` changes the indexed text, so
@@ -936,7 +944,9 @@ Way back: first the keys out, then the image.
 1. Overlay: `fts.dict_filter: none` and `fts.attached_headers: all`
    (keep the keys for now), roll it out. IMAP checks the full text
    again; it does not trust the indexes built with `nosig` and reads the
-   messages of those accounts (slow, but right) until step 2.
+   messages of those accounts (slow, but right) until step 2 — which
+   for `nosig` is a rebuild of every such account (each reads all its
+   messages under its account lock), so plan the time accordingly.
 2. `shardpostctl fts layout3 list -verify` lists the accounts with
    `dict_filter` or `attached_headers`. Those with `attached_headers
    nosig` need `fts_rebuild` (exact: it reads the messages again); those
@@ -945,9 +955,9 @@ Way back: first the keys out, then the image.
    messages delivered while the filter was on). A rebuild with the
    default settings takes both away.
 3. `shardpostctl fts dictfilter disable` — removes the mark, waits five
-   seconds, reads the layout record of every layout 3 account and exits
-   0 only when no generation has either property (65 otherwise, with
-   the accounts).
+   seconds, reads the presence index (its entries carry whether a
+   generation has either property) and exits 0 only when no generation
+   has either (65 otherwise, with the accounts).
 4. Remove the three keys from the overlay, roll it out, then roll the
    image back (for a version before 0.49.0 see the shrinking above).
 
@@ -962,9 +972,11 @@ version.
 a version marker that does not fit its generation. A `3` left by a
 version before 0.50.0 that converted a filtered generation (back to
 layout 2, or a reshard that dropped the filter from the record) is set
-to `2` — the dictionary is whole. A `4` whose record lost the text
-preparation is only reported; `shardpostctl plan fts_layout <account>`
-writes the record anew.
+to `2` — the dictionary is whole. A `2` on a generation with the
+filter or `nosig` (an older writer gave it its first ids while it was
+empty, so an older reader would trust it) is set to `3` or `4`. A `4`
+whose record lost the text preparation is only reported; `shardpostctl
+plan fts_layout <account>` writes the record anew.
 
 ## Pools
 

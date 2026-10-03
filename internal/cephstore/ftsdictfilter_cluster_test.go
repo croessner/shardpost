@@ -3,6 +3,7 @@
 package cephstore
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -389,7 +390,7 @@ func TestDictFilterFactor(t *testing.T) {
 	cur := curLoc(layoutOf(t, u), u.ftsShards)
 	_, before := dictKeys(t, u)
 
-	f, err := u.dictFactor(cur, 25)
+	f, err := u.dictFactor(cur, 25, runSample(cur))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,5 +681,164 @@ func TestVersionDriftScrub(t *testing.T) {
 
 	if rep, err := u.Scrub(ScrubOptions{}); err != nil || rep.FTSVersionDrift != 0 {
 		t.Errorf("second scrub %+v %v", rep, err)
+	}
+}
+
+// presenceEntry reads the account's entry of the presence index (nil:
+// none).
+func presenceEntry(t *testing.T, s *Store, account string) *model.FTSLayoutEntry {
+	t.Helper()
+
+	ix, release, err := s.FTSLayoutIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	v, err := ix.Get(account)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var e model.FTSLayoutEntry
+	if err := json.Unmarshal(v, &e); err != nil {
+		t.Fatal(err)
+	}
+
+	return &e
+}
+
+// checkProps fails unless the presence entry of the account has Props
+// exactly when want.
+func checkProps(t *testing.T, stage string, s *Store, u *User, want bool) {
+	t.Helper()
+
+	e := presenceEntry(t, s, u.name)
+	if e == nil || e.Props.IsZero() == want {
+		t.Errorf("%s: presence entry %+v, props %v", stage, e, want)
+	}
+}
+
+// TestDictFilterPresenceProps: the presence entry carries Props while a
+// generation of the account has the filter or "nosig" — set by a fresh
+// index, a conversion and a rebuild with them, cleared by a switch or a
+// rebuild without them and by the clear of a conversion that did not
+// happen — so that "fts dictfilter disable" reads the index only.
+func TestDictFilterPresenceProps(t *testing.T) {
+	s := dictFilterStore(t, true, filterOn)
+	u := filledUsers(t, idDocs(5), s)[0]
+
+	checkProps(t, "fresh", s, u, true)
+	convert(t, u, model.FTSLayoutRequest{DictFilter: model.FTSDictFilterNone})
+	checkProps(t, "converted without", s, u, false)
+	convert(t, u, model.FTSLayoutRequest{DictFilter: model.FTSDictFilterIDs})
+	checkProps(t, "converted with", s, u, true)
+
+	u.ftsCfg.dictFilter = false
+
+	rebuild(t, u)
+	checkProps(t, "rebuilt without", s, u, false)
+
+	// a conversion to the filter that stops and is cleared
+	tok := "job-props/1"
+
+	crashAt(t, u.name, phaseP5)
+
+	if _, err := u.ConvertFTSLayout(model.FTSLayoutRequest{DictFilter: model.FTSDictFilterIDs, Tok: tok}); err == nil {
+		t.Fatal("the crash hook did not stop the run")
+	}
+
+	ftsLayoutHook = nil
+
+	checkProps(t, "conversion under way", s, u, true)
+
+	if ok, err := u.ClearFTSLayoutNext(tok); err != nil || !ok {
+		t.Fatalf("clear %v %v", ok, err)
+	}
+
+	checkProps(t, "conversion cleared", s, u, false)
+
+	convert(t, u, model.FTSLayoutRequest{Layout: model.FTSLayout2})
+
+	if e := presenceEntry(t, s, u.name); e != nil {
+		t.Errorf("entry after 3→2 %+v", e)
+	}
+}
+
+// TestDictFilterPresenceScrub: the scrub sets Props that a filtered
+// generation lacks and clears Props older than the grace that no
+// generation needs; a dry run changes nothing.
+func TestDictFilterPresenceScrub(t *testing.T) {
+	s := dictFilterStore(t, true, nil)
+	users := filledUsers(t, idDocs(3), s, s)
+	plain, filtered := users[0], users[1]
+
+	convert(t, filtered, model.FTSLayoutRequest{DictFilter: model.FTSDictFilterIDs})
+
+	ix, release, err := s.FTSLayoutIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	old := []byte(`{"since":"2020-01-01T00:00:00Z","props":"2020-01-01T00:00:00Z"}`)
+	if err := ix.Set(plain.name, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ix.Set(filtered.name, []byte(`{"since":"2020-01-01T00:00:00Z"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if rep, err := plain.Scrub(ScrubOptions{DryRun: true}); err != nil || presenceEntry(t, s, plain.name).Props.IsZero() {
+		t.Fatalf("dry run %+v %v", rep, err)
+	}
+
+	for _, u := range users {
+		if rep, err := u.Scrub(ScrubOptions{}); err != nil || rep.FTSPresenceFixed != 1 {
+			t.Errorf("scrub of %s: %+v %v", u.name, rep, err)
+		}
+	}
+
+	checkProps(t, "scrubbed unfiltered", s, plain, false)
+	checkProps(t, "scrubbed filtered", s, filtered, true)
+}
+
+// TestVersionDriftFilteredTwo: a filtered generation with the marker
+// "2" (a version before 0.50.0 gave its first ids to it while it was
+// empty) would be trusted by that version: the scrub sets "3".
+func TestVersionDriftFilteredTwo(t *testing.T) {
+	u := filledUsers(t, idDocs(3), dictFilterStore(t, true, filterOn))[0]
+
+	if err := u.idx.SetOmap(oidFTSMap, map[string][]byte{ftsVersionKey3: []byte(ftsVersion)}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := u.Scrub(ScrubOptions{})
+	if err != nil || rep.FTSVersionDrift != 1 {
+		t.Fatalf("scrub %+v %v", rep, err)
+	}
+
+	if _, v3 := versionMarkers(t, u); v3 != ftsVersionDict {
+		t.Errorf("marker after the scrub %q", v3)
+	}
+}
+
+// TestDictFilterLayout2: dict_filter ids for a layout 2 index without a
+// layout 3 target is refused (it would do nothing); none is what layout
+// 2 has.
+func TestDictFilterLayout2(t *testing.T) {
+	u := filledUsers(t, layoutDocs(3), testStore(t))[0]
+
+	if _, err := u.ConvertFTSLayout(model.FTSLayoutRequest{DictFilter: model.FTSDictFilterIDs, Tok: "job-l2/1"}); !errors.Is(err, errDictFilterLayout2) {
+		t.Errorf("ids on layout 2: %v", err)
+	}
+
+	if rep := convert(t, u, model.FTSLayoutRequest{DictFilter: model.FTSDictFilterNone}); !rep.Noop {
+		t.Errorf("none on layout 2: %+v", rep)
 	}
 }
