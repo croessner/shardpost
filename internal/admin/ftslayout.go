@@ -62,9 +62,15 @@ func (s *Server) GetFTSLayout3(w http.ResponseWriter, r *http.Request) {
 
 // layout3Status reads the mark and the registrations.
 func (s *Server) layout3Status(now time.Time) (adminapi.FTSLayout3Status, error) {
+	return s.markStatus(model.FTSLayoutMarkKey, now)
+}
+
+// markStatus reads a cluster mark (FTSLayoutMarkKey, FTSDictFilterMarkKey)
+// and the registrations.
+func (s *Server) markStatus(key string, now time.Time) (adminapi.FTSLayout3Status, error) {
 	st := adminapi.FTSLayout3Status{Servers: []adminapi.ServerRegistration{}}
 
-	b, err := s.o.KV.Get(model.FTSLayoutMarkKey)
+	b, err := s.o.KV.Get(key)
 
 	switch {
 	case errors.Is(err, model.ErrNotFound):
@@ -90,6 +96,12 @@ func (s *Server) layout3Status(now time.Time) (adminapi.FTSLayout3Status, error)
 
 // EnableFTSLayout3 sets the mark after the registrations check.
 func (s *Server) EnableFTSLayout3(w http.ResponseWriter, r *http.Request) {
+	s.enableMark(w, r, model.FTSLayoutMarkKey, model.CapFTSLayout3)
+}
+
+// enableMark sets a cluster mark after the registrations check for the
+// capability c.
+func (s *Server) enableMark(w http.ResponseWriter, r *http.Request, key, c string) {
 	if !require(w, r, jobs.RoleRepair) || !s.layoutEnabled(w) {
 		return
 	}
@@ -101,7 +113,7 @@ func (s *Server) EnableFTSLayout3(w http.ResponseWriter, r *http.Request) {
 	}
 
 	force := req.Force != nil && *req.Force
-	auditf(r, "pods", req.Pods, "force", force)
+	auditf(r, "mark", key, "pods", req.Pods, "force", force)
 
 	now := time.Now()
 
@@ -111,19 +123,19 @@ func (s *Server) EnableFTSLayout3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := jobs.Layout3Ready(servers, req.Pods); err != nil && !force {
+	if err := jobs.CapReady(servers, req.Pods, c); err != nil && !force {
 		writeError(w, http.StatusConflict, adminapi.Conflict, err.Error())
 		return
 	}
 
 	mark, _ := json.Marshal(model.FTSLayoutMark{EnabledAt: now.UTC(), Principal: principalOf(r.Context()).name, Pods: req.Pods, Forced: force})
 
-	if err := s.o.KV.Update(model.FTSLayoutMarkKey, func([]byte) ([]byte, error) { return mark, nil }); err != nil {
+	if err := s.o.KV.Update(key, func([]byte) ([]byte, error) { return mark, nil }); err != nil {
 		s.importError(w, r, err)
 		return
 	}
 
-	st, err := s.layout3Status(now)
+	st, err := s.markStatus(key, now)
 	if err != nil {
 		s.importError(w, r, err)
 		return
@@ -360,6 +372,12 @@ func apiShape(s model.FTSLayoutShape) adminapi.FTSLayoutShape {
 	if s.S > 0 {
 		out.S, out.D, out.H = &s.S, &s.D, &s.H
 	}
+
+	if s.DictIDMinRunes > 0 {
+		out.DictIdMinRunes = &s.DictIDMinRunes
+	}
+
+	out.AttachedHeaders = optional(s.AttachedHeaders)
 
 	return out
 }

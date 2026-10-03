@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,8 @@ type fakeIndex struct {
 	// was called and hold it until dueGate is closed.
 	dueEntered chan struct{}
 	dueGate    chan struct{}
+	// dx is the identifier filter of the current generation (B14h).
+	dx int
 }
 
 func (f *fakeIndex) snapshot() (gen, next string, cleared []string) {
@@ -66,7 +69,7 @@ func (u *fakeLayoutUser) FTSLayout() (model.FTSLayoutState, error) {
 	u.f.mu.Lock()
 	defer u.f.mu.Unlock()
 
-	st := model.FTSLayoutState{Current: model.FTSLayoutShape{Layout: 3, Gen: u.f.gen, S: 1, D: 1, H: 1}}
+	st := model.FTSLayoutState{Current: model.FTSLayoutShape{Layout: 3, Gen: u.f.gen, S: 1, D: 1, H: 1, DictIDMinRunes: u.f.dx}}
 	if u.f.next != "" {
 		st.Next, st.NextTok, st.NextAt = &model.FTSLayoutShape{Layout: 3, Gen: "next"}, u.f.next, u.f.nextAt
 	}
@@ -267,6 +270,114 @@ func TestLayout3EnableDisable(t *testing.T) {
 	enableChecks(t, fx)
 
 	disableChecks(t, fx)
+}
+
+// TestDictFilterEnableDisable (B14h): the mark of the dictionary filter
+// needs exactly --pods fresh registrations with fts_dict_filter; disable
+// removes it and lists the accounts whose generation still has the
+// filter, read from their layout records; the layout 3 mark is a
+// different one.
+func TestDictFilterEnableDisable(t *testing.T) {
+	fx := serveLayout(t, Options{}, RoleDiagnose, jobs.RoleRepair)
+	ctx := context.Background()
+
+	for _, pod := range []string{"pod-a", "pod-b"} {
+		if err := jobs.RegisterServer(fx.kv, pod, "0.50.0", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st, err := fx.c.GetFTSDictFilterWithResponse(ctx)
+	if err != nil || st.JSON200 == nil || st.JSON200.Enabled || len(st.JSON200.Servers) != 2 {
+		t.Fatalf("status %v %+v", err, st.JSON200)
+	}
+
+	enableDictFilter(t, fx)
+	disableDictFilter(t, fx)
+}
+
+// enableDictFilter: the wrong pod count is refused naming the
+// capability, the right one sets the mark of the filter and not the
+// layout 3 mark.
+func enableDictFilter(t *testing.T, fx *layoutFixture) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	if bad, _ := fx.c.EnableFTSDictFilterWithResponse(ctx, adminapi.FTSLayout3Enable{Pods: 3}); bad.StatusCode() != http.StatusConflict ||
+		!strings.Contains(bad.JSONDefault.Message, model.CapFTSDictFilter) {
+		t.Fatalf("enable with the wrong count: %d", bad.StatusCode())
+	}
+
+	ok, _ := fx.c.EnableFTSDictFilterWithResponse(ctx, adminapi.FTSLayout3Enable{Pods: 2})
+	if ok.JSON200 == nil || !ok.JSON200.Enabled || ok.JSON200.Mark.Pods != 2 {
+		t.Fatalf("enable: %d %+v", ok.StatusCode(), ok.JSON200)
+	}
+
+	if _, err := fx.kv.Get(model.FTSDictFilterMarkKey); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	if _, err := fx.kv.Get(model.FTSLayoutMarkKey); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("the layout 3 mark was set: %v", err)
+	}
+}
+
+// disableDictFilter: disable lists the accounts whose generation has the
+// filter (none when none has), list --verify shows it.
+func disableDictFilter(t *testing.T, fx *layoutFixture) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	ix, _, _ := fx.layout.FTSLayoutIndex()
+	for _, a := range []string{"alice", "bob"} {
+		if err := ix.Set(a, []byte(`{"since":"2026-10-01T00:00:00Z"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fx.setDX(25)
+
+	dis, _ := fx.c.DisableFTSDictFilterWithResponse(ctx)
+	if dis.JSON200 == nil || !slices.Equal(slices.Sorted(slices.Values(dis.JSON200.Accounts)), []string{"alice", "bob"}) {
+		t.Fatalf("disable: %d %+v", dis.StatusCode(), dis.JSON200)
+	}
+
+	if _, err := fx.kv.Get(model.FTSDictFilterMarkKey); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("mark after disable: %v", err)
+	}
+
+	verifiedFilter(t, fx, 25)
+	fx.setDX(0)
+
+	if dis, _ := fx.c.DisableFTSDictFilterWithResponse(ctx); dis.JSON200 == nil || len(dis.JSON200.Accounts) != 0 {
+		t.Fatalf("disable without filtered generations: %d %+v", dis.StatusCode(), dis.JSON200)
+	}
+}
+
+// verifiedFilter: list --verify shows the identifier filter dx of the
+// first account's generation.
+func verifiedFilter(t *testing.T, fx *layoutFixture, dx int) {
+	t.Helper()
+
+	verify := true
+
+	list, _ := fx.c.ListFTSLayout3AccountsWithResponse(context.Background(), &adminapi.ListFTSLayout3AccountsParams{Verify: &verify})
+	if list.JSON200 == nil || len(list.JSON200.Items) == 0 || list.JSON200.Items[0].Layout == nil {
+		t.Fatalf("list --verify: %d %+v", list.StatusCode(), list.JSON200)
+	}
+
+	if got := list.JSON200.Items[0].Layout.Current.DictIdMinRunes; got == nil || *got != dx {
+		t.Fatalf("list --verify: filter %v, want %d", got, dx)
+	}
+}
+
+// setDX sets the identifier filter of the fake index.
+func (fx *layoutFixture) setDX(n int) {
+	fx.f.mu.Lock()
+	fx.f.dx = n
+	fx.f.mu.Unlock()
 }
 
 // disableChecks: disable lists the account that still has layout 3 and

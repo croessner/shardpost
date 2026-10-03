@@ -17,6 +17,9 @@ import (
 //	fts layout3 enable -pods n [-force] [-json]        role repair
 //	fts layout3 disable [-json]                        role repair (exit 65 while accounts have layout 3)
 //	fts layout3 list [-verify] [-after a] [-limit n] [-json]  role diagnose, scope of all accounts
+//	fts dictfilter status [-json]                      role diagnose (stage B14h)
+//	fts dictfilter enable -pods n [-force] [-json]     role repair
+//	fts dictfilter disable [-json]                     role repair, scope of all accounts (exit 65 while generations have it)
 //	fts layout show [-json] <account>                  role diagnose
 //	fts layout clear [-json] <account>                 role repair
 //	fts stats [-exact] [-parallel n] [-classes] [-json] <account>  role diagnose (ftsstats.go)
@@ -25,6 +28,8 @@ import (
 const (
 	verbShow       = "show"
 	verbStatus     = "status"
+	verbEnable     = "enable"
+	verbDisable    = "disable"
 	labelPrincipal = "principal"
 	labelNext      = "next"
 )
@@ -32,6 +37,7 @@ const (
 const (
 	cmdFTS   = "fts"
 	ftsUsage = "usage: shardpostctl fts layout3 status|enable -pods n [-force]|disable|list [-verify] [-after a] [-limit n] [-json] | " +
+		"fts dictfilter status|enable -pods n [-force]|disable [-json] | " +
 		"fts layout show|clear [-json] <account> | fts stats [-exact] [-parallel n] [-classes] [-json] <account>"
 )
 
@@ -74,13 +80,72 @@ func ftsCmd(client *adminapi.ClientWithResponses, args []string, stdout, stderr 
 	}
 
 	a.rest = rest
-	ctx := context.Background()
 
+	return ftsGroupCmd(context.Background(), client, group, verb, a, stdout, stderr)
+}
+
+// ftsGroupCmd runs a command of a group of fts.
+func ftsGroupCmd(ctx context.Context, client *adminapi.ClientWithResponses, group, verb string, a ftsArgs, stdout, stderr io.Writer) int {
 	switch {
-	case group == "layout3" && len(rest) == 0:
+	case group == "layout3" && len(a.rest) == 0:
 		return layout3Cmd(ctx, client, verb, a, stdout, stderr)
-	case group == "layout" && len(rest) == 1 && (verb == verbShow || verb == "clear"):
-		return accountLayoutCmd(ctx, client, verb, rest[0], a, stdout, stderr)
+	case group == "dictfilter" && len(a.rest) == 0:
+		return dictFilterCmd(ctx, client, verb, a, stdout, stderr)
+	case group == "layout" && len(a.rest) == 1 && (verb == verbShow || verb == "clear"):
+		return accountLayoutCmd(ctx, client, verb, a.rest[0], a, stdout, stderr)
+	default:
+		sayln(stderr, ftsUsage)
+		return exUsage
+	}
+}
+
+// dictFilterCmd runs the commands of the cluster mark of the dictionary
+// filter (stage B14h).
+func dictFilterCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb string, a ftsArgs, stdout, stderr io.Writer) int {
+	show := func(st *adminapi.FTSLayout3Status) int { return printLayout3(stdout, st, a.asJSON) }
+
+	switch verb {
+	case verbStatus:
+		return request(stderr, func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+			resp, err := c.GetFTSDictFilterWithResponse(ctx)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}, show)
+	case verbEnable:
+		if a.pods < 1 {
+			sayln(stderr, "shardpostctl: fts dictfilter enable needs -pods <number of running servers>")
+			return exUsage
+		}
+
+		body := adminapi.FTSLayout3Enable{Pods: a.pods}
+		if a.force {
+			body.Force = &a.force
+		}
+
+		return request(stderr, func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+			resp, err := c.EnableFTSDictFilterWithResponse(ctx, body)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}, show)
+	case verbDisable:
+		return request(stderr, func() (*adminapi.FTSLayout3Disable, *adminapi.Error, int, error) {
+			resp, err := c.DisableFTSDictFilterWithResponse(ctx)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}, func(d *adminapi.FTSLayout3Disable) int {
+			return printDisable(stdout, stderr, d, a.asJSON, "the dictionary filter mark removed; no generation has the filter or the text preparation nosig",
+				"have a generation with the dictionary filter or the text preparation nosig: downgrade not possible yet "+
+					"(convert them with fts_layout -dict-filter none, rebuild those with nosig with fts_rebuild)")
+		})
 	default:
 		sayln(stderr, ftsUsage)
 		return exUsage
@@ -99,9 +164,9 @@ func layout3Cmd(ctx context.Context, c *adminapi.ClientWithResponses, verb strin
 
 			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 		}, func(st *adminapi.FTSLayout3Status) int { return printLayout3(stdout, st, a.asJSON) })
-	case "enable":
+	case verbEnable:
 		return layout3Enable(ctx, c, a, stdout, stderr)
-	case "disable":
+	case verbDisable:
 		return layout3Disable(ctx, c, a, stdout, stderr)
 	case verbList:
 		return layout3List(ctx, c, a, stdout, stderr)
@@ -143,32 +208,38 @@ func layout3Disable(ctx context.Context, c *adminapi.ClientWithResponses, a ftsA
 
 		return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 	}, func(d *adminapi.FTSLayout3Disable) int {
-		if a.asJSON {
-			printJSON(stdout, d)
-		} else {
-			for _, acct := range d.Accounts {
-				sayln(stdout, acct)
-			}
-		}
-
-		if len(d.Accounts) == 0 {
-			if !a.asJSON {
-				sayln(stdout, "layout 3 mark removed; no account has layout 3")
-			}
-
-			return exOK
-		}
-
-		more := ""
-		if d.More != nil && *d.More {
-			more = " (and more)"
-		}
-
-		sayf(stderr, "shardpostctl: the mark is removed, but %d accounts%s still have layout 3: downgrade not possible yet "+
-			"(convert them with fts_layout layout 2)\n", len(d.Accounts), more)
-
-		return exDataErr
+		return printDisable(stdout, stderr, d, a.asJSON, "layout 3 mark removed; no account has layout 3",
+			"still have layout 3: downgrade not possible yet (convert them with fts_layout layout 2)")
 	})
+}
+
+// printDisable prints what a disable of a cluster mark left: the
+// accounts that still need the mark's version (exit 65), or done.
+func printDisable(stdout, stderr io.Writer, d *adminapi.FTSLayout3Disable, asJSON bool, done, still string) int {
+	if asJSON {
+		printJSON(stdout, d)
+	} else {
+		for _, acct := range d.Accounts {
+			sayln(stdout, acct)
+		}
+	}
+
+	if len(d.Accounts) == 0 {
+		if !asJSON {
+			sayln(stdout, done)
+		}
+
+		return exOK
+	}
+
+	more := ""
+	if d.More != nil && *d.More {
+		more = " (and more)"
+	}
+
+	sayf(stderr, "shardpostctl: the mark is removed, but %d accounts%s %s\n", len(d.Accounts), more, still)
+
+	return exDataErr
 }
 
 func layout3List(ctx context.Context, c *adminapi.ClientWithResponses, a ftsArgs, stdout, stderr io.Writer) int {
@@ -393,6 +464,14 @@ func shapeText(s adminapi.FTSLayoutShape) string {
 
 	if s.S != nil && s.D != nil && s.H != nil {
 		text += fmt.Sprintf(" S/D/H %d/%d/%d", *s.S, *s.D, *s.H)
+	}
+
+	if s.DictIdMinRunes != nil && *s.DictIdMinRunes > 0 {
+		text += fmt.Sprintf(" dict_filter ids/%d", *s.DictIdMinRunes)
+	}
+
+	if s.AttachedHeaders != nil && *s.AttachedHeaders != "" {
+		text += " attached_headers " + *s.AttachedHeaders
 	}
 
 	return text

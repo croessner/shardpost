@@ -13,6 +13,8 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .IR n ]
 .RB [ \-shards
 .IR n | s/d/h ]
+.RB [ \-dict-filter
+.BR none | ids ]
 .RB [ \-due-only ]
 .RB [ \-\-json ]
 .I kind account
@@ -25,6 +27,8 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .IR n ]
 .RB [ \-shards
 .IR n | s/d/h ]
+.RB [ \-dict-filter
+.BR none | ids ]
 .RB [ \-due-only ]
 .RB [ \-\-json ]
 .I kind
@@ -262,8 +266,14 @@ and builds it again from every message. When it completes it sets the
 index version marker; without it, and while a rebuild runs or after
 one stopped midway, IMAP substring search does not use the index and
 checks every message of the mailbox. Run it for every account after an
-upgrade that changes how text is indexed. It has no checkpoint: after a
-takeover it starts over.
+upgrade that changes how text is indexed. A layout 3 index gets the
+identifier filter
+.RI ( fts.dict_filter )
+and the text preparation
+.RI ( fts.attached_headers )
+of the configuration while the cluster mark of the dictionary filter is
+set (since 0.50.0): it is how an existing account changes its text
+preparation. It has no checkpoint: after a takeover it starts over.
 .TP
 .B fts_dict_convert
 Role
@@ -320,11 +330,34 @@ up to
 (a conversion from layout 2 estimates them from the number of messages;
 the plan names the kinds a cap cut in its target,
 .IR capped );
+.B \-dict-filter
+sets the identifier filter of a layout 3 target (since 0.50.0, the
+parameter
+.IR dict_filter ):
+.B ids
+gives a body word with letters and digits of at least
+.I fts.dict_id_min_runes
+characters one start entry instead of a key per trigram,
+.B none
+takes the filter away; without it the target gets the filter that
+.I fts.dict_filter
+and the cluster mark of the filter ask for. The postings are copied as
+they are and the dictionary is derived from them by the target's
+filter, so both directions are exact; the dictionary objects of the
+target are estimated from a sample of the posting keys. The target
+keeps the source's text preparation
+.RI ( fts.attached_headers ;
+changing it takes
+.BR fts_rebuild ).
 .B \-due-only
 ends without a change while the key counts ask for the shape the index
-has (the fts_due worker plans the job so). Converting to layout 3 needs
-the cluster mark
+has and its identifier filter is the one asked for (the fts_due worker
+plans the job so, but never because of the filter). Converting to
+layout 3 needs the cluster mark
 .RB ( "shardpostctl fts layout3 enable" ),
+.B \-dict-filter ids
+the mark of the filter
+.RB ( "shardpostctl fts dictfilter enable" ),
 read when the job is planned and when it starts. The job freezes the
 account's posting objects, writes the target generation from them (dead
 document ids left out, the dictionary derived from the terms, the header
@@ -527,9 +560,17 @@ and
 .I fts.dict_shards_max
 do not apply.
 .TP
+.BR \-dict-filter " none" | ids
+.BR fts_layout :
+the identifier filter of a layout 3 target (default: as
+.I fts.dict_filter
+and the cluster mark of the filter say); not with
+.BR "\-layout 2" .
+.TP
 .B \-due-only
 .BR fts_layout :
-no change while the key counts ask for the shape the index has.
+no change while the key counts ask for the shape the index has and its
+identifier filter is the one asked for.
 .TP
 .B \-wait
 Wait until the job ends. The exit code is then the job's outcome.
@@ -641,6 +682,19 @@ and one header object, whatever the caps say:
 .nf
 .RS
 shardpostctl plan -shards 32/128/1 fts_layout user@example.org
+.RE
+.fi
+.PP
+Give one account the identifier filter of the dictionary (the cluster
+mark of the filter is set), and convert every account whose filter
+differs from
+.I fts.dict_filter
+(both directions):
+.PP
+.nf
+.RS
+shardpostctl plan -dict-filter ids fts_layout user@example.org
+shardpostctl plan -all -due-only fts_layout
 .RE
 .fi
 .PP

@@ -54,7 +54,7 @@ type Registration struct {
 
 // record is the value of the registration at now.
 func (r Registration) record(now time.Time) model.ServerRecord {
-	return model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool}, Seen: now.UTC(),
+	return model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool, model.CapFTSDictFilter}, Seen: now.UTC(),
 		Role: r.Role, SystemPool: r.SystemPool, StartedAt: r.StartedAt.UTC()}
 }
 
@@ -213,9 +213,9 @@ func (m *Manager) expireServer(e model.DueEntry, now time.Time) error {
 	return m.expiryMove(e, nil)
 }
 
-// ErrNotReady refuses "fts layout3 enable" while the registrations do
-// not show exactly the expected servers.
-var ErrNotReady = errors.New("the cluster is not ready for layout 3")
+// ErrNotReady refuses "fts layout3 enable" and "fts dictfilter enable"
+// while the registrations do not show exactly the expected servers.
+var ErrNotReady = errors.New("the cluster is not ready for the mark")
 
 // Layout3Ready checks the registrations for "fts layout3 enable --pods
 // n": exactly n fresh registrations of servers (role serve, or none:
@@ -224,6 +224,14 @@ var ErrNotReady = errors.New("the cluster is not ready for layout 3")
 // within model.ServerFresh that did not record its end still has its
 // predecessor's fresh record: wait until it is older (F12).
 func Layout3Ready(servers []Server, pods int) error {
+	return CapReady(servers, pods, model.CapFTSLayout3)
+}
+
+// CapReady checks the registrations for an enable of a cluster mark
+// with --pods n: exactly n fresh registrations of servers, each with
+// the capability c ("fts layout3 enable": model.CapFTSLayout3, "fts
+// dictfilter enable": model.CapFTSDictFilter).
+func CapReady(servers []Server, pods int, c string) error {
 	var fresh []string
 
 	capable := 0
@@ -235,14 +243,14 @@ func Layout3Ready(servers []Server, pods int) error {
 
 		fresh = append(fresh, fmt.Sprintf("%s (%s, seen %s)", s.Instance, s.Version, s.Seen.UTC().Format(time.RFC3339)))
 
-		if s.HasCap(model.CapFTSLayout3) {
+		if s.HasCap(c) {
 			capable++
 		}
 	}
 
 	if len(fresh) != pods || capable != pods {
 		return fmt.Errorf("%w: %d fresh registrations (%d with %s), expected --pods %d: %s; a replaced pod's record stays fresh for %s",
-			ErrNotReady, len(fresh), capable, model.CapFTSLayout3, pods, strings.Join(fresh, ", "), model.ServerFresh)
+			ErrNotReady, len(fresh), capable, c, pods, strings.Join(fresh, ", "), model.ServerFresh)
 	}
 
 	return nil

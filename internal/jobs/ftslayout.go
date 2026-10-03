@@ -19,14 +19,18 @@ const KindFTSLayout = "fts_layout"
 // ftsLayoutParams are the parameters of fts_layout: the target layout (0:
 // the account's), forced object counts — shards one count for the
 // posting, dictionary and header objects alike, shape "s/d/h" each its
-// own (neither: from the key counts) — and due_only, which ends without
-// a change while the counts ask for the shape the index has. Forced
-// counts ignore fts.shards_max and fts.dict_shards_max (at most 4096).
+// own (neither: from the key counts) — the identifier filter of a layout
+// 3 target (dict_filter "ids", "none"; omitted: as the configuration and
+// the cluster mark of the filter say) and due_only, which ends without
+// a change while the counts ask for the shape the index has and its
+// filter is the one asked for. Forced counts ignore fts.shards_max and
+// fts.dict_shards_max (at most 4096).
 type ftsLayoutParams struct {
-	Layout  int    `json:"layout,omitempty"`
-	Shards  int    `json:"shards,omitempty"`
-	Shape   string `json:"shape,omitempty"`
-	DueOnly bool   `json:"due_only,omitempty"`
+	Layout     int    `json:"layout,omitempty"`
+	Shards     int    `json:"shards,omitempty"`
+	Shape      string `json:"shape,omitempty"`
+	DictFilter string `json:"dict_filter,omitempty"`
+	DueOnly    bool   `json:"due_only,omitempty"`
 }
 
 // maxForcedShards bounds forced object counts.
@@ -42,6 +46,13 @@ func parseFTSLayout(params json.RawMessage) (ftsLayoutParams, error) {
 
 	if p.Layout != 0 && p.Layout != model.FTSLayout2 && p.Layout != model.FTSLayout3 {
 		return p, fmt.Errorf("%w: layout must be 2 or 3", ErrInvalidParams)
+	}
+
+	switch {
+	case p.DictFilter != "" && p.DictFilter != model.FTSDictFilterNone && p.DictFilter != model.FTSDictFilterIDs:
+		return p, fmt.Errorf("%w: dict_filter must be none or ids", ErrInvalidParams)
+	case p.DictFilter != "" && p.Layout == model.FTSLayout2:
+		return p, fmt.Errorf("%w: dict_filter applies to layout 3 only", ErrInvalidParams)
 	}
 
 	return p, p.checkForced()
@@ -113,6 +124,10 @@ func (k *ftsLayoutKind) Plan(_ context.Context, env *Env, u model.User, _ string
 		return nil, "", err
 	}
 
+	if err := requireDictFilter(env, p); err != nil {
+		return nil, "", err
+	}
+
 	lay, err := capability[model.FTSLayouter](u, "change the full-text layout")
 	if err != nil {
 		return nil, "", err
@@ -156,6 +171,30 @@ func requireLayout3(env *Env, p ftsLayoutParams) error {
 	return err
 }
 
+// requireDictFilter refuses a target with the identifier filter without
+// the cluster mark of the filter, read now (temp/13 §5.3).
+func requireDictFilter(env *Env, p ftsLayoutParams) error {
+	if p.DictFilter != model.FTSDictFilterIDs {
+		return nil
+	}
+
+	var marked model.FTSDictFilterMarked
+	if env != nil {
+		marked, _ = env.Layout3.(model.FTSDictFilterMarked)
+	}
+
+	if marked == nil {
+		return model.ErrFTSDictFilterMark
+	}
+
+	ok, err := marked.FTSDictFilterEnabled()
+	if err == nil && !ok {
+		err = model.ErrFTSDictFilterMark
+	}
+
+	return err
+}
+
 // layoutToken is the conversion token of a run: the lock session of the
 // job and the generation of its lease (R4.1).
 func (r *Run) layoutToken() string { return model.JobLockToken(lockSession(r.Job.ID), r.gen) }
@@ -167,6 +206,10 @@ func (k *ftsLayoutKind) Run(_ context.Context, run *Run) (res any, err error) {
 	}
 
 	if err := requireLayout3(run.Env, p); err != nil {
+		return nil, err
+	}
+
+	if err := requireDictFilter(run.Env, p); err != nil {
 		return nil, err
 	}
 
@@ -194,7 +237,8 @@ func (k *ftsLayoutKind) Run(_ context.Context, run *Run) (res any, err error) {
 
 	shape, _ := ParseFTSShape(p.Shape) // checked by parseFTSLayout
 
-	return lay.ConvertFTSLayout(model.FTSLayoutRequest{Layout: p.Layout, Shards: p.Shards, Shape: shape, DueOnly: p.DueOnly, Tok: tok, Fence: run.Fence,
+	return lay.ConvertFTSLayout(model.FTSLayoutRequest{Layout: p.Layout, Shards: p.Shards, Shape: shape, DictFilter: p.DictFilter,
+		DueOnly: p.DueOnly, Tok: tok, Fence: run.Fence,
 		Progress: func(phase string, done, total int) {
 			if time.Since(last) > time.Second || done == total {
 				last = time.Now()

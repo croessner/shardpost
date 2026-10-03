@@ -17,8 +17,8 @@ import (
 
 // Maintenance jobs (roadmap 8c):
 //
-//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind> <account>   dry run, prints the plan
-//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind>   a batch of the kind over every account
+//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind> <account>   dry run, prints the plan
+//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind>   a batch of the kind over every account
 //	plan show <plan-id>
 //	apply [-wait] [-idempotency-key K] <plan-id>        run the plan as a job
 //	check [-wait] <account>                             read-only index check
@@ -28,8 +28,8 @@ import (
 // With -wait (and for job wait) the exit code is the job's outcome: 0
 // succeeded, 1 partially failed, 69 failed or cancelled.
 
-const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind> <account> |
-  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-due-only] <kind> | plan show <plan-id> |
+const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind> <account> |
+  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
   kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, fts_layout, mailbox_name_convert,
@@ -47,6 +47,7 @@ type jobArgs struct {
 	dueOnly          bool
 	layout           int
 	shards           string
+	dictFilter       string
 	uids             string
 	classes, mailbox string
 	idemKey, account string
@@ -71,7 +72,8 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 	fs.BoolVar(&a.skipIdle, "skip-idle", false, "plan -all scrub: skip the accounts unchanged since their last clean scrub")
 	fs.IntVar(&a.layout, "layout", 0, "fts_layout: the target layout (2 or 3; default the account's)")
 	fs.StringVar(&a.shards, "shards", "", "fts_layout: forced object counts of a layout 3 target, n for all or s/d/h (default from the key counts; the caps do not apply)")
-	fs.BoolVar(&a.dueOnly, "due-only", false, "fts_layout: no change while the key counts ask for the shape the index has")
+	fs.StringVar(&a.dictFilter, "dict-filter", "", "fts_layout: the identifier filter of a layout 3 target, none or ids (default as fts.dict_filter and the cluster mark say)")
+	fs.BoolVar(&a.dueOnly, "due-only", false, "fts_layout: no change while the key counts ask for the shape the index has and its filter is the one asked for")
 	fs.StringVar(&a.idemKey, "idempotency-key", "", "reuse the job of an earlier identical request")
 	fs.StringVar(&a.account, "account", "", "job list: only this account")
 	fs.StringVar(&a.state, labelState, "", "job list: only this state")
@@ -86,6 +88,11 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 
 	if err := checkShards(a.shards); err != nil {
 		sayln(stderr, "shardpostctl: -shards:", err)
+		return a, false
+	}
+
+	if a.dictFilter != "" && a.dictFilter != "none" && a.dictFilter != "ids" {
+		sayln(stderr, "shardpostctl: -dict-filter: none or ids")
 		return a, false
 	}
 
@@ -269,6 +276,10 @@ func layoutParams(a jobArgs, params map[string]any) {
 	case a.shards != "":
 		n, _ := strconv.Atoi(a.shards) // checked by checkShards
 		params["shards"] = n
+	}
+
+	if a.dictFilter != "" {
+		params["dict_filter"] = a.dictFilter
 	}
 
 	if a.dueOnly {

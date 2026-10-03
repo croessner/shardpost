@@ -109,6 +109,68 @@ func TestFTSLayoutCommands(t *testing.T) {
 	}
 }
 
+// TestFTSDictFilterCommands (B14h): the mark of the dictionary filter
+// has the commands of the layout 3 mark; disable exits 0 when no
+// account has a filtered generation and 65 while one has
+// (printDisable); -dict-filter takes none or ids.
+func TestFTSDictFilterCommands(t *testing.T) {
+	socket, kv, ls := serveLayout(t)
+
+	if err := jobs.RegisterServer(kv, "pod-a", "0.50.0", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		args []string
+		code int
+		out  string
+	}{
+		{[]string{"fts", "dictfilter", "enable"}, exUsage, ""},
+		{[]string{"fts", "dictfilter", "enable", "-pods", "2"}, exDataErr, ""},
+		{[]string{"fts", "dictfilter", "enable", "-pods", "1"}, exOK, "enabled     true"},
+		{[]string{"fts", "dictfilter", "status"}, exOK, "fts_dict_filter"},
+		{[]string{"fts", "dictfilter", "disable"}, exOK, "no generation has the filter"},
+		{[]string{"fts", "dictfilter", "bogus"}, exUsage, ""},
+		{[]string{"plan", "-dict-filter", "all", "fts_layout", "alice"}, exUsage, ""},
+	} {
+		code, out, errOut := call(socket, "", c.args...)
+		if code != c.code || !strings.Contains(out, c.out) {
+			t.Errorf("%v: %d %q %q", c.args, code, out, errOut)
+		}
+	}
+
+	ix, _, _ := ls.FTSLayoutIndex()
+	if err := ix.Set("alice", []byte(`{"since":"2026-10-01T00:00:00Z"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// the account's index (memstore: layout 2) has no filter
+	code, out, errOut := call(socket, "", "fts", "dictfilter", "disable", "-json")
+	if code != exOK || strings.Contains(out, "alice") {
+		t.Errorf("disable: %d %q %q", code, out, errOut)
+	}
+
+	// the exit code of accounts left is printDisable's, shared with
+	// layout 3
+	d := &adminapi.FTSLayout3Disable{Accounts: []string{"alice"}}
+
+	var o, e strings.Builder
+	if code := printDisable(&o, &e, d, false, "done", "have it"); code != exDataErr || !strings.Contains(o.String(), "alice") || !strings.Contains(e.String(), "have it") {
+		t.Errorf("printDisable: %d %q %q", code, o.String(), e.String())
+	}
+}
+
+// TestShapeText: the identifier filter and the text preparation of a
+// generation are shown with its shape.
+func TestShapeText(t *testing.T) {
+	n, s := func(v int) *int { return &v }, func(v string) *string { return &v }
+	sh := adminapi.FTSLayoutShape{Layout: 3, Gen: s("g"), S: n(1), D: n(2), H: n(1), DictIdMinRunes: n(25), AttachedHeaders: s("nosig")}
+
+	if got := shapeText(sh); got != "layout 3 gen g S/D/H 1/2/1 dict_filter ids/25 attached_headers nosig" {
+		t.Errorf("shape %q", got)
+	}
+}
+
 // TestFTSStatsCommand (temp/13 §7.1): the key counts of any account;
 // classes only for a test account, otherwise exit 77; no term printed.
 func TestFTSStatsCommand(t *testing.T) {

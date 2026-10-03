@@ -723,6 +723,8 @@ stopped run is seen after its 90 s heartbeat aged).
   fts_rebuild <account>`.
 - Scrub `FTSMixedLayout`: layout 2 objects in a layout 3 account, written
   by a server before 0.45.0 after a wrong way back: `fts_rebuild`.
+- Scrub `FTSVersionDrift`: see
+  [below](#dictionary-filter-and-attached-headers-0500).
 - `imapceph_fts_shards_capped_total{kind}` rises: an account's objects of
   that kind outgrew their target at the cap (`fts.shards_max` for
   `postings` and `headers`, `fts.dict_shards_max` for `dictionary`); the
@@ -849,6 +851,120 @@ account is locked for the job). To choose the time for a large account,
 run the job by hand right after the restart (`shardpostctl plan
 -due-only fts_layout <account>`, `apply -wait`) or set
 `fts.auto_reshard: false` until then.
+
+### Dictionary filter and attached headers (0.50.0)
+
+Two settings make the substring dictionary of large accounts smaller
+([storage](../architecture/storage.md#full-text-identifier-filter)):
+`fts.dict_filter: ids` gives a body identifier (letters and digits, at
+least `fts.dict_id_min_runes` characters, default 25) one start entry
+instead of one key per trigram; `fts.attached_headers: nosig` leaves
+the signature and trace fields of attached messages out of the body
+text. Both are off by default, and with the defaults nothing changes:
+no new key, no other marker, the same search results. What they change
+for the users is in [protocols](../protocols.md#search-sort-and-thread):
+an identifier is no longer found by a part from its inside, and the
+signature fields of forwarded and bounced messages are not searchable.
+
+Both are properties of an index generation (its layout record shows
+them: `shardpostctl fts layout show <account>` prints `dict_filter
+ids/25` and `attached_headers nosig`). A generation gets them when it is
+created — a fresh index, `fts_rebuild`, `fts_layout` — and only while
+the cluster mark `fts/dictfilter` is set, because a server before 0.50.0
+must not search such an index (it does not trust it and reads the
+messages instead).
+
+**Order of overlay and image.** The three keys are new: an older version
+refuses to start with them. Rollout: first the image, then the keys.
+Way back: first the keys out, then the image.
+
+**Enabling it (croessner: N = 25 with `nosig`).**
+
+1. Roll out 0.50.0 to every pod and wait three minutes.
+2. `shardpostctl fts dictfilter status`: every fresh pod reports
+   `fts_dict_filter`.
+3. Put into the overlay and roll it out (the pods restart):
+
+   ```yaml
+   fts:
+     dict_filter: ids
+     dict_id_min_runes: 25
+     attached_headers: nosig
+   ```
+
+   From now on IMAP `BODY`/`TEXT` check messages without the signature
+   fields of attached headers; the existing indexes still have them (a
+   superset, still trusted). New generations stay unfiltered until the
+   mark is set.
+4. `shardpostctl fts dictfilter enable -pods <number of running pods>`.
+   New accounts get both properties from now on.
+5. Convert the existing accounts. `nosig` changes the indexed text, so
+   it takes `fts_rebuild`, which reads every message again and builds
+   the new generation with both properties; `fts_layout` would keep the
+   old text (it copies the postings). The rebuild holds the account
+   lock for its whole duration — deliveries into the account fail
+   temporarily (LMTP 451, the MTA retries), new logins are refused —
+   and IMAP searches of the account read the messages until it is done.
+   1. The test account first, and measure the time:
+      `shardpostctl plan fts_rebuild rbdpoc2@exampleserver.de`,
+      `shardpostctl apply -wait <plan-id>`; then `shardpostctl fts
+      layout show rbdpoc2@exampleserver.de` (both properties, `V` =
+      `4`) and `shardpostctl fts stats rbdpoc2@exampleserver.de` (keys
+      per message).
+   2. The largest account at a quiet time, the same way
+      (`de10000@srvint.net`).
+   3. The rest as a batch with little parallelism
+      (`jobs.batch_parallel`): `shardpostctl plan -all fts_rebuild`,
+      `shardpostctl apply <plan-id>`.
+
+   Only the filter, without `nosig`, needs no rebuild:
+   `shardpostctl plan -all -due-only fts_layout` converts exactly the
+   accounts whose filter differs from the configuration (the dictionary
+   is derived from the postings; an account that is not due ends as a
+   no-op after a short lock), `-dict-filter ids` forces it for one
+   account. The plan of an account shows the target with the estimated
+   dictionary objects (a sample of the posting keys; the job logs the
+   factor).
+6. Check: `shardpostctl fts layout3 list -verify` shows the properties of
+   every account; `imapceph_fts_dict_keys_written_total{entry="prefix"}`
+   grows with the deliveries; `rados listomapkeys … | wc -l` of the
+   dictionary objects and `ceph df detail` (`stored_omap`) before and
+   after; `ceph health` without `LARGE_OMAP_OBJECTS`.
+
+**Way back.** In order:
+
+1. Overlay: `fts.dict_filter: none` and `fts.attached_headers: all`
+   (keep the keys for now), roll it out. IMAP checks the full text
+   again; it does not trust the indexes built with `nosig` and reads the
+   messages of those accounts (slow, but right) until step 2.
+2. `shardpostctl fts layout3 list -verify` lists the accounts with
+   `dict_filter` or `attached_headers`. Those with `attached_headers
+   nosig` need `fts_rebuild` (exact: it reads the messages again); those
+   with the filter only `shardpostctl plan -all -due-only fts_layout`
+   (exact: P5 derives every trigram key from the postings, also of the
+   messages delivered while the filter was on). A rebuild with the
+   default settings takes both away.
+3. `shardpostctl fts dictfilter disable` — removes the mark, waits five
+   seconds, reads the layout record of every layout 3 account and exits
+   0 only when no generation has either property (65 otherwise, with
+   the accounts).
+4. Remove the three keys from the overlay, roll it out, then roll the
+   image back (for a version before 0.49.0 see the shrinking above).
+
+In an emergency, when an older server already runs against such
+accounts: it does not trust them (IMAP slow, but right; JMAP finds
+identifiers only as whole words and still misses the signature fields).
+Export `shardpostctl fts layout3 list -verify -json` while 0.50.0 still
+runs, and rebuild those accounts with `fts_rebuild` under the older
+version.
+
+**Scrub finding `fts_version_drift`** (`imapceph_fts_version_drift_total`):
+a version marker that does not fit its generation. A `3` left by a
+version before 0.50.0 that converted a filtered generation (back to
+layout 2, or a reshard that dropped the filter from the record) is set
+to `2` — the dictionary is whole. A `4` whose record lost the text
+preparation is only reported; `shardpostctl plan fts_layout <account>`
+writes the record anew.
 
 ## Pools
 

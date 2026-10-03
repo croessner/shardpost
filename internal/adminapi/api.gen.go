@@ -557,7 +557,8 @@ type BatchPlanRequest struct {
 
 	// Params Parameters of the kind for every account; scrub: `classes`
 	// (empty = all); fts_layout: `layout`, `shards` or `shape`,
-	// `due_only` (see `FTSLayoutParams`). The other kinds take none.
+	// `dict_filter`, `due_only` (see `FTSLayoutParams`). The other
+	// kinds take none.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
 	// SkipIdle scrub only: skip the accounts whose last batch scrub was
@@ -699,7 +700,9 @@ type FTSIdentBound struct {
 
 // FTSLayout3Disable defines model for FTSLayout3Disable.
 type FTSLayout3Disable struct {
-	// Accounts Accounts that still have a layout 3 index (at most 1000).
+	// Accounts Accounts that still need the mark's version: for layout 3 a
+	// layout 3 index, for the dictionary filter a generation with
+	// the filter or the text preparation `nosig` (at most 1000).
 	Accounts []string `json:"accounts"`
 
 	// More There are more than listed.
@@ -711,7 +714,7 @@ type FTSLayout3Enable struct {
 	// Force Set the mark without the check.
 	Force *bool `json:"force,omitempty"`
 
-	// Pods The number of servers running now; exactly as many fresh registrations must report layout 3.
+	// Pods The number of servers running now; exactly as many fresh registrations must report the capability of the mark.
 	Pods int `json:"pods"`
 }
 
@@ -758,8 +761,19 @@ type FTSLayoutClear struct {
 
 // FTSLayoutShape defines model for FTSLayoutShape.
 type FTSLayoutShape struct {
+	// AttachedHeaders The text preparation of the generation (since 0.50.0):
+	// `nosig` without the signature and trace fields of attached
+	// headers. Missing: every field.
+	AttachedHeaders *string `json:"attached_headers,omitempty"`
+
 	// D Dictionary objects.
 	D *int `json:"d,omitempty"`
+
+	// DictIdMinRunes The identifier filter of the generation's dictionary (since
+	// 0.50.0): a body term with letters and digits of at least
+	// this many runes has one start entry instead of its trigram
+	// keys. Missing: no filter.
+	DictIdMinRunes *int `json:"dict_id_min_runes,omitempty"`
 
 	// Gen The generation (layout 3).
 	Gen *string `json:"gen,omitempty"`
@@ -1261,7 +1275,7 @@ type PlanRequest struct {
 
 	// Params scrub: `classes` (deliveries, moves, retired, uncovered, entries,
 	// refs, orphans, unknown, quota; empty = all); fts_layout:
-	// `layout`, `shards` or `shape`, `due_only` (see
+	// `layout`, `shards` or `shape`, `dict_filter`, `due_only` (see
 	// `FTSLayoutParams`); mailbox_delete:
 	// `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
 	// `deleted: true` (every message flagged \Deleted when planned).
@@ -1887,6 +1901,9 @@ type SetTraceJSONRequestBody = TraceRequest
 
 // FlushAuthCacheJSONRequestBody defines body for FlushAuthCache for application/json ContentType.
 type FlushAuthCacheJSONRequestBody = AuthFlushRequest
+
+// EnableFTSDictFilterJSONRequestBody defines body for EnableFTSDictFilter for application/json ContentType.
+type EnableFTSDictFilterJSONRequestBody = FTSLayout3Enable
 
 // EnableFTSLayout3JSONRequestBody defines body for EnableFTSLayout3 for application/json ContentType.
 type EnableFTSLayout3JSONRequestBody = FTSLayout3Enable
@@ -2556,8 +2573,10 @@ type ClientInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+	// with `dict_filter: ids` the cluster mark of the dictionary filter
+	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
 	// (409). A plan that changes other accounts (ACL repairs, purge)
@@ -2576,8 +2595,10 @@ type ClientInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+	// with `dict_filter: ids` the cluster mark of the dictionary filter
+	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
 	// (409). A plan that changes other accounts (ACL repairs, purge)
@@ -2861,6 +2882,74 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBody(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetFTSDictFilter The dictionary filter mark of the full-text index
+	//
+	// Whether the cluster mark of the dictionary filter
+	// (`fts/dictfilter`, since 0.50.0) is set, and the server
+	// registrations as for layout 3. The mark allows index
+	// generations that a version before 0.50.0 must not search: with
+	// the identifier filter of the substring dictionary
+	// (`fts.dict_filter: ids`) and with the text preparation without
+	// the signature and trace fields of attached headers
+	// (`fts.attached_headers: nosig`). Without it new generations get
+	// neither, whatever the configuration says. Requires the role
+	// `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/fts/dictfilter (the `GetFTSDictFilter` operationId).
+	GetFTSDictFilter(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableFTSDictFilter Remove the dictionary filter mark
+	//
+	// Removes the cluster mark of the dictionary filter, so that no
+	// new generation gets the identifier filter or the text
+	// preparation `nosig`; waits five seconds (creators read the mark
+	// when they create) and then reads the layout record of every
+	// account of the layout 3 presence index (one read each) and lists
+	// those whose current or next generation still has either. A
+	// downgrade to a version before 0.50.0 is possible only when that
+	// list is empty: convert them with `fts_layout`
+	// `dict_filter: none` and rebuild those with `nosig` with
+	// `fts_rebuild` first. Requires the role `repair`.
+	//
+	// Corresponds with POST /admin/v1/fts/dictfilter/disable (the `DisableFTSDictFilter` operationId).
+	DisableFTSDictFilter(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableFTSDictFilterWithBody Allow the dictionary filter in the cluster
+	//
+	// Sets the cluster mark of the dictionary filter after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+	// layout 3 mark. With the mark, new generations (fresh indexes,
+	// rebuilds, `fts_layout` jobs) get the identifier filter of
+	// `fts.dict_filter` and the text preparation of
+	// `fts.attached_headers`; existing ones change with `fts_layout`
+	// (filter) or `fts_rebuild` (text preparation). Refused with
+	// `conflict` (409) when the registrations do not match. Requires
+	// the role `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+	EnableFTSDictFilterWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableFTSDictFilter Allow the dictionary filter in the cluster
+	//
+	// Sets the cluster mark of the dictionary filter after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+	// layout 3 mark. With the mark, new generations (fresh indexes,
+	// rebuilds, `fts_layout` jobs) get the identifier filter of
+	// `fts.dict_filter` and the text preparation of
+	// `fts.attached_headers`; existing ones change with `fts_layout`
+	// (filter) or `fts_rebuild` (text preparation). Refused with
+	// `conflict` (409) when the registrations do not match. Requires
+	// the role `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+	EnableFTSDictFilter(ctx context.Context, body EnableFTSDictFilterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetFTSLayout3 Layout 3 of the full-text index in the cluster
 	//
 	// Whether the cluster mark that allows layout 3 is set, and the
@@ -2880,8 +2969,10 @@ type ClientInterface interface {
 	// being converted to) a layout 3 index, entered before its layout 3
 	// objects are created and removed after a conversion back to layout
 	// 2. With `verify` each account's layout record is read and an entry
-	// whose account has no layout 3 index is marked. Requires the role
-	// `diagnose` and the scope of all accounts.
+	// whose account has no layout 3 index is marked; the shapes show
+	// the identifier filter (`dict_id_min_runes`) and the text
+	// preparation (`attached_headers`) of each generation. Requires
+	// the role `diagnose` and the scope of all accounts.
 	//
 	// Corresponds with GET /admin/v1/fts/layout3/accounts (the `ListFTSLayout3Accounts` operationId).
 	ListFTSLayout3Accounts(ctx context.Context, params *ListFTSLayout3AccountsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4214,8 +4305,10 @@ func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxI
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+// with `dict_filter: ids` the cluster mark of the dictionary filter
+// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
 // (409). A plan that changes other accounts (ACL repairs, purge)
@@ -4244,8 +4337,10 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+// with `dict_filter: ids` the cluster mark of the dictionary filter
+// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
 // (409). A plan that changes other accounts (ACL repairs, purge)
@@ -4759,6 +4854,114 @@ func (c *Client) DeliverWithBody(ctx context.Context, params *DeliverParams, con
 	return c.Client.Do(req)
 }
 
+// GetFTSDictFilter The dictionary filter mark of the full-text index
+//
+// Whether the cluster mark of the dictionary filter
+// (`fts/dictfilter`, since 0.50.0) is set, and the server
+// registrations as for layout 3. The mark allows index
+// generations that a version before 0.50.0 must not search: with
+// the identifier filter of the substring dictionary
+// (`fts.dict_filter: ids`) and with the text preparation without
+// the signature and trace fields of attached headers
+// (`fts.attached_headers: nosig`). Without it new generations get
+// neither, whatever the configuration says. Requires the role
+// `diagnose`.
+//
+// Corresponds with GET /admin/v1/fts/dictfilter (the `GetFTSDictFilter` operationId).
+func (c *Client) GetFTSDictFilter(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFTSDictFilterRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableFTSDictFilter Remove the dictionary filter mark
+//
+// Removes the cluster mark of the dictionary filter, so that no
+// new generation gets the identifier filter or the text
+// preparation `nosig`; waits five seconds (creators read the mark
+// when they create) and then reads the layout record of every
+// account of the layout 3 presence index (one read each) and lists
+// those whose current or next generation still has either. A
+// downgrade to a version before 0.50.0 is possible only when that
+// list is empty: convert them with `fts_layout`
+// `dict_filter: none` and rebuild those with `nosig` with
+// `fts_rebuild` first. Requires the role `repair`.
+//
+// Corresponds with POST /admin/v1/fts/dictfilter/disable (the `DisableFTSDictFilter` operationId).
+func (c *Client) DisableFTSDictFilter(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableFTSDictFilterRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableFTSDictFilterWithBody Allow the dictionary filter in the cluster
+//
+// Sets the cluster mark of the dictionary filter after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+// layout 3 mark. With the mark, new generations (fresh indexes,
+// rebuilds, `fts_layout` jobs) get the identifier filter of
+// `fts.dict_filter` and the text preparation of
+// `fts.attached_headers`; existing ones change with `fts_layout`
+// (filter) or `fts_rebuild` (text preparation). Refused with
+// `conflict` (409) when the registrations do not match. Requires
+// the role `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+func (c *Client) EnableFTSDictFilterWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableFTSDictFilterRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableFTSDictFilter Allow the dictionary filter in the cluster
+//
+// Sets the cluster mark of the dictionary filter after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+// layout 3 mark. With the mark, new generations (fresh indexes,
+// rebuilds, `fts_layout` jobs) get the identifier filter of
+// `fts.dict_filter` and the text preparation of
+// `fts.attached_headers`; existing ones change with `fts_layout`
+// (filter) or `fts_rebuild` (text preparation). Refused with
+// `conflict` (409) when the registrations do not match. Requires
+// the role `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+func (c *Client) EnableFTSDictFilter(ctx context.Context, body EnableFTSDictFilterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableFTSDictFilterRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // GetFTSLayout3 Layout 3 of the full-text index in the cluster
 //
 // Whether the cluster mark that allows layout 3 is set, and the
@@ -4788,8 +4991,10 @@ func (c *Client) GetFTSLayout3(ctx context.Context, reqEditors ...RequestEditorF
 // being converted to) a layout 3 index, entered before its layout 3
 // objects are created and removed after a conversion back to layout
 // 2. With `verify` each account's layout record is read and an entry
-// whose account has no layout 3 index is marked. Requires the role
-// `diagnose` and the scope of all accounts.
+// whose account has no layout 3 index is marked; the shapes show
+// the identifier filter (`dict_id_min_runes`) and the text
+// preparation (`attached_headers`) of each generation. Requires
+// the role `diagnose` and the scope of all accounts.
 //
 // Corresponds with GET /admin/v1/fts/layout3/accounts (the `ListFTSLayout3Accounts` operationId).
 func (c *Client) ListFTSLayout3Accounts(ctx context.Context, params *ListFTSLayout3AccountsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -8129,6 +8334,100 @@ func NewDeliverRequestWithBody(server string, params *DeliverParams, contentType
 	return req, nil
 }
 
+// NewGetFTSDictFilterRequest constructs an http.Request for the GetFTSDictFilter method
+func NewGetFTSDictFilterRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/dictfilter")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDisableFTSDictFilterRequest constructs an http.Request for the DisableFTSDictFilter method
+func NewDisableFTSDictFilterRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/dictfilter/disable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnableFTSDictFilterRequest calls the generic EnableFTSDictFilter builder with application/json body
+func NewEnableFTSDictFilterRequest(server string, body EnableFTSDictFilterJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnableFTSDictFilterRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnableFTSDictFilterRequestWithBody constructs an http.Request for the EnableFTSDictFilter method, with any body, and a specified content type
+func NewEnableFTSDictFilterRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/dictfilter/enable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetFTSLayout3Request constructs an http.Request for the GetFTSLayout3 method
 func NewGetFTSLayout3Request(server string) (*http.Request, error) {
 	var err error
@@ -9576,8 +9875,10 @@ type ClientWithResponsesInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+	// with `dict_filter: ids` the cluster mark of the dictionary filter
+	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
 	// (409). A plan that changes other accounts (ACL repairs, purge)
@@ -9596,8 +9897,10 @@ type ClientWithResponsesInterface interface {
 	// `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 	// `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-	// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-	// plan is refused with `conflict` (409). `fts_dict_convert` is a
+	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+	// with `dict_filter: ids` the cluster mark of the dictionary filter
+	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
 	// (409). A plan that changes other accounts (ACL repairs, purge)
@@ -9899,6 +10202,78 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/deliveries (the `Deliver` operationId).
 	DeliverWithBodyWithResponse(ctx context.Context, params *DeliverParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeliverResponse, error)
 
+	// GetFTSDictFilterWithResponse The dictionary filter mark of the full-text index
+	//
+	// Whether the cluster mark of the dictionary filter
+	// (`fts/dictfilter`, since 0.50.0) is set, and the server
+	// registrations as for layout 3. The mark allows index
+	// generations that a version before 0.50.0 must not search: with
+	// the identifier filter of the substring dictionary
+	// (`fts.dict_filter: ids`) and with the text preparation without
+	// the signature and trace fields of attached headers
+	// (`fts.attached_headers: nosig`). Without it new generations get
+	// neither, whatever the configuration says. Requires the role
+	// `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/fts/dictfilter (the `GetFTSDictFilter` operationId).
+	GetFTSDictFilterWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetFTSDictFilterResponse, error)
+
+	// DisableFTSDictFilterWithResponse Remove the dictionary filter mark
+	//
+	// Removes the cluster mark of the dictionary filter, so that no
+	// new generation gets the identifier filter or the text
+	// preparation `nosig`; waits five seconds (creators read the mark
+	// when they create) and then reads the layout record of every
+	// account of the layout 3 presence index (one read each) and lists
+	// those whose current or next generation still has either. A
+	// downgrade to a version before 0.50.0 is possible only when that
+	// list is empty: convert them with `fts_layout`
+	// `dict_filter: none` and rebuild those with `nosig` with
+	// `fts_rebuild` first. Requires the role `repair`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/dictfilter/disable (the `DisableFTSDictFilter` operationId).
+	DisableFTSDictFilterWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableFTSDictFilterResponse, error)
+
+	// EnableFTSDictFilterWithBodyWithResponse Allow the dictionary filter in the cluster
+	//
+	// Sets the cluster mark of the dictionary filter after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+	// layout 3 mark. With the mark, new generations (fresh indexes,
+	// rebuilds, `fts_layout` jobs) get the identifier filter of
+	// `fts.dict_filter` and the text preparation of
+	// `fts.attached_headers`; existing ones change with `fts_layout`
+	// (filter) or `fts_rebuild` (text preparation). Refused with
+	// `conflict` (409) when the registrations do not match. Requires
+	// the role `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+	EnableFTSDictFilterWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableFTSDictFilterResponse, error)
+
+	// EnableFTSDictFilterWithResponse Allow the dictionary filter in the cluster
+	//
+	// Sets the cluster mark of the dictionary filter after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+	// layout 3 mark. With the mark, new generations (fresh indexes,
+	// rebuilds, `fts_layout` jobs) get the identifier filter of
+	// `fts.dict_filter` and the text preparation of
+	// `fts.attached_headers`; existing ones change with `fts_layout`
+	// (filter) or `fts_rebuild` (text preparation). Refused with
+	// `conflict` (409) when the registrations do not match. Requires
+	// the role `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+	EnableFTSDictFilterWithResponse(ctx context.Context, body EnableFTSDictFilterJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSDictFilterResponse, error)
+
 	// GetFTSLayout3WithResponse Layout 3 of the full-text index in the cluster
 	//
 	// Whether the cluster mark that allows layout 3 is set, and the
@@ -9920,8 +10295,10 @@ type ClientWithResponsesInterface interface {
 	// being converted to) a layout 3 index, entered before its layout 3
 	// objects are created and removed after a conversion back to layout
 	// 2. With `verify` each account's layout record is read and an entry
-	// whose account has no layout 3 index is marked. Requires the role
-	// `diagnose` and the scope of all accounts.
+	// whose account has no layout 3 index is marked; the shapes show
+	// the identifier filter (`dict_id_min_runes`) and the text
+	// preparation (`attached_headers`) of each generation. Requires
+	// the role `diagnose` and the scope of all accounts.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -12750,6 +13127,150 @@ func (r DeliverResponse) ContentType() string {
 	return ""
 }
 
+type GetFTSDictFilterResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetFTSDictFilterResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetFTSDictFilterResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetFTSDictFilterResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFTSDictFilterResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFTSDictFilterResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetFTSDictFilterResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableFTSDictFilterResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Disable
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DisableFTSDictFilterResponse) GetJSON200() *FTSLayout3Disable {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableFTSDictFilterResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableFTSDictFilterResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableFTSDictFilterResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableFTSDictFilterResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableFTSDictFilterResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type EnableFTSDictFilterResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r EnableFTSDictFilterResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r EnableFTSDictFilterResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r EnableFTSDictFilterResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableFTSDictFilterResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableFTSDictFilterResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r EnableFTSDictFilterResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetFTSLayout3Response struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -14493,8 +15014,10 @@ func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, acc
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+// with `dict_filter: ids` the cluster mark of the dictionary filter
+// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
 // (409). A plan that changes other accounts (ACL repairs, purge)
@@ -14519,8 +15042,10 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
 // `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-// cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-// plan is refused with `conflict` (409). `fts_dict_convert` is a
+// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+// with `dict_filter: ids` the cluster mark of the dictionary filter
+// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
 // (409). A plan that changes other accounts (ACL repairs, purge)
@@ -14960,6 +15485,102 @@ func (c *ClientWithResponses) DeliverWithBodyWithResponse(ctx context.Context, p
 	return ParseDeliverResponse(rsp)
 }
 
+// GetFTSDictFilterWithResponse The dictionary filter mark of the full-text index
+//
+// Whether the cluster mark of the dictionary filter
+// (`fts/dictfilter`, since 0.50.0) is set, and the server
+// registrations as for layout 3. The mark allows index
+// generations that a version before 0.50.0 must not search: with
+// the identifier filter of the substring dictionary
+// (`fts.dict_filter: ids`) and with the text preparation without
+// the signature and trace fields of attached headers
+// (`fts.attached_headers: nosig`). Without it new generations get
+// neither, whatever the configuration says. Requires the role
+// `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/fts/dictfilter (the `GetFTSDictFilter` operationId).
+func (c *ClientWithResponses) GetFTSDictFilterWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetFTSDictFilterResponse, error) {
+	rsp, err := c.GetFTSDictFilter(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFTSDictFilterResponse(rsp)
+}
+
+// DisableFTSDictFilterWithResponse Remove the dictionary filter mark
+//
+// Removes the cluster mark of the dictionary filter, so that no
+// new generation gets the identifier filter or the text
+// preparation `nosig`; waits five seconds (creators read the mark
+// when they create) and then reads the layout record of every
+// account of the layout 3 presence index (one read each) and lists
+// those whose current or next generation still has either. A
+// downgrade to a version before 0.50.0 is possible only when that
+// list is empty: convert them with `fts_layout`
+// `dict_filter: none` and rebuild those with `nosig` with
+// `fts_rebuild` first. Requires the role `repair`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/dictfilter/disable (the `DisableFTSDictFilter` operationId).
+func (c *ClientWithResponses) DisableFTSDictFilterWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableFTSDictFilterResponse, error) {
+	rsp, err := c.DisableFTSDictFilter(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableFTSDictFilterResponse(rsp)
+}
+
+// EnableFTSDictFilterWithBodyWithResponse Allow the dictionary filter in the cluster
+//
+// Sets the cluster mark of the dictionary filter after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+// layout 3 mark. With the mark, new generations (fresh indexes,
+// rebuilds, `fts_layout` jobs) get the identifier filter of
+// `fts.dict_filter` and the text preparation of
+// `fts.attached_headers`; existing ones change with `fts_layout`
+// (filter) or `fts_rebuild` (text preparation). Refused with
+// `conflict` (409) when the registrations do not match. Requires
+// the role `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+func (c *ClientWithResponses) EnableFTSDictFilterWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableFTSDictFilterResponse, error) {
+	rsp, err := c.EnableFTSDictFilterWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableFTSDictFilterResponse(rsp)
+}
+
+// EnableFTSDictFilterWithResponse Allow the dictionary filter in the cluster
+//
+// Sets the cluster mark of the dictionary filter after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `fts_dict_filter` (since 0.50.0); otherwise as the
+// layout 3 mark. With the mark, new generations (fresh indexes,
+// rebuilds, `fts_layout` jobs) get the identifier filter of
+// `fts.dict_filter` and the text preparation of
+// `fts.attached_headers`; existing ones change with `fts_layout`
+// (filter) or `fts_rebuild` (text preparation). Refused with
+// `conflict` (409) when the registrations do not match. Requires
+// the role `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/dictfilter/enable (the `EnableFTSDictFilter` operationId).
+func (c *ClientWithResponses) EnableFTSDictFilterWithResponse(ctx context.Context, body EnableFTSDictFilterJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSDictFilterResponse, error) {
+	rsp, err := c.EnableFTSDictFilter(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableFTSDictFilterResponse(rsp)
+}
+
 // GetFTSLayout3WithResponse Layout 3 of the full-text index in the cluster
 //
 // Whether the cluster mark that allows layout 3 is set, and the
@@ -14987,8 +15608,10 @@ func (c *ClientWithResponses) GetFTSLayout3WithResponse(ctx context.Context, req
 // being converted to) a layout 3 index, entered before its layout 3
 // objects are created and removed after a conversion back to layout
 // 2. With `verify` each account's layout record is read and an entry
-// whose account has no layout 3 index is marked. Requires the role
-// `diagnose` and the scope of all accounts.
+// whose account has no layout 3 index is marked; the shapes show
+// the identifier filter (`dict_id_min_runes`) and the text
+// preparation (`attached_headers`) of each generation. Requires
+// the role `diagnose` and the scope of all accounts.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -17201,6 +17824,105 @@ func ParseDeliverResponse(rsp *http.Response) (*DeliverResponse, error) {
 	return response, nil
 }
 
+// ParseGetFTSDictFilterResponse parses an HTTP response from a GetFTSDictFilterWithResponse call
+func ParseGetFTSDictFilterResponse(rsp *http.Response) (*GetFTSDictFilterResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFTSDictFilterResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableFTSDictFilterResponse parses an HTTP response from a DisableFTSDictFilterWithResponse call
+func ParseDisableFTSDictFilterResponse(rsp *http.Response) (*DisableFTSDictFilterResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableFTSDictFilterResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Disable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableFTSDictFilterResponse parses an HTTP response from a EnableFTSDictFilterWithResponse call
+func ParseEnableFTSDictFilterResponse(rsp *http.Response) (*EnableFTSDictFilterResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableFTSDictFilterResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetFTSLayout3Response parses an HTTP response from a GetFTSLayout3WithResponse call
 func ParseGetFTSLayout3Response(rsp *http.Response) (*GetFTSLayout3Response, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -17930,6 +18652,15 @@ type ServerInterface interface {
 	// Deliver Local delivery (LDA)
 	// (POST /admin/v1/deliveries)
 	Deliver(w http.ResponseWriter, r *http.Request, params DeliverParams)
+	// GetFTSDictFilter The dictionary filter mark of the full-text index
+	// (GET /admin/v1/fts/dictfilter)
+	GetFTSDictFilter(w http.ResponseWriter, r *http.Request)
+	// DisableFTSDictFilter Remove the dictionary filter mark
+	// (POST /admin/v1/fts/dictfilter/disable)
+	DisableFTSDictFilter(w http.ResponseWriter, r *http.Request)
+	// EnableFTSDictFilter Allow the dictionary filter in the cluster
+	// (POST /admin/v1/fts/dictfilter/enable)
+	EnableFTSDictFilter(w http.ResponseWriter, r *http.Request)
 	// GetFTSLayout3 Layout 3 of the full-text index in the cluster
 	// (GET /admin/v1/fts/layout3)
 	GetFTSLayout3(w http.ResponseWriter, r *http.Request)
@@ -20420,6 +21151,48 @@ func (siw *ServerInterfaceWrapper) Deliver(w http.ResponseWriter, r *http.Reques
 	handler.ServeHTTP(w, r)
 }
 
+// GetFTSDictFilter operation middleware
+func (siw *ServerInterfaceWrapper) GetFTSDictFilter(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetFTSDictFilter(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DisableFTSDictFilter operation middleware
+func (siw *ServerInterfaceWrapper) DisableFTSDictFilter(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DisableFTSDictFilter(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// EnableFTSDictFilter operation middleware
+func (siw *ServerInterfaceWrapper) EnableFTSDictFilter(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.EnableFTSDictFilter(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetFTSLayout3 operation middleware
 func (siw *ServerInterfaceWrapper) GetFTSLayout3(w http.ResponseWriter, r *http.Request) {
 
@@ -21119,6 +21892,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3", wrapper.GetFTSLayout3)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/layout3/enable", wrapper.EnableFTSLayout3)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/layout3/disable", wrapper.DisableFTSLayout3)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/dictfilter", wrapper.GetFTSDictFilter)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/dictfilter/enable", wrapper.EnableFTSDictFilter)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/dictfilter/disable", wrapper.DisableFTSDictFilter)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3/accounts", wrapper.ListFTSLayout3Accounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout", wrapper.GetFTSLayout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout/clear", wrapper.ClearFTSLayout)

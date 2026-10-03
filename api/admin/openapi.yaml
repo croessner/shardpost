@@ -548,8 +548,10 @@ paths:
         `fts_dict_convert`, `fts_layout`, `mailbox_name_convert`,
         `attachment_backfill` (role `repair`), `mailbox_delete`, `expunge`,
         `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
-        cluster mark (`POST /admin/v1/fts/layout3/enable`); without it the
-        plan is refused with `conflict` (409). `fts_dict_convert` is a
+        cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
+        with `dict_filter: ids` the cluster mark of the dictionary filter
+        (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+        is refused with `conflict` (409). `fts_dict_convert` is a
         legacy kind for layout 2 indexes written before 0.35.0; for an
         account whose index has layout 3 it is refused with `conflict`
         (409). A plan that changes other accounts (ACL repairs, purge)
@@ -1620,6 +1622,84 @@ paths:
                 $ref: "#/components/schemas/FTSLayout3Disable"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/fts/dictfilter:
+    get:
+      operationId: getFTSDictFilter
+      summary: The dictionary filter mark of the full-text index
+      description: |
+        Whether the cluster mark of the dictionary filter
+        (`fts/dictfilter`, since 0.50.0) is set, and the server
+        registrations as for layout 3. The mark allows index
+        generations that a version before 0.50.0 must not search: with
+        the identifier filter of the substring dictionary
+        (`fts.dict_filter: ids`) and with the text preparation without
+        the signature and trace fields of attached headers
+        (`fts.attached_headers: nosig`). Without it new generations get
+        neither, whatever the configuration says. Requires the role
+        `diagnose`.
+      responses:
+        "200":
+          description: The mark and the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/dictfilter/enable:
+    post:
+      operationId: enableFTSDictFilter
+      summary: Allow the dictionary filter in the cluster
+      description: |
+        Sets the cluster mark of the dictionary filter after checking
+        that exactly `pods` fresh registrations of servers report the
+        capability `fts_dict_filter` (since 0.50.0); otherwise as the
+        layout 3 mark. With the mark, new generations (fresh indexes,
+        rebuilds, `fts_layout` jobs) get the identifier filter of
+        `fts.dict_filter` and the text preparation of
+        `fts.attached_headers`; existing ones change with `fts_layout`
+        (filter) or `fts_rebuild` (text preparation). Refused with
+        `conflict` (409) when the registrations do not match. Requires
+        the role `repair`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FTSLayout3Enable"
+      responses:
+        "200":
+          description: The mark is set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/dictfilter/disable:
+    post:
+      operationId: disableFTSDictFilter
+      summary: Remove the dictionary filter mark
+      description: |
+        Removes the cluster mark of the dictionary filter, so that no
+        new generation gets the identifier filter or the text
+        preparation `nosig`; waits five seconds (creators read the mark
+        when they create) and then reads the layout record of every
+        account of the layout 3 presence index (one read each) and lists
+        those whose current or next generation still has either. A
+        downgrade to a version before 0.50.0 is possible only when that
+        list is empty: convert them with `fts_layout`
+        `dict_filter: none` and rebuild those with `nosig` with
+        `fts_rebuild` first. Requires the role `repair`.
+      responses:
+        "200":
+          description: The mark is gone; the accounts whose index still has the filter or the text preparation nosig.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Disable"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/fts/layout3/accounts:
     get:
       operationId: listFTSLayout3Accounts
@@ -1629,8 +1709,10 @@ paths:
         being converted to) a layout 3 index, entered before its layout 3
         objects are created and removed after a conversion back to layout
         2. With `verify` each account's layout record is read and an entry
-        whose account has no layout 3 index is marked. Requires the role
-        `diagnose` and the scope of all accounts.
+        whose account has no layout 3 index is marked; the shapes show
+        the identifier filter (`dict_id_min_runes`) and the text
+        preparation (`attached_headers`) of each generation. Requires
+        the role `diagnose` and the scope of all accounts.
       parameters:
         - name: after
           in: query
@@ -2390,7 +2472,8 @@ components:
           description: |
             Parameters of the kind for every account; scrub: `classes`
             (empty = all); fts_layout: `layout`, `shards` or `shape`,
-            `due_only` (see `FTSLayoutParams`). The other kinds take none.
+            `dict_filter`, `due_only` (see `FTSLayoutParams`). The other
+            kinds take none.
         skip_idle:
           type: boolean
           description: |
@@ -2524,6 +2607,19 @@ components:
         h:
           type: integer
           description: Header text objects.
+        dict_id_min_runes:
+          type: integer
+          description: |
+            The identifier filter of the generation's dictionary (since
+            0.50.0): a body term with letters and digits of at least
+            this many runes has one start entry instead of its trigram
+            keys. Missing: no filter.
+        attached_headers:
+          type: string
+          description: |
+            The text preparation of the generation (since 0.50.0):
+            `nosig` without the signature and trace fields of attached
+            headers. Missing: every field.
     FTSStats:
       type: object
       required: [shape, docs, exact, terms, dict_keys, header_keys, objects]
@@ -2769,7 +2865,7 @@ components:
           type: integer
           minimum: 1
           maximum: 100000
-          description: The number of servers running now; exactly as many fresh registrations must report layout 3.
+          description: The number of servers running now; exactly as many fresh registrations must report the capability of the mark.
         force:
           type: boolean
           description: Set the mark without the check.
@@ -2781,7 +2877,10 @@ components:
           type: array
           items:
             type: string
-          description: Accounts that still have a layout 3 index (at most 1000).
+          description: |
+            Accounts that still need the mark's version: for layout 3 a
+            layout 3 index, for the dictionary filter a generation with
+            the filter or the text preparation `nosig` (at most 1000).
         more:
           type: boolean
           description: There are more than listed.
@@ -3153,11 +3252,22 @@ components:
             Forced object counts of a layout 3 target, each its own:
             posting/dictionary/header objects, 1 to 4096 each (since
             0.49.0).
+        dict_filter:
+          type: string
+          enum: [none, ids]
+          description: |
+            The identifier filter of a layout 3 target (since 0.50.0):
+            `ids` with `fts.dict_id_min_runes` (needs the cluster mark
+            of the filter, else 409), `none` without; omitted, as
+            `fts.dict_filter` and the mark say. The postings are copied
+            either way and the dictionary derived from them anew, so
+            both directions are exact. Not with `layout: 2`.
         due_only:
           type: boolean
           description: |
             End without a change while the key counts ask for the shape
-            the index has (how the `fts_due` worker plans the job).
+            the index has and its identifier filter is the one asked for
+            (how the `fts_due` worker plans the job).
     PlanRequest:
       type: object
       required: [kind]
@@ -3171,7 +3281,7 @@ components:
           description: |
             scrub: `classes` (deliveries, moves, retired, uncovered, entries,
             refs, orphans, unknown, quota; empty = all); fts_layout:
-            `layout`, `shards` or `shape`, `due_only` (see
+            `layout`, `shards` or `shape`, `dict_filter`, `due_only` (see
             `FTSLayoutParams`); mailbox_delete:
             `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
             `deleted: true` (every message flagged \Deleted when planned).
