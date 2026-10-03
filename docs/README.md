@@ -44,6 +44,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [ShardPost 0.49.0](reports/2026-10-03-shardpost-0.49.0.md): separate full-text caps, worker no-op fix, parallel conversions, fts stats; offline measurement for B14h (stage B14g).
 - [Full-text dictionary V0](reports/2026-10-03-fts-dictionary-v0.md): the largest account resharded to 128 dictionary objects, large-omap warning cleared.
 - [System pool cutover on croessner](reports/2026-10-02-system-pool-cutover.md): store-wide namespaces moved to shardpost-system with 0.48.0, about two minutes of downtime.
 - [ShardPost 0.47.0](reports/2026-10-02-shardpost-0.47.0.md): system pool routing, fence and mark, registration roles, hotspot fixes (stage B11a).

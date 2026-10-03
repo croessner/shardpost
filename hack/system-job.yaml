@@ -56,9 +56,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: system
-          # The release with the system tools (0.48.0 or later); pin it by
+          # The release with the system tools (0.49.0 or later); pin it by
           # digest like the overlays.
-          image: docker.io/chrroessner/shardpost:0.48.0@sha256:81571bc775b6d11946a0a2aacf7258f2b5139da1391f541881e41635f3b0b3f1
+          image: docker.io/chrroessner/shardpost:0.49.0@sha256:fa3759cc269b5a09c1c64088d745f2c6294f2d875f536ca2ed46686a51516589
           args: ["system", "migrate", "--to", "shardpost-system", "--check"]
           env:
             - name: CEPH_USER

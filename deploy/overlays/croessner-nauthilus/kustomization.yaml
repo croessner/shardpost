@@ -17,8 +17,8 @@ components:
 # after ../croessner has pinned its images.
 images:
   - name: docker.io/chrroessner/shardpost
-    newTag: 0.48.0
-    digest: sha256:81571bc775b6d11946a0a2aacf7258f2b5139da1391f541881e41635f3b0b3f1
+    newTag: 0.49.0
+    digest: sha256:fa3759cc269b5a09c1c64088d745f2c6294f2d875f536ca2ed46686a51516589
 configMapGenerator:
   - name: shardpost-server-config
     namespace: shardpost
@@ -30,7 +30,7 @@ configMapGenerator:
     files:
       - sieve-after/50-public-folders.sieve
 patches:
-  # System pool (B11, 0.48.0): the store-wide namespaces moved to
+  # System pool (B11, 0.49.0): the store-wide namespaces moved to
   # shardpost-system on 2026-10-02 (run 00720635caff). The server reads it
   # from server.yaml; the push worker and the scrub CronJob take it from the
   # environment, which wins over server.yaml.
