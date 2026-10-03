@@ -296,6 +296,53 @@ func TestDictFilterEnableDisable(t *testing.T) {
 	disableDictFilter(t, fx)
 }
 
+// TestOnlineMarkEnableDisable (B14i): the mark of online runs needs
+// exactly --pods fresh registrations with fts_online_build; disable
+// removes it; the other marks stay untouched.
+func TestOnlineMarkEnableDisable(t *testing.T) {
+	fx := serveLayout(t, Options{}, RoleDiagnose, jobs.RoleRepair)
+	ctx := context.Background()
+
+	for _, pod := range []string{"pod-a", "pod-b"} {
+		if err := jobs.RegisterServer(fx.kv, pod, "0.51.0", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st, err := fx.c.GetFTSOnlineWithResponse(ctx)
+	if err != nil || st.JSON200 == nil || len(st.JSON200.Servers) != 2 {
+		t.Fatalf("status %v %+v", err, st.JSON200)
+	}
+
+	if bad, _ := fx.c.EnableFTSOnlineWithResponse(ctx, adminapi.FTSLayout3Enable{Pods: 3}); bad.StatusCode() != http.StatusConflict ||
+		!strings.Contains(bad.JSONDefault.Message, model.CapFTSOnlineBuild) {
+		t.Fatalf("enable with the wrong count: %d", bad.StatusCode())
+	}
+
+	if ok, _ := fx.c.EnableFTSOnlineWithResponse(ctx, adminapi.FTSLayout3Enable{Pods: 2}); ok.JSON200 == nil || !ok.JSON200.Enabled {
+		t.Fatalf("enable: %d %+v", ok.StatusCode(), ok.JSON200)
+	}
+
+	marksSet(t, fx, map[string]bool{model.FTSOnlineMarkKey: true, model.FTSLayoutMarkKey: false, model.FTSDictFilterMarkKey: false})
+
+	if off, _ := fx.c.DisableFTSOnlineWithResponse(ctx); off.JSON200 == nil || off.JSON200.Enabled {
+		t.Fatalf("disable: %d %+v", off.StatusCode(), off.JSON200)
+	}
+
+	marksSet(t, fx, map[string]bool{model.FTSOnlineMarkKey: false})
+}
+
+// marksSet checks which cluster marks are set.
+func marksSet(t *testing.T, fx *layoutFixture, want map[string]bool) {
+	t.Helper()
+
+	for key, set := range want {
+		if _, err := fx.kv.Get(key); (err == nil) != set {
+			t.Errorf("mark %s: %v", key, err)
+		}
+	}
+}
+
 // enableDictFilter: the wrong pod count is refused naming the
 // capability, the right one sets the mark of the filter and not the
 // layout 3 mark.

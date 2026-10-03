@@ -231,6 +231,24 @@ func (e ErrorCode) Valid() bool {
 	}
 }
 
+// Defines values for FTSLayoutStateNextMode.
+const (
+	Copy    FTSLayoutStateNextMode = "copy"
+	Reindex FTSLayoutStateNextMode = "reindex"
+)
+
+// Valid indicates whether the value is a known member of the FTSLayoutStateNextMode enum.
+func (e FTSLayoutStateNextMode) Valid() bool {
+	switch e {
+	case Copy:
+		return true
+	case Reindex:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for FTSObjectStatsKind.
 const (
 	Dictionary FTSObjectStatsKind = "dictionary"
@@ -552,13 +570,27 @@ type AuthFlushRequest struct {
 
 // BatchPlanRequest defines model for BatchPlanRequest.
 type BatchPlanRequest struct {
+	// Anytime fts_layout and fts_rebuild only (since 0.51.0): ignore the
+	// reshard window. Without it a batch starts an account only
+	// inside `fts.reshard_window` and, for an online run, only when
+	// its estimate fits into what is left of the window; outside it
+	// gives the job back until the next window starts (it shows
+	// `waiting for the reshard window`) and goes on from its
+	// checkpoint. An account whose estimate is longer than the
+	// whole window fails with `window_too_small`.
+	Anytime *bool `json:"anytime,omitempty"`
+
 	// Kind The kind to run on every account.
 	Kind string `json:"kind"`
 
 	// Params Parameters of the kind for every account; scrub: `classes`
 	// (empty = all); fts_layout: `layout`, `shards` or `shape`,
-	// `dict_filter`, `due_only` (see `FTSLayoutParams`). The other
-	// kinds take none.
+	// `dict_filter`, `due_only`, `online` (see `FTSLayoutParams`);
+	// fts_rebuild: `online`, `skip_unreadable`, `drop_orphan_ids`
+	// (see `FTSRebuildParams`). The other kinds take none. An
+	// omitted `online` is decided by the plan for the whole batch
+	// (accounts without a layout 3 index then count as
+	// `unsupported`).
 	Params *map[string]interface{} `json:"params,omitempty"`
 
 	// SkipIdle scrub only: skip the accounts whose last batch scrub was
@@ -796,6 +828,15 @@ type FTSLayoutState struct {
 	// NextAt Last heartbeat of an import reshard run.
 	NextAt *time.Time `json:"next_at,omitempty"`
 
+	// NextMode The mode of an online run: `copy` from the postings (a
+	// reshard, a change of the identifier filter), `reindex` from
+	// the messages (a rebuild).
+	NextMode *FTSLayoutStateNextMode `json:"next_mode,omitempty"`
+
+	// NextOnline The conversion in progress runs online, without the account's
+	// lock (since 0.51.0): writers record what they index for it.
+	NextOnline *bool `json:"next_online,omitempty"`
+
 	// NextTok The run of the conversion in progress (`job-<id>/<lease generation>` or `<session>/<nonce>`).
 	NextTok *string `json:"next_tok,omitempty"`
 
@@ -811,6 +852,11 @@ type FTSLayoutState struct {
 	// OldToks The runs that left the `old` generations, in the same order.
 	OldToks *[]string `json:"old_toks,omitempty"`
 }
+
+// FTSLayoutStateNextMode The mode of an online run: `copy` from the postings (a
+// reshard, a change of the identifier filter), `reindex` from
+// the messages (a rebuild).
+type FTSLayoutStateNextMode string
 
 // FTSObjectStats defines model for FTSObjectStats.
 type FTSObjectStats struct {
@@ -1275,8 +1321,10 @@ type PlanRequest struct {
 
 	// Params scrub: `classes` (deliveries, moves, retired, uncovered, entries,
 	// refs, orphans, unknown, quota; empty = all); fts_layout:
-	// `layout`, `shards` or `shape`, `dict_filter`, `due_only` (see
-	// `FTSLayoutParams`); mailbox_delete:
+	// `layout`, `shards` or `shape`, `dict_filter`, `due_only`,
+	// `online` (see `FTSLayoutParams`); fts_rebuild: `online`,
+	// `skip_unreadable`, `drop_orphan_ids` (see
+	// `FTSRebuildParams`); mailbox_delete:
 	// `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
 	// `deleted: true` (every message flagged \Deleted when planned).
 	Params *map[string]interface{} `json:"params,omitempty"`
@@ -1907,6 +1955,9 @@ type EnableFTSDictFilterJSONRequestBody = FTSLayout3Enable
 
 // EnableFTSLayout3JSONRequestBody defines body for EnableFTSLayout3 for application/json ContentType.
 type EnableFTSLayout3JSONRequestBody = FTSLayout3Enable
+
+// EnableFTSOnlineJSONRequestBody defines body for EnableFTSOnline for application/json ContentType.
+type EnableFTSOnlineJSONRequestBody = FTSLayout3Enable
 
 // SubmitJobJSONRequestBody defines body for SubmitJob for application/json ContentType.
 type SubmitJobJSONRequestBody = JobRequest
@@ -2575,7 +2626,9 @@ type ClientInterface interface {
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
-	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+	// `fts_rebuild` with `online: true` the cluster mark of online runs
+	// (`POST /admin/v1/fts/online/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -2597,7 +2650,9 @@ type ClientInterface interface {
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
-	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+	// `fts_rebuild` with `online: true` the cluster mark of online runs
+	// (`POST /admin/v1/fts/online/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -3032,6 +3087,67 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
 	EnableFTSLayout3(ctx context.Context, body EnableFTSLayout3JSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetFTSOnline The mark of online runs of the full-text index
+	//
+	// Whether the cluster mark of online runs (`fts/online`, since
+	// 0.51.0) is set, and the server registrations as for layout 3.
+	// The mark allows `fts_layout` and `fts_rebuild` jobs to run
+	// without the account's maintenance lock: deliveries, logins and
+	// sessions go on while the index is resharded or rebuilt beside
+	// the current generation, and a single compare-and-swap switches
+	// to it. Without the mark every run is offline, as before 0.51.0.
+	// Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/fts/online (the `GetFTSOnline` operationId).
+	GetFTSOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableFTSOnline Remove the mark of online runs
+	//
+	// Removes the cluster mark of online runs: new plans of
+	// `fts_layout` and `fts_rebuild` run offline (`online: true` is
+	// refused with `conflict`), a planned online run that has not
+	// started fails its check. Runs that already started finish;
+	// before a downgrade to a version before 0.51.0 wait until no
+	// account shows an online run (`next_online` in the layout state)
+	// or clear it with `POST
+	// /admin/v1/accounts/{account}/fts/layout/clear`. Requires the
+	// role `repair`.
+	//
+	// Corresponds with POST /admin/v1/fts/online/disable (the `DisableFTSOnline` operationId).
+	DisableFTSOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableFTSOnlineWithBody Allow online runs of the full-text index
+	//
+	// Sets the cluster mark of online runs after checking that exactly
+	// `pods` fresh registrations of servers report the capability
+	// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+	// mark. A server before 0.51.0 does not record what it indexes
+	// for an online run and waits at its freeze (a temporary failure
+	// after `fts.frozen_wait_seconds`), so every server must know it
+	// first. Refused with `conflict` (409) when the registrations do
+	// not match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+	EnableFTSOnlineWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableFTSOnline Allow online runs of the full-text index
+	//
+	// Sets the cluster mark of online runs after checking that exactly
+	// `pods` fresh registrations of servers report the capability
+	// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+	// mark. A server before 0.51.0 does not record what it indexes
+	// for an online run and waits at its freeze (a temporary failure
+	// after `fts.frozen_wait_seconds`), so every server must know it
+	// first. Refused with `conflict` (409) when the registrations do
+	// not match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+	EnableFTSOnline(ctx context.Context, body EnableFTSOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListJobs Jobs, oldest first
 	//
 	// Requires the role `diagnose`; a client with an account scope must
@@ -3142,9 +3258,13 @@ type ClientInterface interface {
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-	// takes the maintenance lock per account; an account another job or
-	// an import holds is tried again at the end. `skip_idle` (scrub
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+	// unless online) takes the maintenance lock per account; an account
+	// another job or an import holds (or, online, another run of the
+	// account is alive) is tried again at the end; online, an account
+	// without a layout 3 index counts as `unsupported`. A batch of
+	// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+	// `anytime` is set. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
 	// complete batch scrub found nothing, for at most
 	// `scrub.interval_days`. The plan's account is empty and its kind
@@ -3165,9 +3285,13 @@ type ClientInterface interface {
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-	// takes the maintenance lock per account; an account another job or
-	// an import holds is tried again at the end. `skip_idle` (scrub
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+	// unless online) takes the maintenance lock per account; an account
+	// another job or an import holds (or, online, another run of the
+	// account is alive) is tried again at the end; online, an account
+	// without a layout 3 index counts as `unsupported`. A batch of
+	// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+	// `anytime` is set. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
 	// complete batch scrub found nothing, for at most
 	// `scrub.interval_days`. The plan's account is empty and its kind
@@ -4309,7 +4433,9 @@ func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxI
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 // cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 // with `dict_filter: ids` the cluster mark of the dictionary filter
-// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+// `fts_rebuild` with `online: true` the cluster mark of online runs
+// (`POST /admin/v1/fts/online/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -4341,7 +4467,9 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 // cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 // with `dict_filter: ids` the cluster mark of the dictionary filter
-// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+// `fts_rebuild` with `online: true` the cluster mark of online runs
+// (`POST /admin/v1/fts/online/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -5096,6 +5224,107 @@ func (c *Client) EnableFTSLayout3(ctx context.Context, body EnableFTSLayout3JSON
 	return c.Client.Do(req)
 }
 
+// GetFTSOnline The mark of online runs of the full-text index
+//
+// Whether the cluster mark of online runs (`fts/online`, since
+// 0.51.0) is set, and the server registrations as for layout 3.
+// The mark allows `fts_layout` and `fts_rebuild` jobs to run
+// without the account's maintenance lock: deliveries, logins and
+// sessions go on while the index is resharded or rebuilt beside
+// the current generation, and a single compare-and-swap switches
+// to it. Without the mark every run is offline, as before 0.51.0.
+// Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/fts/online (the `GetFTSOnline` operationId).
+func (c *Client) GetFTSOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFTSOnlineRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableFTSOnline Remove the mark of online runs
+//
+// Removes the cluster mark of online runs: new plans of
+// `fts_layout` and `fts_rebuild` run offline (`online: true` is
+// refused with `conflict`), a planned online run that has not
+// started fails its check. Runs that already started finish;
+// before a downgrade to a version before 0.51.0 wait until no
+// account shows an online run (`next_online` in the layout state)
+// or clear it with `POST
+// /admin/v1/accounts/{account}/fts/layout/clear`. Requires the
+// role `repair`.
+//
+// Corresponds with POST /admin/v1/fts/online/disable (the `DisableFTSOnline` operationId).
+func (c *Client) DisableFTSOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableFTSOnlineRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableFTSOnlineWithBody Allow online runs of the full-text index
+//
+// Sets the cluster mark of online runs after checking that exactly
+// `pods` fresh registrations of servers report the capability
+// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+// mark. A server before 0.51.0 does not record what it indexes
+// for an online run and waits at its freeze (a temporary failure
+// after `fts.frozen_wait_seconds`), so every server must know it
+// first. Refused with `conflict` (409) when the registrations do
+// not match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+func (c *Client) EnableFTSOnlineWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableFTSOnlineRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableFTSOnline Allow online runs of the full-text index
+//
+// Sets the cluster mark of online runs after checking that exactly
+// `pods` fresh registrations of servers report the capability
+// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+// mark. A server before 0.51.0 does not record what it indexes
+// for an online run and waits at its freeze (a temporary failure
+// after `fts.frozen_wait_seconds`), so every server must know it
+// first. Refused with `conflict` (409) when the registrations do
+// not match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+func (c *Client) EnableFTSOnline(ctx context.Context, body EnableFTSOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableFTSOnlineRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ListJobs Jobs, oldest first
 //
 // Requires the role `diagnose`; a client with an account scope must
@@ -5296,9 +5525,13 @@ func (c *Client) RetryLearningJob(ctx context.Context, job JobID, body RetryLear
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 // `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-// takes the maintenance lock per account; an account another job or
-// an import holds is tried again at the end. `skip_idle` (scrub
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+// unless online) takes the maintenance lock per account; an account
+// another job or an import holds (or, online, another run of the
+// account is alive) is tried again at the end; online, an account
+// without a layout 3 index counts as `unsupported`. A batch of
+// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+// `anytime` is set. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
 // complete batch scrub found nothing, for at most
 // `scrub.interval_days`. The plan's account is empty and its kind
@@ -5329,9 +5562,13 @@ func (c *Client) CreateBatchPlanWithBody(ctx context.Context, contentType string
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 // `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-// takes the maintenance lock per account; an account another job or
-// an import holds is tried again at the end. `skip_idle` (scrub
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+// unless online) takes the maintenance lock per account; an account
+// another job or an import holds (or, online, another run of the
+// account is alive) is tried again at the end; online, an account
+// without a layout 3 index counts as `unsupported`. A batch of
+// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+// `anytime` is set. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
 // complete batch scrub found nothing, for at most
 // `scrub.interval_days`. The plan's account is empty and its kind
@@ -8604,6 +8841,100 @@ func NewEnableFTSLayout3RequestWithBody(server string, contentType string, body 
 	return req, nil
 }
 
+// NewGetFTSOnlineRequest constructs an http.Request for the GetFTSOnline method
+func NewGetFTSOnlineRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/online")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDisableFTSOnlineRequest constructs an http.Request for the DisableFTSOnline method
+func NewDisableFTSOnlineRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/online/disable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnableFTSOnlineRequest calls the generic EnableFTSOnline builder with application/json body
+func NewEnableFTSOnlineRequest(server string, body EnableFTSOnlineJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnableFTSOnlineRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnableFTSOnlineRequestWithBody constructs an http.Request for the EnableFTSOnline method, with any body, and a specified content type
+func NewEnableFTSOnlineRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/fts/online/enable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewListJobsRequest constructs an http.Request for the ListJobs method
 func NewListJobsRequest(server string, params *ListJobsParams) (*http.Request, error) {
 	var err error
@@ -9881,7 +10212,9 @@ type ClientWithResponsesInterface interface {
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
-	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+	// `fts_rebuild` with `online: true` the cluster mark of online runs
+	// (`POST /admin/v1/fts/online/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -9903,7 +10236,9 @@ type ClientWithResponsesInterface interface {
 	// `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 	// cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
-	// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+	// `fts_rebuild` with `online: true` the cluster mark of online runs
+	// (`POST /admin/v1/fts/online/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -10366,6 +10701,71 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/fts/layout3/enable (the `EnableFTSLayout3` operationId).
 	EnableFTSLayout3WithResponse(ctx context.Context, body EnableFTSLayout3JSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSLayout3Response, error)
 
+	// GetFTSOnlineWithResponse The mark of online runs of the full-text index
+	//
+	// Whether the cluster mark of online runs (`fts/online`, since
+	// 0.51.0) is set, and the server registrations as for layout 3.
+	// The mark allows `fts_layout` and `fts_rebuild` jobs to run
+	// without the account's maintenance lock: deliveries, logins and
+	// sessions go on while the index is resharded or rebuilt beside
+	// the current generation, and a single compare-and-swap switches
+	// to it. Without the mark every run is offline, as before 0.51.0.
+	// Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/fts/online (the `GetFTSOnline` operationId).
+	GetFTSOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetFTSOnlineResponse, error)
+
+	// DisableFTSOnlineWithResponse Remove the mark of online runs
+	//
+	// Removes the cluster mark of online runs: new plans of
+	// `fts_layout` and `fts_rebuild` run offline (`online: true` is
+	// refused with `conflict`), a planned online run that has not
+	// started fails its check. Runs that already started finish;
+	// before a downgrade to a version before 0.51.0 wait until no
+	// account shows an online run (`next_online` in the layout state)
+	// or clear it with `POST
+	// /admin/v1/accounts/{account}/fts/layout/clear`. Requires the
+	// role `repair`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/online/disable (the `DisableFTSOnline` operationId).
+	DisableFTSOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableFTSOnlineResponse, error)
+
+	// EnableFTSOnlineWithBodyWithResponse Allow online runs of the full-text index
+	//
+	// Sets the cluster mark of online runs after checking that exactly
+	// `pods` fresh registrations of servers report the capability
+	// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+	// mark. A server before 0.51.0 does not record what it indexes
+	// for an online run and waits at its freeze (a temporary failure
+	// after `fts.frozen_wait_seconds`), so every server must know it
+	// first. Refused with `conflict` (409) when the registrations do
+	// not match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+	EnableFTSOnlineWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableFTSOnlineResponse, error)
+
+	// EnableFTSOnlineWithResponse Allow online runs of the full-text index
+	//
+	// Sets the cluster mark of online runs after checking that exactly
+	// `pods` fresh registrations of servers report the capability
+	// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+	// mark. A server before 0.51.0 does not record what it indexes
+	// for an online run and waits at its freeze (a temporary failure
+	// after `fts.frozen_wait_seconds`), so every server must know it
+	// first. Refused with `conflict` (409) when the registrations do
+	// not match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+	EnableFTSOnlineWithResponse(ctx context.Context, body EnableFTSOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSOnlineResponse, error)
+
 	// ListJobsWithResponse Jobs, oldest first
 	//
 	// Requires the role `diagnose`; a client with an account scope must
@@ -10486,9 +10886,13 @@ type ClientWithResponsesInterface interface {
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-	// takes the maintenance lock per account; an account another job or
-	// an import holds is tried again at the end. `skip_idle` (scrub
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+	// unless online) takes the maintenance lock per account; an account
+	// another job or an import holds (or, online, another run of the
+	// account is alive) is tried again at the end; online, an account
+	// without a layout 3 index counts as `unsupported`. A batch of
+	// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+	// `anytime` is set. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
 	// complete batch scrub found nothing, for at most
 	// `scrub.interval_days`. The plan's account is empty and its kind
@@ -10509,9 +10913,13 @@ type ClientWithResponsesInterface interface {
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-	// takes the maintenance lock per account; an account another job or
-	// an import holds is tried again at the end. `skip_idle` (scrub
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+	// unless online) takes the maintenance lock per account; an account
+	// another job or an import holds (or, online, another run of the
+	// account is alive) is tried again at the end; online, an account
+	// without a layout 3 index counts as `unsupported`. A batch of
+	// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+	// `anytime` is set. `skip_idle` (scrub
 	// only) skips the accounts that did not change since their last
 	// complete batch scrub found nothing, for at most
 	// `scrub.interval_days`. The plan's account is empty and its kind
@@ -13469,6 +13877,150 @@ func (r EnableFTSLayout3Response) ContentType() string {
 	return ""
 }
 
+type GetFTSOnlineResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetFTSOnlineResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetFTSOnlineResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetFTSOnlineResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFTSOnlineResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFTSOnlineResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetFTSOnlineResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableFTSOnlineResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DisableFTSOnlineResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableFTSOnlineResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableFTSOnlineResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableFTSOnlineResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableFTSOnlineResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableFTSOnlineResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type EnableFTSOnlineResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r EnableFTSOnlineResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r EnableFTSOnlineResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r EnableFTSOnlineResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableFTSOnlineResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableFTSOnlineResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r EnableFTSOnlineResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListJobsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -15022,7 +15574,9 @@ func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, acc
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 // cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 // with `dict_filter: ids` the cluster mark of the dictionary filter
-// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+// `fts_rebuild` with `online: true` the cluster mark of online runs
+// (`POST /admin/v1/fts/online/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -15050,7 +15604,9 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
 // cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
 // with `dict_filter: ids` the cluster mark of the dictionary filter
-// (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+// `fts_rebuild` with `online: true` the cluster mark of online runs
+// (`POST /admin/v1/fts/online/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -15705,6 +16261,95 @@ func (c *ClientWithResponses) EnableFTSLayout3WithResponse(ctx context.Context, 
 	return ParseEnableFTSLayout3Response(rsp)
 }
 
+// GetFTSOnlineWithResponse The mark of online runs of the full-text index
+//
+// Whether the cluster mark of online runs (`fts/online`, since
+// 0.51.0) is set, and the server registrations as for layout 3.
+// The mark allows `fts_layout` and `fts_rebuild` jobs to run
+// without the account's maintenance lock: deliveries, logins and
+// sessions go on while the index is resharded or rebuilt beside
+// the current generation, and a single compare-and-swap switches
+// to it. Without the mark every run is offline, as before 0.51.0.
+// Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/fts/online (the `GetFTSOnline` operationId).
+func (c *ClientWithResponses) GetFTSOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetFTSOnlineResponse, error) {
+	rsp, err := c.GetFTSOnline(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFTSOnlineResponse(rsp)
+}
+
+// DisableFTSOnlineWithResponse Remove the mark of online runs
+//
+// Removes the cluster mark of online runs: new plans of
+// `fts_layout` and `fts_rebuild` run offline (`online: true` is
+// refused with `conflict`), a planned online run that has not
+// started fails its check. Runs that already started finish;
+// before a downgrade to a version before 0.51.0 wait until no
+// account shows an online run (`next_online` in the layout state)
+// or clear it with `POST
+// /admin/v1/accounts/{account}/fts/layout/clear`. Requires the
+// role `repair`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/online/disable (the `DisableFTSOnline` operationId).
+func (c *ClientWithResponses) DisableFTSOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableFTSOnlineResponse, error) {
+	rsp, err := c.DisableFTSOnline(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableFTSOnlineResponse(rsp)
+}
+
+// EnableFTSOnlineWithBodyWithResponse Allow online runs of the full-text index
+//
+// Sets the cluster mark of online runs after checking that exactly
+// `pods` fresh registrations of servers report the capability
+// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+// mark. A server before 0.51.0 does not record what it indexes
+// for an online run and waits at its freeze (a temporary failure
+// after `fts.frozen_wait_seconds`), so every server must know it
+// first. Refused with `conflict` (409) when the registrations do
+// not match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+func (c *ClientWithResponses) EnableFTSOnlineWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableFTSOnlineResponse, error) {
+	rsp, err := c.EnableFTSOnlineWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableFTSOnlineResponse(rsp)
+}
+
+// EnableFTSOnlineWithResponse Allow online runs of the full-text index
+//
+// Sets the cluster mark of online runs after checking that exactly
+// `pods` fresh registrations of servers report the capability
+// `fts_online_build` (since 0.51.0); otherwise as the layout 3
+// mark. A server before 0.51.0 does not record what it indexes
+// for an online run and waits at its freeze (a temporary failure
+// after `fts.frozen_wait_seconds`), so every server must know it
+// first. Refused with `conflict` (409) when the registrations do
+// not match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/fts/online/enable (the `EnableFTSOnline` operationId).
+func (c *ClientWithResponses) EnableFTSOnlineWithResponse(ctx context.Context, body EnableFTSOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableFTSOnlineResponse, error) {
+	rsp, err := c.EnableFTSOnline(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableFTSOnlineResponse(rsp)
+}
+
 // ListJobsWithResponse Jobs, oldest first
 //
 // Requires the role `diagnose`; a client with an account scope must
@@ -15879,9 +16524,13 @@ func (c *ClientWithResponses) RetryLearningJobWithResponse(ctx context.Context, 
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 // `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-// takes the maintenance lock per account; an account another job or
-// an import holds is tried again at the end. `skip_idle` (scrub
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+// unless online) takes the maintenance lock per account; an account
+// another job or an import holds (or, online, another run of the
+// account is alive) is tried again at the end; online, an account
+// without a layout 3 index counts as `unsupported`. A batch of
+// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+// `anytime` is set. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
 // complete batch scrub found nothing, for at most
 // `scrub.interval_days`. The plan's account is empty and its kind
@@ -15908,9 +16557,13 @@ func (c *ClientWithResponses) CreateBatchPlanWithBodyWithResponse(ctx context.Co
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
 // `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-// takes the maintenance lock per account; an account another job or
-// an import holds is tried again at the end. `skip_idle` (scrub
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+// unless online) takes the maintenance lock per account; an account
+// another job or an import holds (or, online, another run of the
+// account is alive) is tried again at the end; online, an account
+// without a layout 3 index counts as `unsupported`. A batch of
+// `fts_layout` or `fts_rebuild` keeps the reshard window unless
+// `anytime` is set. `skip_idle` (scrub
 // only) skips the accounts that did not change since their last
 // complete batch scrub found nothing, for at most
 // `scrub.interval_days`. The plan's account is empty and its kind
@@ -18063,6 +18716,105 @@ func ParseEnableFTSLayout3Response(rsp *http.Response) (*EnableFTSLayout3Respons
 	return response, nil
 }
 
+// ParseGetFTSOnlineResponse parses an HTTP response from a GetFTSOnlineWithResponse call
+func ParseGetFTSOnlineResponse(rsp *http.Response) (*GetFTSOnlineResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFTSOnlineResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableFTSOnlineResponse parses an HTTP response from a DisableFTSOnlineWithResponse call
+func ParseDisableFTSOnlineResponse(rsp *http.Response) (*DisableFTSOnlineResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableFTSOnlineResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableFTSOnlineResponse parses an HTTP response from a EnableFTSOnlineWithResponse call
+func ParseEnableFTSOnlineResponse(rsp *http.Response) (*EnableFTSOnlineResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableFTSOnlineResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListJobsResponse parses an HTTP response from a ListJobsWithResponse call
 func ParseListJobsResponse(rsp *http.Response) (*ListJobsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -18681,6 +19433,15 @@ type ServerInterface interface {
 	// EnableFTSLayout3 Allow layout 3 in the cluster
 	// (POST /admin/v1/fts/layout3/enable)
 	EnableFTSLayout3(w http.ResponseWriter, r *http.Request)
+	// GetFTSOnline The mark of online runs of the full-text index
+	// (GET /admin/v1/fts/online)
+	GetFTSOnline(w http.ResponseWriter, r *http.Request)
+	// DisableFTSOnline Remove the mark of online runs
+	// (POST /admin/v1/fts/online/disable)
+	DisableFTSOnline(w http.ResponseWriter, r *http.Request)
+	// EnableFTSOnline Allow online runs of the full-text index
+	// (POST /admin/v1/fts/online/enable)
+	EnableFTSOnline(w http.ResponseWriter, r *http.Request)
 	// ListJobs Jobs, oldest first
 	// (GET /admin/v1/jobs)
 	ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams)
@@ -21302,6 +22063,48 @@ func (siw *ServerInterfaceWrapper) EnableFTSLayout3(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// GetFTSOnline operation middleware
+func (siw *ServerInterfaceWrapper) GetFTSOnline(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetFTSOnline(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DisableFTSOnline operation middleware
+func (siw *ServerInterfaceWrapper) DisableFTSOnline(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DisableFTSOnline(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// EnableFTSOnline operation middleware
+func (siw *ServerInterfaceWrapper) EnableFTSOnline(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.EnableFTSOnline(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListJobs operation middleware
 func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Request) {
 
@@ -21903,6 +22706,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/dictfilter", wrapper.GetFTSDictFilter)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/dictfilter/enable", wrapper.EnableFTSDictFilter)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/dictfilter/disable", wrapper.DisableFTSDictFilter)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/online", wrapper.GetFTSOnline)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/online/enable", wrapper.EnableFTSOnline)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/online/disable", wrapper.DisableFTSOnline)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3/accounts", wrapper.ListFTSLayout3Accounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout", wrapper.GetFTSLayout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout/clear", wrapper.ClearFTSLayout)

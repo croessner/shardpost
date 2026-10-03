@@ -1,6 +1,6 @@
-.TH SHARDPOSTCTL-FTS 1 "2026-10-03" "ShardPost 0.50.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-FTS 1 "2026-10-03" "ShardPost 0.51.0" "ShardPost Manual"
 .SH NAME
-shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the dictionary filter mark, the accounts with layout 3, the layout record and the key counts of an account
+shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the dictionary filter mark, the mark of online runs, the accounts with layout 3, the layout record and the key counts of an account
 .SH SYNOPSIS
 .B shardpostctl fts layout3 status
 .RB [ \-json ]
@@ -22,6 +22,17 @@ shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the dicti
 .RB [ \-json ]
 .br
 .B shardpostctl fts dictfilter disable
+.RB [ \-json ]
+.br
+.B shardpostctl fts online status
+.RB [ \-json ]
+.br
+.B shardpostctl fts online enable \-pods
+.I n
+.RB [ \-force ]
+.RB [ \-json ]
+.br
+.B shardpostctl fts online disable
 .RB [ \-json ]
 .br
 .B shardpostctl fts layout3 list
@@ -183,6 +194,52 @@ with
 .BR fts_rebuild ,
 under settings that ask for neither. Role:
 .BR repair .
+.SS fts online status
+Shows whether the cluster mark of online runs
+.RB ( fts/online ,
+since 0.51.0) is set, with the registrations as
+.BR "layout3 status" .
+The mark allows
+.B fts_layout
+and
+.B fts_rebuild
+to run without the account lock: the target generation is built beside
+the current one while deliveries, logins and sessions go on; writers
+record what they index meanwhile, the run catches it up and switches in
+one compare-and-swap. A server before 0.51.0 does not record and waits
+at the run's freeze (a temporary failure after
+.IR fts.frozen_wait_seconds ),
+so the mark needs every server to know it. Without the mark every run
+is offline under the account lock, as before 0.51.0. Role:
+.BR diagnose .
+.SS fts online enable
+Sets the mark when exactly
+.I n
+fresh registrations of servers report the capability
+.BR fts_online_build ;
+otherwise as
+.BR "layout3 enable" .
+Plans with
+.B \-online
+are allowed from then on, and with
+.I "fts.online_build: auto"
+also plans without it (the reshards of the
+.B fts_due
+worker included). Role:
+.BR repair .
+.SS fts online disable
+Removes the mark: new plans run offline, a plan with
+.B \-online
+is refused, a planned online job that has not started fails. Runs that
+started finish; before a downgrade to a version before 0.51.0 wait until
+no account shows
+.B next_online
+in
+.B "fts layout show"
+(or clear it with
+.BR "fts layout clear" ).
+Role:
+.BR repair .
 .SS fts layout3 list
 Lists the presence index of the accounts with a layout 3 index (or a
 conversion to it), a page at a time, with the time each was entered.
@@ -212,7 +269,11 @@ and its text preparation
 .RB ( "attached_headers nosig" )
 when it has them, a conversion in progress
 .RB ( next ,
-the token of its run and, for an import reshard, its last heartbeat) and
+the token of its run and, for an import reshard, its last heartbeat;
+.B "next_online yes, mode copy"
+or
+.B reindex
+for an online run, since 0.51.0) and
 sources not removed yet
 .RB ( old ,
 each with the token of the run that left it and, for an import
@@ -226,7 +287,8 @@ heartbeat is older than 90 seconds. Its freeze is lifted (only the
 freeze of exactly that run) and its target objects are deleted; a
 conversion whose run still works is left alone. Sources a run left
 behind after its switch (it stopped before deleting them) are deleted
-the same way when that run has ended. Deliveries into an
+the same way when that run has ended. For an online run its records in
+the id map go as well. Deliveries into an
 account with a stale conversion fail temporarily after
 .I fts.frozen_wait_seconds
 until it is cleared; the job itself, a job or import that takes the
@@ -402,6 +464,18 @@ shardpostctl fts dictfilter disable
 .RE
 .fi
 .PP
+After the rollout of 0.51.0 to all three pods, allow online runs and
+rebuild an account without locking it (deliveries and sessions go on):
+.PP
+.nf
+.RS
+shardpostctl fts online status
+shardpostctl fts online enable -pods 3
+shardpostctl plan -online fts_rebuild rbdpoc2@exampleserver.de
+shardpostctl fts layout show rbdpoc2@exampleserver.de
+.RE
+.fi
+.PP
 How many dictionary keys per message does an account have, and how full
 are its posting objects (counters only)?
 .PP
@@ -439,8 +513,8 @@ no
 .BR \-pods ).
 .TP
 .B 65
-.BR enable :
-the registrations do not show exactly
+.B enable
+(each mark): the registrations do not show exactly
 .I n
 fresh servers with the capability of the mark;
 .BR "layout3 disable" :

@@ -17,8 +17,10 @@ import (
 
 // Maintenance jobs (roadmap 8c):
 //
-//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind> <account>   dry run, prints the plan
-//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind>   a batch of the kind over every account
+//	plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only]
+//	     [-online|-offline] [-skip-unreadable] [-keep-orphan-ids] <kind> <account>   dry run, prints the plan
+//	plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only]
+//	     [-online|-offline] [-anytime] [-skip-unreadable] [-keep-orphan-ids] <kind>   a batch of the kind over every account
 //	plan show <plan-id>
 //	apply [-wait] [-idempotency-key K] <plan-id>        run the plan as a job
 //	check [-wait] <account>                             read-only index check
@@ -28,8 +30,10 @@ import (
 // With -wait (and for job wait) the exit code is the job's outcome: 0
 // succeeded, 1 partially failed, 69 failed or cancelled.
 
-const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind> <account> |
-  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only] <kind> | plan show <plan-id> |
+const jobsUsage = `usage: shardpostctl plan [-classes a,b] [-mailbox M] [-uids 1,2 | -deleted] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only]
+    [-online|-offline] [-skip-unreadable] [-keep-orphan-ids] <kind> <account> |
+  plan -all [-classes a,b] [-skip-idle] [-layout 2|3] [-shards n|s/d/h] [-dict-filter none|ids] [-due-only]
+    [-online|-offline] [-anytime] [-skip-unreadable] [-keep-orphan-ids] <kind> | plan show <plan-id> |
   apply [-wait] [-idempotency-key K] <plan-id> | check [-wait] <account> |
   job list [-account A] [-state S] [-limit n] [-after id] | job show|wait|cancel <job-id>   (each with --json)
   kinds: scrub, quota_recalc, acl_reconcile, fts_rebuild, fts_dict_convert, fts_layout, mailbox_name_convert,
@@ -45,6 +49,10 @@ type jobArgs struct {
 	deleted          bool
 	all, skipIdle    bool
 	dueOnly          bool
+	online, offline  bool
+	anytime          bool
+	skipUnreadable   bool
+	keepOrphans      bool
 	layout           int
 	shards           string
 	dictFilter       string
@@ -74,6 +82,11 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 	fs.StringVar(&a.shards, "shards", "", "fts_layout: forced object counts of a layout 3 target, n for all or s/d/h (default from the key counts; the caps do not apply)")
 	fs.StringVar(&a.dictFilter, "dict-filter", "", "fts_layout: the identifier filter of a layout 3 target, none or ids (default as fts.dict_filter and the cluster mark say)")
 	fs.BoolVar(&a.dueOnly, "due-only", false, "fts_layout: no change while the key counts ask for the shape the index has and its filter is the one asked for")
+	fs.BoolVar(&a.online, "online", false, "fts_layout, fts_rebuild: run without the account's lock (needs the cluster mark fts/online)")
+	fs.BoolVar(&a.offline, "offline", false, "fts_layout, fts_rebuild: run under the account's lock (default unless fts.online_build is auto and the mark is set)")
+	fs.BoolVar(&a.anytime, "anytime", false, "plan -all fts_layout|fts_rebuild: ignore the reshard window")
+	fs.BoolVar(&a.skipUnreadable, "skip-unreadable", false, "fts_rebuild -online: skip a live message whose blob cannot be read")
+	fs.BoolVar(&a.keepOrphans, "keep-orphan-ids", false, "fts_rebuild -online: count ids without blob and mailbox entry instead of dropping them")
 	fs.StringVar(&a.idemKey, "idempotency-key", "", "reuse the job of an earlier identical request")
 	fs.StringVar(&a.account, "account", "", "job list: only this account")
 	fs.StringVar(&a.state, labelState, "", "job list: only this state")
@@ -93,6 +106,11 @@ func parseJobArgs(name string, args []string, stderr io.Writer) (jobArgs, bool) 
 
 	if a.dictFilter != "" && a.dictFilter != "none" && a.dictFilter != "ids" {
 		sayln(stderr, "shardpostctl: -dict-filter: none or ids")
+		return a, false
+	}
+
+	if a.online && a.offline {
+		sayln(stderr, "shardpostctl: -online and -offline exclude each other")
 		return a, false
 	}
 
@@ -172,6 +190,11 @@ func planCreate(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs,
 	kind, account := a.args[0], a.args[1]
 	params := map[string]any{}
 
+	if a.anytime {
+		sayln(stderr, "shardpostctl: -anytime is for plan -all; the job of one account runs at once, whatever the reshard window says")
+		return exUsage
+	}
+
 	if a.classes != "" {
 		params["classes"] = strings.Split(a.classes, ",")
 	}
@@ -241,6 +264,10 @@ func planAll(ctx context.Context, c *adminapi.ClientWithResponses, a jobArgs, st
 		req.SkipIdle = &a.skipIdle
 	}
 
+	if a.anytime {
+		req.Anytime = &a.anytime
+	}
+
 	resp, err := c.CreateBatchPlanWithResponse(ctx, req)
 	if err != nil {
 		return transportError(stderr, err)
@@ -284,6 +311,22 @@ func layoutParams(a jobArgs, params map[string]any) {
 
 	if a.dueOnly {
 		params["due_only"] = true
+	}
+
+	// fts_layout and fts_rebuild (stage B14i); omitted, the plan decides
+	switch {
+	case a.online:
+		params["online"] = true
+	case a.offline:
+		params["online"] = false
+	}
+
+	if a.skipUnreadable {
+		params["skip_unreadable"] = true
+	}
+
+	if a.keepOrphans {
+		params["drop_orphan_ids"] = false
 	}
 }
 

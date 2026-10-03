@@ -33,8 +33,11 @@ func TestPopulateLayout2ThenConvert(t *testing.T) {
 
 	t.Cleanup(func() { unmark(t, s) })
 
+	t.Cleanup(func() { unmarkKey(t, s, model.FTSOnlineMarkKey) })
+
 	m, err := Measure(ctx, MeasureOptions{Guard: guard(prefix), Config: cfg, Store: s, Every: 1, Parallel: 4,
-		ProbeAccounts: testAccts, Search: searchQueries, Convert: true, TraceDir: t.TempDir(), Log: discard()})
+		ProbeAccounts: testAccts, Search: searchQueries, Convert: true, Online: true, Load: 20, NewDeliverer: deliverer,
+		Gen: populateOptions(prefix).Gen, TraceDir: t.TempDir(), Log: discard()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +46,8 @@ func TestPopulateLayout2ThenConvert(t *testing.T) {
 	if c == nil || c.Count != testAccts || c.Ops[benchIndex][bench.ClassFTXP].Writes < 1 {
 		t.Fatalf("convert probe %+v", c)
 	}
+
+	checkOnlineProbe(t, m)
 
 	if m.SearchAfter == nil || m.SearchAfter.Fingerprint != m.Search.Fingerprint {
 		t.Errorf("search after the conversion %+v, before %s", m.SearchAfter, m.Search.Fingerprint)
@@ -53,6 +58,16 @@ func TestPopulateLayout2ThenConvert(t *testing.T) {
 	var out strings.Builder
 	if err := bench.WriteMeasureTable(&out, m); err != nil || !strings.Contains(out.String(), "fts_layout conversion") {
 		t.Errorf("table %v:\n%s", err, out.String())
+	}
+}
+
+// checkOnlineProbe: the online reshards (B14i) ran in every probe
+// account, and the deliveries during them all succeeded.
+func checkOnlineProbe(t *testing.T, m *bench.MeasureReport) {
+	t.Helper()
+
+	if o := m.ConvertOnline; o == nil || o.Accounts != testAccts || o.Failures != 0 || o.Run.Count != uint64(testAccts) {
+		t.Errorf("online probe %+v", o)
 	}
 }
 
@@ -81,6 +96,12 @@ func checkConverted(t *testing.T, s *cephstore.Store, cfg cephstore.Config, pref
 // unmark removes the layout 3 mark of the bench pools.
 func unmark(t *testing.T, s *cephstore.Store) {
 	t.Helper()
+	unmarkKey(t, s, model.FTSLayoutMarkKey)
+}
+
+// unmarkKey removes a cluster mark of the bench pools.
+func unmarkKey(t *testing.T, s *cephstore.Store, key string) {
+	t.Helper()
 
 	kv, err := s.AdminKV()
 	if err != nil {
@@ -88,7 +109,7 @@ func unmark(t *testing.T, s *cephstore.Store) {
 	}
 	defer kv.Close()
 
-	if err := kv.Update(model.FTSLayoutMarkKey, func([]byte) ([]byte, error) { return nil, nil }); err != nil {
+	if err := kv.Update(key, func([]byte) ([]byte, error) { return nil, nil }); err != nil {
 		t.Fatal(err)
 	}
 }

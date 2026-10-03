@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-JOB 1 "2026-10-03" "ShardPost 0.50.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-JOB 1 "2026-10-03" "ShardPost 0.51.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-job \- plan, apply and watch maintenance jobs
 .SH SYNOPSIS
@@ -16,6 +16,9 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-dict-filter
 .BR none | ids ]
 .RB [ \-due-only ]
+.RB [ \-online | \-offline ]
+.RB [ \-skip-unreadable ]
+.RB [ \-keep-orphan-ids ]
 .RB [ \-\-json ]
 .I kind account
 .br
@@ -30,6 +33,10 @@ shardpostctl-job \- plan, apply and watch maintenance jobs
 .RB [ \-dict-filter
 .BR none | ids ]
 .RB [ \-due-only ]
+.RB [ \-online | \-offline ]
+.RB [ \-anytime ]
+.RB [ \-skip-unreadable ]
+.RB [ \-keep-orphan-ids ]
 .RB [ \-\-json ]
 .I kind
 .br
@@ -156,6 +163,29 @@ skipped. A cancel stops
 the batch between two accounts. A server that takes the batch over
 continues after the last page done.
 .PP
+A batch of
+.B fts_layout
+or
+.B fts_rebuild
+keeps the reshard window
+.RI ( fts.reshard_window ,
+since 0.51.0) unless
+.B \-anytime
+is given: it starts an account only inside the window; outside it the
+job shows "waiting for the reshard window" and gives itself back until
+the next window starts (the attempt does not count), then goes on from
+its checkpoint. An online run that does not fit into what is left of
+the window waits for the next one (the result lists it as
+.IR later );
+one whose estimate is longer than the whole window fails the account
+with
+.IR window_too_small .
+Online, the accounts are not locked; an account another run of which is
+alive is tried again at the end as a locked one, and one without a
+layout 3 index counts as
+.I unsupported
+(not as failed).
+.PP
 A batch is refused (exit 65) until the account directory has completed
 its backfill
 .RB ( "shardpost index backfill accounts" ),
@@ -274,6 +304,36 @@ and the text preparation
 of the configuration while the cluster mark of the dictionary filter is
 set (since 0.50.0): it is how an existing account changes its text
 preparation. It has no checkpoint: after a takeover it starts over.
+.IP
+With
+.B \-online
+(since 0.51.0; needs the cluster mark of online runs, see
+.BR shardpostctl-fts (1),
+else exit 65, and a layout 3 index, else exit 64) it does not lock the
+account and keeps the index: the target generation is indexed from the
+messages beside the current one, with the identifier filter and the text
+preparation of the configuration, the document ids stay, deliveries
+during the run are recorded and caught up, and one compare-and-swap
+switches. It sets the version marker of the target and removes the
+rebuild key, so it also heals an index an offline rebuild left midway.
+.B \-skip-unreadable
+skips a live message whose blob cannot be read (counted as
+.IR unreadable )
+instead of failing after five attempts;
+.B \-keep-orphan-ids
+only counts the ids that have neither a blob nor a mailbox entry
+.RI ( orphan_ids )
+instead of dropping them. The result is the one of an online
+.B fts_layout
+with mode
+.BR reindex .
+Without
+.B \-online
+or
+.B \-offline
+the plan decides: online with the mark and
+.IR "fts.online_build: auto" ,
+otherwise offline; the plan records the decision.
 .TP
 .B fts_dict_convert
 Role
@@ -390,6 +450,45 @@ a
 result changed nothing. In a batch
 .RB ( "plan \-all" )
 it runs per account with the batch's lock.
+.IP
+With
+.B \-online
+(since 0.51.0; needs the cluster mark of online runs, else exit 65, and
+a layout 3 index, else exit 64; not with
+.BR "\-layout 2" )
+it does not lock the account: writers keep writing into the current
+generation and record what they index meanwhile, the copy builds the
+target beside it, the run catches up and switches in one
+compare-and-swap. Users notice at most a search that starts over once;
+an account with a steady stream of deliveries may hold its new
+deliveries up to
+.I fts.build_hold_ms
+(2 s) before the switch. The result adds
+.IR online ,
+.I mode
+.RB ( copy ),
+.IR rounds ,
+.IR caught_up ,
+.IR hold_ms ,
+.I dead_ids
+and ends without a change and without an error as
+.I deferred
+.B busy
+(another run of the account alive, or the account locked),
+.B window
+or
+.B window_too_small
+(a run the fts_due worker or a batch planned that does not fit into the
+reshard window), or as
+.I unsupported
+(no layout 3 index). Without
+.B \-online
+or
+.B \-offline
+the plan decides: online with the mark and
+.IR "fts.online_build: auto" ,
+otherwise offline; the plan records the decision, and a server before
+0.51.0 that takes an online job over runs it offline under the lock.
 .TP
 .B mailbox_name_convert
 Role
@@ -491,7 +590,11 @@ then fails at once with "run shardpostctl account repair" (see
 .BR shardpostctl-account (1)).
 .SS The account lock
 Jobs marked above as "locks the account" take the same lock an import
-uses. While it is held, IMAP and POP3 answer "Mailbox maintenance in
+uses (online runs of
+.B fts_layout
+and
+.B fts_rebuild
+do not). While it is held, IMAP and POP3 answer "Mailbox maintenance in
 progress", LMTP answers
 .IR "451 4.2.1" ,
 and other jobs and imports stay out. Sessions that were already open
@@ -571,6 +674,35 @@ and the cluster mark of the filter say); not with
 .BR fts_layout :
 no change while the key counts ask for the shape the index has and its
 identifier filter is the one asked for.
+.TP
+.B \-online
+.TQ
+.B \-offline
+.BR fts_layout ,
+.BR fts_rebuild :
+run without the account lock, or under it (default: as
+.I fts.online_build
+and the cluster mark of online runs say). They exclude each other.
+.TP
+.B \-anytime
+.BR "plan \-all"
+of
+.B fts_layout
+or
+.BR fts_rebuild :
+ignore the reshard window. A plan for one account runs at once anyway
+(refused there).
+.TP
+.B \-skip-unreadable
+.B fts_rebuild \-online
+skips a live message whose blob cannot be read.
+.TP
+.B \-keep-orphan-ids
+.B fts_rebuild \-online
+counts the ids without blob and mailbox entry instead of dropping them
+(the parameter
+.I drop_orphan_ids
+false).
 .TP
 .B \-wait
 Wait until the job ends. The exit code is then the job's outcome.
@@ -747,6 +879,19 @@ shardpostctl job wait <job-id>
 .RE
 .fi
 .PP
+The same without locking any account (since 0.51.0, with the cluster
+mark of online runs): one account at once, then every account inside the
+reshard window, or right away with
+.BR \-anytime :
+.PP
+.nf
+.RS
+shardpostctl plan -online fts_rebuild user@example.org
+shardpostctl plan -all -online fts_rebuild
+shardpostctl plan -all -online -anytime -due-only fts_layout
+.RE
+.fi
+.PP
 What the nightly scrub does (it is submitted by
 .BR "shardpost scrub \-\-batch" ):
 .PP
@@ -809,7 +954,19 @@ with
 .B "\-layout 3"
 without the cluster mark,
 .B fts_dict_convert
-for an account whose index has layout 3.
+for an account whose index has layout 3,
+.B fts_layout
+or
+.B fts_rebuild
+with
+.B \-online
+without the cluster mark of online runs.
+.TP
+.B 64
+Wrong arguments, or a plan refused for its parameters (for example
+.B \-online
+for an account with a layout 2 index, or with
+.BR "\-layout 2" ).
 .TP
 .B 67
 No such job, plan or account.

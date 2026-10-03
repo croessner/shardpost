@@ -280,6 +280,8 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	fs.IntVar(&o.Search, "search", 0, "search queries per probe account (0: no search rounds)")
 	fs.IntVar(&o.Expunge, "expunge", 0, "INBOX messages per probe account and expunge round (0: no expunge rounds)")
 	fs.BoolVar(&o.Convert, "convert", false, "convert the probe accounts' full-text index to layout 3 (needs layout 3: --fts-layout 3 or fts.layout 3, the default) and reshard it once more, counting the second round")
+	fs.BoolVar(&o.Online, "online", false, "with --convert: reshard the probe accounts online once more (sets the online mark in the bench pools)")
+	fs.IntVar(&o.Load, "load", 0, "with --online: deliveries per second into the account of each online reshard")
 	fs.Int64Var(&o.Extrapolate, "extrapolate", 1000000, "scale the per-account means to this many accounts (0: no)")
 	fs.IntVar(&ec.DataChunks, "ec-k", 2, "data chunks of the data pool's erasure code profile")
 	fs.IntVar(&ec.CodingChunks, "ec-m", 1, "coding chunks of the data pool's erasure code profile")
@@ -343,7 +345,8 @@ func measureValid(o *cephbench.MeasureOptions, f *benchFlags, configured int) bo
 		}
 	}
 
-	return o.Every > 0 && f.parallel > 0 && (!o.Convert || f.effectiveLayout(configured) == 3)
+	return o.Every > 0 && f.parallel > 0 && (!o.Convert || f.effectiveLayout(configured) == 3) &&
+		(!o.Online || o.Convert) && o.Load >= 0 && (o.Load == 0 || o.Online)
 }
 
 // writeBenchReport writes the table (to standard error when the JSON

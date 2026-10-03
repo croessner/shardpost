@@ -99,8 +99,8 @@ type MeasureReport struct {
 	// namespaces live in the index pool).
 	SystemPool string `json:"system_pool,omitempty"`
 	FTSShards  int    `json:"fts_shards"`
-	ShardSize uint32 `json:"mbox_shard_size"`
-	ChunkSize int64  `json:"chunk_size"`
+	ShardSize  uint32 `json:"mbox_shard_size"`
+	ChunkSize  int64  `json:"chunk_size"`
 
 	Inventory InventorySummary `json:"inventory"`
 	// StoreWide is what lies outside the accounts (~accounts and the
@@ -117,8 +117,8 @@ type MeasureReport struct {
 	Contention *ProbeReport `json:"contention,omitempty"`
 	// Search and Expunge are the probes of measure --search and
 	// --expunge.
-	Search      *SearchReport `json:"search,omitempty"`
-	Expunge     *RoundReport  `json:"expunge,omitempty"`
+	Search  *SearchReport `json:"search,omitempty"`
+	Expunge *RoundReport  `json:"expunge,omitempty"`
 	// Convert is the probe of measure --convert: the first round
 	// converts the probe accounts to layout 3 (its latency is the time
 	// the account is locked, the 451 window of a fts_layout job), the
@@ -126,9 +126,33 @@ type MeasureReport struct {
 	// the search probe after it, whose fingerprint must equal Search's.
 	Convert     *RoundReport  `json:"convert,omitempty"`
 	SearchAfter *SearchReport `json:"search_after_convert,omitempty"`
-	UserOpen    *OpenReport   `json:"user_open,omitempty"`
-	SessionOpen *OpenReport   `json:"session_open,omitempty"`
-	Notes       []string      `json:"notes,omitempty"`
+	// ConvertOnline is the probe of measure --convert --online (stage
+	// B14i): an online reshard of every probe account while deliveries
+	// go into it at --load per second.
+	ConvertOnline *OnlineReport `json:"convert_online,omitempty"`
+	UserOpen      *OpenReport   `json:"user_open,omitempty"`
+	SessionOpen   *OpenReport   `json:"session_open,omitempty"`
+	Notes         []string      `json:"notes,omitempty"`
+}
+
+// OnlineReport is the probe of measure --convert --online: online
+// reshards of the probe accounts, one after the other, each with a load
+// of deliveries into its account while it runs.
+type OnlineReport struct {
+	Accounts int `json:"accounts"`
+	// Load is the deliveries per second into the account of a run.
+	Load int `json:"load"`
+	// Run is the latency of a whole run (nobody waits for it); Rounds,
+	// CaughtUp and HoldMS are summed over the runs.
+	Run      LatencySummary `json:"run_latency"`
+	Rounds   int            `json:"catchup_rounds"`
+	CaughtUp int64          `json:"caught_up"`
+	HoldMS   int64          `json:"hold_ms"`
+	// Deliveries during the runs, the failed ones (should be 0: no
+	// temporary failure) and their latency.
+	Deliveries int64          `json:"deliveries"`
+	Failures   int64          `json:"failures"`
+	Delivery   LatencySummary `json:"delivery_latency"`
 }
 
 // Extrapolate scales the inventory to n accounts.

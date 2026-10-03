@@ -978,6 +978,117 @@ empty, so an older reader would trust it) is set to `3` or `4`. A `4`
 whose record lost the text preparation is only reported; `shardpostctl
 plan fts_layout <account>` writes the record anew.
 
+### Online reshard and rebuild (0.51.0)
+
+Since 0.51.0 `fts_layout` and `fts_rebuild` can run *online*, without
+the account lock ([storage](../architecture/storage.md#online-runs-of-the-full-text-index)):
+the target generation is built beside the current one while deliveries,
+logins and sessions go on, and one compare-and-swap switches.
+
+**What users notice.** Nothing, with two exceptions: a search during the
+run reads the layout record once more, and one search at the switch
+starts over in the new generation. When an account gets so many
+deliveries that the run does not catch up within
+`fts.build_catchup_rounds`, deliveries and appends of that account wait
+up to `fts.build_hold_ms` (2 s) once before the switch — slower, never
+refused. Without the mark, or with an older server in the cluster, the
+runs are offline as before (LMTP 451, refused logins, sessions ended for
+the whole job).
+
+**The mark `fts/online`.** Rollout:
+
+1. Roll out 0.51.0 to every pod; wait three minutes (a replaced pod's
+   registration stays fresh that long).
+2. `shardpostctl fts online status`: every fresh pod reports
+   `fts_online_build`.
+3. `shardpostctl fts online enable -pods <number of running pods>`.
+4. Optionally `fts.online_build: auto` in the overlay (after the image,
+   see below): plans without `-online`/`-offline` — also those of the
+   `fts_due` worker — then run online. With the default `off` only
+   `-online` runs online.
+
+A job runs as its plan decided (the plan records `online`). `plan
+-online` without the mark is refused with 409; on a layout 2 account
+with 400 (conversions between the layouts stay offline). During a rollout
+there are no online runs.
+
+**Way back.**
+
+1. `shardpostctl fts online disable`: new plans run offline (`-online`
+   409); a planned online job that has not started fails its check.
+2. Wait for the online runs that started: `shardpostctl fts layout show
+   <account>` shows `next_online` while one runs (`fts layout3 list
+   -verify` for all accounts), or `shardpostctl fts layout clear
+   <account>`.
+3. Remove the new keys from the overlay, roll it out, then roll the
+   image back.
+
+In an emergency (the image is back while an online `next` is there):
+older writers meet a hard freeze and wait, then fail temporarily, until
+the jobs scrub or `fts layout clear` (which an older version knows)
+removes the run; its `w:` keys stay as harmless leftovers that an older
+version never reads (the scrub of 0.51.0 removes them later). Generations
+an online run switched to are ordinary layout 3 generations.
+
+**The reshard window** (`fts.reshard_window`, `fts.reshard_window_tz`).
+The `fts_due` worker plans its reshards inside the window, at most
+`fts.build_max_running` at a time, and only when the estimate
+(`fts.build_ms_per_message_copy` × documents) fits into what is left of
+it; the others wait for the next window start plus a stable spread per
+account. Outside the window only an account whose largest object holds
+1.8 times its target is planned (near 2·T, where Ceph reports large omap
+objects). A batch of `fts_layout` or `fts_rebuild` keeps the window
+too: outside it the job shows `waiting for the reshard window`, gives
+itself back until the next window starts and goes on from its
+checkpoint; `-anytime` ignores the window. A run whose estimate is longer
+than the whole window does not start (`window_too_small`, metric
+`imapceph_fts_build_window_too_small_total`; the worker looks again a
+day later, a batch fails the account): plan the account on its own (a
+single plan runs at once) or widen the window. A run that overruns its
+window ends normally; runs over several nights come with a later stage.
+On the days the clocks change the window is an hour shorter or longer.
+
+**Enabling the dictionary filter and `nosig` on croessner through
+online rebuilds.** Instead of step 5 of the runbook above (offline
+rebuilds, each locking its account for minutes):
+
+1. 0.51.0 on every pod, `fts online enable -pods <n>` as above.
+2. Overlay (after the image): the window and, for the reshards of the
+   worker, `auto`:
+
+   ```yaml
+   fts:
+     online_build: auto
+     reshard_window: "02:00-05:00"
+     reshard_window_tz: Europe/Berlin
+   ```
+
+3. The dictionary filter as in steps 1–4 of the runbook above: the
+   overlay with `dict_filter: ids`, `dict_id_min_runes: 25`,
+   `attached_headers: nosig`, then `fts dictfilter enable -pods <n>`.
+4. The test account first, online, and measure:
+   `shardpostctl plan -online fts_rebuild rbdpoc2@exampleserver.de`,
+   `shardpostctl apply -wait <plan-id>`. The result shows `mode
+   reindex`, `rounds`, `caught_up`, `hold_ms`, `orphan_ids`;
+   `shardpostctl fts layout show` both properties, `V` = `4`.
+5. `de10000@srvint.net` the same way (a single plan runs at once,
+   whatever the window; at a quiet time anyway), then `~public`.
+6. The rest as a batch inside the window: `shardpostctl plan -all
+   -online fts_rebuild`, `shardpostctl apply <plan-id>`. Accounts without
+   a layout 3 index count as `unsupported` (none on croessner), a busy
+   account is tried again at the end.
+7. Check: the LMTP log without `delivery deferred, account locked`, the
+   IMAP log without `session closed, account locked`,
+   `imapceph_fts_build_runs_total{result="ok"}` per account,
+   `ceph df detail` before, during (two generations of an account at a
+   time) and after.
+
+**Scrub finding `fts_build_leftover`:** `w:` keys or `w#` of an online
+run that the layout record no longer names (a crashed run, or one an
+older version cleared). The scrub removes them with the repair class
+`uncovered`, keeping those of the run `L.next` names; they are harmless
+either way.
+
 ## Pools
 
 Three pools (`deploy/base/ceph/pools.yaml`):

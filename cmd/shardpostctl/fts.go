@@ -20,6 +20,9 @@ import (
 //	fts dictfilter status [-json]                      role diagnose (stage B14h)
 //	fts dictfilter enable -pods n [-force] [-json]     role repair
 //	fts dictfilter disable [-json]                     role repair, scope of all accounts (exit 65 while generations have it)
+//	fts online status [-json]                          role diagnose (stage B14i)
+//	fts online enable -pods n [-force] [-json]         role repair
+//	fts online disable [-json]                         role repair
 //	fts layout show [-json] <account>                  role diagnose
 //	fts layout clear [-json] <account>                 role repair
 //	fts stats [-exact] [-parallel n] [-classes] [-json] <account>  role diagnose (ftsstats.go)
@@ -38,6 +41,7 @@ const (
 	cmdFTS   = "fts"
 	ftsUsage = "usage: shardpostctl fts layout3 status|enable -pods n [-force]|disable|list [-verify] [-after a] [-limit n] [-json] | " +
 		"fts dictfilter status|enable -pods n [-force]|disable [-json] | " +
+		"fts online status|enable -pods n [-force]|disable [-json] | " +
 		"fts layout show|clear [-json] <account> | fts stats [-exact] [-parallel n] [-classes] [-json] <account>"
 )
 
@@ -91,12 +95,35 @@ func ftsGroupCmd(ctx context.Context, client *adminapi.ClientWithResponses, grou
 		return layout3Cmd(ctx, client, verb, a, stdout, stderr)
 	case group == "dictfilter" && len(a.rest) == 0:
 		return dictFilterCmd(ctx, client, verb, a, stdout, stderr)
+	case group == "online" && len(a.rest) == 0:
+		return onlineCmd(ctx, client, verb, a, stdout, stderr)
 	case group == "layout" && len(a.rest) == 1 && (verb == verbShow || verb == "clear"):
 		return accountLayoutCmd(ctx, client, verb, a.rest[0], a, stdout, stderr)
 	default:
 		sayln(stderr, ftsUsage)
 		return exUsage
 	}
+}
+
+// statusCall is an API call that answers the status of a cluster mark.
+type statusCall func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error)
+
+// markEnable runs "fts <group> enable -pods n [-force]": enable sends the
+// body.
+func markEnable(stderr io.Writer, group string, a ftsArgs, enable func(adminapi.FTSLayout3Enable) statusCall,
+	show func(*adminapi.FTSLayout3Status) int,
+) int {
+	if a.pods < 1 {
+		sayln(stderr, "shardpostctl: fts "+group+" enable needs -pods <number of running servers>")
+		return exUsage
+	}
+
+	body := adminapi.FTSLayout3Enable{Pods: a.pods}
+	if a.force {
+		body.Force = &a.force
+	}
+
+	return request(stderr, enable(body), show)
 }
 
 // dictFilterCmd runs the commands of the cluster mark of the dictionary
@@ -115,23 +142,15 @@ func dictFilterCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb st
 			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 		}, show)
 	case verbEnable:
-		if a.pods < 1 {
-			sayln(stderr, "shardpostctl: fts dictfilter enable needs -pods <number of running servers>")
-			return exUsage
-		}
+		return markEnable(stderr, "dictfilter", a, func(body adminapi.FTSLayout3Enable) statusCall {
+			return func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+				resp, err := c.EnableFTSDictFilterWithResponse(ctx, body)
+				if err != nil {
+					return nil, nil, 0, err
+				}
 
-		body := adminapi.FTSLayout3Enable{Pods: a.pods}
-		if a.force {
-			body.Force = &a.force
-		}
-
-		return request(stderr, func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
-			resp, err := c.EnableFTSDictFilterWithResponse(ctx, body)
-			if err != nil {
-				return nil, nil, 0, err
+				return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 			}
-
-			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 		}, show)
 	case verbDisable:
 		return request(stderr, func() (*adminapi.FTSLayout3Disable, *adminapi.Error, int, error) {
@@ -150,6 +169,51 @@ func dictFilterCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb st
 		sayln(stderr, ftsUsage)
 		return exUsage
 	}
+}
+
+// onlineCmd runs the commands of the cluster mark of online runs (stage
+// B14i).
+func onlineCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb string, a ftsArgs, stdout, stderr io.Writer) int {
+	show := func(st *adminapi.FTSLayout3Status) int { return printLayout3(stdout, st, a.asJSON) }
+
+	var call statusCall
+
+	switch verb {
+	case verbStatus:
+		call = func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+			resp, err := c.GetFTSOnlineWithResponse(ctx)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}
+	case verbEnable:
+		return markEnable(stderr, "online", a, func(body adminapi.FTSLayout3Enable) statusCall {
+			return func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+				resp, err := c.EnableFTSOnlineWithResponse(ctx, body)
+				if err != nil {
+					return nil, nil, 0, err
+				}
+
+				return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+			}
+		}, show)
+	case verbDisable:
+		call = func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
+			resp, err := c.DisableFTSOnlineWithResponse(ctx)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+
+			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
+		}
+	default:
+		sayln(stderr, ftsUsage)
+		return exUsage
+	}
+
+	return request(stderr, call, show)
 }
 
 // layout3Cmd runs the cluster commands.
@@ -427,6 +491,15 @@ func printLayoutState(stdout io.Writer, st *adminapi.FTSLayoutState) {
 
 	if st.NextAt != nil {
 		rows = append(rows, [2]string{"next_at", st.NextAt.UTC().Format(time.RFC3339)})
+	}
+
+	if st.NextOnline != nil && *st.NextOnline {
+		mode := ""
+		if st.NextMode != nil {
+			mode = string(*st.NextMode)
+		}
+
+		rows = append(rows, [2]string{"next_online", "yes, mode " + mode})
 	}
 
 	if st.Old != nil {

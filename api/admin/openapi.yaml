@@ -550,7 +550,9 @@ paths:
         `purge` (role `delete`). `fts_layout` with `layout: 3` needs the
         cluster mark (`POST /admin/v1/fts/layout3/enable`), `fts_layout`
         with `dict_filter: ids` the cluster mark of the dictionary filter
-        (`POST /admin/v1/fts/dictfilter/enable`); without them the plan
+        (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
+        `fts_rebuild` with `online: true` the cluster mark of online runs
+        (`POST /admin/v1/fts/online/enable`); without them the plan
         is refused with `conflict` (409). `fts_dict_convert` is a
         legacy kind for layout 2 indexes written before 0.35.0; for an
         account whose index has layout 3 it is refused with `conflict`
@@ -582,9 +584,13 @@ paths:
         `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
         `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
         its kind and the scope of all accounts (socket callers; mutual-TLS
-        clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`)
-        takes the maintenance lock per account; an account another job or
-        an import holds is tried again at the end. `skip_idle` (scrub
+        clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
+        unless online) takes the maintenance lock per account; an account
+        another job or an import holds (or, online, another run of the
+        account is alive) is tried again at the end; online, an account
+        without a layout 3 index counts as `unsupported`. A batch of
+        `fts_layout` or `fts_rebuild` keeps the reshard window unless
+        `anytime` is set. `skip_idle` (scrub
         only) skips the accounts that did not change since their last
         complete batch scrub found nothing, for at most
         `scrub.interval_days`. The plan's account is empty and its kind
@@ -1702,6 +1708,79 @@ paths:
                 $ref: "#/components/schemas/FTSLayout3Disable"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/fts/online:
+    get:
+      operationId: getFTSOnline
+      summary: The mark of online runs of the full-text index
+      description: |
+        Whether the cluster mark of online runs (`fts/online`, since
+        0.51.0) is set, and the server registrations as for layout 3.
+        The mark allows `fts_layout` and `fts_rebuild` jobs to run
+        without the account's maintenance lock: deliveries, logins and
+        sessions go on while the index is resharded or rebuilt beside
+        the current generation, and a single compare-and-swap switches
+        to it. Without the mark every run is offline, as before 0.51.0.
+        Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The mark and the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/online/enable:
+    post:
+      operationId: enableFTSOnline
+      summary: Allow online runs of the full-text index
+      description: |
+        Sets the cluster mark of online runs after checking that exactly
+        `pods` fresh registrations of servers report the capability
+        `fts_online_build` (since 0.51.0); otherwise as the layout 3
+        mark. A server before 0.51.0 does not record what it indexes
+        for an online run and waits at its freeze (a temporary failure
+        after `fts.frozen_wait_seconds`), so every server must know it
+        first. Refused with `conflict` (409) when the registrations do
+        not match. Requires the role `repair`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FTSLayout3Enable"
+      responses:
+        "200":
+          description: The mark is set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/fts/online/disable:
+    post:
+      operationId: disableFTSOnline
+      summary: Remove the mark of online runs
+      description: |
+        Removes the cluster mark of online runs: new plans of
+        `fts_layout` and `fts_rebuild` run offline (`online: true` is
+        refused with `conflict`), a planned online run that has not
+        started fails its check. Runs that already started finish;
+        before a downgrade to a version before 0.51.0 wait until no
+        account shows an online run (`next_online` in the layout state)
+        or clear it with `POST
+        /admin/v1/accounts/{account}/fts/layout/clear`. Requires the
+        role `repair`.
+      responses:
+        "200":
+          description: The mark is gone; the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/fts/layout3/accounts:
     get:
       operationId: listFTSLayout3Accounts
@@ -2474,14 +2553,29 @@ components:
           description: |
             Parameters of the kind for every account; scrub: `classes`
             (empty = all); fts_layout: `layout`, `shards` or `shape`,
-            `dict_filter`, `due_only` (see `FTSLayoutParams`). The other
-            kinds take none.
+            `dict_filter`, `due_only`, `online` (see `FTSLayoutParams`);
+            fts_rebuild: `online`, `skip_unreadable`, `drop_orphan_ids`
+            (see `FTSRebuildParams`). The other kinds take none. An
+            omitted `online` is decided by the plan for the whole batch
+            (accounts without a layout 3 index then count as
+            `unsupported`).
         skip_idle:
           type: boolean
           description: |
             scrub only: skip the accounts whose last batch scrub was
             complete, found nothing and is younger than
             `scrub.interval_days`, and which did not change since.
+        anytime:
+          type: boolean
+          description: |
+            fts_layout and fts_rebuild only (since 0.51.0): ignore the
+            reshard window. Without it a batch starts an account only
+            inside `fts.reshard_window` and, for an online run, only when
+            its estimate fits into what is left of the window; outside it
+            gives the job back until the next window starts (it shows
+            `waiting for the reshard window`) and goes on from its
+            checkpoint. An account whose estimate is longer than the
+            whole window fails with `window_too_small`.
     AccountPage:
       type: object
       required: [items]
@@ -2740,6 +2834,18 @@ components:
           type: string
           format: date-time
           description: Last heartbeat of an import reshard run.
+        next_online:
+          type: boolean
+          description: |
+            The conversion in progress runs online, without the account's
+            lock (since 0.51.0): writers record what they index for it.
+        next_mode:
+          type: string
+          enum: [copy, reindex]
+          description: |
+            The mode of an online run: `copy` from the postings (a
+            reshard, a change of the identifier filter), `reindex` from
+            the messages (a rebuild).
         old:
           type: array
           description: Source generations a conversion switched away from and has not removed yet.
@@ -3270,6 +3376,46 @@ components:
             End without a change while the key counts ask for the shape
             the index has and its identifier filter is the one asked for
             (how the `fts_due` worker plans the job).
+        online:
+          type: boolean
+          description: |
+            Run without the account's maintenance lock (since 0.51.0):
+            deliveries, logins and sessions go on, the target is built
+            beside the current generation and one compare-and-swap
+            switches to it. `true` needs the cluster mark of online runs
+            (`POST /admin/v1/fts/online/enable`, else 409) and a layout
+            3 index (else 400; a batch counts such accounts as
+            unsupported); omitted, the plan decides: online with the
+            mark and `fts.online_build: auto`, else offline. The plan
+            records the decision. Not with `layout: 2`.
+    FTSRebuildParams:
+      type: object
+      description: |
+        The parameters of the kind `fts_rebuild` in `params` of a plan or
+        a batch plan (since 0.51.0).
+      properties:
+        online:
+          type: boolean
+          description: |
+            Rebuild without the account's maintenance lock: the target
+            generation is indexed from the messages beside the current
+            one (with the identifier filter and the text preparation the
+            configuration and the cluster mark of the filter ask for),
+            the id map stays, and one compare-and-swap switches. It sets
+            the version marker of the target and removes the rebuild key
+            of an offline rebuild that stopped midway. Decided as
+            `online` of `fts_layout`.
+        skip_unreadable:
+          type: boolean
+          description: |
+            Online only: skip a live message whose blob cannot be read
+            (counted as `unreadable`) instead of failing the run.
+        drop_orphan_ids:
+          type: boolean
+          description: |
+            Online only (default true): drop the ids that have neither a
+            blob nor a mailbox entry (counted as `orphan_ids`); false
+            only counts them.
     PlanRequest:
       type: object
       required: [kind]
@@ -3283,8 +3429,10 @@ components:
           description: |
             scrub: `classes` (deliveries, moves, retired, uncovered, entries,
             refs, orphans, unknown, quota; empty = all); fts_layout:
-            `layout`, `shards` or `shape`, `dict_filter`, `due_only` (see
-            `FTSLayoutParams`); mailbox_delete:
+            `layout`, `shards` or `shape`, `dict_filter`, `due_only`,
+            `online` (see `FTSLayoutParams`); fts_rebuild: `online`,
+            `skip_unreadable`, `drop_orphan_ids` (see
+            `FTSRebuildParams`); mailbox_delete:
             `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
             `deleted: true` (every message flagged \Deleted when planned).
     Plan:
