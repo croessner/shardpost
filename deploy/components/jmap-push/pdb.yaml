@@ -1,0 +1,12 @@
+# One push pod may be down at a time (a node drain): the other holds
+# every partition meanwhile, within jmap.push.max_watched_accounts.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shardpost-push
+  namespace: shardpost
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-push

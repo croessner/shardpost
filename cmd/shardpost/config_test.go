@@ -69,6 +69,8 @@ func TestBackfillCommandLine(t *testing.T) {
 		"scrub --sweep --repair":            commandScrubSweep + " --repair",
 		"scrub --sweep --restart --repair":  commandScrubSweep + " --repair --restart",
 		"scrub --sweep --restart":           commandScrubSweep + " --restart",
+		"push":                              commandPush,
+		"runner":                            commandRunner,
 	} {
 		if _, command, err := loadConfig(strings.Fields(args)); err != nil || command != want {
 			t.Errorf("%q: %q %v", args, command, err)

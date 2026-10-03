@@ -15,7 +15,7 @@ repair are in the [storage chapter](docs/architecture/storage.md).
 
 | Component | Task | Boundary |
 |---|---|---|
-| This project's mail server | IMAP, POP3, LMTP, ManageSieve, Sieve, mail store, learning worker | No public SMTP MTA and no user management |
+| This project's mail server | IMAP, POP3, LMTP, ManageSieve, Sieve, mail store; the background workers (jobs, learning, delayed sending, expiries) in the servers or in job runner pods of their own; the JMAP push workers as a deployment of their own that share 64 partitions | No public SMTP MTA and no user management |
 | nauthilus-director | Public protocol access and backend routing; client IP via PROXY | Its own configuration, certificates and health checks |
 | Nauthilus | Login and resolution of an address to the canonical account | No mail content, no mailbox index |
 | Ceph/Rook | RADOS persistence, replication/EC; provisioning of the Ceph credentials | No global transaction across mail objects |
@@ -37,8 +37,9 @@ identical concurrent ones (see [configuration](docs/configuration.md#auth-cache-
 `cmd/shardpost` is the wiring point. It loads and validates the configuration,
 initializes logging and telemetry, obtains Ceph access, opens the store and
 connects protocol servers, authentication, the Sieve engine, the program
-launcher and the learning worker. It also starts the health, readiness and
-metrics endpoints and coordinates shutdown.
+launcher and the background workers (in the server, or in `shardpost runner`
+pods when the servers are front-ends with `workers.run: false`). It also
+starts the health, readiness and metrics endpoints and coordinates shutdown.
 
 The protocol servers own their connections and translate commands into
 operations on `model.User`. `imapproto` implements its own parser, dispatcher,

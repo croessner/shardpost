@@ -16,7 +16,9 @@ import (
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
+	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
+	"shardpost/internal/version"
 	"shardpost/internal/webpush"
 )
 
@@ -31,7 +33,7 @@ func (srv *servers) setupHTTP(log *slog.Logger, settings *config.Config, store *
 		return err
 	}
 
-	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog, srv.sendq, srv.kv)
+	admin, err := newAdminServers(log, settings, authn, srv.delivery, store, srv.notices, flushLog, srv.sendq, srv.kv, srv.jobs, srv.learning)
 	if err != nil {
 		return err
 	}
@@ -243,8 +245,9 @@ func pushAuth(ctx context.Context, log *slog.Logger, settings *config.Config, kv
 }
 
 // runPush runs the push worker ("shardpost push") until ctx ends, with the
-// health and metrics listener beside it for the probes.
-func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store) error {
+// health and metrics listener beside it for the probes. status is what
+// the registration shows of it.
+func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, store *cephstore.Store, status *jmap.PushStatus) error {
 	c := settings.JMAP.Push
 	if !c.Enabled() {
 		return fmt.Errorf("shardpost push needs jmap.push.vapid_key_file")
@@ -277,23 +280,45 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 
 	defer func() { _ = health.Close() }()
 
-	host, _ := os.Hostname()
+	o := pushWorkerOptions(settings, store)
+	o.KV, o.Sender, o.Auth, o.Log, o.VAPIDPublicKey, o.Status = kv, pushSender(c, vapid), authn, log.With("component", "push"), vapid.PublicKey(), status
 
-	return jmap.RunPushWorker(ctx, jmap.WorkerOptions{
-		Store:          storeAdapter{store},
-		KV:             kv,
-		Sender:         pushSender(c, vapid),
-		Instance:       host + "-" + randomSuffix(),
-		Auth:           authn,
-		Log:            log.With("component", "push"),
-		VAPIDPublicKey: vapid.PublicKey(),
-		Scan:           sec(c.ScanSeconds),
-		Poll:           sec(c.PollSeconds),
+	return jmap.RunPushWorker(ctx, o)
+}
+
+// pushWorkerOptions maps the configured push settings (the partitions
+// of stage B18a among them); the store, the sender, the authenticator,
+// the log, the key and the status are the caller's.
+func pushWorkerOptions(settings *config.Config, store *cephstore.Store) jmap.WorkerOptions {
+	c := settings.JMAP.Push
+
+	return jmap.WorkerOptions{
+		Store: storeAdapter{store},
+		// The same name as the registration: stable across restarts of
+		// the container, so the worker finds its own membership record.
+		Instance: registrationInstance(model.RolePush),
+		Version:  version.Version,
+		Scan:     sec(c.ScanSeconds),
+		Poll:     sec(c.PollSeconds),
 		// The shared accounts, built as the front-ends build them.
 		Sharing:          jmapSharing(settings),
 		MaxSharedWatches: int(c.MaxSharedWatches),
 		MaxWatches:       int(c.WorkerMaxWatches),
-	})
+		// The partitions.
+		LeaseTTL:           sec(c.LeaseSeconds),
+		Take:               sec(c.TakeSeconds),
+		Retry:              sec(c.RetrySeconds),
+		OrphanHold:         sec(c.OrphanHoldSeconds),
+		FullScan:           sec(c.FullScanSeconds),
+		Rebalance:          sec(c.RebalanceSeconds),
+		RebalanceSettle:    sec(c.RebalanceSettleSeconds),
+		Handoff:            sec(c.HandoffSeconds),
+		MaxPartitions:      int(c.MaxPartitions),
+		MaxWatchedAccounts: int(c.MaxWatchedAccounts),
+		StartRate:          int(c.StartRate),
+		SelfStopMargin:     config.PushSelfStopMargin * time.Second,
+		Rotate:             store,
+	}
 }
 
 // jmapQuota finds the warnLimit of the Quota objects: per resource the

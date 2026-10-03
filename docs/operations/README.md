@@ -103,6 +103,157 @@ A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
 the header can reach the server as a protocol command.
 
+## Push partitions
+
+Since 0.52.0 the JMAP push workers share 64 partitions
+([JMAP: Push partitions](../jmap.md#push-partitions),
+[configuration](../configuration.md#push-worker-partitions-jmappush)).
+Component `deploy/components/jmap-push`: two replicas with a rolling
+update (`maxSurge 1`, `maxUnavailable 0`, `minReadySeconds 30`), a
+termination grace period of 30 s, a spread over the nodes and a
+disruption budget of one.
+
+**Prerequisite: NTP on every node.** The pods compare the clocks of
+each other's membership records with their own: a pod whose clock is
+behind by more than `jmap.push.lease_seconds` is invisible to the others
+(its partitions count as orphaned; the locks protect them, the others
+only try in vain), one whose clock is ahead counts as alive for longer.
+Both converge once the clocks agree.
+
+**How many pods.** No HPA: the replicas follow the accounts with push
+subscriptions, about `1.3 × accounts / jmap.push.max_watched_accounts`
+and at least two (200 000 accounts: six, up to eight). Every scaling
+moves partitions; from n to n + 1 pods the new one has its share after
+`rebalance_settle_seconds` plus `rebalance_seconds` per partition moved
+(one to two pods: about seven minutes; six to seven: about a minute and
+a half). Each move costs the accounts of that partition one hand-over
+(at most about ten seconds without a push, at most one push repeated).
+
+**The way over from the single pod (0.51.0 and before).** Roll out in
+this order: first every front-end, then the push deployment. The
+front-ends of 0.52.0 write the checksum into the index values and notify
+the workers; while old and new front-ends run, the checksums are not to
+be trusted and the workers fall back to the hourly full pass. Apply the
+push deployment with `replicas: 1` first: the new pod waits while the
+old one holds the lease record (`event=push_legacy_wait`), is ready
+nonetheless, Kubernetes ends the old pod, which releases, and within two
+seconds the new pod writes the marker and takes the 64 partitions. The
+old pod's last stop loses what it had in flight, as every rollout did
+before; roll it out in a quiet hour. Check with `shardpostctl server
+list` (`PARTITIONS` 64) and `imapceph_jmap_push_partitions_held`, then
+set `replicas: 2` and watch the partitions move to 32/32.
+
+**Way back to 0.51.0 (the push deployment only).** With the rolling
+update in the manifest the way back is a full rollout: the 0.51.0 pod
+starts beside the new ones, waits (the marker), is ready, and the new
+pods end one by one; the last one deletes the marker as it ends, and the
+old pod takes the lease at its next renewal (≤ 30 s). Set `replicas: 1`
+before the image change to end exactly one new pod. After a crash of the
+last new pod the old one waits for the marker to expire (≤ 90 s). The
+state records stay readable (the acknowledgements and the checksums are
+ignored by the old pod). Rolling the front-ends back has no effect on
+the workers beyond the checksums.
+
+**A hard end.** A pod killed without its grace period leaves its leases
+to expire: the others take its partitions within the lease plus a
+cadence (about 45 s at most) and keep them for `orphan_hold_seconds`. A
+pod restarted under the same name after a crash waits for its old record
+to expire and starts without a right to its old partitions.
+
+**Alerts** (`docs/observability.md`): `imapceph_jmap_push_partitions_unowned`
+above 0 for two minutes; the p99 of `imapceph_jmap_push_gap_seconds` or
+of `imapceph_jmap_push_handover_seconds` above 10 s;
+`imapceph_jmap_push_verifyq_age_seconds` above 60 s;
+`imapceph_jmap_push_partition_events_total{event="lost"}` rising for
+long (a lock object or an OSD in trouble); `event=push_scan_listing`
+in the logs (no effective `admin.kv_index: read`: run `shardpost index
+backfill kv`).
+
+`shardpost system migrate` refuses while `jmap/push/lease` has a time in
+the future: the marker of the partitioned pods counts like the lease of
+the single one, so the runbook of the migration ("push to 0, exit 2
+right after is normal") holds unchanged.
+
+## Job runners
+
+Since 0.53.0 the background workers of the servers — the job runner
+with the expiry and `fts_due` workers, the upload expiry, the delayed
+submission worker and the learning worker — can run in pods of their
+own: `shardpost runner` (role `runner`), component
+`deploy/components/runner` (four pods, up to eight, a disruption budget
+of one, a network policy that admits the health and metrics port alone).
+The servers then run with `WORKERS_RUN=false` and are front-ends: they
+keep the jobs API, the registration, the auth flush and every writer of
+the queues ([configuration](../configuration.md#background-workers-workersrun)).
+The push workers stay a deployment of their own (another egress, the
+VAPID secret, a scale of their own). croessner keeps its two combined
+pods and no runner: with two pods a third brings no relief, and a single
+runner would be a new single point. The separated topology is checked
+with `make test-docker` and a time-boxed smoke test.
+
+**What the runner is.** It reads the servers' configmap (the system pool
+included: its manifest sets no `CEPH_SYSTEM_POOL`, which would win over
+the configmap) and the learning Secret, needs no TLS, VAPID or Nauthilus
+secrets (its load leaves the secret files of the authentication and of
+the push worker unread; a relay password file, which the delayed
+submission worker sends with, must be mounted), opens no protocol listener and no admin
+listener, and registers with the role `runner`. Diagnosis runs through a
+server pod as before: `kubectl exec ... shardpostctl job list`,
+`shardpostctl server list` (the runners' registrations show there, with
+`WORKERS true` on combined servers and `false` on front-ends). It checks
+the placement of the store's own namespaces every minute like a server
+and drains when it is lost. Its termination grace period is 60 s: jobs
+are handed over (`event=job_release`), running learning jobs get
+`imapsieve.learning.shutdown_seconds`, and its delayed submission
+partitions are named in a notify so that another worker takes them at
+once instead of at its next poll.
+
+**Switching an existing cluster.** First apply the `runner` component
+(two to four pods) and wait until its pods are ready: the runners take
+the leases beside the servers; nothing moves yet. Then add the component
+`deploy/components/runner-frontends`, a separate apply: the servers roll
+out with `WORKERS_RUN=false`:
+each old pod hands its jobs over (release plus notify, the runners take
+them at once), the leases of the expiry, `fts_due` and upload workers go
+to the runners at their next cadence (within a minute), the learning
+lease after `lock_retry_seconds`, and the submission partitions at once
+(the notify names them). Nothing is lost: the queues are durable, and a
+delayed submission goes at most one poll late. A new cluster starts
+separated. **The way back** is the reverse: remove the component
+`runner-frontends` (the servers take the workers up again), then the
+`runner` component. Always "able to take first, then give up".
+
+**Mixed versions and the way back of 0.53.0.** `--pods` of `shardpostctl
+fts layout3|dictfilter|online enable` counts servers and runners since
+0.53.0. A server before 0.53.0 that answers the check counts runners
+not: it reports too few and refuses, the safe side; so runners come
+only when every server has 0.53.0. After an image rollback of the
+servers `--pods` counts servers alone again, and an enable that was
+computed with runners refuses: determine `n` anew (front-ends alone).
+Delete the runner deployment before the rollback: an older image does
+not know the command `runner` and refuses to start.
+`imapsieve.learning.concurrency` goes into the configmap only once every
+pod runs 0.53.0, and out of it before a rollback.
+
+**Sizing.** `jobs.max_parallel` 8 per runner through `JOBS_MAX_PARALLEL`
+(the configmap's value would reach the front-ends, where it is without
+effect); the real bounds stay cluster-wide (`fts.build_max_running`, the
+account locks, the batch fan-out in the pod). Whether the slots suffice
+shows `imapceph_job_claim_wait_seconds`. The learning programs'
+`extprograms` `max_parallel` has to reach `imapsieve.learning.concurrency`
+(8 on a large cluster), or the program phase bounds the jobs; the server
+warns at startup. Delayed sending with 16 partitions keeps
+`max_partitions` 0, so that a failed runner's partitions are taken by
+the others.
+
+**HPA.** Front-ends may scale on CPU once `workers.run` is false (their
+CPU follows the sessions); a scale-down waits for the drain
+(`DRAIN_SECONDS`). Runners get no HPA on CPU: jobs come in bursts, and a
+scale-down in the middle of a batch costs a hand-over; a later scaling
+on backlog (due jobs, `imap_imapsieve_learning_lag_seconds`) with a
+stabilization of 15 minutes or more is possible. Push gets no HPA either
+(see [Push partitions](#push-partitions)).
+
 ## Delayed submissions
 
 Delayed JMAP sending (0.43.0, [JMAP](../jmap.md#delayed-sending),
@@ -110,7 +261,9 @@ Delayed JMAP sending (0.43.0, [JMAP](../jmap.md#delayed-sending),
 `jmap.submission.delayed.max_delay_seconds` is set. It needs the admin
 store indexes (`admin.kv_index` `write` or `read`) and a relay; every
 server with a relay runs the worker unless
-`jmap.submission.delayed.worker` is `false`.
+`jmap.submission.delayed.worker` is `false` or the server is a front-end
+(`workers.run: false`, see [Job runners](#job-runners)), in which case
+the runners send.
 
 **Rollout.** Roll the release out to every server first, then set
 `max_delay_seconds`. A server before 0.43.0 refuses `HOLDFOR` and
@@ -159,8 +312,9 @@ hold are overdue` show it.
 **Stopping a server.** A server that stops starts no new conversation,
 waits for the running ones (up to the relay's timeouts, ten minutes for
 its answer to a message; give the pod a grace period to match, or
-accept the next point), and gives its partition leases back; another
-server takes them on its next poll. A server that is killed while
+accept the next point), and gives its partition leases back with a
+notify that names them; another worker takes them at once (before
+0.53.0 at its next poll). A server that is killed while
 sending (SIGKILL) is safe for at most once: the submission ends as
 unknown after the sending timeout and is not sent again. A server that
 dies keeps its leases until the cls_lock runs out (three minutes).

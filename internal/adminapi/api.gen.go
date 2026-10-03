@@ -1376,9 +1376,13 @@ type ServerRegistration struct {
 	Fresh    bool   `json:"fresh"`
 	Instance string `json:"instance"`
 
-	// Role What the process is: `serve`, `push`, `scrub`, `backfill` or
-	// `sweep`; missing in registrations before 0.47.0, which are
-	// servers.
+	// Partitions The push partitions a push worker holds (role `push`, since
+	// 0.52.0); missing for the other roles.
+	Partitions *int `json:"partitions,omitempty"`
+
+	// Role What the process is: `serve`, `push`, `scrub`, `backfill`,
+	// `sweep` or `runner` (a job runner pod, since 0.53.0); missing
+	// in registrations before 0.47.0, which are servers.
 	Role *string   `json:"role,omitempty"`
 	Seen time.Time `json:"seen"`
 
@@ -1391,6 +1395,14 @@ type ServerRegistration struct {
 	// SystemPool A pool by its id (what placement checks compare) and its name.
 	SystemPool *PoolRef `json:"system_pool,omitempty"`
 	Version    string   `json:"version"`
+
+	// Watched The accounts with push subscriptions a push worker watches
+	// (role `push`, since 0.52.0); missing for the other roles.
+	Watched *int `json:"watched,omitempty"`
+
+	// Workers Whether a server runs the background workers (`workers.run`,
+	// since 0.53.0); missing before and for the other roles.
+	Workers *bool `json:"workers,omitempty"`
 }
 
 // ServerRegistrationList defines model for ServerRegistrationList.

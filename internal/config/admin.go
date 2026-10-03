@@ -54,8 +54,11 @@ type Jobs struct {
 	RetentionDays int `mapstructure:"retention_days" validate:"gte=1,lte=365"`
 	// PlanTTLSeconds is how long a plan can be applied.
 	PlanTTLSeconds int `mapstructure:"plan_ttl_seconds" validate:"gte=60,lte=86400"`
-	// MaxParallel bounds the jobs one server runs at once.
-	MaxParallel int `mapstructure:"max_parallel" validate:"gte=1,lte=16"`
+	// MaxParallel bounds the jobs one process runs at once. It has an
+	// environment variable of its own (stage B18b), so that the runner
+	// deployment gets a value of its own without a configmap key that
+	// would reach the front-ends as well.
+	MaxParallel int `mapstructure:"max_parallel" env:"JOBS_MAX_PARALLEL" validate:"gte=1,lte=16"`
 	// SettleSeconds is how long an exclusive job waits after taking the
 	// maintenance lock for deliveries and sessions that opened the
 	// account before (sessions re-check the lock every 5 seconds).
@@ -69,6 +72,20 @@ type Jobs struct {
 	// on at once in the server that runs it (scrub batches use
 	// scrub.parallel).
 	BatchParallel int `mapstructure:"batch_parallel" validate:"gte=1,lte=32"`
+}
+
+// Workers decides whether a server ("shardpost serve") runs the
+// background workers beside its listeners (stage B18b): the job runner
+// with the expiry and fts_due workers, the upload expiry, the delayed
+// submission worker and the learning worker. A front-end in a
+// deployment with runner pods ("shardpost runner") sets Run false: it
+// keeps the jobs API, the registration, the auth flush and every writer
+// of the queues, and leaves the running to the runners. Run false takes
+// precedence over jmap.submission.delayed.worker. The key is meant to
+// be set through the environment (WORKERS_RUN), so that a way back to
+// an image before 0.53.0 does not break on an unknown configmap key.
+type Workers struct {
+	Run bool `mapstructure:"run" env:"WORKERS_RUN"`
 }
 
 // Trace configures the per-account protocol trace (role trace): an

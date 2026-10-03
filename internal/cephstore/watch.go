@@ -7,6 +7,7 @@ import (
 	"github.com/ceph/go-ceph/rados"
 
 	"shardpost/internal/model"
+	"shardpost/internal/sortedindex"
 )
 
 // Change notification
@@ -69,7 +70,11 @@ func (u *User) watchObject(oid string) (model.Watch, error) {
 }
 
 // watchObj is watchObject with the concrete type.
-func (u *User) watchObj(oid string) (*Watch, error) {
+func (u *User) watchObj(oid string) (*Watch, error) { return u.watchObjData(oid, nil) }
+
+// watchObjData is watchObj that hands the data of every notify to data
+// when it is set (a payload watch) instead of firing the event channel.
+func (u *User) watchObjData(oid string, data *sortedindex.PayloadPump) (*Watch, error) {
 	rw, err := u.idx.Watch(oid)
 	if err != nil {
 		return nil, err
@@ -77,7 +82,7 @@ func (u *User) watchObj(oid string) (*Watch, error) {
 
 	u.inflight.Add(1)
 
-	w := &Watch{w: rw, unwatch: rw.Delete, events: make(chan struct{}, 1), errs: make(chan error, 1), done: make(chan struct{})}
+	w := &Watch{w: rw, unwatch: rw.Delete, events: make(chan struct{}, 1), errs: make(chan error, 1), done: make(chan struct{}), data: data}
 	go w.pump(u)
 
 	return w, nil
@@ -97,6 +102,9 @@ type Watch struct {
 	once sync.Once
 	// onClose (if set) runs once when the watch is closed.
 	onClose func()
+	// data, when set, takes the data of every notify (a payload watch,
+	// see payloadWatch); the event channel is not fired then.
+	data *sortedindex.PayloadPump
 }
 
 func (w *Watch) pump(u *User) {
@@ -122,12 +130,34 @@ func (w *Watch) pump(u *User) {
 
 			_ = ev.Ack(nil)
 
+			if w.data != nil {
+				w.data.Push(ev.Data)
+
+				continue
+			}
+
 			select {
 			case w.events <- struct{}{}:
 			default: // coalesce
 			}
 		}
 	}
+}
+
+// payloadWatch is a Watch that delivers the data of every notify
+// (model.PayloadWatch).
+type payloadWatch struct{ *Watch }
+
+var _ model.PayloadWatch = payloadWatch{}
+
+// Events yields the data of every notify (an empty one after an
+// overflow, see sortedindex.PayloadPump).
+func (w payloadWatch) Events() <-chan []byte { return w.data.Events() }
+
+// Close removes the watch and ends the pump of its data.
+func (w payloadWatch) Close() {
+	w.Watch.Close()
+	w.data.Close()
 }
 
 // fail reports err on the watch's error channel unless one is pending.

@@ -1034,20 +1034,21 @@ answered 429 at once, without waiting for a slot (see
 **Push subscriptions** (RFC 8620 7.2) are for clients that cannot keep a
 connection open. A front-end takes them and keeps them in the shared
 admin store — all subscriptions of an account in one record, and new
-ones in a queue of verifications to send; a separate process, the
-**push worker** (`shardpost push`, one replica, component
-`deploy/components/jmap-push`), serves them. It sends the
+ones in a queue of verifications to send; separate processes, the
+**push workers** (`shardpost push`, component
+`deploy/components/jmap-push`), serve them. They send the
 `PushVerification` of a new subscription, and once the client has sent
-the code back it watches that account and posts a `StateChange` when it
+the code back they watch that account and post a `StateChange` when it
 changes, gathering changes for a second so a burst becomes one push.
-The worker that works holds a lease in the admin store, renewed on a
-clock of its own, and another waits for it to lapse; a store it cannot
-reach for a moment does not end its work while its lease is valid. The
-state last pushed is kept per account, so a worker that takes over, or
-restarts, pushes what happened in between rather than starting from
-now. The account watches are kept up: a watch the store reports broken
-(an OSD restart drops RADOS watches) is set up again, and the poll
-covers the gap.
+The accounts are split into 64 partitions that the push pods share out
+among themselves (see [Push partitions](#push-partitions)); the state
+last pushed is kept per account with an acknowledgement per
+subscription, so a worker that takes a partition over, or restarts,
+pushes what happened in between rather than starting from now, and
+repeats at most one push. The account watches are kept up: a watch the
+store reports broken (an OSD restart drops RADOS watches) is set up
+again after a random half second to five seconds, and the poll covers
+the gap.
 
 Every request to a push service is encrypted for the device when the
 subscription has keys (RFC 8291, aes128gcm) and signed with the
@@ -1097,10 +1098,123 @@ error and drops nothing. An account may hold
 `jmap.push.max_subscriptions` (16) subscriptions of at most 32 types
 each.
 
-The worker lists the account records once per scan and reads the
-verification queue every two seconds; each watched account costs it an
-open store view, a RADOS watch and a poll. That is sized for thousands
-of accounts with push subscriptions, not for millions.
+Each watched account costs its worker an open store view, a RADOS watch
+and a poll. One pod watches at most `jmap.push.max_watched_accounts`
+(50 000) accounts; the number of push pods follows the accounts with
+subscriptions (about 1.3 times their number divided by that bound, and
+at least two).
+
+### Push partitions
+
+Since 0.52.0 (stage B18a) the push worker is partitioned. The partition
+of an account is the shard of its subscription record in the hint
+index of the admin store (`ix.jmap/push/acct`, 64 shards; the same
+function on the front-ends and the workers), so the count is in the
+data, not in the configuration, and a holder reads only its shard. Every
+partition has a lease of its own: a cls_lock on `ix.jmap/push/p<nn>/lock`
+in `~admin` with a TTL of `jmap.push.lease_seconds` (30), renewed every
+third of it. A holder that could not renew stops the partition itself
+five seconds before the TTL is up and releases it, so two holders never
+overlap; a holder whose lease was lost gives the partition up the same
+way. The leases stand through a cephx key rotation: the holder moves
+them to the new connection without stopping a watcher.
+
+**Sharing out.** Every push pod writes a record of itself into
+`ix.jmap/push/members` (its partitions, the accounts it watches, its
+bounds), every third of the lease and at once after every change, and
+reads the records of the others at the start of every cadence
+(`jmap.push.take_seconds`, 5 s, with a jitter of a fifth) and on every
+control notify. A record older than the lease is a pod that is gone.
+The fresh pods, sorted by name, each should hold ⌊64 / n⌋ partitions,
+the first 64 mod n of them one more (three pods: 22/21/21). A pod under
+its share takes free partitions, starting at a random one; it takes at
+once, over its share, a partition whose holder's record expired
+(orphaned) or that has been free for two cadences (contested), and
+tries such partitions every `jmap.push.retry_seconds` (2) until it has
+the lock or a fresh pod holds it. A pod over its share sheds one
+partition per `jmap.push.rebalance_seconds` (10), the one it took last,
+once the set of pods has stood still for
+`jmap.push.rebalance_settle_seconds` (60), another pod is under its
+share with capacity, and the partition was not taken as a replacement
+within `jmap.push.orphan_hold_seconds` (600). A pod takes no partition
+that would put it over `jmap.push.max_watched_accounts` or
+`jmap.push.max_partitions`, and starts the watchers of a partition at
+`jmap.push.start_rate` (5000) per second. Scaling from n to n + 1 pods
+therefore takes the settle time plus a rebalance interval per partition
+moved (one to two pods on a small cluster: about seven minutes).
+
+**Hand-over.** A partition is given up in order: the watchers end their
+round (a round of pushes has a budget of three seconds that the stop
+does not cut short, and never more than four fifths of
+`jmap.push.handoff_seconds`), save, the record is written without the
+partition and confirmed, the lock is unlocked, and the control object
+`ix.jmap/push/ctl` is notified; the others read the membership at once
+and take the partition. A pod that ends (SIGTERM) marks its record as
+leaving — it no longer counts in the shares, but its partitions are not
+free until it drops them — discards lock attempts in flight, and sheds
+its partitions in three waves at the period of `jmap.push.handoff_seconds`
+(5), one notify per wave, so that no single successor has to start every
+watcher at once; the whole end stays within the pod's termination grace
+period of 30 s. A pod that finds a fresh record of its own name with
+partitions (its predecessor crashed) waits for the record to expire and
+a little beyond before it takes anything, so that the healthy pods get
+the orphaned partitions and a pod in a crash loop does not win its old
+partitions back. A membership object that does not answer freezes
+taking and shedding (the pods go on serving what they hold); a lock
+object that hangs delays that partition alone, because every lock and
+membership operation runs with a deadline beside the cadence.
+
+**Latency.** A planned hand-over (a rollout, scaling, a node drain)
+costs an account at most about ten seconds between the last push of the
+old holder and the first pass of the new one, typically two to four. A
+crashed pod's partitions are taken within the lease plus a cadence plus
+the start: about 45 s at most, typically 30. Web Push goes through the
+push services with seconds of latency anyway; IMAP IDLE and the JMAP
+event source do not depend on the push worker.
+
+**State per account and duplicates.** `jmap/push/seen/<account>` holds
+the state last seen (`seq`, the digest and the states of the shared
+accounts) and per subscription an acknowledgement (`ack`: the position
+it was delivered up to) plus an `epoch`. A subscription has a backlog
+when its acknowledgement is behind; the types of the backlog are derived
+from the account's log (every type when the log no longer reaches back),
+so nothing has to be stored about what is still to be sent, and two
+writers merge by taking the maximum per subscription in a
+compare-and-swap. A counter that jumped back (the account was purged and
+created again) raises the epoch, and a record of a higher epoch wins a
+merge whole. The rules: every change after a subscription's last
+acknowledgement leads to at least one `StateChange` to it while it is
+not gone or refused; a hand-over repeats at most one `StateChange` per
+subscription (RFC 8620 7.1: a `StateChange` is idempotent, the client
+calls `/changes`); a delivered change is never repeated after any number
+of hand-overs. A subscription verified between two hand-overs starts at
+the state of its verification, and a backlog of types it does not want
+is acknowledged without a push.
+
+**Waking.** A front-end that changes an account's subscriptions notifies
+the lock object of the account's partition with the account as payload;
+the holder reads that one record and starts, stops or updates the
+watcher within a second. A new subscription's verification notifies
+partition 0 as well, whose holder — or, if nobody holds it, the holder of
+the smallest held partition — sends the verifications. The scan of a
+partition (`jmap.push.scan_seconds`, 30) stays the safety net: it reads
+the shard in pages of 256 and a record only when the checksum in its
+index value changed, when the value has none (written by a front-end
+before 0.52.0), or in the full pass that reads every record of a
+partition once per `jmap.push.full_scan_seconds` (3600). While the index
+is being resharded the scan pauses and the watchers go on. Without an
+effective `admin.kv_index: read` (no completed `shardpost index backfill
+kv`) the partitions are still shared by leases, but every holder lists
+the subscription records and filters its own (`event=push_scan_listing`,
+once per scan interval), which is a fallback, not a mode to run in.
+
+**Mixed versions.** The partitioned pods keep the lease record of the
+single worker of before 0.52.0 (`jmap/push/lease`) occupied as a marker,
+so an old pod waits; and they take no partition while an old pod holds
+the record (`event=push_legacy_wait`), so a rolling update hands over
+without two kinds of worker pushing at once. The order of a rollout is
+front-ends first, then the push deployment (see
+[operations](operations/README.md#push-partitions)).
 
 ### Shared accounts in push
 
@@ -1965,6 +2079,18 @@ jmap:
     poll_seconds: 60
     timeout_seconds: 10
     message_ttl_seconds: 86400
+    # the partitions of the worker (0.52.0; see Push partitions)
+    max_partitions: 0            # partitions one pod holds at most (0: all)
+    lease_seconds: 30            # TTL of a partition lease
+    take_seconds: 5              # cadence of taking and shedding
+    retry_seconds: 2             # fast cadence for orphaned partitions
+    orphan_hold_seconds: 600     # a replacement is kept this long
+    full_scan_seconds: 3600      # every record of a partition once per hour
+    rebalance_seconds: 10        # pause between two partitions shed
+    rebalance_settle_seconds: 60 # the pods stand still this long before a shed
+    handoff_seconds: 5           # watchers end within it; period of the waves
+    max_watched_accounts: 50000  # accounts one pod watches at most
+    start_rate: 5000             # watchers started per second
   submission:
     relay_addr: relay.example.org:587
     helo: shardpost.example.org

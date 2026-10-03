@@ -16,6 +16,35 @@ type MemBackend struct {
 	objs map[string]*memObject
 	// Writes counts the successful writes (tests).
 	Writes atomic.Int64
+	// hookFn, when set (SetHook), runs before every operation
+	// ("read_keys", "read_page", "write") on the object named; it may
+	// block (an object in peering) or return an error, which the
+	// operation then returns (tests).
+	hookMu sync.RWMutex
+	hookFn func(op, oid string) error
+}
+
+// SetHook sets the hook of the operations (nil: none); tests set it
+// while the backend is in use.
+func (m *MemBackend) SetHook(fn func(op, oid string) error) {
+	m.hookMu.Lock()
+	defer m.hookMu.Unlock()
+
+	m.hookFn = fn
+}
+
+// hook runs the hook of an operation, if any (outside the lock: it may
+// block).
+func (m *MemBackend) hook(op, oid string) error {
+	m.hookMu.RLock()
+	fn := m.hookFn
+	m.hookMu.RUnlock()
+
+	if fn != nil {
+		return fn(op, oid)
+	}
+
+	return nil
 }
 
 type memObject struct {
@@ -35,6 +64,10 @@ func (m *MemBackend) CacheKey() string { return m.key }
 
 // ReadKeys implements Backend.
 func (m *MemBackend) ReadKeys(oid string, keys []string) (map[string][]byte, uint64, error) {
+	if err := m.hook("read_keys", oid); err != nil {
+		return nil, 0, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -56,6 +89,10 @@ func (m *MemBackend) ReadKeys(oid string, keys []string) (map[string][]byte, uin
 
 // ReadPage implements Backend.
 func (m *MemBackend) ReadPage(oid, startAfter string, limit int) ([]KV, bool, error) {
+	if err := m.hook("read_page", oid); err != nil {
+		return nil, false, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -85,6 +122,10 @@ func (m *MemBackend) ReadPage(oid, startAfter string, limit int) ([]KV, bool, er
 
 // Write implements Backend.
 func (m *MemBackend) Write(oid string, ver uint64, set map[string][]byte, rm []string) error {
+	if err := m.hook("write", oid); err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

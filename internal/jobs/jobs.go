@@ -110,6 +110,17 @@ func (j *Job) claimable(now time.Time) bool {
 	}
 }
 
+// claimableSince is when the job became claimable: its creation for a
+// queued one (or the end of a postponement), the end of its lease for
+// one a runner left behind.
+func (j *Job) claimableSince() time.Time {
+	if j.State == StateQueued && j.Lease.Until.Before(j.Created) {
+		return j.Created
+	}
+
+	return j.Lease.Until
+}
+
 // Plan is the dry run of a dangerous job: what it would do, valid until
 // Expires, applied at most once.
 type Plan struct {

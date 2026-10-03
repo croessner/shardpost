@@ -116,13 +116,16 @@ it lists the admin namespace. Role:
 .SS fts layout3 enable
 Sets the mark when exactly
 .I n
-fresh registrations of servers report the capability
+fresh registrations of servers and job runners report the capability
 .BR fts_layout3 .
-Only servers count (role
+Only the processes that write account data under the mark count: servers
+(role
 .BR serve ,
-or no role: a registration before 0.47.0); the push worker, scrubs and
-backfills do not. Servers before 0.45.0 do not register, so the number
-of pods running now is the check:
+or no role: a registration before 0.47.0) and, since 0.53.0, job
+runners (role
+.BR runner );
+the push workers, scrubs and backfills do not. Servers before 0.45.0 do
+not register, so the number of pods running now is the check:
 .B \-pods
 is required. A pod that crashed less than three minutes ago leaves its
 fresh record (one that ended in order does not), so the check sees one
@@ -343,7 +346,8 @@ contains a term, on any account. Role:
 .TP
 .BI \-pods " n"
 .BR enable :
-the number of servers running now (required).
+the number of servers and job runners running now (required). After a
+way back to a server before 0.53.0 the check counts servers alone.
 .TP
 .B \-force
 .BR enable :

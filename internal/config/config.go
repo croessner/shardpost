@@ -45,6 +45,9 @@ type Config struct {
 	Trace Trace `mapstructure:"trace"`
 	// Jobs configures the maintenance jobs.
 	Jobs Jobs `mapstructure:"jobs"`
+	// Workers decides whether a server runs the background workers
+	// (stage B18b).
+	Workers Workers `mapstructure:"workers"`
 	// JMAP configures the JMAP front-end (off without an address).
 	JMAP JMAP `mapstructure:"jmap"`
 	// FTS configures the text preparation of the full-text index.
@@ -389,6 +392,8 @@ var defaults = []struct {
 	{"imapsieve.learning.index", indexModeRead},
 	{"imapsieve.learning.lock_retry_seconds", 20},
 	{"imapsieve.learning.queue_shards", 4},
+	{"imapsieve.learning.concurrency", 1},
+	{"imapsieve.learning.shutdown_seconds", 10},
 	{"extprograms.bin_dir", "/usr/local/lib/shardpost/programs"},
 	{"quota.grace", ""},
 	{"admin.socket", ""},
@@ -414,6 +419,7 @@ var defaults = []struct {
 	{"jobs.settle_seconds", 10},
 	{"jobs.expiry_seconds", 60},
 	{"jobs.batch_parallel", 2},
+	{"workers.run", true},
 	{"trace.max_line_bytes", 2048},
 	{"trace.max_duration_seconds", 86400},
 	{"trace.default_duration_seconds", 1800},
@@ -543,6 +549,17 @@ var defaults = []struct {
 	{"jmap.push.poll_seconds", 0},
 	{"jmap.push.timeout_seconds", 0},
 	{"jmap.push.message_ttl_seconds", 0},
+	{"jmap.push.max_partitions", 0},
+	{"jmap.push.lease_seconds", DefaultPushLeaseSeconds},
+	{"jmap.push.take_seconds", DefaultPushTakeSeconds},
+	{"jmap.push.retry_seconds", DefaultPushRetrySeconds},
+	{"jmap.push.orphan_hold_seconds", DefaultPushOrphanHoldSeconds},
+	{"jmap.push.full_scan_seconds", DefaultPushFullScanSeconds},
+	{"jmap.push.rebalance_seconds", DefaultPushRebalanceSeconds},
+	{"jmap.push.rebalance_settle_seconds", DefaultPushRebalanceSettleSeconds},
+	{"jmap.push.handoff_seconds", DefaultPushHandoffSeconds},
+	{"jmap.push.max_watched_accounts", DefaultPushMaxWatchedAccounts},
+	{"jmap.push.start_rate", DefaultPushStartRate},
 	{"server.public_prefix", "Public/"},
 	{"server.shared_prefix", "Shared/"},
 	{"server.autocreate", defaultAutocreate},
@@ -648,7 +665,17 @@ var defaults = []struct {
 
 // Load accepts an optional YAML file. Explicit environment values override it.
 // Errors name fields, never values, because configuration may contain secrets.
-func Load(path string) (*Config, error) {
+func Load(path string) (*Config, error) { return load(path, false) }
+
+// LoadRunner is Load for "shardpost runner" (stage B18b), which reads
+// the servers' configuration but authenticates nobody: the secret files
+// of the authentication (the master password, the Nauthilus client
+// secrets) need not exist, and the authentication settings are not
+// checked. Everything else is loaded and checked as for a server.
+func LoadRunner(path string) (*Config, error) { return load(path, true) }
+
+// load is Load; runner loads for the runner.
+func load(path string, runner bool) (*Config, error) {
 	v := viper.New()
 	v.SetConfigType("yaml")
 
@@ -667,7 +694,7 @@ func Load(path string) (*Config, error) {
 		c.Rook.ClientSecret = "rook-ceph-client-" + c.Ceph.User
 	}
 
-	if err := resolveSecrets(reflect.ValueOf(c).Elem()); err != nil {
+	if err := resolveSecrets(reflect.ValueOf(c).Elem(), runner); err != nil {
 		return nil, err
 	}
 
@@ -675,8 +702,10 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	if err := c.checkAuth(); err != nil {
-		return nil, err
+	if !runner {
+		if err := c.checkAuth(); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := c.checkPrograms(); err != nil {
@@ -1096,14 +1125,31 @@ func bind(v *viper.Viper, t reflect.Type, prefix string) error {
 	return nil
 }
 
-func resolveSecrets(v reflect.Value) error {
+// runnerUnusedSecrets are the secret files a runner may lack: those of
+// the authentication and of the push worker, which it does not use. The
+// relay passwords it does use (the delayed submission worker sends) stay
+// required.
+var runnerUnusedSecrets = map[string]bool{
+	"LMTP_AUTH_PASSWORD_FILE":                 true,
+	"MASTER_PASSWORD_FILE":                    true,
+	"NAUTHILUS_INTROSPECT_CLIENT_SECRET_FILE": true,
+	"NAUTHILUS_PASSWORD_FILE":                 true,
+	"NAUTHILUS_TOKEN_FILE":                    true,
+	"NAUTHILUS_OIDC_CLIENT_SECRET_FILE":       true,
+	"JMAP_PUSH_VAPID_KEY_FILE":                true,
+}
+
+// resolveSecrets reads every "<Field>File" into "<Field>". lenient lets a
+// file of runnerUnusedSecrets that cannot be read pass with the field
+// left empty (the runner).
+func resolveSecrets(v reflect.Value, lenient bool) error {
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		sf := t.Field(i)
 
 		if f.Kind() == reflect.Struct {
-			if err := resolveSecrets(f); err != nil {
+			if err := resolveSecrets(f, lenient); err != nil {
 				return err
 			}
 
@@ -1121,6 +1167,10 @@ func resolveSecrets(v reflect.Value) error {
 
 		b, err := os.ReadFile(f.String())
 		if err != nil {
+			if lenient && runnerUnusedSecrets[sf.Tag.Get("env")] {
+				continue
+			}
+
 			return fmt.Errorf("cannot read secret file for %s", sf.Tag.Get("env"))
 		}
 

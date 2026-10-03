@@ -276,6 +276,8 @@ func (m *Manager) claim(id string, extra []model.DueKey) (*Job, uint64, error) {
 			return errors.New("not claimable")
 		}
 
+		metrics.JobClaimWait.Observe(now.Sub(j.claimableSince()).Seconds())
+
 		if j.State == StateQueued {
 			j.State, j.Started = StateRunning, now
 		}
@@ -294,6 +296,9 @@ func (m *Manager) claim(id string, extra []model.DueKey) (*Job, uint64, error) {
 // final state.
 func (m *Manager) execute(parent context.Context, j *Job, gen uint64) {
 	log := m.env.Log.With("job", j.ID, "kind", j.Kind, "account", j.Account)
+
+	metrics.JobRunning.WithLabelValues(j.Kind).Inc()
+	defer metrics.JobRunning.WithLabelValues(j.Kind).Dec()
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

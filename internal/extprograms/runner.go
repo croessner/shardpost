@@ -32,9 +32,11 @@ var runs = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_extprograms
 // again later.
 const ExitTempFail = 75
 
+// DefaultParallel is the parallelism of a program without max_parallel
+// (the learning concurrency is bounded by it as well).
 const (
 	defaultTimeout   = 10 * time.Second
-	defaultParallel  = 4
+	DefaultParallel  = 4
 	defaultMaxOutput = 1 << 20
 	defaultMaxInput  = 64 << 20
 )
@@ -75,7 +77,7 @@ func New(cfg config.ExtPrograms) *Runner {
 	for name, p := range cfg.Programs {
 		n := int(p.MaxParallel)
 		if n <= 0 {
-			n = defaultParallel
+			n = DefaultParallel
 		}
 
 		r.slots[name] = make(chan struct{}, n)

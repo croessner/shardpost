@@ -1,0 +1,17 @@
+# The runners accept nothing but the health and metrics port: they have
+# no protocol and no admin listener. Egress (the relay of delayed
+# submissions, rspamd for the learning programs, Ceph, Rook) is the
+# namespace's policy, as for the servers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shardpost-runner-ingress
+  namespace: shardpost
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-runner
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 8080}

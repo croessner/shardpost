@@ -19,6 +19,10 @@ type Waker interface {
 	// Notify wakes the watchers of oid (best effort, may return before
 	// they are woken).
 	Notify(oid string)
+	// NotifyPayload is Notify with data for the payload watchers.
+	NotifyPayload(oid string, data []byte)
+	// WatchPayload watches oid with the data of every notify.
+	WatchPayload(oid string) (model.PayloadWatch, error)
 }
 
 // ErrNoWatch is returned by Queue.Watch on a backend without Waker.
@@ -179,6 +183,24 @@ func (q *Queue) Watch() (model.Watch, error) {
 func (q *Queue) Notify() {
 	if w, ok := q.ix.b.(Waker); ok {
 		w.Notify(ShardOID(q.ix.name, 0))
+	}
+}
+
+// WatchPayload watches shard 0 with the data of every notify (a worker
+// that hands partitions over at shutdown names them, stage B18b).
+func (q *Queue) WatchPayload() (model.PayloadWatch, error) {
+	w, ok := q.ix.b.(Waker)
+	if !ok {
+		return nil, ErrNoWatch
+	}
+
+	return w.WatchPayload(ShardOID(q.ix.name, 0))
+}
+
+// NotifyPayload wakes the watchers of the queue with data.
+func (q *Queue) NotifyPayload(data []byte) {
+	if w, ok := q.ix.b.(Waker); ok {
+		w.NotifyPayload(ShardOID(q.ix.name, 0), data)
 	}
 }
 

@@ -448,19 +448,45 @@ and granted through the admin API, see
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `jobs.enabled` | true | runner in this server (all servers share the jobs) |
+| `jobs.enabled` | true | the job system in this process: the jobs API (submit, list, cancel, plans) and the runner; `false` answers the jobs API and the directory repair with 503. To move the running off a server, set `workers.run: false` instead (below), which keeps the API |
 | `jobs.poll_seconds` | 5 | interval between scans for new jobs; with `admin.kv_index: read` a runner is also woken at once when a job is submitted or handed over at shutdown, and the poll is the fallback |
 | `jobs.lease_seconds` | 60 | how long a claim holds without renewal (another server may take over afterwards); the expiry worker's lock lives this plus 120 s |
 | `jobs.retention_days` | 14 | retention of finished jobs, their idempotency keys and plans (after `expires`) |
 | `jobs.expiry_seconds` | 60 | how often the expiry worker (one server of the cluster, `admin.kv_index` `write` or `read`) deletes the jobs, idempotency keys and plans whose retention ended, and how often the other servers try to take its lock (5–3600) |
 | `jobs.plan_ttl_seconds` | 3600 | how long a plan stays valid |
-| `jobs.max_parallel` | 2 | concurrent jobs per server |
+| `jobs.max_parallel` | 2 | concurrent jobs per process; environment `JOBS_MAX_PARALLEL` (0.53.0), so that the runner deployment gets a value of its own — a configmap value reaches the front-ends as well, where it is without effect under `workers.run: false` |
 | `jobs.settle_seconds` | 10 | how long an exclusive job waits after setting the maintenance lock, so that running deliveries can finish and open IMAP/POP3 sessions notice the lock (they check it at most every 5 s when a command starts and disconnect with BYE) |
 
 | `jobs.batch_parallel` | 2 | how many accounts a batch over all accounts works on at once in the server that runs it (1–32; a batch scrub uses `scrub.parallel`) |
 
-YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c)
+YAML only, except `jobs.max_parallel`. For operating them see
+[Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c)
 and [batches over all accounts](admin-api.md#batches-over-all-accounts).
+
+### Background workers (`workers.run`)
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `workers.run` | `WORKERS_RUN` | true | this server runs the background workers beside its listeners: the job runner with the expiry and `fts_due` workers, the upload expiry, the delayed submission worker and the learning worker. `false` makes it a front-end in a deployment with job runner pods (`shardpost runner`, 0.53.0): it keeps the jobs API, the registration, the auth flush and every writer of the queues (learning `Put` and notify, job submit and notify, uploads, `fts_due`, submissions, push subscriptions) and runs no worker |
+
+`workers.run` is the switch of the topology; `jmap.submission.delayed.worker`
+switches one worker inside a process that runs workers. `workers.run:
+false` takes precedence: a front-end runs no submission worker whatever
+`delayed.worker` says, and is not warned about it; it warns once at
+startup when no job runner and no server with workers is registered.
+Set it through the environment (the `runner` component does): a way
+back to an image before 0.53.0 must not break on an unknown configmap
+key (the configmap is read strictly, see [the strict configmap](#the-strict-configmap)).
+See [operations: job runners](operations/README.md#job-runners).
+
+### The strict configmap
+
+The configuration file is decoded strictly: a key the image does not
+know refuses the start. A new key therefore goes into the configmap only
+once no older image can run any more, and a key that switches a
+topology (`workers.run`) or sizes one deployment apart from another
+(`jobs.max_parallel`) comes as an environment variable, which an older
+image ignores.
 
 ### Scrub (`scrub`)
 
@@ -535,7 +561,9 @@ and [Operations](operations/README.md#admin-store-backfill).
 | --- | --- | --- |
 | `imapsieve.learning.index` | `read` (`write` before 0.47.0) | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
 | `imapsieve.learning.queue_shards` | 4 | shard objects of the due queue (1–8) when its first writer creates it; an existing queue keeps its count |
-| `imapsieve.learning.lock_retry_seconds` | 20 | how often a server that does not hold the learning worker lease tries to take it, with a jitter of ±50 % (1–3600; environment `LEARNING_LOCK_RETRY_SECONDS`). The holder works on once a second and when notified; a lease lost to a key rotation is taken again at once |
+| `imapsieve.learning.lock_retry_seconds` | 20 | how often a process that does not hold the learning worker lease tries to take it, with a jitter of ±50 % (1–3600; environment `LEARNING_LOCK_RETRY_SECONDS`). The holder works on once a second and when notified (since 0.53.0 only the holder watches the queue); a lease lost to a key rotation is taken again at once |
+| `imapsieve.learning.concurrency` | 1 | learning jobs the holder of the lease runs at once (1–32; environment `LEARNING_CONCURRENCY`, 0.53.0): jobs of different accounts in parallel, jobs of one account one after the other in due order (a semaphore per account, tried without waiting: a job whose account is busy is offered again at the next pass), never the same job twice at once. The program phase is bounded by the learning program's `extprograms` `max_parallel` as well (4 without one): set it to at least the concurrency, or the concurrency is not reached (the server warns). A large cluster runs 8 on its runners; two combined pods run 2 |
+| `imapsieve.learning.shutdown_seconds` | 10 | how long running learning jobs get to end when the process stops (1–300; environment `LEARNING_SHUTDOWN_SECONDS`); what still runs is cut off and the next holder runs it again (at least once, as before) |
 
 `read` takes effect only once `shardpost index backfill learning`
 completed (with a start after the last server without the index
@@ -783,9 +811,9 @@ and [operations](operations/README.md#delayed-submissions)):
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `jmap.submission.delayed.max_delay_seconds` | `JMAP_SUBMISSION_DELAYED_MAX_DELAY_SECONDS` | 0 | the longest delay a client may ask for with `HOLDFOR`/`HOLDUNTIL`, advertised as `maxDelayedSend` (0–31536000); 0 offers no delayed sending. Needs `jmap.submission.relay_addr` and `admin.kv_index` `write` or `read` |
-| `jmap.submission.delayed.worker` | `JMAP_SUBMISSION_DELAYED_WORKER` | true | this server runs the submission worker (with a relay); it runs also with `max_delay_seconds` 0, so that what is queued is still sent |
+| `jmap.submission.delayed.worker` | `JMAP_SUBMISSION_DELAYED_WORKER` | true | this process runs the submission worker (with a relay); it runs also with `max_delay_seconds` 0, so that what is queued is still sent. `workers.run: false` takes precedence: a front-end runs none |
 | `jmap.submission.delayed.partitions` | `JMAP_SUBMISSION_DELAYED_PARTITIONS` | 1 | worker partitions: the accounts by hash, each partition with a lease of its own (1–64); all servers should use the same value (a difference costs only duplicate reads: the record is the fence) |
-| `jmap.submission.delayed.max_partitions` | `JMAP_SUBMISSION_DELAYED_MAX_PARTITIONS` | 0 | partitions one server holds at most (0: all; at most `partitions`). The servers running the worker times `max_partitions` must reach `partitions`, or a partition nobody holds is never sent (counted as `imapceph_jmap_submission_queue_entries{state="unowned"}` and warned about); (servers − 1) × `max_partitions` for failover. Keep the default 0 unless there is a reason |
+| `jmap.submission.delayed.max_partitions` | `JMAP_SUBMISSION_DELAYED_MAX_PARTITIONS` | 0 | partitions one worker holds at most (0: all; at most `partitions`). The workers times `max_partitions` must reach `partitions`, or a partition nobody holds is never sent (counted as `imapceph_jmap_submission_queue_entries{state="unowned"}` and warned about); for one worker to be able to fail, `max_partitions` ≥ ⌈`partitions` / (workers − 1)⌉. Keep the default 0 (every worker takes what is free; the random start spreads them) unless there is a reason: with 16 partitions on four runners, 4 would leave the partitions of a failed runner unsent until it is back |
 | `jmap.submission.delayed.poll_seconds` | `JMAP_SUBMISSION_DELAYED_POLL_SECONDS` | 30 | how often a worker looks at the queue without a notification, and tries to take free partitions (1–3600); a new submission wakes the workers at once, and a worker sleeps only until the earliest entry it saw is due |
 | `jmap.submission.delayed.sending_timeout_seconds` | `JMAP_SUBMISSION_DELAYED_SENDING_TIMEOUT_SECONDS` | 3600 | how long a submission may stay in `sending` before it counts as final with an unknown result and is not sent again (1800–86400); has to exceed the longest conversation with the relay (see below) |
 | `jmap.submission.delayed.concurrency` | `JMAP_SUBMISSION_DELAYED_CONCURRENCY` | 4 | conversations with the relay one worker holds at once (1–64) |
@@ -801,6 +829,38 @@ step timeout more per recipient when the relay is that slow for each.
 `sending_timeout_seconds` has to stay above it; a server warns at
 startup when it does not (counting no recipients). A conversation that
 outlasts it is reported as unknown, never sent twice.
+
+### Push worker partitions (`jmap.push.*`)
+
+The JMAP push worker shares 64 partitions among its pods (0.52.0, see
+[JMAP: Push partitions](jmap.md#push-partitions) and
+[operations](operations/README.md#push-partitions)). The push
+deployment has no configmap; the keys come as environment variables
+and keep their defaults unless there is a reason.
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `jmap.push.max_partitions` | `JMAP_PUSH_MAX_PARTITIONS` | 0 | partitions one pod holds at most (0–64; 0: all) |
+| `jmap.push.lease_seconds` | `JMAP_PUSH_LEASE_SECONDS` | 30 | TTL of a partition lease, renewed every third of it (15–300); a membership record expires after the same time; a holder that could not renew stops the partition five seconds before it is up |
+| `jmap.push.take_seconds` | `JMAP_PUSH_TAKE_SECONDS` | 5 | cadence of taking and shedding, ± 20 % (1–60); also the deadline of one lock or membership operation |
+| `jmap.push.retry_seconds` | `JMAP_PUSH_RETRY_SECONDS` | 2 | fast cadence for orphaned, contested and refused partitions (1–60, at most `take_seconds`) |
+| `jmap.push.orphan_hold_seconds` | `JMAP_PUSH_ORPHAN_HOLD_SECONDS` | 600 | a partition taken as a replacement is not shed for this long (0–3600) |
+| `jmap.push.full_scan_seconds` | `JMAP_PUSH_FULL_SCAN_SECONDS` | 3600 | every record of a partition is read once in this time, whatever its checksum says (0: never; else at least `scan_seconds`) |
+| `jmap.push.rebalance_seconds` | `JMAP_PUSH_REBALANCE_SECONDS` | 10 | pause between two partitions a pod sheds (1–600) |
+| `jmap.push.rebalance_settle_seconds` | `JMAP_PUSH_REBALANCE_SETTLE_SECONDS` | 60 | the set of pods has to stand still this long before one sheds (0–3600, at least `lease_seconds`) |
+| `jmap.push.handoff_seconds` | `JMAP_PUSH_HANDOFF_SECONDS` | 5 | how long the watchers of a partition get to end when it is given up, and the period of the waves at shutdown (1–30, below `lease_seconds` − 5 and the termination grace period) |
+| `jmap.push.max_watched_accounts` | `JMAP_PUSH_MAX_WATCHED_ACCOUNTS` | 50000 | accounts one pod watches at most; it takes no partition that would put it over, by the estimate the membership gives (at least 100) |
+| `jmap.push.start_rate` | `JMAP_PUSH_START_RATE` | 5000 | watchers a pod starts per second when it takes a partition (10–100000) |
+| `jmap.push.scan_seconds` | `JMAP_PUSH_SCAN_SECONDS` | 30 | how often a holder reads its shard of the subscription index (as before) |
+
+The relations are checked at startup: `lease_seconds ≥ 3 ×
+take_seconds` (a partition free for two cadences is contested),
+`rebalance_settle_seconds ≥ lease_seconds` (a dead record is gone
+before anyone sheds to it), `handoff_seconds < lease_seconds − 5` (a
+hand-over ends before the holder would stop the partition itself),
+`retry_seconds ≤ take_seconds`, and `full_scan_seconds` 0 or at least
+`scan_seconds`. The partition count itself is not configurable: it is
+the shard count of the hint index `ix.jmap/push/acct` (64).
 
 ### Nauthilus client (`nauthilus.timeout`, `nauthilus.http_max_idle_per_host`)
 

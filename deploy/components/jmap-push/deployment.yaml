@@ -1,5 +1,13 @@
-# The JMAP push worker: one replica. A second one would wait for the
-# lease in the admin store, so a rollout never pushes twice.
+# The JMAP push worker: two replicas that share the 64 push partitions
+# between them (stage B18a). A rolling update starts the new pod beside
+# the old ones (maxSurge 1, maxUnavailable 0); a pod that ends gives its
+# partitions up in waves within terminationGracePeriodSeconds, and the
+# others take them at once. Scaling moves partitions: a new pod gets its
+# share after jmap.push.rebalance_settle_seconds, one partition per
+# jmap.push.rebalance_seconds. No HPA: the replicas follow the accounts
+# with push subscriptions (about 1.3 × accounts / max_watched_accounts,
+# at least two). Roll the front-ends out before this deployment (see
+# docs/operations/README.md, "Push partitions").
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,9 +16,13 @@ metadata:
   labels:
     app.kubernetes.io/name: shardpost-push
 spec:
-  replicas: 1
+  replicas: 2
+  minReadySeconds: 30
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: shardpost-push
@@ -25,6 +37,16 @@ spec:
     spec:
       serviceAccountName: shardpost-server
       automountServiceAccountToken: true # needed to fetch the cephx key from Rook
+      # Three waves of jmap.push.handoff_seconds (5) plus the waits on the
+      # membership: about 25 s at most.
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shardpost-push
       securityContext:
         runAsNonRoot: true
         runAsUser: 167
@@ -61,6 +83,11 @@ spec:
               value: /secrets/jmap-vapid/vapid.pem
             - name: JMAP_PUSH_VAPID_SUBJECT
               value: mailto:postmaster@roessner-net.de
+            # The partition settings (JMAP_PUSH_LEASE_SECONDS, _TAKE_SECONDS,
+            # _RETRY_SECONDS, _ORPHAN_HOLD_SECONDS, _FULL_SCAN_SECONDS,
+            # _REBALANCE_SECONDS, _REBALANCE_SETTLE_SECONDS, _HANDOFF_SECONDS,
+            # _MAX_WATCHED_ACCOUNTS, _START_RATE, _MAX_PARTITIONS) keep their
+            # defaults here; see docs/configuration.md.
             - name: GOMEMLIMIT
               value: "400MiB"
           ports:

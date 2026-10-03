@@ -43,6 +43,16 @@ type Learning struct {
 	// QueueShards is the shard count of the due queue when its first
 	// writer creates it; an existing queue keeps the count in its head.
 	QueueShards int `mapstructure:"queue_shards" validate:"gte=1,lte=8"`
+	// Concurrency is how many learning jobs the holder of the lease
+	// runs at once (stage B18b): jobs of different accounts in parallel,
+	// jobs of one account one after the other in due order. 1 is the
+	// behaviour before. The program phase is bounded by the program's
+	// extprograms max_parallel as well, so that should be at least this.
+	Concurrency int64 `mapstructure:"concurrency" env:"LEARNING_CONCURRENCY" validate:"gte=1,lte=32"`
+	// ShutdownSeconds is how long running learning jobs get to end when
+	// the process stops; what still runs then is cut off and the next
+	// holder of the lease runs it again.
+	ShutdownSeconds int64 `mapstructure:"shutdown_seconds" env:"LEARNING_SHUTDOWN_SECONDS" validate:"gte=1,lte=300"`
 }
 
 // LearningRule selects COPY/MOVE events by special-use flags and names the

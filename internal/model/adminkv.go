@@ -85,4 +85,20 @@ type AdminOmap interface {
 	Watch(oid string) (Watch, error)
 	// Notify wakes the watchers of oid (best effort).
 	Notify(oid string)
+	// NotifyPayload wakes the watchers of oid and hands them data (best
+	// effort; a plain Watch sees it as an event without data).
+	NotifyPayload(oid string, data []byte)
+	// WatchPayload watches oid like Watch, delivering the data of every
+	// notify; it creates the object when it does not exist.
+	WatchPayload(oid string) (PayloadWatch, error)
+}
+
+// PayloadWatch is a watch that delivers the data of every notify. The
+// events are buffered; when the holder falls behind, the watch drops
+// the data and delivers one empty event instead, which means "check
+// everything".
+type PayloadWatch interface {
+	Events() <-chan []byte
+	Errors() <-chan error
+	Close()
 }
