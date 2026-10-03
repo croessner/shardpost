@@ -62,6 +62,11 @@ func diagCmd(client *adminapi.ClientWithResponses, noun string, args []string, s
 		return exUsage
 	}
 
+	// The cluster marks "quota online" and "mailbox lock" (marks.go).
+	if isMarkCmd(noun, args) {
+		return marksCmd(client, noun, args, stdout, stderr)
+	}
+
 	verb := noun + " " + args[0]
 
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
