@@ -348,7 +348,11 @@ for the switch). A job that fails or is cancelled removes its unfinished
 conversion itself; one that lost its lease leaves it to the server that
 takes over, which replaces it. The result names the source and target
 generations and counts terms, dictionary keys, header texts and
-documents; a
+documents, and since 0.49.0 the writes of the copy
+.RI ( writes ,
+each fenced) and the most keys its write buffer held
+.RI ( buffer_keys );
+a
 .B noop
 result changed nothing. In a batch
 .RB ( "plan \-all" )

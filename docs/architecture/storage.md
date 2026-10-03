@@ -1658,6 +1658,20 @@ of that last section (about 63.5 terms and 311 dictionary keys per
 message); between 5000 and 36 246 messages it is a bridge, not a
 measurement.
 
+**What the caps do not change.** More dictionary objects keep each of
+them below Ceph's threshold, but not the sum. At about 280 dictionary
+keys per message and an estimated 50 to 60 bytes of omap each (the
+index pool holds about 65 bytes per key on average, postings and
+header texts included), a dictionary costs 14 to 17 KB of NVMe per
+message; 10¹⁰ messages, an upper estimate for a provider with a million
+accounts, would be about 2.8·10¹² keys and 140 to 170 TB before
+replication. The identifiers — new in every message — are most of it;
+the bench corpus `ids` and `shardpostctl fts stats -classes` on test
+accounts measure how much, and a later stage may give them one key each
+instead of one per trigram. The next limit of large accounts is the
+fan-out of a delivery: with about 650 terms it touches nearly every
+posting object, 2·S operations.
+
 <a id="full-text-conversion"></a>
 **Conversion.** The job `fts_layout` (role `repair`, exclusive, also as
 a batch) converts between the layouts and reshards a layout 3 index. A
