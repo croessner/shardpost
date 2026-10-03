@@ -15,7 +15,7 @@ import (
 
 // The membership of the push pods (stage B18a, §4.3): one omap object
 // "ix.jmap/push/members" in the admin namespace, one key per pod
-// (<instance> -> memberRecord), written every pushHeartbeat and at once
+// (<instance> -> memberRecord), written every third of the lease and at once
 // after every take, release, shed and expiry, each a plain omap set
 // without compare-and-swap. A pod reads it at the start of every tick
 // and on every control notify, at most one read in flight; what it
@@ -30,9 +30,9 @@ import (
 const (
 	pushMembersOID = "ix.jmap/push/members"
 	pushCtlOID     = "ix.jmap/push/ctl"
-	// pushHeartbeat is how often a pod writes its membership record
-	// without an event.
-	pushHeartbeat = 10 * time.Second
+	// pushHeartbeatsPerLease is how many times per lease a pod writes its
+	// membership record without an event (every 10 s for a lease of 30 s).
+	pushHeartbeatsPerLease = 3
 	// pushMemberExpiry is after how long a reader deletes a record whose
 	// writer is gone (its partitions count as orphaned after
 	// lease_seconds already).
@@ -60,10 +60,13 @@ type memberRecord struct {
 	// its own (NTP on the nodes is a prerequisite).
 	Seen time.Time `json:"seen"`
 	// Held are the partitions the pod holds, Watched the accounts it
-	// watches.
-	Held    []int  `json:"held"`
-	Watched int    `json:"watched"`
-	Version string `json:"version,omitempty"`
+	// watches; MaxHeld and MaxWatched are its bounds (0: none), so that
+	// the others can tell whether it has capacity for one more.
+	Held       []int  `json:"held"`
+	Watched    int    `json:"watched"`
+	MaxHeld    int    `json:"max_held,omitempty"`
+	MaxWatched int    `json:"max_watched,omitempty"`
+	Version    string `json:"version,omitempty"`
 	// Leaving marks a pod that ends in order: it is not counted in the
 	// share, and its partitions are being shed, not free.
 	Leaving bool `json:"leaving,omitempty"`
@@ -74,7 +77,17 @@ type memberRecord struct {
 }
 
 // holds reports whether the record names partition p.
-func (m *memberRecord) holds(p int) bool { return slices.Contains(m.Held, p) }
+func (m memberRecord) holds(p int) bool { return slices.Contains(m.Held, p) }
+
+// capacity reports whether the pod of the record can take one more
+// partition of about est accounts within its bounds.
+func (m memberRecord) capacity(est int) bool {
+	if m.MaxHeld > 0 && len(m.Held) >= m.MaxHeld {
+		return false
+	}
+
+	return m.MaxWatched <= 0 || m.Watched+est <= m.MaxWatched
+}
 
 // membersView is the membership as last read.
 type membersView struct {

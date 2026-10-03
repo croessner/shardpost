@@ -302,12 +302,12 @@ const (
 type MemLocks struct {
 	mu   sync.Mutex
 	held map[string]*memLease
-	// Hook, when set, runs before every lock operation (LockOpLock,
-	// LockOpRenew, LockOpUnlock) on the lease named; it may block (a
-	// lock object in peering) or return an error, which fails the
-	// operation. It is read without the lock, so a test sets it before
-	// the locks are used.
-	Hook func(op, name string) error
+	// hookFn, when set (SetHook), runs before every lock operation
+	// (LockOpLock, LockOpRenew, LockOpUnlock) on the lease named; it may
+	// block (a lock object in peering) or return an error, which fails
+	// the operation.
+	hookMu sync.RWMutex
+	hookFn func(op, name string) error
 	// handle is the current connection handle (Rotate changes it).
 	handle int64
 	hooks  map[int]func()
@@ -336,9 +336,22 @@ type memLease struct {
 	renewDone         chan struct{}
 }
 
+// SetHook sets the hook of the lock operations (nil: none); tests set
+// it while the locks are in use.
+func (m *MemLocks) SetHook(fn func(op, name string) error) {
+	m.hookMu.Lock()
+	defer m.hookMu.Unlock()
+
+	m.hookFn = fn
+}
+
 func (m *MemLocks) hook(op, name string) error {
-	if m.Hook != nil {
-		return m.Hook(op, name)
+	m.hookMu.RLock()
+	fn := m.hookFn
+	m.hookMu.RUnlock()
+
+	if fn != nil {
+		return fn(op, name)
 	}
 
 	return nil
@@ -486,6 +499,20 @@ func (l *memLease) Release() {
 	l.done = true
 	if l.l.held[l.name] == l {
 		delete(l.l.held, l.name)
+	}
+}
+
+// Abandon stops the renewal without an unlock, as the death of the
+// holder's process would: the lock expires after its TTL (tests).
+func (l *memLease) Abandon() {
+	l.mu.Lock()
+	stop, renewDone := l.stop, l.renewDone
+	l.stop, l.renewDone = nil, nil
+	l.mu.Unlock()
+
+	if stop != nil {
+		close(stop)
+		<-renewDone
 	}
 }
 

@@ -758,6 +758,10 @@ func (svc *partitionService) startWatcher(ctx context.Context, account string, f
 	svc.watching[account] = wt
 	svc.wg.Add(1)
 
+	if svc.w.hooks != nil {
+		svc.w.hooks.watcherStarts.Add(1)
+	}
+
 	if first {
 		svc.started = true
 		svc.first.Add(1)

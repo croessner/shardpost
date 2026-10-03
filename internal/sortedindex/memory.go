@@ -16,18 +16,32 @@ type MemBackend struct {
 	objs map[string]*memObject
 	// Writes counts the successful writes (tests).
 	Writes atomic.Int64
-	// Hook, when set, runs before every operation ("read_keys",
-	// "read_page", "write") on the object named; it may block (an object
-	// in peering) or return an error, which the operation then returns
-	// (tests). It is read without the lock, so a test sets it before the
-	// backend is used.
-	Hook func(op, oid string) error
+	// hookFn, when set (SetHook), runs before every operation
+	// ("read_keys", "read_page", "write") on the object named; it may
+	// block (an object in peering) or return an error, which the
+	// operation then returns (tests).
+	hookMu sync.RWMutex
+	hookFn func(op, oid string) error
 }
 
-// hook runs the Hook of an operation, if any.
+// SetHook sets the hook of the operations (nil: none); tests set it
+// while the backend is in use.
+func (m *MemBackend) SetHook(fn func(op, oid string) error) {
+	m.hookMu.Lock()
+	defer m.hookMu.Unlock()
+
+	m.hookFn = fn
+}
+
+// hook runs the hook of an operation, if any (outside the lock: it may
+// block).
 func (m *MemBackend) hook(op, oid string) error {
-	if m.Hook != nil {
-		return m.Hook(op, oid)
+	m.hookMu.RLock()
+	fn := m.hookFn
+	m.hookMu.RUnlock()
+
+	if fn != nil {
+		return fn(op, oid)
 	}
 
 	return nil

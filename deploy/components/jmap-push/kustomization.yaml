@@ -1,18 +1,22 @@
-# JMAP push subscriptions (RFC 8620 7.2) with Web Push: the push worker
-# ("shardpost push", one replica) and the VAPID key the front-ends
-# advertise. The event source needs none of this.
+# JMAP push subscriptions (RFC 8620 7.2) with Web Push: the push workers
+# ("shardpost push", two replicas sharing 64 partitions, stage B18a), their
+# disruption budget, and the VAPID key the front-ends advertise. The event
+# source needs none of this.
 #
 # Requires a Secret in the namespace, created once outside git:
 #   shardpost-jmap-vapid   key vapid.pem: a P-256 private key in PEM, e.g.
 #                          openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt
 # Rotating it invalidates every subscription (RFC 9749 5).
 #
-# The worker posts to push services on the Internet (HTTPS): a network
-# policy that limits egress has to let it out.
+# The workers post to push services on the Internet (HTTPS): a network
+# policy that limits egress has to let them out. They share the partitions
+# through the admin store, so the nodes need NTP: a pod whose clock is off
+# by more than jmap.push.lease_seconds counts as gone for the others.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 resources:
   - deployment.yaml
+  - pdb.yaml
 patches:
   - path: server-patch.yaml
     target:

@@ -43,12 +43,16 @@ type partition struct {
 	// was taken as a replacement (no shed until then); busy marks a
 	// free partition whose lock this pod was refused (fast cadence);
 	// freeSince is the first fresh read in which it was free
-	// (contested after two cadences); rotGen is the rotation count a
+	// (contested after two cadences); orphaned marks a partition seen
+	// orphaned, tried over the target until a fresh member holds it (a
+	// record of the crashed pod's name that comes back empty does not
+	// make it an ordinary free one); rotGen is the rotation count a
 	// lock attempt started under.
 	takenAt     time.Time
 	orphanUntil time.Time
 	busy        bool
 	freeSince   time.Time
+	orphaned    bool
 	rotGen      int64
 	// opStart is when the operation in flight started (a warning when
 	// it takes longer than the cadence).
@@ -108,8 +112,13 @@ const (
 // detectRestart is the restart detection of §4.3: a pod that finds a
 // fresh record of its own name with partitions (its predecessor crashed
 // and its locks still run) writes nothing and tries nothing until that
-// record expired; the other pods see the partitions as orphaned then,
-// and it starts as an ordinary new member.
+// record expired, and for a renewal interval and a cadence beyond: the
+// other pods see the partitions as orphaned from the record's expiry on
+// and try them every fast cadence, the locks expire within a renewal
+// interval after the record (the last renewal came within one of the
+// last heartbeat), so by the time the restarted pod starts, the healthy
+// pods hold what they had capacity for, and it starts as an ordinary
+// new member without a right to its old partitions.
 func (w *worker) detectRestart(ctx context.Context) {
 	if w.hooks != nil && w.hooks.noRestartDetection {
 		return
@@ -129,7 +138,7 @@ func (w *worker) detectRestart(ctx context.Context) {
 		return
 	}
 
-	wait := w.o.LeaseTTL - w.now().Sub(rec.Seen)
+	wait := w.o.LeaseTTL - w.now().Sub(rec.Seen) + w.o.LeaseTTL/pushHeartbeatsPerLease + w.o.Take
 	w.o.Log.Warn("push worker: a fresh record of this instance holds partitions; its predecessor crashed, waiting for the record to expire",
 		"event", "push_partition", "action", "restart_wait", "held", rec.Held, "wait", wait)
 
@@ -157,7 +166,7 @@ func (w *worker) rebalance(ctx context.Context) bool {
 	w.warnSlowOps(now)
 
 	if age > 2*w.o.Take {
-		metrics.PushPartitionEvents.WithLabelValues(eventMembersStale).Inc()
+		w.event(eventMembersStale)
 		w.o.Log.Warn("push worker: the membership is stale; taking and shedding nothing", "event", "push_partition",
 			"action", eventMembersStale, "age", age.Round(time.Millisecond))
 
@@ -218,7 +227,7 @@ func (w *worker) rebalance(ctx context.Context) bool {
 			}
 
 			switch {
-			case now.Sub(p.freeSince) > 2*w.o.Take: // contested
+			case p.orphaned || now.Sub(p.freeSince) > 2*w.o.Take: // orphaned before, or contested
 				fast = true
 
 				if capacity() {
@@ -233,7 +242,7 @@ func (w *worker) rebalance(ctx context.Context) bool {
 			}
 		case classOrphan:
 			fast = true
-			p.freeSince = time.Time{}
+			p.freeSince, p.orphaned = time.Time{}, true
 
 			if capacity() {
 				w.tryTake(p, true)
@@ -243,8 +252,7 @@ func (w *worker) rebalance(ctx context.Context) bool {
 			fast = true
 			p.freeSince = time.Time{}
 		default:
-			p.freeSince = time.Time{}
-			p.busy = false
+			p.freeSince, p.busy, p.orphaned = time.Time{}, false, false
 		}
 	}
 
@@ -411,7 +419,7 @@ func (w *worker) activate(p *partition, l model.Lease, orphan bool) {
 	now := w.now()
 
 	w.mu.Lock()
-	p.state, p.lease, p.takenAt, p.busy, p.freeSince = stateActive, l, now, false, time.Time{}
+	p.state, p.lease, p.takenAt, p.busy, p.freeSince, p.orphaned = stateActive, l, now, false, time.Time{}, false
 	p.orphanUntil = time.Time{}
 
 	if orphan {
@@ -427,7 +435,7 @@ func (w *worker) activate(p *partition, l model.Lease, orphan bool) {
 		event = eventTakenOrphan
 	}
 
-	metrics.PushPartitionEvents.WithLabelValues(event).Inc()
+	w.event(event)
 	w.observeGap(p, now)
 	w.o.Log.Info("push worker: partition taken", "event", "push_partition", "action", event, "partition", p.n)
 
@@ -546,7 +554,7 @@ func (w *worker) releasePartition(p *partition, event string, notify bool) {
 		w.omap.Notify(pushCtlOID)
 	}
 
-	metrics.PushPartitionEvents.WithLabelValues(event).Inc()
+	w.event(event)
 	w.o.Log.Info("push worker: partition given up", "event", "push_partition", "action", event, "partition", p.n)
 
 	w.events <- partEvent{p: p, kind: evReleased}
@@ -632,7 +640,7 @@ func someoneUnder(v *membersView, names []string, n int, o WorkerOptions, est in
 			continue
 		}
 
-		if len(rec.Held) < targets[name] && rec.Watched+est <= o.MaxWatchedAccounts {
+		if len(rec.Held) < targets[name] && rec.capacity(est) {
 			return true
 		}
 	}
@@ -668,7 +676,7 @@ func (w *worker) onRotate() {
 				return
 			}
 
-			metrics.PushPartitionEvents.WithLabelValues(eventRotated).Inc()
+			w.event(eventRotated)
 		}(p)
 	}
 }
@@ -814,7 +822,7 @@ func (w *worker) releaseWave(wave []*partition) {
 			p.state, p.lease, p.svc, p.dropped = stateFree, nil, nil, false
 			w.mu.Unlock()
 
-			metrics.PushPartitionEvents.WithLabelValues(eventReleased).Inc()
+			w.event(eventReleased)
 		}(p)
 	}
 
@@ -822,6 +830,26 @@ func (w *worker) releaseWave(wave []*partition) {
 
 	w.omap.Notify(pushCtlOID)
 	w.o.Log.Info("push worker: wave released", "event", "push_partition", "action", eventReleased, "partitions", partitionNumbers(wave))
+}
+
+// abandon is the crash of tests: the leases stop being renewed without
+// an unlock (as the leases of a process that died), the watchers stop
+// without saving, and nothing is written.
+func (w *worker) abandon() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for _, p := range w.parts {
+		if p.lease != nil {
+			if a, ok := p.lease.(interface{ Abandon() }); ok {
+				a.Abandon()
+			}
+		}
+
+		if p.cancel != nil {
+			p.cancel()
+		}
+	}
 }
 
 // partitionNumbers are the numbers of a set of partitions.

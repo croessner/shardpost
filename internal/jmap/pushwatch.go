@@ -29,9 +29,6 @@ func (w *worker) watchAccount(ctx context.Context, svc *partitionService, accoun
 	defer svc.forget(account, self)
 	defer svc.firstPassDone(self)
 
-	w.watched.Add(1)
-	defer w.watched.Add(-1)
-
 	u, err := w.o.Store.User(account)
 	if err != nil {
 		w.o.Log.Warn("push worker: open account", "account", account, "err", err)
@@ -48,6 +45,16 @@ func (w *worker) watchAccount(ctx context.Context, svc *partitionService, accoun
 	}
 	defer f.close()
 	defer f.reportPending(w, 0)
+
+	// Counted as watched once it follows: from here on nothing of the
+	// account is missed.
+	w.watched.Add(1)
+	w.updateStatus()
+
+	defer func() {
+		w.watched.Add(-1)
+		w.updateStatus()
+	}()
 
 	if f.dirty && self.saves() {
 		w.saveState(u, account, f, svc)
@@ -153,7 +160,7 @@ func (f *follow) reportPending(w *worker, n int) {
 // read with the views a request would open, and the backlog of every
 // subscription from its acknowledgement.
 func (w *worker) startFollow(u model.User, account string, svc *partitionService) (*follow, error) {
-	seen, err := w.startState(u, account)
+	seen, raised, err := w.startState(u, account)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +168,7 @@ func (w *worker) startFollow(u model.User, account string, svc *partitionService
 	sess := &session{account: account, user: u, own: u, srv: w.srv, views: &views{store: w.o.Store},
 		log: w.o.Log.With("account", account)}
 
-	f := &follow{last: seen.Seq, digest: seen.Digest, views: sess.views, epoch: seen.Epoch,
+	f := &follow{last: seen.Seq, digest: seen.Digest, views: sess.views, epoch: seen.Epoch, dirty: raised,
 		shared:  newSharedPush(w.srv, sess, w.watches, w.o.MaxSharedWatches),
 		ack:     map[string]pushAck{},
 		pending: map[string]map[string]map[string]string{}}
@@ -218,23 +225,24 @@ func (f *follow) rebuildPending(u model.User, account string, subs []*pushRecord
 // startState is where a watcher starts: the state last pushed for the
 // account. A state ahead of the account (the counter jumped back: the
 // account was purged and created again) raises the epoch and starts
-// the state and every acknowledgement at the account's counter; a
-// state far behind is kept as it is (the first pass then reports every
-// type, as changedTypes does for a log that no longer reaches back).
-func (w *worker) startState(u model.User, account string) (pushSeen, error) {
+// the state and every acknowledgement at the account's counter (raised
+// reports it, and the watcher saves at once); a state far behind is
+// kept as it is (the first pass then reports every type, as
+// changedTypes does for a log that no longer reaches back).
+func (w *worker) startState(u model.User, account string) (seen pushSeen, raised bool, err error) {
 	now, err := u.AccountState()
 	if err != nil {
-		return pushSeen{}, err
+		return pushSeen{}, false, err
 	}
 
 	raw, err := w.o.KV.Get(pushSeenKey(account))
 	if err != nil {
-		return pushSeen{Seq: now}, nil
+		return pushSeen{Seq: now}, false, nil
 	}
 
 	seen, ok := decodeSeen(raw)
 	if !ok {
-		return pushSeen{Seq: now}, nil
+		return pushSeen{Seq: now}, false, nil
 	}
 
 	ahead := seen.Seq > now
@@ -256,7 +264,7 @@ func (w *worker) startState(u model.User, account string) (pushSeen, error) {
 			"epoch", seen.Epoch)
 	}
 
-	return seen, nil
+	return seen, ahead, nil
 }
 
 // saveState records what was last pushed for an account: a

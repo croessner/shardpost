@@ -93,7 +93,8 @@ type WorkerOptions struct {
 	// SelfStopMargin is how long before its lease would run out a holder
 	// stops a partition it could not renew (5 s); RoundBudget how long
 	// one round of a watcher (the pushes to every subscription of an
-	// account) may take once the partition is being given up (3 s).
+	// account) may take once the partition is being given up (3 s, and
+	// never more than four fifths of Handoff).
 	SelfStopMargin, RoundBudget time.Duration
 	// Rotate, when set, tells the worker about key rotations of the
 	// store, after which it moves its leases to the new connection
@@ -178,6 +179,13 @@ func workerDefaults(o WorkerOptions) WorkerOptions {
 		if *p.v <= 0 {
 			*p.v = *p.d
 		}
+	}
+
+	// The round of a watcher ends within the hand-off, so that a
+	// partition given up never waits on a push: the budget is bounded
+	// by four fifths of the hand-off.
+	if o.RoundBudget > o.Handoff*4/5 {
+		o.RoundBudget = o.Handoff * 4 / 5
 	}
 
 	// OrphanHold and FullScan may be 0 by choice: a negative value asks
@@ -338,7 +346,7 @@ type worker struct {
 	hooks *pushTestHooks
 }
 
-// pushTestHooks steer the worker in tests.
+// pushTestHooks steer and observe the worker in tests.
 type pushTestHooks struct {
 	// swapHandoffOrder notifies before the membership write of a release
 	// (the counter-check of the write → unlock → notify order).
@@ -346,8 +354,47 @@ type pushTestHooks struct {
 	// noRestartDetection switches the restart detection off (the
 	// counter-check of the crash loop test).
 	noRestartDetection bool
-	// lockTried counts the lock attempts.
-	lockTried atomic.Int64
+	// lockTried counts the lock attempts, watcherStarts the watchers
+	// started.
+	lockTried, watcherStarts atomic.Int64
+	// events counts the partition events by name.
+	mu     sync.Mutex
+	events map[string]int
+	// crash, when closed, ends the worker at once, without the orderly
+	// end: its leases stop being renewed (memstore) and its record stays.
+	crash chan struct{}
+	// onMembersWrite sees every membership record written.
+	onMembersWrite func(rec *memberRecord)
+}
+
+// count counts an event.
+func (h *pushTestHooks) count(event string) {
+	if h == nil {
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.events == nil {
+		h.events = map[string]int{}
+	}
+
+	h.events[event]++
+}
+
+// of is the count of an event.
+func (h *pushTestHooks) of(event string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.events[event]
+}
+
+// event counts a partition event in the metric and the test hooks.
+func (w *worker) event(name string) {
+	metrics.PushPartitionEvents.WithLabelValues(name).Inc()
+	w.hooks.count(name)
 }
 
 // RunPushWorker runs the push worker until ctx ends.
@@ -387,6 +434,10 @@ func runPushWorker(ctx context.Context, o WorkerOptions, hooks *pushTestHooks) e
 
 	w.members = newMembership(w.omap, o.Instance, o.LeaseTTL, o.Now, o.Log)
 	defer w.members.close()
+
+	if hooks != nil {
+		w.members.writeHook = hooks.onMembersWrite
+	}
 
 	w.legacy = legacyMarker{w: w}
 
@@ -444,7 +495,7 @@ func (w *worker) run(ctx context.Context) {
 
 	fast.Stop()
 
-	heartbeat := time.NewTicker(pushHeartbeat)
+	heartbeat := time.NewTicker(w.o.LeaseTTL / pushHeartbeatsPerLease)
 	defer heartbeat.Stop()
 
 	verify := time.NewTicker(w.o.Verify)
@@ -487,10 +538,19 @@ func (w *worker) run(ctx context.Context) {
 		}
 	}
 
+	var crash chan struct{}
+	if w.hooks != nil {
+		crash = w.hooks.crash
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			w.shutdown()
+
+			return
+		case <-crash:
+			w.abandon()
 
 			return
 		case <-tick.C:
@@ -615,7 +675,7 @@ func (w *worker) setRegistered() {
 func (w *worker) record() *memberRecord {
 	now := w.now()
 	rec := &memberRecord{Seen: now, Held: w.heldList(), Watched: int(w.watched.Load()), Version: w.o.Version,
-		Leaving: w.leaving.Load()}
+		MaxHeld: w.o.MaxPartitions, MaxWatched: w.o.MaxWatchedAccounts, Leaving: w.leaving.Load()}
 
 	w.mu.Lock()
 	for _, p := range w.parts {
