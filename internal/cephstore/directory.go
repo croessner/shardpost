@@ -328,6 +328,9 @@ func (s *Store) holdLockOn(u *User, oid, name, desc string, ttl time.Duration, o
 // view and cookie.
 func (l *lease) take(flags *byte) error {
 	u, cookie := l.view()
+	if u == nil {
+		return errors.New("the lease holds no view")
+	}
 
 	ret, err := u.idx.LockExclusive(l.oid, l.name, cookie, l.desc, l.ttl, flags)
 	if err != nil {
@@ -353,8 +356,13 @@ func (l *lease) view() (*User, string) {
 	return l.u, l.cookie
 }
 
-// unlockOn unlocks through u with cookie and closes u.
+// unlockOn unlocks through u with cookie and closes u (nil: the lease
+// holds no view any more, after a failed Retake).
 func (l *lease) unlockOn(u *User, cookie string) {
+	if u == nil {
+		return
+	}
+
 	start := time.Now()
 	_, _ = u.idx.Unlock(l.oid, l.name, cookie)
 	l.observe("release", start)
@@ -425,7 +433,7 @@ func (l *lease) Retake() error {
 	nu, err := l.reopen()
 	if err != nil {
 		l.unlockOn(old, oldCookie)
-		l.lost.Store(true)
+		l.dropView()
 
 		return err
 	}
@@ -441,8 +449,8 @@ func (l *lease) Retake() error {
 	sent := time.Now()
 	if err := l.take(nil); err != nil {
 		l.observe("take", sent)
-		l.lost.Store(true)
 		nu.Close()
+		l.dropView()
 
 		return err
 	}
@@ -452,6 +460,17 @@ func (l *lease) Retake() error {
 	nu.keepLock(l, l.ttl/3, l.take)
 
 	return nil
+}
+
+// dropView is the end of a failed Retake: the view the lease pointed
+// to is closed already, so the lease forgets it and counts as released
+// and lost; the Release that follows unlocks and closes nothing.
+func (l *lease) dropView() {
+	l.mu.Lock()
+	l.u, l.released = nil, true
+	l.mu.Unlock()
+
+	l.lost.Store(true)
 }
 
 // rememberHeld and forgetHeld track the locks Rotate gives up.

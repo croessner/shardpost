@@ -1,6 +1,7 @@
 package memstore
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -325,7 +326,10 @@ type memLease struct {
 	ttl  time.Duration
 	keep bool
 
-	mu sync.Mutex
+	// opMu serializes Retake and Release, as in the RADOS store, so
+	// that a release never races the take of a retake.
+	opMu sync.Mutex
+	mu   sync.Mutex
 	// until is when the lock expires in the store; validUntil the
 	// holder's deadline (the time the last renewal was sent plus the
 	// TTL); handle the connection it was taken or retaken through.
@@ -478,6 +482,9 @@ func (l *memLease) ValidUntil() time.Time {
 // Release implements model.Lease: it stops the renewal, waits for one in
 // flight (which may hang in the Hook) and unlocks.
 func (l *memLease) Release() {
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
+
 	l.mu.Lock()
 	stop, renewDone := l.stop, l.renewDone
 	l.stop, l.renewDone = nil, nil
@@ -518,9 +525,19 @@ func (l *memLease) Abandon() {
 
 // Retake implements model.LeaseRetaker: the lease moves to the current
 // handle. It unlocks through the old one and locks again through the
-// new one; a Hook that refuses the new lock loses the lease.
+// new one; another holder that took the lock in the gap, or a Hook that
+// refuses the new lock, loses the lease.
 func (l *memLease) Retake() error {
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
+
 	l.mu.Lock()
+	if l.done {
+		l.mu.Unlock()
+
+		return errors.New("the lease is released")
+	}
+
 	stop, renewDone := l.stop, l.renewDone
 	l.stop, l.renewDone = nil, nil
 	l.mu.Unlock()
@@ -530,7 +547,15 @@ func (l *memLease) Retake() error {
 		<-renewDone
 	}
 
+	// The unlock through the old handle: from here on another holder
+	// may take the lock.
 	_ = l.l.hook(LockOpUnlock, l.name)
+
+	l.l.mu.Lock()
+	if l.l.held[l.name] == l {
+		delete(l.l.held, l.name)
+	}
+	l.l.mu.Unlock()
 
 	if err := l.l.hook(LockOpLock, l.name); err != nil {
 		l.markLost()
@@ -542,6 +567,12 @@ func (l *memLease) Retake() error {
 
 	l.l.mu.Lock()
 	defer l.l.mu.Unlock()
+
+	if cur := l.l.held[l.name]; cur != nil && cur != l && cur.holds(sent) {
+		l.markLost()
+
+		return model.ErrLocked
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

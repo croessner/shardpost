@@ -185,6 +185,62 @@ func TestMemRotate(t *testing.T) {
 	keep.Release()
 }
 
+// TestMemRetakeLostInGap: when another holder takes the lock in the gap
+// of a Retake (after the unlock through the old handle, before the new
+// lock), the Retake fails, the lease is lost, and the other holder keeps
+// the lock, also after the lost lease is released.
+func TestMemRetakeLostInGap(t *testing.T) {
+	kv := NewAdminKV()
+
+	keep, err := kv.LockQueueKeep("gap", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	kv.Rotate()
+
+	var (
+		other    model.Lease
+		otherErr error
+		inGap    bool
+	)
+
+	kv.Locks().SetHook(func(op, name string) error {
+		if op == LockOpLock && name == "gap" && !inGap {
+			inGap = true
+			other, otherErr = kv.LockQueueKeep("gap", time.Minute)
+		}
+
+		return nil
+	})
+
+	if err := keep.(model.LeaseRetaker).Retake(); !errors.Is(err, model.ErrLocked) {
+		t.Fatalf("Retake after another holder took the lock: %v, want ErrLocked", err)
+	}
+
+	kv.Locks().SetHook(nil)
+
+	if otherErr != nil {
+		t.Fatalf("the other holder could not take the lock in the gap: %v", otherErr)
+	}
+
+	if !keep.Lost() || other.Lost() {
+		t.Fatalf("after the retake: keep lost %v, other lost %v", keep.Lost(), other.Lost())
+	}
+
+	keep.Release()
+
+	if !kv.Locks().Held("gap") {
+		t.Fatal("the release of the lost lease freed the other holder's lock")
+	}
+
+	if _, err := kv.LockQueueKeep("gap", time.Minute); !errors.Is(err, model.ErrLocked) {
+		t.Fatalf("a third holder took the lock: %v", err)
+	}
+
+	other.Release()
+}
+
 // twoLeases takes a LockQueue and a LockQueueKeep lease.
 func twoLeases(t *testing.T, kv *AdminKV) (plain, keep model.Lease) {
 	t.Helper()

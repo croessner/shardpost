@@ -195,6 +195,53 @@ func TestPushLeaseRetakeOnRotate(t *testing.T) {
 	expectRenewal(t, keep, 10*time.Second)
 }
 
+// TestPushLeaseRetakeFailsThenRelease: when another store holds the
+// lock by the time Retake takes it again, the Retake fails, the lease is
+// lost and holds no view any more, and the Release that follows neither
+// unlocks through the closed view nor closes it a second time; the
+// other store keeps its lock.
+func TestPushLeaseRetakeFailsThenRelease(t *testing.T) {
+	s := storeWith(t, func(*Config) {})
+	kv, kv2 := adminKVOf(t, s), adminKVOf(t, storeWith(t, func(*Config) {}))
+	name := pushTestLock(t)
+
+	keep, err := kv.LockQueueKeep(name, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The lock is freed behind the lease's back (the renewal comes every
+	// ten seconds) and the other store takes it.
+	kl := keep.(*lease)
+	u, cookie := kl.view()
+
+	if _, err := u.idx.Unlock(sortedindex.LockOID(name), "worker", cookie); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := kv2.LockQueueKeep(name, 30*time.Second)
+	if err != nil {
+		t.Fatalf("the other store could not take the freed lock: %v", err)
+	}
+	defer other.Release()
+
+	if err := keep.(model.LeaseRetaker).Retake(); !errors.Is(err, ErrLocked) {
+		t.Fatalf("Retake against another holder: %v, want ErrLocked", err)
+	}
+
+	if v, _ := kl.view(); v != nil || !keep.Lost() {
+		t.Fatalf("after the failed retake: view %p, lost %v", v, keep.Lost())
+	}
+
+	keep.Release()
+	keep.Release()
+
+	_, otherCookie := other.(*lease).view()
+	if info := lockersOf(t, s, sortedindex.LockOID(name)); info.NumLockers != 1 || len(info.Cookies) != 1 || info.Cookies[0] != otherCookie {
+		t.Fatalf("lockers after the release: %+v, want the other store's only", info)
+	}
+}
+
 // keepAndPlain takes a LockQueueKeep lease on name and a LockQueue lease
 // beside it (both released with the test).
 func keepAndPlain(t *testing.T, kv *AdminKV, name string) (keep, plain model.Lease) {
