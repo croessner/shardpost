@@ -120,9 +120,10 @@ Plans a batch of the kind over every account of the account directory:
 .BR index_check ,
 .BR scrub ,
 .BR fts_rebuild ,
-.B attachment_backfill
+.BR attachment_backfill ,
+.B fts_layout
 or
-.BR fts_layout .
+.BR quota_recalc .
 .B \-classes
 selects the repair classes of a scrub as for one account;
 .B \-skip-idle
@@ -143,7 +144,8 @@ meanwhile), failed and with findings, and names the first 50 that failed
 or had findings; a batch with a failed account ends
 .IR partially_failed .
 A kind that locks the account
-.RB ( fts_rebuild )
+.RB ( fts_rebuild ", " fts_layout " and " quota_recalc
+unless online)
 takes the lock per account and waits
 .I jobs.settle_seconds
 before it writes, as a single job does: while it holds an account, the
@@ -279,8 +281,38 @@ and those removed
 .TP
 .B quota_recalc
 Role
-.BR repair ,
-locks the account. Counts the usage from the index again and stores it.
+.BR repair .
+Counts the usage from the index again and stores it. Offline (the
+default) it locks the account and waits
+.I jobs.settle_seconds
+first, so that no delivery holds a reservation while the counters are
+replaced. With
+.B \-online
+(or
+.I quota.online_recount
+.BR auto )
+and the cluster mark
+.B quota/online
+(see
+.BR shardpostctl-account (1))
+it counts beside the writers, which capture every change of the usage
+while it runs, and replaces the counters in one compare-and-swap: no
+451, no refused login, no
+.BR BYE .
+The plan shows a dry count (approximate while the account is written
+to); the result reports the counted and the stored usage, the mode and,
+online, the barrier time, the captures and the switch rounds. A run
+that cannot start or switch safely (an open reservation older than the
+barrier, an import or a repairing scrub on the account, a switch that
+did not go through on an account with dozens of registry writes a
+second) ends
+.B busy
+and is planned again with a backoff; one that another writer
+invalidated (an offline recount, an import, a rename across the quota
+rules) ends
+.B lost
+and is planned again as well. Neither changes the counters. See
+.BR docs/quota.md .
 .TP
 .B acl_reconcile
 Role
@@ -547,10 +579,46 @@ own when it needs it; the job does it ahead of time.
 .TP
 .B mailbox_delete
 Role
-.BR delete ,
-locks the account. Deletes the mailbox named by
+.BR delete .
+Deletes the mailbox named by
 .B \-mailbox
-with its children. INBOX is refused.
+with its children. INBOX is refused. Offline (the default) it locks the
+account. With
+.B \-online
+(or
+.I jobs.mailbox_delete_online
+.BR auto )
+and the cluster mark
+.B mailbox/lock
+(see
+.BR shardpostctl-mailbox (1))
+it locks only the mailboxes it removes: a write into one is refused
+(IMAP
+.BR "NO [UNAVAILABLE]" ,
+JMAP
+.BR forbidden ),
+a Sieve
+.B fileinto
+into one goes to INBOX, and only a session that has one selected is
+closed with
+.BR BYE ;
+everybody else notices nothing. The job locks the targets, waits
+.I jobs.settle_seconds
+and, at most
+.IR jobs.mailbox_lock_barrier_seconds ,
+for the operations that started before the lock, checks the plan (a
+delivery into a target since the plan is drift and the mail stays; flag
+changes are no drift online), unregisters the targets by id and frees
+the account before it releases blobs and shards. A target another job
+locks, an import or a repairing scrub on the account, or a MOVE into or
+out of a target that still stands (also an abandoned one, which the
+scrub completes after
+.I scrub.intent_grace_seconds
+or
+.B shardpostctl account scrub
+at once) ends the run
+.BR busy ,
+and it is planned again.
 .TP
 .B expunge
 Role
@@ -683,10 +751,21 @@ identifier filter is the one asked for.
 .TQ
 .B \-offline
 .BR fts_layout ,
-.BR fts_rebuild :
+.BR fts_rebuild ,
+.BR quota_recalc ,
+.BR mailbox_delete :
 run without the account lock, or under it (default: as
-.I fts.online_build
-and the cluster mark of online runs say). They exclude each other.
+.IR fts.online_build ,
+.I quota.online_recount
+or
+.I jobs.mailbox_delete_online
+and the cluster mark of the kind say:
+.BR fts/online ,
+.B quota/online
+or
+.BR mailbox/lock ).
+.B \-online
+without the mark is refused with exit code 65. They exclude each other.
 .TP
 .B \-anytime
 .BR "plan \-all"
@@ -757,6 +836,29 @@ Delete a mailbox: look first, then act.
 .RS
 shardpostctl plan -mailbox 'Archive/2019' mailbox_delete user@example.org
 shardpostctl apply -wait 20260919T173044Z-38cd01e99e31
+.RE
+.fi
+.PP
+The same without locking the account (the mark
+.B mailbox/lock
+is set): only
+.I Archive/2019
+and its children are locked while the job unregisters them.
+.PP
+.nf
+.RS
+shardpostctl plan -online -mailbox 'Archive/2019' mailbox_delete user@example.org
+.RE
+.fi
+.PP
+Recount the usage of every account without a lock (the mark
+.B quota/online
+is set):
+.PP
+.nf
+.RS
+shardpostctl plan -all -online quota_recalc
+shardpostctl apply -wait <plan-id>
 .RE
 .fi
 .PP

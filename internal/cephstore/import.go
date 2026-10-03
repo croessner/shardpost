@@ -59,31 +59,44 @@ func (u *User) ImportLock(session string, ttl time.Duration) (time.Time, error) 
 	now := time.Now()
 	exp := now.Add(ttl)
 
-	var held bool
+	var held, mailboxes bool
 
 	// The session goes along: a purge job that restarts after it deleted
-	// the registry takes its lock again (see casOmapOpAs).
-	err := casOmapOpAs(u, u.idx, oidRegistry, []string{regImportLock}, session, func(cur map[string][]byte) (map[string][]byte, []string, func(*rados.WriteOp)) {
-		held = false
+	// the registry takes its lock again (see casOmapOpAs). The mailbox
+	// locks of mailbox_delete (stage B17) are read in the same op: an
+	// account lock is refused while a job holds mailboxes locked (before
+	// it has unregistered them, phase destroying).
+	err := casOmapPrefixAs(u, u.idx, oidRegistry, []string{regImportLock}, []string{regMailboxLockPrefix}, session,
+		func(cur map[string][]byte, pages map[string]prefixPage) (map[string][]byte, []string) {
+			held, mailboxes = false, false
 
-		if v, ok := cur[regImportLock]; ok {
-			var l importLock
-			if json.Unmarshal(v, &l) == nil && l.Session != session && time.Unix(l.Expires, 0).After(now) {
-				held = true
-				return nil, nil, nil
+			if v, ok := cur[regImportLock]; ok {
+				var l importLock
+				if json.Unmarshal(v, &l) == nil && l.Session != session && time.Unix(l.Expires, 0).After(now) {
+					held = true
+					return nil, nil
+				}
 			}
-		}
 
-		b, _ := json.Marshal(importLock{Session: session, Expires: exp.Unix()})
+			if _, blocked := mailboxLocksBlock(pages[regMailboxLockPrefix], session, now); blocked {
+				mailboxes = true
+				return nil, nil
+			}
 
-		return map[string][]byte{regImportLock: b}, nil, nil
-	})
+			b, _ := json.Marshal(importLock{Session: session, Expires: exp.Unix()})
+
+			return map[string][]byte{regImportLock: b}, nil
+		})
 	if err != nil {
 		return time.Time{}, fmt.Errorf("import lock: %w", err)
 	}
 
 	if held {
 		return time.Time{}, model.ErrImportLocked
+	}
+
+	if mailboxes {
+		return time.Time{}, fmt.Errorf("%w: a mailbox_delete job holds mailboxes of the account locked", model.ErrImportLocked)
 	}
 
 	return time.Unix(exp.Unix(), 0), nil
@@ -283,7 +296,7 @@ func (u *User) importCreate(name string, spec model.ImportMailbox) (*Mailbox, er
 	size := u.importShardSize(spec)
 
 	err = u.createIntended(&rec, name, size)
-	if errCode(err) == syscall.EEXIST {
+	if errCode(err) == syscall.EEXIST || errors.Is(err, errIDDeleting) {
 		rec.ID = newGUID() // the preferred id is in use
 		err = u.createIntended(&rec, name, size)
 	}
@@ -470,7 +483,7 @@ func (u *User) retired(mb *Mailbox) (*MailboxInfo, bool) {
 func (u *User) swapRecord(mb *Mailbox, rec MailboxRec, info *MailboxInfo) error {
 	swapped := false
 	b, _ := json.Marshal(&rec)
-	tomb := deletionTombstone(mb, info)
+	tomb := deletionTombstone(mb, info, nil)
 
 	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		var old MailboxRec

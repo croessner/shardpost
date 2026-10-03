@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-MAILBOX 1 "2026-09-20" "ShardPost 0.26.2" "ShardPost Manual"
+.TH SHARDPOSTCTL-MAILBOX 1 "2026-10-03" "ShardPost 0.51.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-mailbox \- list, inspect, create, rename and subscribe mailboxes
 .SH SYNOPSIS
@@ -34,6 +34,17 @@ shardpostctl-mailbox \- list, inspect, create, rename and subscribe mailboxes
 .RB [ \-if-match
 .IR etag ]
 .I account mailbox
+.br
+.B shardpostctl mailbox lock status
+.RB [ \-\-json ]
+.br
+.B shardpostctl mailbox lock enable \-pods
+.I n
+.RB [ \-force ]
+.RB [ \-\-json ]
+.br
+.B shardpostctl mailbox lock disable
+.RB [ \-\-json ]
 .SH DESCRIPTION
 A
 .I mailbox
@@ -98,6 +109,45 @@ mailboxes to show.
 .PP
 Role:
 .BR provision .
+.SS mailbox lock status
+Shows whether the cluster mark of the mailbox lock
+.RB ( mailbox/lock ,
+since 0.52.0) is set, with the server registrations as
+.B fts layout3 status
+shows them. The mark allows the
+.B mailbox_delete
+job (see
+.BR shardpostctl-job (1))
+to lock only the mailboxes it removes instead of the whole account:
+deliveries, logins and sessions go on, a write into a locked mailbox is
+refused, a Sieve
+.B fileinto
+into one goes to INBOX, and only a session that has one selected is
+closed. A server before 0.52.0 does not see the lock and would deliver
+into a mailbox that is being deleted, so the mark needs every server to
+know it. Without the mark the job takes the account lock, as before
+0.52.0. Role:
+.BR diagnose .
+.SS mailbox lock enable
+Sets the mark when exactly
+.I n
+fresh registrations of servers report the capability
+.BR mailbox_lock ;
+otherwise it is refused with exit code 65 naming the instances.
+.B \-force
+sets it without the check (audited). Plans with
+.B \-online
+are allowed from then on, and with
+.I "jobs.mailbox_delete_online: auto"
+also plans without it. Role:
+.BR repair .
+.SS mailbox lock disable
+Removes the mark: new plans take the account lock, a plan with
+.B \-online
+is refused. Runs that started finish; before a downgrade to a version
+before 0.52.0 wait for them (or cancel the jobs, which unlocks their
+mailboxes). Role:
+.BR repair .
 .SH OPTIONS
 .TP
 .BI \-limit " n"
@@ -128,6 +178,14 @@ mailbox of the account carries the same attribute.
 Make the change conditional. The ETag is printed by every command that
 changes a mailbox; if the mailbox changed meanwhile, the server refuses
 with exit code 65 instead of overwriting someone else's change.
+.TP
+.BI \-pods " n"
+.B mailbox lock enable:
+the number of servers running now (required).
+.TP
+.B \-force
+.B mailbox lock enable:
+set the mark without the registrations check (audited).
 .TP
 .B \-\-json
 Print the answer as JSON.

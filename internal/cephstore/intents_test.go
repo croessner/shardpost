@@ -262,7 +262,7 @@ func TestRemovalCrashRecount(t *testing.T) {
 	}
 
 	// Crash 1: entry removed, reference not released (refs 2, entries 1).
-	if _, _, _, err := u.unlink(a, []Meta{m}, ""); err != nil {
+	if _, err := u.unlink(a, []Meta{m}, "", true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,10 +283,12 @@ func TestRemovalCrashRecount(t *testing.T) {
 	// scrub must not release again: the blob is gone (refs reached 0).
 	b, _ := u.Lookup("Copy")
 
-	removed, _, _, err := u.unlink(b, copied, "")
-	if err != nil || len(removed) != 1 {
-		t.Fatalf("unlink: %v, %d removed", err, len(removed))
+	ures, err := u.unlink(b, copied, "", true)
+	if err != nil || len(ures.removed) != 1 {
+		t.Fatalf("unlink: %v, %d removed", err, len(ures.removed))
 	}
+
+	removed := ures.removed
 
 	if err := u.releaseBlob(&removed[0]); err != nil {
 		t.Fatal(err)
@@ -311,10 +313,12 @@ func TestRemovalCrashNoDoubleDecrement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, _, _, err := u.unlink(a, []Meta{m}, "")
+	ures, err := u.unlink(a, []Meta{m}, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	removed := ures.removed
 
 	if err := u.releaseBlob(&removed[0]); err != nil {
 		t.Fatal(err)
@@ -334,7 +338,7 @@ func TestRemovalCrashLastReference(t *testing.T) {
 	a := mustMailbox(t, u, "INBOX")
 
 	m := deliverN(t, u, "INBOX", 1, 2500)[0]
-	if _, _, _, err := u.unlink(a, []Meta{m}, ""); err != nil {
+	if _, err := u.unlink(a, []Meta{m}, "", true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -358,7 +362,7 @@ func TestBlobIntentCrash(t *testing.T) {
 	raw := testMessage("crash", 2500)
 
 	if _, err := u.reserveWith(mb, Quota{Bytes: int64(len(raw)), Msgs: 1},
-		map[string][]byte{blobIntentKey(guid): u.newBlobIntent(int64(len(raw)))}); err != nil {
+		map[string][]byte{blobIntentKey(guid): u.newBlobIntent(int64(len(raw)), mb.ID)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -368,7 +372,7 @@ func TestBlobIntentCrash(t *testing.T) {
 
 	// A delivery that linked but died before its intent went.
 	linked := deliverN(t, u, "INBOX", 1, 200)[0]
-	if err := u.setIntent(map[string][]byte{blobIntentKey(linked.GUID): u.newBlobIntent(linked.Size)}); err != nil {
+	if err := u.setIntent(map[string][]byte{blobIntentKey(linked.GUID): u.newBlobIntent(linked.Size, mb.ID)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -448,7 +452,7 @@ func crashedDelete(t *testing.T, u *User, mb *Mailbox) {
 		t.Fatal(err)
 	}
 
-	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info); err != nil || lost {
+	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info, ""); err != nil || lost {
 		t.Fatalf("unregister: %v, lost %v", err, lost)
 	}
 
@@ -625,7 +629,7 @@ func TestScrubPendingSeesIntents(t *testing.T) {
 		t.Fatalf("pending %q, %v; want nothing", p, err)
 	}
 
-	if _, _, _, err := u.unlink(mb, []Meta{m}, ""); err != nil {
+	if _, err := u.unlink(mb, []Meta{m}, "", true); err != nil {
 		t.Fatal(err)
 	}
 

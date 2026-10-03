@@ -23,7 +23,7 @@ var (
 
 // RunScrub implements model.Scrubber.
 func (u *User) RunScrub(req model.ScrubRequest) (any, error) {
-	return u.Scrub(ScrubOptions{DryRun: req.DryRun, Repairs: req.Repairs, Grace: req.Grace, Fence: req.Fence})
+	return u.Scrub(ScrubOptions{DryRun: req.DryRun, Repairs: req.Repairs, Grace: req.Grace, Fence: req.Fence, Holder: req.Holder})
 }
 
 // ScrubState implements model.ScrubProber: the account counter and the

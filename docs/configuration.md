@@ -454,10 +454,12 @@ and granted through the admin API, see
 | `jobs.retention_days` | 14 | retention of finished jobs, their idempotency keys and plans (after `expires`) |
 | `jobs.expiry_seconds` | 60 | how often the expiry worker (one server of the cluster, `admin.kv_index` `write` or `read`) deletes the jobs, idempotency keys and plans whose retention ended, and how often the other servers try to take its lock (5–3600) |
 | `jobs.plan_ttl_seconds` | 3600 | how long a plan stays valid |
-| `jobs.max_parallel` | 2 | concurrent jobs per process; environment `JOBS_MAX_PARALLEL` (0.53.0), so that the runner deployment gets a value of its own — a configmap value reaches the front-ends as well, where it is without effect under `workers.run: false` |
+| `jobs.max_parallel` | 2 | concurrent jobs per process; environment `JOBS_MAX_PARALLEL` (0.52.0), so that the runner deployment gets a value of its own — a configmap value reaches the front-ends as well, where it is without effect under `workers.run: false` |
 | `jobs.settle_seconds` | 10 | how long an exclusive job waits after setting the maintenance lock, so that running deliveries can finish and open IMAP/POP3 sessions notice the lock (they check it at most every 5 s when a command starts and disconnect with BYE) |
 
 | `jobs.batch_parallel` | 2 | how many accounts a batch over all accounts works on at once in the server that runs it (1–32; a batch scrub uses `scrub.parallel`) |
+| `jobs.mailbox_delete_online` | `off` | what a plan of `mailbox_delete` without `online` gets (since 0.52.0): `auto` the mailbox lock while the cluster mark `mailbox/lock` is set (only the mailboxes it removes are locked, users notice nothing else), `off` the account lock as before. `auto` needs `jobs.settle_seconds` of at least 7, the time IMAP sessions take to see the lock. `online: true` needs the mark either way (409 without) |
+| `jobs.mailbox_lock_barrier_seconds` | 120 | how long a `mailbox_delete` with the mailbox lock waits for the operations that started before its lock (10–900); after it the job is given back and tried again later |
 
 YAML only, except `jobs.max_parallel`. For operating them see
 [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c)
@@ -467,7 +469,7 @@ and [batches over all accounts](admin-api.md#batches-over-all-accounts).
 
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `workers.run` | `WORKERS_RUN` | true | this server runs the background workers beside its listeners: the job runner with the expiry and `fts_due` workers, the upload expiry, the delayed submission worker and the learning worker. `false` makes it a front-end in a deployment with job runner pods (`shardpost runner`, 0.53.0): it keeps the jobs API, the registration, the auth flush and every writer of the queues (learning `Put` and notify, job submit and notify, uploads, `fts_due`, submissions, push subscriptions) and runs no worker |
+| `workers.run` | `WORKERS_RUN` | true | this server runs the background workers beside its listeners: the job runner with the expiry and `fts_due` workers, the upload expiry, the delayed submission worker and the learning worker. `false` makes it a front-end in a deployment with job runner pods (`shardpost runner`, 0.52.0): it keeps the jobs API, the registration, the auth flush and every writer of the queues (learning `Put` and notify, job submit and notify, uploads, `fts_due`, submissions, push subscriptions) and runs no worker |
 
 `workers.run` is the switch of the topology; `jmap.submission.delayed.worker`
 switches one worker inside a process that runs workers. `workers.run:
@@ -475,7 +477,7 @@ false` takes precedence: a front-end runs no submission worker whatever
 `delayed.worker` says, and is not warned about it; it warns once at
 startup when no job runner and no server with workers is registered.
 Set it through the environment (the `runner` component does): a way
-back to an image before 0.53.0 must not break on an unknown configmap
+back to an image before 0.52.0 must not break on an unknown configmap
 key (the configmap is read strictly, see [the strict configmap](#the-strict-configmap)).
 See [operations: job runners](operations/README.md#job-runners).
 
@@ -487,6 +489,26 @@ once no older image can run any more, and a key that switches a
 topology (`workers.run`) or sizes one deployment apart from another
 (`jobs.max_parallel`) comes as an environment variable, which an older
 image ignores.
+
+### Quota recount (`quota`)
+
+The online recount of `quota_recalc` (since 0.52.0, see [Quota:
+recounting the usage](quota.md#recounting-the-usage) and the runbook in
+[operations](operations/README.md#online-quota-recount-and-mailbox-lock)):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `quota.online_recount` | `off` | what a plan of `quota_recalc` without `online` gets: `auto` online while the cluster mark `quota/online` is set (no account lock; the writers capture their changes for the run), `off` offline under the account lock as before 0.52.0. `online: true` needs the mark either way (409 without) |
+| `quota.recount_barrier_seconds` | 120 | how long an online run waits for the reservations and MOVEs that started before it (10–900); after it the run is `busy` and planned again |
+| `quota.recount_dead_intent_seconds` | 600 | how old an intent may be before a run takes it for abandoned (60–3600, at most `scrub.intent_grace_seconds`); every such intent counts `imapceph_quota_recount_dead_intents_total` |
+| `quota.recount_switch_attempts` | 10 | switch calls (of 16 compare-and-swap rounds each) before a run holds the usage writers (1–50) |
+| `quota.recount_hold_ms` | 2000 | how long a run holds the usage writers at most while it switches (0–5000; 0: never, the run is `busy` instead); logins, flag writes and searches never wait |
+| `quota.recount_max_capture_keys` | 1000 | a run whose captures grow beyond this many registry keys ends (10–100000); the writer that crosses the bound ends it |
+| `quota.recount_max_capture_entries` | 1000000 | the same for the entries in the captures (1000–10000000) |
+| `quota.recount_release_chunk` | 10000 | entries one capture key holds (100–50000; keeps a value below 1 MiB) |
+
+The other `quota` keys (grace, rules, warnings, the over flag) are in
+[Quota](quota.md).
 
 ### Scrub (`scrub`)
 
@@ -561,8 +583,8 @@ and [Operations](operations/README.md#admin-store-backfill).
 | --- | --- | --- |
 | `imapsieve.learning.index` | `read` (`write` before 0.47.0) | `off`: no due queue, no owner index (the behaviour before); `write`: keep them up to date while the learning worker, the admin API's learning list and the account purge still list the namespace `~learning` of the data pool; `read`: also read from them (the worker is woken by a notify instead of listing every second). Environment: `LEARNING_INDEX` |
 | `imapsieve.learning.queue_shards` | 4 | shard objects of the due queue (1–8) when its first writer creates it; an existing queue keeps its count |
-| `imapsieve.learning.lock_retry_seconds` | 20 | how often a process that does not hold the learning worker lease tries to take it, with a jitter of ±50 % (1–3600; environment `LEARNING_LOCK_RETRY_SECONDS`). The holder works on once a second and when notified (since 0.53.0 only the holder watches the queue); a lease lost to a key rotation is taken again at once |
-| `imapsieve.learning.concurrency` | 1 | learning jobs the holder of the lease runs at once (1–32; environment `LEARNING_CONCURRENCY`, 0.53.0): jobs of different accounts in parallel, jobs of one account one after the other in due order (a semaphore per account, tried without waiting: a job whose account is busy is offered again at the next pass), never the same job twice at once. The program phase is bounded by the learning program's `extprograms` `max_parallel` as well (4 without one): set it to at least the concurrency, or the concurrency is not reached (the server warns). A large cluster runs 8 on its runners; two combined pods run 2 |
+| `imapsieve.learning.lock_retry_seconds` | 20 | how often a process that does not hold the learning worker lease tries to take it, with a jitter of ±50 % (1–3600; environment `LEARNING_LOCK_RETRY_SECONDS`). The holder works on once a second and when notified (since 0.52.0 only the holder watches the queue); a lease lost to a key rotation is taken again at once |
+| `imapsieve.learning.concurrency` | 1 | learning jobs the holder of the lease runs at once (1–32; environment `LEARNING_CONCURRENCY`, 0.52.0): jobs of different accounts in parallel, jobs of one account one after the other in due order (a semaphore per account, tried without waiting: a job whose account is busy is offered again at the next pass), never the same job twice at once. The program phase is bounded by the learning program's `extprograms` `max_parallel` as well (4 without one): set it to at least the concurrency, or the concurrency is not reached (the server warns). A large cluster runs 8 on its runners; two combined pods run 2 |
 | `imapsieve.learning.shutdown_seconds` | 10 | how long running learning jobs get to end when the process stops (1–300; environment `LEARNING_SHUTDOWN_SECONDS`); what still runs is cut off and the next holder runs it again (at least once, as before) |
 
 `read` takes effect only once `shardpost index backfill learning`

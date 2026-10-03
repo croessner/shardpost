@@ -320,14 +320,15 @@ and removes it once the write is complete
 
 | Intent | Where | Set | Removed |
 |---|---|---|---|
-| `bi:<guid>` | registry | in the reservation CAS of `DeliverGUID` (delivery, APPEND, CATENATE, REPLACE, Sieve `fileinto`, COPY into another account), before the blob is written | once the entry is linked or the blob deleted again; batched, see below |
+| `bi:<guid>` | registry | in the reservation CAS of `DeliverGUID` (delivery, APPEND, CATENATE, REPLACE, Sieve `fileinto`, COPY into another account), before the blob is written; since 0.52.0 with the mailbox id (`m`) | once the entry is linked or the blob deleted again; batched, see below |
+| `qi:<id>` | registry | in the reservation CAS of a COPY or a MOVE out of an ignored mailbox, and in the rename CAS of a rename across the quota rules (since 0.52.0, see [below](#online-quota-recount-and-the-mailbox-lock-0520)) | with the reservation (at once when something is given back), or in the booking of the rename |
 | `bimp:<batch>` | registry | in the reservation CAS of an import step: each message's GUID and a salt from which its two fallback GUIDs follow (about 35 bytes per message, 350 KiB for the largest step of 10 000 messages) | after the header write of the step |
 | `up:<guid>` | registry | before a JMAP upload's blob is written, after its entry in the uploads due queue | when the upload expires (`jmap.upload_ttl_seconds`) |
 | `sub:<guid>` | registry | before the message copy of a delayed JMAP submission is written, with the submission id and an expiry seven days after the release time | when the submission ends (sent, canceled, failed), by the submission worker or the cancel; see [Delayed submissions](#delayed-submissions) |
 | `ci:<id>` | registry | in a CAS of its own before `mbox/<id>` is created | in the CAS that registers the name (or an import replacement's swap) |
-| `dm:<id>` | registry | in the CAS that unregisters a mailbox, with its UIDNEXT and shard size | after the blobs are released and the shards deleted (highest first, shard 0 last) |
+| `dm:<id>` | registry | in the CAS that unregisters a mailbox, with its UIDNEXT and shard size; since 0.52.0 with `q` (0 until the usage is released, 1 after) | after the blobs are released and the shards deleted (highest first, shard 0 last) |
 | `ps:<id>` | registry | before the first private `\Seen` mark of the public folder `<id>` is written | when the scrub removes the marks of a folder that is gone |
-| `r:<uid>` | shard 0 of the mailbox | in the header CAS that removes the entry (EXPUNGE, MOVE, the scrub's own removals; for entries above UIDNEXT on a higher shard in a write before the removal), with the blob's GUID, size and chunk count | after the blob reference is released, by the session that removed the entry |
+| `r:<uid>` | shard 0 of the mailbox | in the header CAS that removes the entry (EXPUNGE, MOVE, the scrub's own removals; for entries above UIDNEXT on a higher shard in a write before the removal), with the blob's GUID, size and chunk count; since 0.52.0 also whether the writer removed the entry itself (`d`, with its nonce `n`) and whether its usage is released (`f`, written right after the release CAS: one extra write per release) | after the blob reference is released, by the session that removed the entry |
 
 A DELETE also **retires** the header of shard 0 after unregistering the
 mailbox (`h:uidnext` 0, the old value kept as `h:retired`), so that a
@@ -2077,6 +2078,108 @@ Without the mark everything is as in 0.50.0.
 reshard (under the import session), and the repairs that need a new id
 map: `fts_rebuild` offline for a missing object of the current
 generation, an unreadable id map or `L`, or a cluster without the mark.
+
+## Online quota recount and the mailbox lock (0.52.0)
+
+Two more jobs run without the account lock since 0.52.0 (design:
+temp/16; code: [quotacapture.go](../../internal/cephstore/quotacapture.go),
+[quotaonline.go](../../internal/cephstore/quotaonline.go),
+[mailboxlock.go](../../internal/cephstore/mailboxlock.go)). Both rest on
+`casOmapPrefix` ([casprefix.go](../../internal/cephstore/casprefix.go)):
+a compare-and-swap whose read covers keys *and* the first page of prefix
+ranges in one op under one version, so that the run key, the mailbox
+locks and the scrub marks are read at no extra cost by the CASes that
+already run.
+
+### Registry keys and record fields
+
+| Key or field | Value | Writer |
+|---|---|---|
+| `qr` | `{tok, h, t0, exp, hold}`: the online recount; `h` is the first 16 hex digits of sha256(tok) | the run (start, heartbeat, hold); removed by the switch or a clean-up |
+| `qd#` | `{tok, n, ne, pb, pm}`: the number of `qd:` keys and the entries in them, the net arrivals (bytes, messages) | every usage CAS while `qr` stands |
+| `qd:<n>` | `{h, m, e: [[uid, size, tagged], …]}`: the entries one release took out of mailbox `m` (at most `quota.recount_release_chunk` per key) | EXPUNGE, MOVE out of a counted mailbox, the MOVE gate |
+| `qm:<id>` | `{h, t: [[uid, size], …]}`: the tagged entries a mailbox deletion released | the release CAS of a deletion |
+| `qi:<id>` | `{t, k, m, n, b}`: the intent of a COPY, a MOVE out of an ignored mailbox or a rename across the quota rules (`k`) | the reservation CAS; the rename CAS |
+| `sr:<holder>` | `{holder, exp}`: a scrub that repairs entries or counters | the scrub before its first such repair, renewed with its lease, removed at the end |
+| `mblock:<session>` | `{ids, names, exp, phase}`: the mailboxes a `mailbox_delete` locks; `phase` `locked`, `unregistering`, `destroying` | the job (M1, M5, M6, M7) |
+| `m:<name>` → `lock` | `{s, exp}`: the lock of one mailbox | the job; every rewrite of the record carries it over |
+| `bi:<guid>` → `m` | the mailbox id of the delivery | the reservation CAS |
+| `dm:<id>` → `q` | 0 while the usage is still in the counters, 1 once released | the unregistration (0), the release CAS (1); `keepTombstone` and the renewal of M7 carry it over |
+| `m:<uid>` → `qt` | the `h` of the run whose reservation the entry comes from; stays with the entry | `link` after a captured reservation, the MOVE gate; cleared by `relink` |
+| `r:<uid>` → `d`, `n`, `f` | removed by the writer of the key (the header CAS for shard 0, the commit of the pending change for higher shards), the nonce of that removal, the usage released (or nothing to release) | `unlink`; the flag write after the release CAS |
+
+Every value and field is optional on the read side: a server of 0.51
+reads none of them and writes values without them, which the run and
+the scrub take as "no capture", "not removed", "not released".
+
+### The recount
+
+Arrivals count as a sum only: the entries that come out of a captured
+reservation carry the run's tag, and the listing skips them. Departures
+are captured with (mailbox, UID) and deduplicated. A MOVE between two
+counted mailboxes, which changes no counter, passes a *gate* after its
+intent (one read; a CAS while a run is live) that captures the batch as
+arrivals and its source entries as departures. The run
+
+1. starts with one CAS (`qr`, an empty `qd#`, the rests of an earlier
+   run removed) that is `busy` while an import lock, a mailbox lock
+   before `destroying`, a scrub mark, an import step or another live run
+   stands, and takes a snapshot of the `bi:`/`qi:` intents;
+2. waits until those intents are gone (or dead) and, per mailbox, until
+   the MOVE intents found at the first read of the mailbox are gone (or
+   dead) — later ones belong to MOVEs whose gate saw the run;
+3. lists each counted mailbox: the header (UIDNEXT, HIGHESTMODSEQ), the
+   higher shards from the top (entries at or above UIDNEXT dropped), and
+   shard 0 last with its entries, its `r:` keys and the live pending
+   change records from `pendingScanStart`. An entry not seen on its
+   shard counts when its `r:` has `d` and not `f`; one with an `r:`
+   without `d` that a live pending record names is read again until it
+   has `d`, the record is committed or expired;
+4. folds the captures and switches in one CAS: `q:bytes`/`q:msgs` :=
+   counted + `pb` − tagged departures (a listed mailbox that got a `qm:`
+   contributes nothing), `qr`, `qd#`, `qd:*`, `qm:*` removed; captures
+   of another `h` are foreign leftovers and go with them. The check that
+   every listed mailbox is still counted as it was (a rename across the
+   rules) ends the run `lost` otherwise.
+
+The order of the release moved for all paths, with and without a run:
+`unlink` → the usage release CAS → one write that sets `f` on the
+removal's own `r:` keys → the blob references → the `r:` keys, as before.
+The write order and the life of `r:` stay exactly what the scrub's blob
+safety rests on (`scanIndex` reads `r:` after the entries, a young `r:`
+keeps `fixRefs` off the blob); the extra information is in the value.
+`entriesToRelease` still leaves out every entry with an `r:`, so a
+deletion never releases what another session is releasing.
+
+### The mailbox lock
+
+`mailbox_delete` with the mark locks its targets in their registry
+records, atomically with the binding name → id: the lookup, the
+reservation CAS, the rename and the create CAS read the record anyway.
+Exact (in a registry CAS that carries the write) are the reservation of
+a counted target, the MOVE gate, CREATE under a target, RENAME and the
+unregistration; `Copy`/`Move` into an ignored target, `Move` out of a
+target, `Expunge` and `SetFlags` read the record from the lookup cache
+(at most `registryTTL` = 2 s behind). That is enough because the job
+waits `jobs.settle_seconds` and then, live, until no reservation names a
+target and no MOVE intent points at or sits on one, and checks the plan
+afterwards: a write that slipped through is drift, and the mail stays.
+
+The job unregisters the targets by id under its lock (a record rewritten
+by a server before 0.52.0 lost the lock field: the unregistration stops,
+fail safe), retires the headers, sets the phase `destroying` — from then
+on account locks are taken again and a `fileinto` of the name creates a
+fresh mailbox — and destroys from the tombstones (idempotent; the
+tombstone's time is renewed with its `q` as it is). An import may not
+reuse a mailbox id whose tombstone lives (`createIntended`). The session
+that has a target selected is woken through the RADOS notify of the
+mailbox object and closed with `BYE`; `poll` closes a session only on an
+authoritative answer (the lock in the record, or `ErrNoMailbox` confirmed
+by a registry read, also after another session's `DELETE`), never on a
+transport error. A delivery whose target got locked between the
+resolution and the store goes to INBOX under a new GUID that the
+delivery intent names for INBOX, so a rollback finds the copy where it
+lies; the rollback itself uses `ExpungeOwn`, which ignores the lock.
 
 ## Repair and its limits
 

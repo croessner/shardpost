@@ -68,28 +68,6 @@ func (u *User) RunScrub(req model.ScrubRequest) (any, error) {
 	return rep, nil
 }
 
-// RecountQuota implements model.QuotaRecounter.
-func (u *User) RecountQuota(apply bool) (model.Quota, model.Quota, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-
-	var counted model.Quota
-
-	for _, b := range u.boxes {
-		for _, m := range b.msgs {
-			counted.Bytes += m.Size
-			counted.Msgs++
-		}
-	}
-
-	stored := u.usage
-	if apply {
-		u.usage = counted
-	}
-
-	return counted, stored, nil
-}
-
 // RebuildFTS implements model.FTSRebuilder.
 func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) error {
 	if err := fence(); err != nil {

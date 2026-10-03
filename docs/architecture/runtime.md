@@ -39,7 +39,7 @@ One image, three long-running commands: `shardpost serve` is the server
 with every protocol listener, the admin API and — with `workers.run`
 (the default) — the background workers; with `workers.run: false` it is
 a front-end that keeps the APIs and the writers of the queues and runs
-no worker. `shardpost runner` (0.53.0) is the background workers without
+no worker. `shardpost runner` (0.52.0) is the background workers without
 listeners: the job runner with the expiry and `fts_due` workers, the
 upload expiry, the delayed submission worker and the learning worker,
 registered with the role `runner`. `shardpost push` (0.52.0, partitioned)

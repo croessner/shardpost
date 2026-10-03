@@ -82,6 +82,9 @@ type Config struct {
 	PublicQuota QuotaLimit
 	// QuotaRules are the mailbox rules and the grace (nil: none).
 	QuotaRules *quota.Policy
+	// QuotaRecount tunes the online quota recount (stage B16; zero
+	// fields: the defaults of quotacapture.go).
+	QuotaRecount QuotaRecountConfig
 	// OnQuotaChange, if set, is called after a delivery, copy, move,
 	// expunge or delete changed the usage of an account (the limit is
 	// the base limit, without extras). It must not block.
@@ -523,7 +526,8 @@ func (s *Store) userIn(name, idxPool string) (*User, error) {
 		limits:        cfg.Limits,
 		uploadTTL:     orDefault(cfg.UploadTTL, DefaultUploadTTL),
 		rules:         cfg.QuotaRules, onQuota: cfg.OnQuotaChange,
-		ftsCfg: ftsUserConfig(cfg.FTS)}, nil
+		recount: cfg.QuotaRecount.withDefaults(),
+		ftsCfg:  ftsUserConfig(cfg.FTS)}, nil
 }
 
 // indexPoolOf is the pool of the index part of namespace ns: SystemPool

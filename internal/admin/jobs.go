@@ -51,7 +51,8 @@ func (s *Server) jobError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, errScope):
 		writeError(w, http.StatusForbidden, adminapi.Forbidden, err.Error())
 	case errors.Is(err, jobs.ErrDirectoryNotReady), errors.Is(err, model.ErrFTSLayoutMark), errors.Is(err, model.ErrFTSDictLayout3),
-		errors.Is(err, model.ErrFTSDictFilterMark), errors.Is(err, model.ErrFTSOnlineMark):
+		errors.Is(err, model.ErrFTSDictFilterMark), errors.Is(err, model.ErrFTSOnlineMark), errors.Is(err, model.ErrQuotaOnlineMark),
+		errors.Is(err, model.ErrMailboxLockMark):
 		writeError(w, http.StatusConflict, adminapi.Conflict, err.Error())
 	default:
 		s.importError(w, r, err)

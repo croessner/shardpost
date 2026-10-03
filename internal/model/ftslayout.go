@@ -158,7 +158,7 @@ type ServerRecord struct {
 	Partitions *int `json:"partitions,omitempty"`
 	Watched    *int `json:"watched,omitempty"`
 	// Workers reports whether a server runs the background workers
-	// (workers.run, stage B18b); nil before 0.53.0 and for the other
+	// (workers.run, stage B18b); nil before 0.52.0 and for the other
 	// roles.
 	Workers *bool `json:"workers,omitempty"`
 }

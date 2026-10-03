@@ -408,6 +408,26 @@ matched by.
 `Email/set`, `Email/import`, `Email/parse` and `Email/copy` (RFC 8621
 4.6 to 4.9).
 
+**A mailbox that is being deleted** (a `mailbox_delete` job with the
+mailbox lock holds it, since 0.52.0) takes no writes: an `Email/set`
+creation, an `Email/copy` or an `Email/import` with it in `mailboxIds`,
+and a `mailboxIds` patch into it, are `invalidProperties` with
+`properties: ["mailboxIds"]` (RFC 8621 4.6); a keyword update or a
+destruction of a message in it, and a `Mailbox/set` update or
+destruction of the mailbox itself, are `forbidden` with the description
+"the mailbox is being deleted". Reading goes on until the mailbox is
+gone.
+
+```json
+["Email/set", {"accountId": "u", "notCreated": {"c1": {"type": "invalidProperties",
+  "properties": ["mailboxIds"], "description": "the mailbox is being deleted"}}}, "0"]
+["Mailbox/set", {"accountId": "u", "notDestroyed": {"m7": {"type": "forbidden",
+  "description": "the mailbox is being deleted"}}}, "1"]
+```
+
+Other store errors of a write are still reported as `serverFail`; they
+are sorted per RFC 8620 5.3 in a later stage.
+
 **An update changes where a message is and which keywords it has**;
 every other property of an Email is immutable and an update of it is
 `invalidProperties`. Both are carried out with the IMAP operations the

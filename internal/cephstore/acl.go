@@ -1069,7 +1069,7 @@ func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64)
 	if err := write(modseq); err != nil {
 		// Nothing was written, so nothing is to be picked up: commit the
 		// change empty instead of leaving readers waiting for it.
-		if cerr := u.commitPending(mb, modseq, &changeRec{}, nil); cerr != nil {
+		if cerr := u.commitPending(mb, modseq, &changeRec{}, nil, nil); cerr != nil {
 			u.log.Warn("commit of an empty change failed", "mailbox", mb.Name, "modseq", modseq, "err", cerr)
 		}
 
@@ -1078,7 +1078,7 @@ func (u *User) TouchModSeq(name string, uids []uint32, write func(modseq uint64)
 		return 0, err
 	}
 
-	if err := u.commitPending(mb, modseq, chg, nil); err != nil {
+	if err := u.commitPending(mb, modseq, chg, nil, nil); err != nil {
 		acct.partial()
 		return 0, err
 	}

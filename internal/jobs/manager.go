@@ -46,6 +46,11 @@ type Env struct {
 	// FTSOnline reads the cluster mark of the online runs (nil: online
 	// runs are refused).
 	FTSOnline model.FTSOnlineMarked
+	// QuotaOnline reads the cluster mark of online quota recounts (nil:
+	// refused, stage B16); MailboxLock the mark of the mailbox lock of
+	// mailbox_delete (nil: refused, stage B17).
+	QuotaOnline model.QuotaOnlineMarked
+	MailboxLock model.MailboxLockMarked
 }
 
 // Kind is one job kind.
@@ -126,6 +131,20 @@ type Config struct {
 	// FTSBuild are the settings of the online runs and of the reshard
 	// window (stage B14i).
 	FTSBuild FTSBuild
+	// QuotaOnlineAuto (quota.online_recount "auto") plans quota_recalc
+	// without "online" online while the cluster mark is set (stage B16).
+	QuotaOnlineAuto bool
+	// MailboxDeleteOnlineAuto (jobs.mailbox_delete_online "auto") plans
+	// mailbox_delete without "online" with the mailbox lock while the
+	// cluster mark is set (stage B17); MailboxLockBarrier bounds how long
+	// such a run waits for the operations of before its lock (120 s when
+	// 0).
+	MailboxDeleteOnlineAuto bool
+	MailboxLockBarrier      time.Duration
+	// DeadIntent is how old a reservation intent may be before the
+	// barrier of the mailbox lock takes it for abandoned
+	// (quota.recount_dead_intent_seconds; 600 s when 0).
+	DeadIntent time.Duration
 }
 
 // FTSBuild are the settings of the online runs of fts_layout and
@@ -207,6 +226,7 @@ func (c Config) withDefaults() Config {
 
 	c.ScrubInterval = cmpDur(c.ScrubInterval, 7*24*time.Hour)
 	c.FTSBuild = c.FTSBuild.withDefaults()
+	c.MailboxLockBarrier = cmpDur(c.MailboxLockBarrier, 120*time.Second)
 
 	return c
 }
@@ -238,6 +258,8 @@ type Manager struct {
 	// the lease holder, no listing.
 	ftsDueMu      sync.Mutex
 	ftsDueRunning map[string]bool
+	// hooks are test hooks (quotaonline.go).
+	hooks managerHooks
 }
 
 // NewManager builds the job system; instance names this server in

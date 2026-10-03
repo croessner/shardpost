@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 )
 
@@ -686,6 +687,12 @@ func renameFailed(err error) *setError {
 		return invalidProperty(propName, "a mailbox of that name is already there")
 	}
 
+	if errors.Is(err, model.ErrMailboxLocked) {
+		metrics.MailboxLockRefusals.WithLabelValues("jmap", "mailbox_set").Inc()
+
+		return &setError{Type: setForbidden, Description: descMailboxDeleting}
+	}
+
 	return &setError{Type: setServerFail, Description: err.Error()}
 }
 
@@ -911,6 +918,12 @@ func destroyMailbox(sess *session, t *tree, mb *model.Mailbox, removeEmails bool
 	if err := sess.user.DeleteMailbox(mb.Name); err != nil {
 		if errors.Is(err, model.ErrNoMailbox) {
 			return &setError{Type: setNotFound}
+		}
+
+		if errors.Is(err, model.ErrMailboxLocked) {
+			metrics.MailboxLockRefusals.WithLabelValues("jmap", "mailbox_set").Inc()
+
+			return &setError{Type: setForbidden, Description: descMailboxDeleting}
 		}
 
 		return &setError{Type: setServerFail, Description: err.Error()}

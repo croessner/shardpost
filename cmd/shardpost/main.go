@@ -350,7 +350,16 @@ func cephConfig(settings *config.Config) cephstore.Config {
 		Quota:       cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
 		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},
 		QuotaRules:  quota.NewPolicy(settings.Quota),
-		ShardSize:   uint32(settings.Server.MboxShardSize),
+		QuotaRecount: cephstore.QuotaRecountConfig{
+			Barrier:           time.Duration(settings.Quota.RecountBarrierSeconds) * time.Second,
+			DeadIntent:        time.Duration(settings.Quota.RecountDeadIntentSeconds) * time.Second,
+			SwitchAttempts:    settings.Quota.RecountSwitchAttempts,
+			Hold:              time.Duration(settings.Quota.RecountHoldMS) * time.Millisecond,
+			MaxCaptureKeys:    int64(settings.Quota.RecountMaxCaptureKeys),
+			MaxCaptureEntries: int64(settings.Quota.RecountMaxCaptureEntries),
+			ReleaseChunk:      settings.Quota.RecountReleaseChunk,
+		},
+		ShardSize: uint32(settings.Server.MboxShardSize),
 
 		AccountLogRetention: int(settings.Server.AccountLogRetention),
 		KVIndex:             model.KVIndexMode(settings.Admin.KVIndex),

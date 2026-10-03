@@ -62,7 +62,7 @@ type Registration struct {
 // record is the value of the registration at now.
 func (r Registration) record(now time.Time) model.ServerRecord {
 	rec := model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool, model.CapFTSDictFilter,
-		model.CapFTSOnlineBuild}, Seen: now.UTC(),
+		model.CapFTSOnlineBuild, model.CapQuotaOnlineRecount, model.CapMailboxLock}, Seen: now.UTC(),
 		Role: r.Role, SystemPool: r.SystemPool, StartedAt: r.StartedAt.UTC()}
 
 	if r.Status != nil {
@@ -237,7 +237,7 @@ var ErrNotReady = errors.New("the cluster is not ready for the mark")
 // Layout3Ready checks the registrations for "fts layout3 enable --pods
 // n": exactly n fresh registrations of the processes that write account
 // data under the mark — servers (role serve, or none: before 0.47.0)
-// and, since 0.53.0, job runners — each with the layout 3 capability.
+// and, since 0.52.0, job runners — each with the layout 3 capability.
 // The push worker, scrubs and backfills register too and are not
 // counted. A pod replaced within model.ServerFresh that did not record
 // its end still has its predecessor's fresh record: wait until it is

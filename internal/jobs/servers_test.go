@@ -348,7 +348,7 @@ func TestLayout3ReadyCountsServers(t *testing.T) {
 func expectRunnerCounted(t *testing.T, kv model.AdminKV, now time.Time) {
 	t.Helper()
 
-	if err := Register(kv, Registration{Instance: "runner-0", Version: "0.53.0", Role: model.RoleRunner, StartedAt: now}, now); err != nil {
+	if err := Register(kv, Registration{Instance: "runner-0", Version: "0.52.0", Role: model.RoleRunner, StartedAt: now}, now); err != nil {
 		t.Fatal(err)
 	}
 

@@ -3,8 +3,6 @@ package jobs
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -191,7 +189,7 @@ func (k *scrubKind) Run(_ context.Context, run *Run) (any, error) {
 		run.Env.Log.Info("scrub cleared an unfinished full-text conversion", "account", run.Job.Account, "tok", tok)
 	}
 
-	rep, err := sc.RunScrub(model.ScrubRequest{Repairs: classes, Grace: k.grace, Fence: run.Fence})
+	rep, err := sc.RunScrub(model.ScrubRequest{Repairs: classes, Grace: k.grace, Fence: run.Fence, Holder: run.token()})
 	if err != nil {
 		return rep, err
 	}
@@ -209,44 +207,6 @@ func sortedKeys(m map[string]bool) []string {
 	sort.Strings(out)
 
 	return out
-}
-
-// --- quota_recalc ----------------------------------------------------------
-
-// quotaRecalc replaces the usage counters by a recount under the
-// maintenance lock (no delivery holds a reservation then).
-type quotaRecalc struct{ kindBase }
-
-type quotaSummary struct {
-	Counted model.Quota `json:"counted"`
-	Stored  model.Quota `json:"stored"`
-	Differs bool        `json:"differs"`
-}
-
-func (k *quotaRecalc) Plan(_ context.Context, _ *Env, u model.User, _ string, _ json.RawMessage) (any, string, error) {
-	rc, err := capability[model.QuotaRecounter](u, "recount quota")
-	if err != nil {
-		return nil, "", err
-	}
-
-	counted, stored, err := rc.RecountQuota(false)
-
-	return quotaSummary{counted, stored, counted != stored}, "", err
-}
-
-func (k *quotaRecalc) Run(_ context.Context, run *Run) (any, error) {
-	rc, err := capability[model.QuotaRecounter](run.User, "recount quota")
-	if err != nil {
-		return nil, err
-	}
-
-	if err := run.Fence(); err != nil {
-		return nil, err
-	}
-
-	counted, stored, err := rc.RecountQuota(true)
-
-	return quotaSummary{counted, stored, counted != stored}, err
 }
 
 // --- acl_reconcile ---------------------------------------------------------
@@ -706,165 +666,6 @@ func (k *attachmentBackfill) Run(ctx context.Context, run *Run) (any, error) {
 	})
 }
 
-// --- mailbox_delete --------------------------------------------------------
-
-type mailboxDeleteParams struct {
-	MailboxID string `json:"mailbox_id"`
-}
-
-type deleteTarget struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Messages int64  `json:"messages"`
-	Bytes    int64  `json:"bytes"`
-}
-
-type deleteSummary struct {
-	Mailboxes []deleteTarget `json:"mailboxes"`
-	Messages  int64          `json:"messages"`
-	Bytes     int64          `json:"bytes"`
-}
-
-// mailboxDelete deletes a mailbox with its children from a plan.
-type mailboxDelete struct{ kindBase }
-
-// deleteTargets returns the mailbox and its children (deepest first) and
-// the fingerprint of their state.
-func deleteTargets(u model.User, params json.RawMessage) (deleteSummary, string, error) {
-	var p mailboxDeleteParams
-	if err := json.Unmarshal(params, &p); err != nil || p.MailboxID == "" {
-		return deleteSummary{}, "", fmt.Errorf("%w: mailbox_id required", ErrInvalidParams)
-	}
-
-	boxes, err := u.ListMailboxes()
-	if err != nil {
-		return deleteSummary{}, "", err
-	}
-
-	i := slices.IndexFunc(boxes, func(mb model.Mailbox) bool { return mb.ID == p.MailboxID })
-	if i < 0 {
-		return deleteSummary{}, "", model.ErrNoMailbox
-	}
-
-	root := boxes[i].Name
-	if strings.EqualFold(root, "INBOX") {
-		return deleteSummary{}, "", fmt.Errorf("%w: INBOX cannot be deleted (purge the account instead)", ErrInvalidParams)
-	}
-
-	var s deleteSummary
-
-	for _, mb := range boxes {
-		if mb.Name == root || strings.HasPrefix(mb.Name, root+"/") {
-			t, err := targetOf(u, mb)
-			if err != nil {
-				return deleteSummary{}, "", err
-			}
-
-			s.Mailboxes = append(s.Mailboxes, t)
-			s.Messages += t.Messages
-			s.Bytes += t.Bytes
-		}
-	}
-
-	sort.Slice(s.Mailboxes, func(a, b int) bool { return len(s.Mailboxes[a].Name) > len(s.Mailboxes[b].Name) })
-
-	fp, err := fingerprint(u, s.Mailboxes)
-
-	return s, fp, err
-}
-
-func targetOf(u model.User, mb model.Mailbox) (deleteTarget, error) {
-	msgs, err := u.ListMessages(mb.ID)
-	if err != nil {
-		return deleteTarget{}, err
-	}
-
-	t := deleteTarget{ID: mb.ID, Name: mb.Name, Messages: int64(len(msgs))}
-	for i := range msgs {
-		t.Bytes += msgs[i].Size
-	}
-
-	return t, nil
-}
-
-// fingerprint hashes the identity and change state of the mailboxes.
-func fingerprint(u model.User, targets []deleteTarget) (string, error) {
-	lines := make([]string, 0, len(targets))
-
-	for _, t := range targets {
-		info, err := u.Info(t.Name)
-		if err != nil {
-			return "", err
-		}
-
-		lines = append(lines, fmt.Sprintf("%s %s %d %d %d", info.ID, info.Name, info.UIDValidity, info.UIDNext, info.HighestModSeq))
-	}
-
-	sort.Strings(lines)
-	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
-
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func (k *mailboxDelete) Plan(_ context.Context, _ *Env, u model.User, _ string, params json.RawMessage) (any, string, error) {
-	return deleteTargets(u, params)
-}
-
-// deleteCheckpoint lists the mailboxes already deleted.
-type deleteCheckpoint struct {
-	Deleted []string `json:"deleted"`
-}
-
-func (k *mailboxDelete) Run(_ context.Context, run *Run) (any, error) {
-	var cp deleteCheckpoint
-
-	resumed := run.LoadCheckpoint(&cp)
-
-	var targets []deleteTarget
-
-	if resumed {
-		// The drift check passed before the first delete; the plan names
-		// what remains.
-		var s deleteSummary
-
-		_ = json.Unmarshal(run.Plan.Summary, &s)
-		targets = s.Mailboxes
-	} else {
-		s, fp, err := deleteTargets(run.User, run.Job.Params)
-		if err != nil {
-			return nil, err
-		}
-
-		if fp != run.Plan.Fingerprint {
-			return nil, ErrDrift
-		}
-
-		targets = s.Mailboxes
-	}
-
-	for _, t := range targets {
-		if slices.Contains(cp.Deleted, t.ID) {
-			continue
-		}
-
-		if err := run.Fence(); err != nil {
-			return cp, err
-		}
-
-		if err := run.User.DeleteMailbox(t.Name); err != nil && !errors.Is(err, model.ErrNoMailbox) {
-			return cp, fmt.Errorf("delete %q: %w", t.Name, err)
-		}
-
-		cp.Deleted = append(cp.Deleted, t.ID)
-
-		if err := run.Checkpoint(cp); err != nil {
-			return cp, err
-		}
-	}
-
-	return cp, nil
-}
-
 // --- expunge ---------------------------------------------------------------
 
 // Expunge bounds.
@@ -1004,6 +805,12 @@ func (k *expunge) Run(_ context.Context, run *Run) (any, error) {
 		}
 
 		n, err := expungeBatchOf(run.User, mb, batch, s.Deleted)
+		if errors.Is(err, model.ErrMailboxLocked) {
+			// A mailbox_delete locks the mailbox: nothing is written, the
+			// job waits for the lock to end (it ends with the mailbox).
+			return cp, &PostponeError{Until: run.m.now().Add(run.m.cfg.LeaseTTL), Reason: "the mailbox is locked by a mailbox_delete job"}
+		}
+
 		if err != nil {
 			return cp, err
 		}
@@ -1182,7 +989,7 @@ func purgeInventory(env *Env, u model.User, account string) (purgeSummary, strin
 
 	s.Scripts = append(s.Scripts, names...)
 
-	fp, err := fingerprint(u, targets)
+	fp, err := fingerprint(u, targets, false)
 
 	return s, fp + " " + strings.Join(names, ",") + " " + active, err
 }

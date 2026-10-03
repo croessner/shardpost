@@ -587,7 +587,8 @@ type BatchPlanRequest struct {
 	// (empty = all); fts_layout: `layout`, `shards` or `shape`,
 	// `dict_filter`, `due_only`, `online` (see `FTSLayoutParams`);
 	// fts_rebuild: `online`, `skip_unreadable`, `drop_orphan_ids`
-	// (see `FTSRebuildParams`). The other kinds take none. An
+	// (see `FTSRebuildParams`); quota_recalc: `online` (since
+	// 0.52.0). The other kinds take none. An
 	// omitted `online` is decided by the plan for the whole batch
 	// (accounts without a layout 3 index then count as
 	// `unsupported`).
@@ -1324,9 +1325,16 @@ type PlanRequest struct {
 	// `layout`, `shards` or `shape`, `dict_filter`, `due_only`,
 	// `online` (see `FTSLayoutParams`); fts_rebuild: `online`,
 	// `skip_unreadable`, `drop_orphan_ids` (see
-	// `FTSRebuildParams`); mailbox_delete:
-	// `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
-	// `deleted: true` (every message flagged \Deleted when planned).
+	// `FTSRebuildParams`); quota_recalc: `online` (since 0.52.0:
+	// `true` recounts without the account lock, needs the mark
+	// `quota/online`, else 409; omitted: online with the mark and
+	// `quota.online_recount: auto`; the plan records the
+	// decision); mailbox_delete: `mailbox_id`, `online` (since
+	// 0.52.0: `true` locks only the mailboxes it removes, needs
+	// the mark `mailbox/lock`, else 409; omitted: with the mark
+	// and `jobs.mailbox_delete_online: auto`); expunge:
+	// `mailbox_id` and `uids` (list) or `deleted: true` (every
+	// message flagged \Deleted when planned).
 	Params *map[string]interface{} `json:"params,omitempty"`
 }
 
@@ -1381,7 +1389,7 @@ type ServerRegistration struct {
 	Partitions *int `json:"partitions,omitempty"`
 
 	// Role What the process is: `serve`, `push`, `scrub`, `backfill`,
-	// `sweep` or `runner` (a job runner pod, since 0.53.0); missing
+	// `sweep` or `runner` (a job runner pod, since 0.52.0); missing
 	// in registrations before 0.47.0, which are servers.
 	Role *string   `json:"role,omitempty"`
 	Seen time.Time `json:"seen"`
@@ -1401,7 +1409,7 @@ type ServerRegistration struct {
 	Watched *int `json:"watched,omitempty"`
 
 	// Workers Whether a server runs the background workers (`workers.run`,
-	// since 0.53.0); missing before and for the other roles.
+	// since 0.52.0); missing before and for the other roles.
 	Workers *bool `json:"workers,omitempty"`
 }
 
@@ -1977,8 +1985,14 @@ type SubmitJobJSONRequestBody = JobRequest
 // RetryLearningJobJSONRequestBody defines body for RetryLearningJob for application/json ContentType.
 type RetryLearningJobJSONRequestBody = LearningRetry
 
+// EnableMailboxLockJSONRequestBody defines body for EnableMailboxLock for application/json ContentType.
+type EnableMailboxLockJSONRequestBody = FTSLayout3Enable
+
 // CreateBatchPlanJSONRequestBody defines body for CreateBatchPlan for application/json ContentType.
 type CreateBatchPlanJSONRequestBody = BatchPlanRequest
+
+// EnableQuotaOnlineJSONRequestBody defines body for EnableQuotaOnline for application/json ContentType.
+type EnableQuotaOnlineJSONRequestBody = FTSLayout3Enable
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -2640,7 +2654,11 @@ type ClientInterface interface {
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
 	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 	// `fts_rebuild` with `online: true` the cluster mark of online runs
-	// (`POST /admin/v1/fts/online/enable`); without them the plan
+	// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+	// `online: true` the mark of online quota recounts (`POST
+	// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+	// `online: true` the mark of the mailbox lock (`POST
+	// /admin/v1/mailbox/lock/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -2664,7 +2682,11 @@ type ClientInterface interface {
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
 	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 	// `fts_rebuild` with `online: true` the cluster mark of online runs
-	// (`POST /admin/v1/fts/online/enable`); without them the plan
+	// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+	// `online: true` the mark of online quota recounts (`POST
+	// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+	// `online: true` the mark of the mailbox lock (`POST
+	// /admin/v1/mailbox/lock/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -3263,16 +3285,74 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
 	RetryLearningJob(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetMailboxLock The mark of the mailbox lock of mailbox_delete
+	//
+	// Whether the cluster mark of the mailbox lock (`mailbox/lock`,
+	// since 0.52.0) is set, and the server registrations as for layout
+	// 3. The mark allows `mailbox_delete` jobs to lock only the
+	// mailboxes they remove instead of the account: deliveries, logins
+	// and sessions go on, a write into a locked mailbox is refused
+	// (IMAP `NO [UNAVAILABLE]`, JMAP `forbidden` or
+	// `invalidProperties`), a Sieve `fileinto` into one goes to INBOX,
+	// and only a session that has a locked mailbox selected is closed
+	// with `BYE`. Without the mark every run takes the account lock,
+	// as before 0.52.0. Requires the role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/mailbox/lock (the `GetMailboxLock` operationId).
+	GetMailboxLock(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableMailboxLock Remove the mark of the mailbox lock
+	//
+	// Removes the cluster mark of the mailbox lock: new plans of
+	// `mailbox_delete` take the account lock (`online: true` is refused
+	// with `conflict`). Runs that already started finish; before a
+	// downgrade to a version before 0.52.0 wait for them (or cancel
+	// the jobs, which unlocks their mailboxes). Requires the role
+	// `repair`.
+	//
+	// Corresponds with POST /admin/v1/mailbox/lock/disable (the `DisableMailboxLock` operationId).
+	DisableMailboxLock(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableMailboxLockWithBody Allow the mailbox lock of mailbox_delete
+	//
+	// Sets the cluster mark of the mailbox lock after checking that
+	// exactly `pods` fresh registrations of servers report the
+	// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+	// 3 mark. A server before 0.52.0 does not see the lock and would
+	// deliver into a mailbox that is being deleted: every server must
+	// know it first. Refused with `conflict` (409) when the
+	// registrations do not match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+	EnableMailboxLockWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableMailboxLock Allow the mailbox lock of mailbox_delete
+	//
+	// Sets the cluster mark of the mailbox lock after checking that
+	// exactly `pods` fresh registrations of servers report the
+	// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+	// 3 mark. A server before 0.52.0 does not see the lock and would
+	// deliver into a mailbox that is being deleted: every server must
+	// know it first. Refused with `conflict` (409) when the
+	// registrations do not match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+	EnableMailboxLock(ctx context.Context, body EnableMailboxLockJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// CreateBatchPlanWithBody Plan a batch over all accounts (dry run)
 	//
 	// Plans a batch job: `kind` run on every account of the account
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-	// unless online) takes the maintenance lock per account; an account
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+	// `quota_recalc` unless online) takes the maintenance lock per account; an account
 	// another job or an import holds (or, online, another run of the
 	// account is alive) is tried again at the end; online, an account
 	// without a layout 3 index counts as `unsupported`. A batch of
@@ -3296,10 +3376,10 @@ type ClientInterface interface {
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-	// unless online) takes the maintenance lock per account; an account
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+	// `quota_recalc` unless online) takes the maintenance lock per account; an account
 	// another job or an import holds (or, online, another run of the
 	// account is alive) is tried again at the end; online, an account
 	// without a layout 3 index counts as `unsupported`. A batch of
@@ -3323,6 +3403,64 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
 	GetPlan(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetQuotaOnline The mark of online quota recounts
+	//
+	// Whether the cluster mark of online quota recounts (`quota/online`,
+	// since 0.52.0) is set, and the server registrations as for layout
+	// 3. The mark allows `quota_recalc` jobs to run without the
+	// account's maintenance lock: deliveries, logins and sessions go
+	// on, the writers capture every change of the usage while the run
+	// counts, and one compare-and-swap switches the counters. Without
+	// the mark every run is offline, as before 0.52.0. Requires the
+	// role `diagnose`.
+	//
+	// Corresponds with GET /admin/v1/quota/online (the `GetQuotaOnline` operationId).
+	GetQuotaOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableQuotaOnline Remove the mark of online quota recounts
+	//
+	// Removes the cluster mark of online quota recounts: new plans of
+	// `quota_recalc` run offline (`online: true` is refused with
+	// `conflict`). Runs that already started finish or end busy; before
+	// a downgrade to a version before 0.52.0 wait for them (or cancel
+	// the jobs, which clears their run keys). Requires the role
+	// `repair`.
+	//
+	// Corresponds with POST /admin/v1/quota/online/disable (the `DisableQuotaOnline` operationId).
+	DisableQuotaOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableQuotaOnlineWithBody Allow online quota recounts
+	//
+	// Sets the cluster mark of online quota recounts after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `quota_online_recount` (since 0.52.0); otherwise as
+	// the layout 3 mark. A server before 0.52.0 does not capture its
+	// usage changes for a run, so the counters a run switched to would
+	// be wrong (no mail is lost): every server must know it first.
+	// Refused with `conflict` (409) when the registrations do not
+	// match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+	EnableQuotaOnlineWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableQuotaOnline Allow online quota recounts
+	//
+	// Sets the cluster mark of online quota recounts after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `quota_online_recount` (since 0.52.0); otherwise as
+	// the layout 3 mark. A server before 0.52.0 does not capture its
+	// usage changes for a run, so the counters a run switched to would
+	// be wrong (no mail is lost): every server must know it first.
+	// Refused with `conflict` (409) when the registrations do not
+	// match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+	EnableQuotaOnline(ctx context.Context, body EnableQuotaOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetServerStatus Server status
 	//
@@ -4448,7 +4586,11 @@ func (c *Client) ExportMessage(ctx context.Context, account Account, id MailboxI
 // with `dict_filter: ids` the cluster mark of the dictionary filter
 // (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 // `fts_rebuild` with `online: true` the cluster mark of online runs
-// (`POST /admin/v1/fts/online/enable`); without them the plan
+// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+// `online: true` the mark of online quota recounts (`POST
+// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+// `online: true` the mark of the mailbox lock (`POST
+// /admin/v1/mailbox/lock/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -4482,7 +4624,11 @@ func (c *Client) CreatePlanWithBody(ctx context.Context, account Account, conten
 // with `dict_filter: ids` the cluster mark of the dictionary filter
 // (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 // `fts_rebuild` with `online: true` the cluster mark of online runs
-// (`POST /admin/v1/fts/online/enable`); without them the plan
+// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+// `online: true` the mark of online quota recounts (`POST
+// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+// `online: true` the mark of the mailbox lock (`POST
+// /admin/v1/mailbox/lock/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -5531,16 +5677,114 @@ func (c *Client) RetryLearningJob(ctx context.Context, job JobID, body RetryLear
 	return c.Client.Do(req)
 }
 
+// GetMailboxLock The mark of the mailbox lock of mailbox_delete
+//
+// Whether the cluster mark of the mailbox lock (`mailbox/lock`,
+// since 0.52.0) is set, and the server registrations as for layout
+// 3. The mark allows `mailbox_delete` jobs to lock only the
+// mailboxes they remove instead of the account: deliveries, logins
+// and sessions go on, a write into a locked mailbox is refused
+// (IMAP `NO [UNAVAILABLE]`, JMAP `forbidden` or
+// `invalidProperties`), a Sieve `fileinto` into one goes to INBOX,
+// and only a session that has a locked mailbox selected is closed
+// with `BYE`. Without the mark every run takes the account lock,
+// as before 0.52.0. Requires the role `diagnose`.
+//
+// Corresponds with GET /admin/v1/mailbox/lock (the `GetMailboxLock` operationId).
+func (c *Client) GetMailboxLock(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetMailboxLockRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableMailboxLock Remove the mark of the mailbox lock
+//
+// Removes the cluster mark of the mailbox lock: new plans of
+// `mailbox_delete` take the account lock (`online: true` is refused
+// with `conflict`). Runs that already started finish; before a
+// downgrade to a version before 0.52.0 wait for them (or cancel
+// the jobs, which unlocks their mailboxes). Requires the role
+// `repair`.
+//
+// Corresponds with POST /admin/v1/mailbox/lock/disable (the `DisableMailboxLock` operationId).
+func (c *Client) DisableMailboxLock(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableMailboxLockRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableMailboxLockWithBody Allow the mailbox lock of mailbox_delete
+//
+// Sets the cluster mark of the mailbox lock after checking that
+// exactly `pods` fresh registrations of servers report the
+// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+// 3 mark. A server before 0.52.0 does not see the lock and would
+// deliver into a mailbox that is being deleted: every server must
+// know it first. Refused with `conflict` (409) when the
+// registrations do not match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+func (c *Client) EnableMailboxLockWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableMailboxLockRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableMailboxLock Allow the mailbox lock of mailbox_delete
+//
+// Sets the cluster mark of the mailbox lock after checking that
+// exactly `pods` fresh registrations of servers report the
+// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+// 3 mark. A server before 0.52.0 does not see the lock and would
+// deliver into a mailbox that is being deleted: every server must
+// know it first. Refused with `conflict` (409) when the
+// registrations do not match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+func (c *Client) EnableMailboxLock(ctx context.Context, body EnableMailboxLockJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableMailboxLockRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // CreateBatchPlanWithBody Plan a batch over all accounts (dry run)
 //
 // Plans a batch job: `kind` run on every account of the account
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-// unless online) takes the maintenance lock per account; an account
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+// `quota_recalc` unless online) takes the maintenance lock per account; an account
 // another job or an import holds (or, online, another run of the
 // account is alive) is tried again at the end; online, an account
 // without a layout 3 index counts as `unsupported`. A batch of
@@ -5574,10 +5818,10 @@ func (c *Client) CreateBatchPlanWithBody(ctx context.Context, contentType string
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-// unless online) takes the maintenance lock per account; an account
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+// `quota_recalc` unless online) takes the maintenance lock per account; an account
 // another job or an import holds (or, online, another run of the
 // account is alive) is tried again at the end; online, an account
 // without a layout 3 index counts as `unsupported`. A batch of
@@ -5612,6 +5856,104 @@ func (c *Client) CreateBatchPlan(ctx context.Context, body CreateBatchPlanJSONRe
 // Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
 func (c *Client) GetPlan(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetPlanRequest(c.Server, plan)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetQuotaOnline The mark of online quota recounts
+//
+// Whether the cluster mark of online quota recounts (`quota/online`,
+// since 0.52.0) is set, and the server registrations as for layout
+// 3. The mark allows `quota_recalc` jobs to run without the
+// account's maintenance lock: deliveries, logins and sessions go
+// on, the writers capture every change of the usage while the run
+// counts, and one compare-and-swap switches the counters. Without
+// the mark every run is offline, as before 0.52.0. Requires the
+// role `diagnose`.
+//
+// Corresponds with GET /admin/v1/quota/online (the `GetQuotaOnline` operationId).
+func (c *Client) GetQuotaOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetQuotaOnlineRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableQuotaOnline Remove the mark of online quota recounts
+//
+// Removes the cluster mark of online quota recounts: new plans of
+// `quota_recalc` run offline (`online: true` is refused with
+// `conflict`). Runs that already started finish or end busy; before
+// a downgrade to a version before 0.52.0 wait for them (or cancel
+// the jobs, which clears their run keys). Requires the role
+// `repair`.
+//
+// Corresponds with POST /admin/v1/quota/online/disable (the `DisableQuotaOnline` operationId).
+func (c *Client) DisableQuotaOnline(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableQuotaOnlineRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableQuotaOnlineWithBody Allow online quota recounts
+//
+// Sets the cluster mark of online quota recounts after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `quota_online_recount` (since 0.52.0); otherwise as
+// the layout 3 mark. A server before 0.52.0 does not capture its
+// usage changes for a run, so the counters a run switched to would
+// be wrong (no mail is lost): every server must know it first.
+// Refused with `conflict` (409) when the registrations do not
+// match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+func (c *Client) EnableQuotaOnlineWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableQuotaOnlineRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableQuotaOnline Allow online quota recounts
+//
+// Sets the cluster mark of online quota recounts after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `quota_online_recount` (since 0.52.0); otherwise as
+// the layout 3 mark. A server before 0.52.0 does not capture its
+// usage changes for a run, so the counters a run switched to would
+// be wrong (no mail is lost): every server must know it first.
+// Refused with `conflict` (409) when the registrations do not
+// match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+func (c *Client) EnableQuotaOnline(ctx context.Context, body EnableQuotaOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableQuotaOnlineRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -9333,6 +9675,100 @@ func NewRetryLearningJobRequestWithBody(server string, job JobID, contentType st
 	return req, nil
 }
 
+// NewGetMailboxLockRequest constructs an http.Request for the GetMailboxLock method
+func NewGetMailboxLockRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/mailbox/lock")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDisableMailboxLockRequest constructs an http.Request for the DisableMailboxLock method
+func NewDisableMailboxLockRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/mailbox/lock/disable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnableMailboxLockRequest calls the generic EnableMailboxLock builder with application/json body
+func NewEnableMailboxLockRequest(server string, body EnableMailboxLockJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnableMailboxLockRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnableMailboxLockRequestWithBody constructs an http.Request for the EnableMailboxLock method, with any body, and a specified content type
+func NewEnableMailboxLockRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/mailbox/lock/enable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewCreateBatchPlanRequest calls the generic CreateBatchPlan builder with application/json body
 func NewCreateBatchPlanRequest(server string, body CreateBatchPlanJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -9403,6 +9839,100 @@ func NewGetPlanRequest(server string, plan string) (*http.Request, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewGetQuotaOnlineRequest constructs an http.Request for the GetQuotaOnline method
+func NewGetQuotaOnlineRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/quota/online")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDisableQuotaOnlineRequest constructs an http.Request for the DisableQuotaOnline method
+func NewDisableQuotaOnlineRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/quota/online/disable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnableQuotaOnlineRequest calls the generic EnableQuotaOnline builder with application/json body
+func NewEnableQuotaOnlineRequest(server string, body EnableQuotaOnlineJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnableQuotaOnlineRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnableQuotaOnlineRequestWithBody constructs an http.Request for the EnableQuotaOnline method, with any body, and a specified content type
+func NewEnableQuotaOnlineRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/quota/online/enable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -10228,7 +10758,11 @@ type ClientWithResponsesInterface interface {
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
 	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 	// `fts_rebuild` with `online: true` the cluster mark of online runs
-	// (`POST /admin/v1/fts/online/enable`); without them the plan
+	// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+	// `online: true` the mark of online quota recounts (`POST
+	// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+	// `online: true` the mark of the mailbox lock (`POST
+	// /admin/v1/mailbox/lock/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -10252,7 +10786,11 @@ type ClientWithResponsesInterface interface {
 	// with `dict_filter: ids` the cluster mark of the dictionary filter
 	// (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 	// `fts_rebuild` with `online: true` the cluster mark of online runs
-	// (`POST /admin/v1/fts/online/enable`); without them the plan
+	// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+	// `online: true` the mark of online quota recounts (`POST
+	// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+	// `online: true` the mark of the mailbox lock (`POST
+	// /admin/v1/mailbox/lock/enable`); without them the plan
 	// is refused with `conflict` (409). `fts_dict_convert` is a
 	// legacy kind for layout 2 indexes written before 0.35.0; for an
 	// account whose index has layout 3 it is refused with `conflict`
@@ -10893,16 +11431,78 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/learning/{job}/retry (the `RetryLearningJob` operationId).
 	RetryLearningJobWithResponse(ctx context.Context, job JobID, body RetryLearningJobJSONRequestBody, reqEditors ...RequestEditorFn) (*RetryLearningJobResponse, error)
 
+	// GetMailboxLockWithResponse The mark of the mailbox lock of mailbox_delete
+	//
+	// Whether the cluster mark of the mailbox lock (`mailbox/lock`,
+	// since 0.52.0) is set, and the server registrations as for layout
+	// 3. The mark allows `mailbox_delete` jobs to lock only the
+	// mailboxes they remove instead of the account: deliveries, logins
+	// and sessions go on, a write into a locked mailbox is refused
+	// (IMAP `NO [UNAVAILABLE]`, JMAP `forbidden` or
+	// `invalidProperties`), a Sieve `fileinto` into one goes to INBOX,
+	// and only a session that has a locked mailbox selected is closed
+	// with `BYE`. Without the mark every run takes the account lock,
+	// as before 0.52.0. Requires the role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/mailbox/lock (the `GetMailboxLock` operationId).
+	GetMailboxLockWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetMailboxLockResponse, error)
+
+	// DisableMailboxLockWithResponse Remove the mark of the mailbox lock
+	//
+	// Removes the cluster mark of the mailbox lock: new plans of
+	// `mailbox_delete` take the account lock (`online: true` is refused
+	// with `conflict`). Runs that already started finish; before a
+	// downgrade to a version before 0.52.0 wait for them (or cancel
+	// the jobs, which unlocks their mailboxes). Requires the role
+	// `repair`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/mailbox/lock/disable (the `DisableMailboxLock` operationId).
+	DisableMailboxLockWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableMailboxLockResponse, error)
+
+	// EnableMailboxLockWithBodyWithResponse Allow the mailbox lock of mailbox_delete
+	//
+	// Sets the cluster mark of the mailbox lock after checking that
+	// exactly `pods` fresh registrations of servers report the
+	// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+	// 3 mark. A server before 0.52.0 does not see the lock and would
+	// deliver into a mailbox that is being deleted: every server must
+	// know it first. Refused with `conflict` (409) when the
+	// registrations do not match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+	EnableMailboxLockWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableMailboxLockResponse, error)
+
+	// EnableMailboxLockWithResponse Allow the mailbox lock of mailbox_delete
+	//
+	// Sets the cluster mark of the mailbox lock after checking that
+	// exactly `pods` fresh registrations of servers report the
+	// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+	// 3 mark. A server before 0.52.0 does not see the lock and would
+	// deliver into a mailbox that is being deleted: every server must
+	// know it first. Refused with `conflict` (409) when the
+	// registrations do not match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+	EnableMailboxLockWithResponse(ctx context.Context, body EnableMailboxLockJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableMailboxLockResponse, error)
+
 	// CreateBatchPlanWithBodyWithResponse Plan a batch over all accounts (dry run)
 	//
 	// Plans a batch job: `kind` run on every account of the account
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-	// unless online) takes the maintenance lock per account; an account
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+	// `quota_recalc` unless online) takes the maintenance lock per account; an account
 	// another job or an import holds (or, online, another run of the
 	// account is alive) is tried again at the end; online, an account
 	// without a layout 3 index counts as `unsupported`. A batch of
@@ -10926,10 +11526,10 @@ type ClientWithResponsesInterface interface {
 	// directory, one account after another with a bounded parallelism
 	// (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 	// `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-	// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+	// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 	// its kind and the scope of all accounts (socket callers; mutual-TLS
-	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-	// unless online) takes the maintenance lock per account; an account
+	// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+	// `quota_recalc` unless online) takes the maintenance lock per account; an account
 	// another job or an import holds (or, online, another run of the
 	// account is alive) is tried again at the end; online, an account
 	// without a layout 3 index counts as `unsupported`. A batch of
@@ -10955,6 +11555,68 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/v1/plans/{plan} (the `GetPlan` operationId).
 	GetPlanWithResponse(ctx context.Context, plan string, reqEditors ...RequestEditorFn) (*GetPlanResponse, error)
+
+	// GetQuotaOnlineWithResponse The mark of online quota recounts
+	//
+	// Whether the cluster mark of online quota recounts (`quota/online`,
+	// since 0.52.0) is set, and the server registrations as for layout
+	// 3. The mark allows `quota_recalc` jobs to run without the
+	// account's maintenance lock: deliveries, logins and sessions go
+	// on, the writers capture every change of the usage while the run
+	// counts, and one compare-and-swap switches the counters. Without
+	// the mark every run is offline, as before 0.52.0. Requires the
+	// role `diagnose`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/quota/online (the `GetQuotaOnline` operationId).
+	GetQuotaOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetQuotaOnlineResponse, error)
+
+	// DisableQuotaOnlineWithResponse Remove the mark of online quota recounts
+	//
+	// Removes the cluster mark of online quota recounts: new plans of
+	// `quota_recalc` run offline (`online: true` is refused with
+	// `conflict`). Runs that already started finish or end busy; before
+	// a downgrade to a version before 0.52.0 wait for them (or cancel
+	// the jobs, which clears their run keys). Requires the role
+	// `repair`.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/quota/online/disable (the `DisableQuotaOnline` operationId).
+	DisableQuotaOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableQuotaOnlineResponse, error)
+
+	// EnableQuotaOnlineWithBodyWithResponse Allow online quota recounts
+	//
+	// Sets the cluster mark of online quota recounts after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `quota_online_recount` (since 0.52.0); otherwise as
+	// the layout 3 mark. A server before 0.52.0 does not capture its
+	// usage changes for a run, so the counters a run switched to would
+	// be wrong (no mail is lost): every server must know it first.
+	// Refused with `conflict` (409) when the registrations do not
+	// match. Requires the role `repair`.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+	EnableQuotaOnlineWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableQuotaOnlineResponse, error)
+
+	// EnableQuotaOnlineWithResponse Allow online quota recounts
+	//
+	// Sets the cluster mark of online quota recounts after checking
+	// that exactly `pods` fresh registrations of servers report the
+	// capability `quota_online_recount` (since 0.52.0); otherwise as
+	// the layout 3 mark. A server before 0.52.0 does not capture its
+	// usage changes for a run, so the counters a run switched to would
+	// be wrong (no mail is lost): every server must know it first.
+	// Refused with `conflict` (409) when the registrations do not
+	// match. Requires the role `repair`.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+	EnableQuotaOnlineWithResponse(ctx context.Context, body EnableQuotaOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableQuotaOnlineResponse, error)
 
 	// GetServerStatusWithResponse Server status
 	//
@@ -14379,6 +15041,150 @@ func (r RetryLearningJobResponse) ContentType() string {
 	return ""
 }
 
+type GetMailboxLockResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetMailboxLockResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetMailboxLockResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetMailboxLockResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetMailboxLockResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetMailboxLockResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetMailboxLockResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableMailboxLockResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DisableMailboxLockResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableMailboxLockResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableMailboxLockResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableMailboxLockResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableMailboxLockResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableMailboxLockResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type EnableMailboxLockResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r EnableMailboxLockResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r EnableMailboxLockResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r EnableMailboxLockResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableMailboxLockResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableMailboxLockResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r EnableMailboxLockResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type CreateBatchPlanResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -14469,6 +15275,150 @@ func (r GetPlanResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetPlanResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetQuotaOnlineResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetQuotaOnlineResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetQuotaOnlineResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetQuotaOnlineResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetQuotaOnlineResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetQuotaOnlineResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetQuotaOnlineResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableQuotaOnlineResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DisableQuotaOnlineResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableQuotaOnlineResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableQuotaOnlineResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableQuotaOnlineResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableQuotaOnlineResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableQuotaOnlineResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type EnableQuotaOnlineResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSLayout3Status
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r EnableQuotaOnlineResponse) GetJSON200() *FTSLayout3Status {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r EnableQuotaOnlineResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r EnableQuotaOnlineResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableQuotaOnlineResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableQuotaOnlineResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r EnableQuotaOnlineResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -15591,7 +16541,11 @@ func (c *ClientWithResponses) ExportMessageWithResponse(ctx context.Context, acc
 // with `dict_filter: ids` the cluster mark of the dictionary filter
 // (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 // `fts_rebuild` with `online: true` the cluster mark of online runs
-// (`POST /admin/v1/fts/online/enable`); without them the plan
+// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+// `online: true` the mark of online quota recounts (`POST
+// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+// `online: true` the mark of the mailbox lock (`POST
+// /admin/v1/mailbox/lock/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -15621,7 +16575,11 @@ func (c *ClientWithResponses) CreatePlanWithBodyWithResponse(ctx context.Context
 // with `dict_filter: ids` the cluster mark of the dictionary filter
 // (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
 // `fts_rebuild` with `online: true` the cluster mark of online runs
-// (`POST /admin/v1/fts/online/enable`); without them the plan
+// (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+// `online: true` the mark of online quota recounts (`POST
+// /admin/v1/quota/online/enable`) and `mailbox_delete` with
+// `online: true` the mark of the mailbox lock (`POST
+// /admin/v1/mailbox/lock/enable`); without them the plan
 // is refused with `conflict` (409). `fts_dict_convert` is a
 // legacy kind for layout 2 indexes written before 0.35.0; for an
 // account whose index has layout 3 it is refused with `conflict`
@@ -16532,16 +17490,102 @@ func (c *ClientWithResponses) RetryLearningJobWithResponse(ctx context.Context, 
 	return ParseRetryLearningJobResponse(rsp)
 }
 
+// GetMailboxLockWithResponse The mark of the mailbox lock of mailbox_delete
+//
+// Whether the cluster mark of the mailbox lock (`mailbox/lock`,
+// since 0.52.0) is set, and the server registrations as for layout
+// 3. The mark allows `mailbox_delete` jobs to lock only the
+// mailboxes they remove instead of the account: deliveries, logins
+// and sessions go on, a write into a locked mailbox is refused
+// (IMAP `NO [UNAVAILABLE]`, JMAP `forbidden` or
+// `invalidProperties`), a Sieve `fileinto` into one goes to INBOX,
+// and only a session that has a locked mailbox selected is closed
+// with `BYE`. Without the mark every run takes the account lock,
+// as before 0.52.0. Requires the role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/mailbox/lock (the `GetMailboxLock` operationId).
+func (c *ClientWithResponses) GetMailboxLockWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetMailboxLockResponse, error) {
+	rsp, err := c.GetMailboxLock(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetMailboxLockResponse(rsp)
+}
+
+// DisableMailboxLockWithResponse Remove the mark of the mailbox lock
+//
+// Removes the cluster mark of the mailbox lock: new plans of
+// `mailbox_delete` take the account lock (`online: true` is refused
+// with `conflict`). Runs that already started finish; before a
+// downgrade to a version before 0.52.0 wait for them (or cancel
+// the jobs, which unlocks their mailboxes). Requires the role
+// `repair`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/mailbox/lock/disable (the `DisableMailboxLock` operationId).
+func (c *ClientWithResponses) DisableMailboxLockWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableMailboxLockResponse, error) {
+	rsp, err := c.DisableMailboxLock(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableMailboxLockResponse(rsp)
+}
+
+// EnableMailboxLockWithBodyWithResponse Allow the mailbox lock of mailbox_delete
+//
+// Sets the cluster mark of the mailbox lock after checking that
+// exactly `pods` fresh registrations of servers report the
+// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+// 3 mark. A server before 0.52.0 does not see the lock and would
+// deliver into a mailbox that is being deleted: every server must
+// know it first. Refused with `conflict` (409) when the
+// registrations do not match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+func (c *ClientWithResponses) EnableMailboxLockWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableMailboxLockResponse, error) {
+	rsp, err := c.EnableMailboxLockWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableMailboxLockResponse(rsp)
+}
+
+// EnableMailboxLockWithResponse Allow the mailbox lock of mailbox_delete
+//
+// Sets the cluster mark of the mailbox lock after checking that
+// exactly `pods` fresh registrations of servers report the
+// capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+// 3 mark. A server before 0.52.0 does not see the lock and would
+// deliver into a mailbox that is being deleted: every server must
+// know it first. Refused with `conflict` (409) when the
+// registrations do not match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/mailbox/lock/enable (the `EnableMailboxLock` operationId).
+func (c *ClientWithResponses) EnableMailboxLockWithResponse(ctx context.Context, body EnableMailboxLockJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableMailboxLockResponse, error) {
+	rsp, err := c.EnableMailboxLock(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableMailboxLockResponse(rsp)
+}
+
 // CreateBatchPlanWithBodyWithResponse Plan a batch over all accounts (dry run)
 //
 // Plans a batch job: `kind` run on every account of the account
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-// unless online) takes the maintenance lock per account; an account
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+// `quota_recalc` unless online) takes the maintenance lock per account; an account
 // another job or an import holds (or, online, another run of the
 // account is alive) is tried again at the end; online, an account
 // without a layout 3 index counts as `unsupported`. A batch of
@@ -16571,10 +17615,10 @@ func (c *ClientWithResponses) CreateBatchPlanWithBodyWithResponse(ctx context.Co
 // directory, one account after another with a bounded parallelism
 // (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
 // `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-// `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+// `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
 // its kind and the scope of all accounts (socket callers; mutual-TLS
-// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-// unless online) takes the maintenance lock per account; an account
+// clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+// `quota_recalc` unless online) takes the maintenance lock per account; an account
 // another job or an import holds (or, online, another run of the
 // account is alive) is tried again at the end; online, an account
 // without a layout 3 index counts as `unsupported`. A batch of
@@ -16611,6 +17655,92 @@ func (c *ClientWithResponses) GetPlanWithResponse(ctx context.Context, plan stri
 		return nil, err
 	}
 	return ParseGetPlanResponse(rsp)
+}
+
+// GetQuotaOnlineWithResponse The mark of online quota recounts
+//
+// Whether the cluster mark of online quota recounts (`quota/online`,
+// since 0.52.0) is set, and the server registrations as for layout
+// 3. The mark allows `quota_recalc` jobs to run without the
+// account's maintenance lock: deliveries, logins and sessions go
+// on, the writers capture every change of the usage while the run
+// counts, and one compare-and-swap switches the counters. Without
+// the mark every run is offline, as before 0.52.0. Requires the
+// role `diagnose`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/quota/online (the `GetQuotaOnline` operationId).
+func (c *ClientWithResponses) GetQuotaOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetQuotaOnlineResponse, error) {
+	rsp, err := c.GetQuotaOnline(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetQuotaOnlineResponse(rsp)
+}
+
+// DisableQuotaOnlineWithResponse Remove the mark of online quota recounts
+//
+// Removes the cluster mark of online quota recounts: new plans of
+// `quota_recalc` run offline (`online: true` is refused with
+// `conflict`). Runs that already started finish or end busy; before
+// a downgrade to a version before 0.52.0 wait for them (or cancel
+// the jobs, which clears their run keys). Requires the role
+// `repair`.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/quota/online/disable (the `DisableQuotaOnline` operationId).
+func (c *ClientWithResponses) DisableQuotaOnlineWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*DisableQuotaOnlineResponse, error) {
+	rsp, err := c.DisableQuotaOnline(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableQuotaOnlineResponse(rsp)
+}
+
+// EnableQuotaOnlineWithBodyWithResponse Allow online quota recounts
+//
+// Sets the cluster mark of online quota recounts after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `quota_online_recount` (since 0.52.0); otherwise as
+// the layout 3 mark. A server before 0.52.0 does not capture its
+// usage changes for a run, so the counters a run switched to would
+// be wrong (no mail is lost): every server must know it first.
+// Refused with `conflict` (409) when the registrations do not
+// match. Requires the role `repair`.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+func (c *ClientWithResponses) EnableQuotaOnlineWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableQuotaOnlineResponse, error) {
+	rsp, err := c.EnableQuotaOnlineWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableQuotaOnlineResponse(rsp)
+}
+
+// EnableQuotaOnlineWithResponse Allow online quota recounts
+//
+// Sets the cluster mark of online quota recounts after checking
+// that exactly `pods` fresh registrations of servers report the
+// capability `quota_online_recount` (since 0.52.0); otherwise as
+// the layout 3 mark. A server before 0.52.0 does not capture its
+// usage changes for a run, so the counters a run switched to would
+// be wrong (no mail is lost): every server must know it first.
+// Refused with `conflict` (409) when the registrations do not
+// match. Requires the role `repair`.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/v1/quota/online/enable (the `EnableQuotaOnline` operationId).
+func (c *ClientWithResponses) EnableQuotaOnlineWithResponse(ctx context.Context, body EnableQuotaOnlineJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableQuotaOnlineResponse, error) {
+	rsp, err := c.EnableQuotaOnline(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableQuotaOnlineResponse(rsp)
 }
 
 // GetServerStatusWithResponse Server status
@@ -19069,6 +20199,105 @@ func ParseRetryLearningJobResponse(rsp *http.Response) (*RetryLearningJobRespons
 	return response, nil
 }
 
+// ParseGetMailboxLockResponse parses an HTTP response from a GetMailboxLockWithResponse call
+func ParseGetMailboxLockResponse(rsp *http.Response) (*GetMailboxLockResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetMailboxLockResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableMailboxLockResponse parses an HTTP response from a DisableMailboxLockWithResponse call
+func ParseDisableMailboxLockResponse(rsp *http.Response) (*DisableMailboxLockResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableMailboxLockResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableMailboxLockResponse parses an HTTP response from a EnableMailboxLockWithResponse call
+func ParseEnableMailboxLockResponse(rsp *http.Response) (*EnableMailboxLockResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableMailboxLockResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseCreateBatchPlanResponse parses an HTTP response from a CreateBatchPlanWithResponse call
 func ParseCreateBatchPlanResponse(rsp *http.Response) (*CreateBatchPlanResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -19118,6 +20347,105 @@ func ParseGetPlanResponse(rsp *http.Response) (*GetPlanResponse, error) {
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest Plan
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetQuotaOnlineResponse parses an HTTP response from a GetQuotaOnlineWithResponse call
+func ParseGetQuotaOnlineResponse(rsp *http.Response) (*GetQuotaOnlineResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetQuotaOnlineResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableQuotaOnlineResponse parses an HTTP response from a DisableQuotaOnlineWithResponse call
+func ParseDisableQuotaOnlineResponse(rsp *http.Response) (*DisableQuotaOnlineResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableQuotaOnlineResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableQuotaOnlineResponse parses an HTTP response from a EnableQuotaOnlineWithResponse call
+func ParseEnableQuotaOnlineResponse(rsp *http.Response) (*EnableQuotaOnlineResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableQuotaOnlineResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSLayout3Status
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -19479,12 +20807,30 @@ type ServerInterface interface {
 	// RetryLearningJob Retry a dead learning job
 	// (POST /admin/v1/learning/{job}/retry)
 	RetryLearningJob(w http.ResponseWriter, r *http.Request, job JobID)
+	// GetMailboxLock The mark of the mailbox lock of mailbox_delete
+	// (GET /admin/v1/mailbox/lock)
+	GetMailboxLock(w http.ResponseWriter, r *http.Request)
+	// DisableMailboxLock Remove the mark of the mailbox lock
+	// (POST /admin/v1/mailbox/lock/disable)
+	DisableMailboxLock(w http.ResponseWriter, r *http.Request)
+	// EnableMailboxLock Allow the mailbox lock of mailbox_delete
+	// (POST /admin/v1/mailbox/lock/enable)
+	EnableMailboxLock(w http.ResponseWriter, r *http.Request)
 	// CreateBatchPlan Plan a batch over all accounts (dry run)
 	// (POST /admin/v1/plans)
 	CreateBatchPlan(w http.ResponseWriter, r *http.Request)
 	// GetPlan A plan
 	// (GET /admin/v1/plans/{plan})
 	GetPlan(w http.ResponseWriter, r *http.Request, plan string)
+	// GetQuotaOnline The mark of online quota recounts
+	// (GET /admin/v1/quota/online)
+	GetQuotaOnline(w http.ResponseWriter, r *http.Request)
+	// DisableQuotaOnline Remove the mark of online quota recounts
+	// (POST /admin/v1/quota/online/disable)
+	DisableQuotaOnline(w http.ResponseWriter, r *http.Request)
+	// EnableQuotaOnline Allow online quota recounts
+	// (POST /admin/v1/quota/online/enable)
+	EnableQuotaOnline(w http.ResponseWriter, r *http.Request)
 	// GetServerStatus Server status
 	// (GET /admin/v1/server)
 	GetServerStatus(w http.ResponseWriter, r *http.Request)
@@ -22410,6 +23756,48 @@ func (siw *ServerInterfaceWrapper) RetryLearningJob(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// GetMailboxLock operation middleware
+func (siw *ServerInterfaceWrapper) GetMailboxLock(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetMailboxLock(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DisableMailboxLock operation middleware
+func (siw *ServerInterfaceWrapper) DisableMailboxLock(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DisableMailboxLock(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// EnableMailboxLock operation middleware
+func (siw *ServerInterfaceWrapper) EnableMailboxLock(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.EnableMailboxLock(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CreateBatchPlan operation middleware
 func (siw *ServerInterfaceWrapper) CreateBatchPlan(w http.ResponseWriter, r *http.Request) {
 
@@ -22441,6 +23829,48 @@ func (siw *ServerInterfaceWrapper) GetPlan(w http.ResponseWriter, r *http.Reques
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetPlan(w, r, plan)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetQuotaOnline operation middleware
+func (siw *ServerInterfaceWrapper) GetQuotaOnline(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetQuotaOnline(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DisableQuotaOnline operation middleware
+func (siw *ServerInterfaceWrapper) DisableQuotaOnline(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DisableQuotaOnline(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// EnableQuotaOnline operation middleware
+func (siw *ServerInterfaceWrapper) EnableQuotaOnline(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.EnableQuotaOnline(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -22725,6 +24155,12 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/online", wrapper.GetFTSOnline)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/online/enable", wrapper.EnableFTSOnline)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/fts/online/disable", wrapper.DisableFTSOnline)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/quota/online", wrapper.GetQuotaOnline)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/quota/online/enable", wrapper.EnableQuotaOnline)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/quota/online/disable", wrapper.DisableQuotaOnline)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/mailbox/lock", wrapper.GetMailboxLock)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/mailbox/lock/enable", wrapper.EnableMailboxLock)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/mailbox/lock/disable", wrapper.DisableMailboxLock)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3/accounts", wrapper.ListFTSLayout3Accounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout", wrapper.GetFTSLayout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout/clear", wrapper.ClearFTSLayout)

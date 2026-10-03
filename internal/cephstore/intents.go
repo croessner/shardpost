@@ -63,12 +63,15 @@ const intentFlushDelay = 30 * time.Second
 // blobIntent is the value of "bi:" and "up:": when the intent was set, the
 // size and chunk count of the blob (so that a scrub can unindex and
 // delete it without reading anything else) and, for an upload, when it
-// expires.
+// expires. Mailbox is the id of the mailbox a delivery is for (since
+// 0.52.0; the barriers of the online recount and of the mailbox lock
+// read it).
 type blobIntent struct {
-	Time    int64 `json:"t"`
-	Size    int64 `json:"s"`
-	Chunks  int   `json:"c"`
-	Expires int64 `json:"x,omitempty"`
+	Time    int64  `json:"t"`
+	Size    int64  `json:"s"`
+	Chunks  int    `json:"c"`
+	Expires int64  `json:"x,omitempty"`
+	Mailbox string `json:"m,omitempty"`
 }
 
 // blobRef names one blob of an import step or a removal.
@@ -126,12 +129,27 @@ type mailboxIntent struct {
 	Name      string `json:"n,omitempty"`
 	UIDNext   uint32 `json:"u,omitempty"`
 	ShardSize uint32 `json:"s,omitempty"`
+	// Released (a deletion tombstone, stage B16) is 0 while the usage
+	// of the mailbox is still in the counters, 1 once it was released;
+	// nil in a tombstone written before 0.52.0. Every writer of the
+	// tombstone carries it over.
+	Released *int `json:"q,omitempty"`
 }
 
-// removeIntent is the value of "r:<uid>".
+// removeIntent is the value of "r:<uid>". Removed, Nonce and Released
+// (stage B16, quotacapture.go) say whether the writer of the key removed
+// the entry itself, which removal that was, and whether the entry's
+// usage is released; values written before 0.52.0 have none of them.
 type removeIntent struct {
 	Time int64 `json:"t"`
 	blobRef
+	Removed  bool   `json:"d,omitempty"`
+	Nonce    string `json:"n,omitempty"`
+	Released bool   `json:"f,omitempty"`
+	// QuotaTag is the entry's run tag (qt): an online recount leaves a
+	// removed entry it captured on arrival out of its listing, as it does
+	// with the entry itself.
+	QuotaTag string `json:"qt,omitempty"`
 }
 
 func blobIntentKey(guid string) string { return regBlobPrefix + guid }
@@ -158,9 +176,10 @@ func encode(v any) []byte {
 	return b
 }
 
-// newBlobIntent is the "bi:" value of a blob of size bytes.
-func (u *User) newBlobIntent(size int64) []byte {
-	return encode(blobIntent{Time: time.Now().Unix(), Size: size, Chunks: u.chunkCount(size)})
+// newBlobIntent is the "bi:" value of a blob of size bytes for the
+// mailbox id.
+func (u *User) newBlobIntent(size int64, mailbox string) []byte {
+	return encode(blobIntent{Time: time.Now().Unix(), Size: size, Chunks: u.chunkCount(size), Mailbox: mailbox})
 }
 
 // intentBatch holds the registry keys of intents this view has finished
@@ -294,6 +313,26 @@ func (u *User) stopIntentTimer() {
 
 // rmKeys removes omap keys of an existing object in one write; an absent
 // object is not created (and is no error).
+// setKeysExisting sets keys on an existing object (an absent object is
+// no error: a mailbox deleted meanwhile must not get its shard 0 back).
+func setKeysExisting(ioctx *rados.IOContext, oid string, set map[string][]byte) error {
+	if len(set) == 0 {
+		return nil
+	}
+
+	op := rados.CreateWriteOp()
+	defer op.Release()
+
+	op.AssertExists()
+	op.SetOmap(set)
+
+	if err := op.Operate(ioctx, oid, rados.OperationNoFlag); err != nil && errCode(err) != syscall.ENOENT {
+		return fmt.Errorf("set keys of %s: %w", oid, err)
+	}
+
+	return nil
+}
+
 func rmKeys(ioctx *rados.IOContext, oid string, keys []string) error {
 	if len(keys) == 0 {
 		return nil
@@ -366,7 +405,7 @@ func (u *User) anyKey(oid string, prefixes ...string) (string, error) {
 // intentPrefixes are the registry prefixes of intents a scrub has to look
 // at (ps: is not one: it stays while the marks exist; up: and sub: only
 // once they expired, see expiredUpload).
-var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPrefix, regCreatePrefix, regDeletePrefix}
+var intentPrefixes = []string{regDeliveryPrefix, regBlobPrefix, regImportBlobPrefix, regCreatePrefix, regDeletePrefix, regQuotaIntentPrefix}
 
 // uploadPage bounds the upload intents ScrubPending reads: an account with
 // more uploads than that is judged by the first page (the expiry worker
@@ -455,14 +494,39 @@ func (u *User) removeIntents(id string) (map[string]removeIntent, error) {
 }
 
 // removalSet returns the "r:" keys of a removal: one per entry that the
-// header CAS removed from shard 0 or announced for a higher shard, with
-// the blob each entry referenced.
-func removalSet(now int64, metas []Meta) map[string][]byte {
+// header CAS removed from shard 0 (removed, with d and the nonce) or
+// announced for a higher shard (announced, without d), with the blob
+// each entry referenced. An announced entry whose key is already there
+// (existing) is only refreshed. released says whether a release of the
+// usage follows.
+func removalSet(now int64, removed, announced []Meta, existing map[string][]byte, nonce string, released bool) map[string][]byte {
+	set := make(map[string][]byte, len(removed)+len(announced))
+
+	for i := range removed {
+		set[removeKey(removed[i].UID)] = removalValue(now, &removed[i], true, nonce, !released)
+	}
+
+	for i := range announced {
+		k := removeKey(announced[i].UID)
+		if v, ok := refreshRemoval(existing[k], now); ok {
+			set[k] = v
+			continue
+		}
+
+		set[k] = removalValue(now, &announced[i], false, nonce, !released)
+	}
+
+	return set
+}
+
+// announcedSet returns the "r:" keys of entries removed on a higher
+// shard outside unlink (the scrub's removal of uncovered entries): no
+// release of the usage follows.
+func announcedSet(now int64, metas []Meta, removed bool, nonce string) map[string][]byte {
 	set := make(map[string][]byte, len(metas))
 
 	for i := range metas {
-		m := &metas[i]
-		set[removeKey(m.UID)] = encode(removeIntent{Time: now, blobRef: blobRef{GUID: m.GUID, Size: m.Size, Chunks: m.Chunks}})
+		set[removeKey(metas[i].UID)] = removalValue(now, &metas[i], removed, nonce, true)
 	}
 
 	return set

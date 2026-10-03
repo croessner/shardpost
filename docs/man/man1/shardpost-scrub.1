@@ -56,6 +56,23 @@ lists each account's namespace in both pools,
 reports where the two differ,
 .B intents
 reads the intents only and lists nothing.
+An account with an online quota recount under way (its run key
+.B qr
+in the registry) and one whose mailboxes a
+.B mailbox_delete
+job locks (an
+.B mblock:
+record before its destroying phase) are left alone
+.RB ( OnlineSkipped
+in the report, since 0.52.0). Before its first repair of entries or
+counters a scrub sets a repair mark
+.RB ( sr:<holder> )
+in the registry, which keeps a recount from starting beside it, and
+renews it with its lease; when a renewal fails the repairs stop
+.RB ( RepairsStopped ).
+Captures a dead recount left behind are the finding
+.B quota_capture_leftover
+and are removed by the quota class.
 .B intents
 is safe only when every server of the cluster runs 0.42.0 or later:
 older servers write no removal intents, and a message they move or

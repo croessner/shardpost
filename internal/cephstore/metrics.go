@@ -22,6 +22,24 @@ func (metricsHooks) casRetry(kind, class string) {
 func (metricsHooks) timer(op string) func() { return metrics.Timer(op) }
 func (metricsHooks) listing(site string)    { metrics.RadosListings.WithLabelValues(site).Inc() }
 
+// Online quota recount (stage B16).
+func (metricsHooks) recountHold(d time.Duration) { metrics.QuotaRecountHold.Observe(d.Seconds()) }
+func (metricsHooks) recountCapture(kind string) {
+	metrics.QuotaRecountCaptures.WithLabelValues(kind).Inc()
+}
+func (metricsHooks) recountRun(mode, result, reason string) {
+	metrics.QuotaRecountRuns.WithLabelValues(mode, result, reason).Inc()
+}
+func (metricsHooks) recountPhase(phase string, d time.Duration) {
+	metrics.QuotaRecountPhase.WithLabelValues(phase).Observe(d.Seconds())
+}
+func (metricsHooks) recountDrift(bytes, msgs int64) {
+	metrics.QuotaRecountDrift.WithLabelValues("bytes").Observe(float64(bytes))
+	metrics.QuotaRecountDrift.WithLabelValues("messages").Observe(float64(msgs))
+}
+func (metricsHooks) recountDeadIntent()         { metrics.QuotaRecountDeadIntents.Inc() }
+func (metricsHooks) scrubQuotaSkipped(r string) { metrics.ScrubQuotaSkipped.WithLabelValues(r).Inc() }
+
 // timedOp runs fn as the timed operation op (imapceph_rados_op_seconds,
 // imapceph_rados_inflight_ops).
 func timedOp(op string, fn func() error) error {

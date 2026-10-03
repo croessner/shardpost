@@ -72,6 +72,15 @@ type Jobs struct {
 	// on at once in the server that runs it (scrub batches use
 	// scrub.parallel).
 	BatchParallel int `mapstructure:"batch_parallel" validate:"gte=1,lte=32"`
+	// MailboxDeleteOnline is what a plan of mailbox_delete without
+	// "online" gets (stage B17): "auto" the mailbox lock while the
+	// cluster mark is set ("shardpostctl mailbox lock enable"), "off" the
+	// account lock as before 0.52.0.
+	MailboxDeleteOnline string `mapstructure:"mailbox_delete_online" validate:"oneof=auto off"`
+	// MailboxLockBarrierSeconds bounds how long a mailbox_delete with the
+	// mailbox lock waits for the operations that started before its
+	// lock; after it the job is given back and tried again later.
+	MailboxLockBarrierSeconds int `mapstructure:"mailbox_lock_barrier_seconds" validate:"gte=10,lte=900"`
 }
 
 // Workers decides whether a server ("shardpost serve") runs the
@@ -83,7 +92,7 @@ type Jobs struct {
 // of the queues, and leaves the running to the runners. Run false takes
 // precedence over jmap.submission.delayed.worker. The key is meant to
 // be set through the environment (WORKERS_RUN), so that a way back to
-// an image before 0.53.0 does not break on an unknown configmap key.
+// an image before 0.52.0 does not break on an unknown configmap key.
 type Workers struct {
 	Run bool `mapstructure:"run" env:"WORKERS_RUN"`
 }

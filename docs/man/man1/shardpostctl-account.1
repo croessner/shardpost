@@ -1,4 +1,4 @@
-.TH SHARDPOSTCTL-ACCOUNT 1 "2026-10-01" "ShardPost 0.36.1" "ShardPost Manual"
+.TH SHARDPOSTCTL-ACCOUNT 1 "2026-10-03" "ShardPost 0.51.0" "ShardPost Manual"
 .SH NAME
 shardpostctl-account \- look up an account, its quota and its shares; list the account directory; repair a directory entry
 .SH SYNOPSIS
@@ -9,6 +9,17 @@ shardpostctl-account \- look up an account, its quota and its shares; list the a
 .B shardpostctl quota show
 .RB [ \-\-json ]
 .I account
+.br
+.B shardpostctl quota online status
+.RB [ \-\-json ]
+.br
+.B shardpostctl quota online enable \-pods
+.I n
+.RB [ \-force ]
+.RB [ \-\-json ]
+.br
+.B shardpostctl quota online disable
+.RB [ \-\-json ]
 .br
 .B shardpostctl shared list
 .RB [ \-\-json ]
@@ -75,6 +86,41 @@ If the two look implausible, recount them with the
 .B quota_recalc
 job; see
 .BR shardpostctl-job (1).
+.SS quota online status
+Shows whether the cluster mark of online quota recounts
+.RB ( quota/online ,
+since 0.52.0) is set, with the server registrations as
+.B fts layout3 status
+shows them. The mark allows
+.B quota_recalc
+to run without the account lock: the writers capture every change of
+the usage while the run counts, and one compare-and-swap switches the
+counters; deliveries, logins and sessions go on. A server before 0.52.0
+does not capture, so the counters a run switched to would be wrong (a
+following run corrects them; no mail is lost): the mark needs every
+server to know it. Without the mark every run is offline under the
+account lock, as before 0.52.0. Role:
+.BR diagnose .
+.SS quota online enable
+Sets the mark when exactly
+.I n
+fresh registrations of servers report the capability
+.BR quota_online_recount ;
+otherwise it is refused with exit code 65 naming the instances.
+.B \-force
+sets it without the check (audited). Plans with
+.B \-online
+are allowed from then on, and with
+.I "quota.online_recount: auto"
+also plans without it. Role:
+.BR repair .
+.SS quota online disable
+Removes the mark: new plans run offline, a plan with
+.B \-online
+is refused. Runs that started finish or end busy; before a downgrade
+to a version before 0.52.0 wait for them (or cancel the jobs, which
+clears their run keys). Role:
+.BR repair .
 .SS shared list
 Lists the mailboxes of other accounts this account was granted rights
 on, as the client sees them under the shared prefix
@@ -253,6 +299,15 @@ shardpostctl account show info@example.org
 .nf
 .RS
 shardpostctl quota show user@example.org
+.RE
+.fi
+.PP
+Allow online quota recounts once every pod runs 0.52.0:
+.PP
+.nf
+.RS
+shardpostctl quota online status
+shardpostctl quota online enable -pods 3
 .RE
 .fi
 .PP

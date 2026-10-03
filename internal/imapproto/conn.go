@@ -369,6 +369,9 @@ type conn struct {
 	attempts  auth.LoginAttempts
 	wmu       sync.Mutex // serialises writes from the command loop and bye()
 	lockProbe model.LockProbe
+	// selectedProbe re-checks the selected mailbox for a mailbox lock
+	// or its deletion (stage B17).
+	selectedProbe model.LockProbe
 	// othersProbe is when the views of other namespaces (see other) are
 	// next checked for a lock.
 	othersProbe time.Time
@@ -667,6 +670,10 @@ func (c *conn) commandResult(tag string, err error) error {
 		}
 	case errors.Is(err, errSyntax):
 		c.w.line("%s BAD %v", tag, err)
+	case errors.Is(err, errSelectedGone):
+		// The BYE is written and the state is logout: the loop ends
+		// after the flush (the IDLE gets no tagged answer, RFC 9051
+		// 7.1.5).
 	default:
 		return err // connection-level error
 	}
@@ -732,6 +739,11 @@ func (c *conn) storeErr(tag string, err error) {
 		// sharing account — is being imported or maintained.
 		c.log.Info("command refused, a namespace it needs is locked (import or maintenance)")
 		c.no(tag, "UNAVAILABLE", "Mailbox maintenance in progress, try again later")
+	case errors.Is(err, model.ErrMailboxLocked):
+		// A mailbox_delete job is about to remove the mailbox (stage
+		// B17): only this mailbox is refused, the session goes on.
+		metrics.MailboxLockRefusals.WithLabelValues(protoIMAP, c.cmdName).Inc()
+		c.no(tag, "UNAVAILABLE", "Mailbox is being deleted")
 	default:
 		c.log.Error("storage error", "err", err)
 		c.no(tag, "SERVERBUG", "Storage error")
@@ -932,6 +944,12 @@ func (c *conn) dispatch(tag, name string, uid bool) error {
 		c.w.untagged("BYE [UNAVAILABLE] Mailbox maintenance in progress, try again later")
 		c.state = stateLogout
 
+		return nil
+	}
+
+	// The selected mailbox, every model.LockCheckInterval: a mailbox a
+	// mailbox_delete locked, or one that is gone, closes the session.
+	if c.mbox != nil && c.selectedGone(c.selectedProbe.Selected(c.mu, c.mbox.Name)) {
 		return nil
 	}
 

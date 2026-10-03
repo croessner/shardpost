@@ -420,6 +420,16 @@ var defaults = []struct {
 	{"jobs.expiry_seconds", 60},
 	{"jobs.batch_parallel", 2},
 	{"workers.run", true},
+	{"jobs.mailbox_delete_online", OnlineOff},
+	{"jobs.mailbox_lock_barrier_seconds", 120},
+	{"quota.online_recount", OnlineOff},
+	{"quota.recount_barrier_seconds", 120},
+	{"quota.recount_dead_intent_seconds", 600},
+	{"quota.recount_switch_attempts", 10},
+	{"quota.recount_hold_ms", 2000},
+	{"quota.recount_max_capture_keys", 1000},
+	{"quota.recount_max_capture_entries", 1000000},
+	{"quota.recount_release_chunk", 10000},
 	{"trace.max_line_bytes", 2048},
 	{"trace.max_duration_seconds", 86400},
 	{"trace.default_duration_seconds", 1800},
@@ -1067,6 +1077,19 @@ func (c *Config) checkPrograms() error {
 
 	if err := c.Quota.Validate(); err != nil {
 		return err
+	}
+
+	// A run must never believe in an intent longer than the scrub does:
+	// the scrub removes it after the intent grace.
+	if int64(c.Quota.RecountDeadIntentSeconds) > c.Scrub.IntentGraceSeconds {
+		return fmt.Errorf("quota.recount_dead_intent_seconds (%d) must not exceed scrub.intent_grace_seconds (%d)",
+			c.Quota.RecountDeadIntentSeconds, c.Scrub.IntentGraceSeconds)
+	}
+
+	// With the mailbox lock the settle time is what lets IMAP sessions
+	// notice the lock (registry cache 2 s, lock probe 5 s).
+	if c.Jobs.MailboxDeleteOnline == OnlineAuto && c.Jobs.SettleSeconds < 7 {
+		return fmt.Errorf("jobs.settle_seconds (%d) must be at least 7 with jobs.mailbox_delete_online auto", c.Jobs.SettleSeconds)
 	}
 
 	return c.checkQuotaPrograms()

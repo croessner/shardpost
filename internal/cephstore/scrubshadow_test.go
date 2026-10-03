@@ -32,7 +32,7 @@ func crashedDelivery(t *testing.T, u *User, mb *Mailbox) string {
 	guid := newGUID()
 	raw := testMessage("crashed", 300)
 
-	if _, err := u.reserveWith(mb, Quota{}, map[string][]byte{blobIntentKey(guid): u.newBlobIntent(int64(len(raw)))}); err != nil {
+	if _, err := u.reserveWith(mb, Quota{}, map[string][]byte{blobIntentKey(guid): u.newBlobIntent(int64(len(raw)), mb.ID)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,11 +198,11 @@ func TestDeleteMailboxLateDelivery(t *testing.T) {
 
 	late := deliverN(t, u, "Box", 3, 300) // UIDs 3-5, on shards 0 and 1
 
-	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info); err != nil || lost {
+	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info, ""); err != nil || lost {
 		t.Fatalf("unregister: %v, lost %v", err, lost)
 	}
 
-	if err := u.destroyUnregistered(mb, info, metas, "Box"); err != nil {
+	if _, err := u.destroyUnregistered(mb, info, metas, "Box"); err != nil {
 		t.Fatal(err)
 	}
 

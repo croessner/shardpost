@@ -76,7 +76,7 @@ spec:
               value: "8"
             # imapsieve.learning.concurrency 8 and the learning programs'
             # max_parallel of at least 8 belong into the configmap once every
-            # pod runs 0.53.0 (an older image refuses an unknown key).
+            # pod runs 0.52.0 (an older image refuses an unknown key).
             - name: GOMEMLIMIT
               value: "1800MiB"
             - name: MALLOC_ARENA_MAX

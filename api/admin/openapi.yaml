@@ -552,7 +552,11 @@ paths:
         with `dict_filter: ids` the cluster mark of the dictionary filter
         (`POST /admin/v1/fts/dictfilter/enable`), `fts_layout` and
         `fts_rebuild` with `online: true` the cluster mark of online runs
-        (`POST /admin/v1/fts/online/enable`); without them the plan
+        (`POST /admin/v1/fts/online/enable`), `quota_recalc` with
+        `online: true` the mark of online quota recounts (`POST
+        /admin/v1/quota/online/enable`) and `mailbox_delete` with
+        `online: true` the mark of the mailbox lock (`POST
+        /admin/v1/mailbox/lock/enable`); without them the plan
         is refused with `conflict` (409). `fts_dict_convert` is a
         legacy kind for layout 2 indexes written before 0.35.0; for an
         account whose index has layout 3 it is refused with `conflict`
@@ -582,10 +586,10 @@ paths:
         directory, one account after another with a bounded parallelism
         (`jobs.batch_parallel`, for scrub `scrub.parallel`). Kinds:
         `index_check` (role `diagnose`), `scrub`, `fts_rebuild`,
-        `attachment_backfill`, `fts_layout` (role `repair`); the batch needs the role of
+        `attachment_backfill`, `fts_layout`, `quota_recalc` (role `repair`); the batch needs the role of
         its kind and the scope of all accounts (socket callers; mutual-TLS
-        clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`
-        unless online) takes the maintenance lock per account; an account
+        clients with `all_accounts`). An exclusive kind (`fts_rebuild`, `fts_layout`,
+        `quota_recalc` unless online) takes the maintenance lock per account; an account
         another job or an import holds (or, online, another run of the
         account is alive) is tried again at the end; online, an account
         without a layout 3 index counts as `unsupported`. A batch of
@@ -1782,6 +1786,147 @@ paths:
                 $ref: "#/components/schemas/FTSLayout3Status"
         default:
           $ref: "#/components/responses/Error"
+  /admin/v1/quota/online:
+    get:
+      operationId: getQuotaOnline
+      summary: The mark of online quota recounts
+      description: |
+        Whether the cluster mark of online quota recounts (`quota/online`,
+        since 0.52.0) is set, and the server registrations as for layout
+        3. The mark allows `quota_recalc` jobs to run without the
+        account's maintenance lock: deliveries, logins and sessions go
+        on, the writers capture every change of the usage while the run
+        counts, and one compare-and-swap switches the counters. Without
+        the mark every run is offline, as before 0.52.0. Requires the
+        role `diagnose`.
+      responses:
+        "200":
+          description: The mark and the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/quota/online/enable:
+    post:
+      operationId: enableQuotaOnline
+      summary: Allow online quota recounts
+      description: |
+        Sets the cluster mark of online quota recounts after checking
+        that exactly `pods` fresh registrations of servers report the
+        capability `quota_online_recount` (since 0.52.0); otherwise as
+        the layout 3 mark. A server before 0.52.0 does not capture its
+        usage changes for a run, so the counters a run switched to would
+        be wrong (no mail is lost): every server must know it first.
+        Refused with `conflict` (409) when the registrations do not
+        match. Requires the role `repair`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FTSLayout3Enable"
+      responses:
+        "200":
+          description: The mark is set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/quota/online/disable:
+    post:
+      operationId: disableQuotaOnline
+      summary: Remove the mark of online quota recounts
+      description: |
+        Removes the cluster mark of online quota recounts: new plans of
+        `quota_recalc` run offline (`online: true` is refused with
+        `conflict`). Runs that already started finish or end busy; before
+        a downgrade to a version before 0.52.0 wait for them (or cancel
+        the jobs, which clears their run keys). Requires the role
+        `repair`.
+      responses:
+        "200":
+          description: The mark is gone; the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/mailbox/lock:
+    get:
+      operationId: getMailboxLock
+      summary: The mark of the mailbox lock of mailbox_delete
+      description: |
+        Whether the cluster mark of the mailbox lock (`mailbox/lock`,
+        since 0.52.0) is set, and the server registrations as for layout
+        3. The mark allows `mailbox_delete` jobs to lock only the
+        mailboxes they remove instead of the account: deliveries, logins
+        and sessions go on, a write into a locked mailbox is refused
+        (IMAP `NO [UNAVAILABLE]`, JMAP `forbidden` or
+        `invalidProperties`), a Sieve `fileinto` into one goes to INBOX,
+        and only a session that has a locked mailbox selected is closed
+        with `BYE`. Without the mark every run takes the account lock,
+        as before 0.52.0. Requires the role `diagnose`.
+      responses:
+        "200":
+          description: The mark and the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/mailbox/lock/enable:
+    post:
+      operationId: enableMailboxLock
+      summary: Allow the mailbox lock of mailbox_delete
+      description: |
+        Sets the cluster mark of the mailbox lock after checking that
+        exactly `pods` fresh registrations of servers report the
+        capability `mailbox_lock` (since 0.52.0); otherwise as the layout
+        3 mark. A server before 0.52.0 does not see the lock and would
+        deliver into a mailbox that is being deleted: every server must
+        know it first. Refused with `conflict` (409) when the
+        registrations do not match. Requires the role `repair`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FTSLayout3Enable"
+      responses:
+        "200":
+          description: The mark is set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
+  /admin/v1/mailbox/lock/disable:
+    post:
+      operationId: disableMailboxLock
+      summary: Remove the mark of the mailbox lock
+      description: |
+        Removes the cluster mark of the mailbox lock: new plans of
+        `mailbox_delete` take the account lock (`online: true` is refused
+        with `conflict`). Runs that already started finish; before a
+        downgrade to a version before 0.52.0 wait for them (or cancel
+        the jobs, which unlocks their mailboxes). Requires the role
+        `repair`.
+      responses:
+        "200":
+          description: The mark is gone; the registrations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FTSLayout3Status"
+        default:
+          $ref: "#/components/responses/Error"
   /admin/v1/fts/layout3/accounts:
     get:
       operationId: listFTSLayout3Accounts
@@ -2546,7 +2691,7 @@ components:
       properties:
         kind:
           type: string
-          pattern: "^(index_check|scrub|fts_rebuild|attachment_backfill|fts_layout)$"
+          pattern: "^(index_check|scrub|fts_rebuild|attachment_backfill|fts_layout|quota_recalc)$"
           description: The kind to run on every account.
         params:
           type: object
@@ -2556,7 +2701,8 @@ components:
             (empty = all); fts_layout: `layout`, `shards` or `shape`,
             `dict_filter`, `due_only`, `online` (see `FTSLayoutParams`);
             fts_rebuild: `online`, `skip_unreadable`, `drop_orphan_ids`
-            (see `FTSRebuildParams`). The other kinds take none. An
+            (see `FTSRebuildParams`); quota_recalc: `online` (since
+            0.52.0). The other kinds take none. An
             omitted `online` is decided by the plan for the whole batch
             (accounts without a layout 3 index then count as
             `unsupported`).
@@ -2910,7 +3056,7 @@ components:
           type: string
           description: |
             What the process is: `serve`, `push`, `scrub`, `backfill`,
-            `sweep` or `runner` (a job runner pod, since 0.53.0); missing
+            `sweep` or `runner` (a job runner pod, since 0.52.0); missing
             in registrations before 0.47.0, which are servers.
         system_pool:
           $ref: "#/components/schemas/PoolRef"
@@ -2936,7 +3082,7 @@ components:
           type: boolean
           description: |
             Whether a server runs the background workers (`workers.run`,
-            since 0.53.0); missing before and for the other roles.
+            since 0.52.0); missing before and for the other roles.
     ServerRegistrationList:
       type: object
       required: [servers]
@@ -3448,9 +3594,16 @@ components:
             `layout`, `shards` or `shape`, `dict_filter`, `due_only`,
             `online` (see `FTSLayoutParams`); fts_rebuild: `online`,
             `skip_unreadable`, `drop_orphan_ids` (see
-            `FTSRebuildParams`); mailbox_delete:
-            `mailbox_id`; expunge: `mailbox_id` and `uids` (list) or
-            `deleted: true` (every message flagged \Deleted when planned).
+            `FTSRebuildParams`); quota_recalc: `online` (since 0.52.0:
+            `true` recounts without the account lock, needs the mark
+            `quota/online`, else 409; omitted: online with the mark and
+            `quota.online_recount: auto`; the plan records the
+            decision); mailbox_delete: `mailbox_id`, `online` (since
+            0.52.0: `true` locks only the mailboxes it removes, needs
+            the mark `mailbox/lock`, else 409; omitted: with the mark
+            and `jobs.mailbox_delete_online: auto`); expunge:
+            `mailbox_id` and `uids` (list) or `deleted: true` (every
+            message flagged \Deleted when planned).
     Plan:
       type: object
       required: [id, kind, account, summary, principal, created, expires]

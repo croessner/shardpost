@@ -114,7 +114,7 @@ func markEnable(stderr io.Writer, group string, a ftsArgs, enable func(adminapi.
 	show func(*adminapi.FTSLayout3Status) int,
 ) int {
 	if a.pods < 1 {
-		sayln(stderr, "shardpostctl: fts "+group+" enable needs -pods <number of running servers>")
+		sayln(stderr, "shardpostctl: "+group+" enable needs -pods <number of running servers>")
 		return exUsage
 	}
 
@@ -142,7 +142,7 @@ func dictFilterCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb st
 			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 		}, show)
 	case verbEnable:
-		return markEnable(stderr, "dictfilter", a, func(body adminapi.FTSLayout3Enable) statusCall {
+		return markEnable(stderr, "fts dictfilter", a, func(body adminapi.FTSLayout3Enable) statusCall {
 			return func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
 				resp, err := c.EnableFTSDictFilterWithResponse(ctx, body)
 				if err != nil {
@@ -189,7 +189,7 @@ func onlineCmd(ctx context.Context, c *adminapi.ClientWithResponses, verb string
 			return resp.JSON200, resp.JSONDefault, resp.StatusCode(), nil
 		}
 	case verbEnable:
-		return markEnable(stderr, "online", a, func(body adminapi.FTSLayout3Enable) statusCall {
+		return markEnable(stderr, "fts online", a, func(body adminapi.FTSLayout3Enable) statusCall {
 			return func() (*adminapi.FTSLayout3Status, *adminapi.Error, int, error) {
 				resp, err := c.EnableFTSOnlineWithResponse(ctx, body)
 				if err != nil {

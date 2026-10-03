@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 	"shardpost/internal/sieve"
 )
@@ -36,6 +38,11 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 
 	var done []delivered
 
+	// where are the targets stored into so far, by namespace and
+	// mailbox: a fileinto redirected to INBOX (a mailbox being deleted,
+	// stage B17) and a later keep are one copy, in either order.
+	where := map[string]bool{}
+
 	fail := func(err error) ([]Stored, error) {
 		if r.rollback(done) {
 			_ = r.endIntents(intents) // nothing left to roll back
@@ -45,13 +52,22 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 	}
 
 	for i, f := range files {
-		meta, err := r.storeOne(intents, targets[i], raw, f)
+		if where[targetKey(targets[i])] {
+			continue
+		}
+
+		t, meta, err := r.storeOne(&intents, targets[i], raw, f, where)
 		if err != nil {
 			return fail(err)
 		}
 
-		done = append(done, delivered{targets[i], *meta})
-		r.log.Info("delivered", "user", user, "from", r.req.From, "mailbox", targets[i].where, "uid", meta.UID, "guid", meta.GUID, "size", meta.Size)
+		if meta == nil {
+			continue // redirected to a mailbox that holds the message already
+		}
+
+		where[targetKey(t)] = true
+		done = append(done, delivered{t, *meta})
+		r.log.Info("delivered", "user", user, "from", r.req.From, "mailbox", t.where, "uid", meta.UID, "guid", meta.GUID, "size", meta.Size)
 	}
 
 	if err := r.endIntents(intents); err != nil {
@@ -66,6 +82,9 @@ func (r *run) store(raw []byte, d *sieve.Delivery) ([]Stored, error) {
 
 	return stored, nil
 }
+
+// targetKey identifies a target by namespace and mailbox.
+func targetKey(t target) string { return t.where + "\x00" + t.mailbox }
 
 // resolve turns the fileinto list into targets, dropping a target that
 // another one already names. Sieve deduplicates by name before the
@@ -176,19 +195,42 @@ func (r *run) endIntents(intents []intent) error {
 }
 
 // storeOne records the target in the intent of its namespace and stores
-// the message (or the target's own edited copy) there.
-func (r *run) storeOne(intents []intent, t target, raw []byte, f sieve.FileInto) (*model.Meta, error) {
+// the message (or the target's own edited copy) there. It returns the
+// target the message went to: a mailbox a mailbox_delete locked between
+// the resolution and the store (stage B17) refuses the message, which
+// then goes to INBOX like any failed fileinto, under a new GUID that the
+// intent names for INBOX, so that a rollback after a crash finds the
+// copy where it lies. A nil meta says INBOX holds the message already.
+func (r *run) storeOne(intents *[]intent, t target, raw []byte, f sieve.FileInto, where map[string]bool) (target, *model.Meta, error) {
 	if !t.public && !t.ensured {
 		if err := t.u.EnsureMailbox(t.mailbox, nil); err != nil {
-			return nil, err
+			if model.MailboxLockedError(err) {
+				return r.redirectLocked(intents, t, raw, f, where)
+			}
+
+			return t, nil, err
 		}
 	}
 
 	guid := model.NewGUID()
-	if err := t.u.RecordDelivery(intentOf(intents, t.u), t.mailbox, guid); err != nil {
-		return nil, err
+	if err := t.u.RecordDelivery(intentOf(*intents, t.u), t.mailbox, guid); err != nil {
+		if model.MailboxLockedError(err) {
+			return r.redirectLocked(intents, t, raw, f, where)
+		}
+
+		return t, nil, err
 	}
 
+	meta, err := r.deliverTo(t, guid, raw, f)
+	if model.MailboxLockedError(err) {
+		return r.redirectLocked(intents, t, raw, f, where)
+	}
+
+	return t, meta, err
+}
+
+// deliverTo stores the message into the target under guid.
+func (r *run) deliverTo(t target, guid string, raw []byte, f sieve.FileInto) (*model.Meta, error) {
 	body := f.Raw
 	if body == nil {
 		body = raw
@@ -205,6 +247,43 @@ func (r *run) storeOne(intents []intent, t target, raw []byte, f sieve.FileInto)
 	}
 
 	return meta, err
+}
+
+// redirectLocked stores a message whose target is being deleted into INBOX
+// instead (implicit keep): with its own intent entry, in a namespace
+// that gets an intent of its own if the delivery had none there, and
+// not twice when INBOX holds the message already. A caller that named
+// the mailbox itself gets the refusal: the mailbox is gone in seconds.
+func (r *run) redirectLocked(intents *[]intent, from target, raw []byte, f sieve.FileInto, where map[string]bool) (target, *model.Meta, error) {
+	if r.explicit {
+		return from, nil, ErrNoMailbox
+	}
+
+	metrics.DeliveryRedirected.WithLabelValues(metrics.ReasonLocked).Inc()
+	r.log.Warn("fileinto redirected to INBOX, the mailbox is being deleted", "user", r.req.Account, "mailbox", from.where)
+
+	inbox := target{u: r.u, mailbox: inboxName, where: inboxName}
+	if where[targetKey(inbox)] {
+		return inbox, nil, nil
+	}
+
+	if len(*intents) > 0 && intentOf(*intents, r.u) == "" {
+		id, err := r.u.BeginDelivery()
+		if err != nil {
+			return inbox, nil, err
+		}
+
+		*intents = append(*intents, intent{u: r.u, id: id})
+	}
+
+	guid := model.NewGUID()
+	if err := r.u.RecordDelivery(intentOf(*intents, r.u), inboxName, guid); err != nil {
+		return inbox, nil, err
+	}
+
+	meta, err := r.deliverTo(inbox, guid, raw, f)
+
+	return inbox, meta, err
 }
 
 // target is a resolved fileinto destination: the namespace that stores
@@ -262,16 +341,43 @@ func (r *run) target(name string) (target, error) {
 // mailbox the caller named itself is never created (checkExplicit), nor
 // a public folder.
 func (r *run) creatable(t target) (ensured bool, refused, err error) {
-	if r.explicit || t.public || t.mailbox == inboxName {
+	if t.public || t.mailbox == inboxName {
+		return false, lockedTarget(t), nil
+	}
+
+	if r.explicit {
 		return false, nil, nil
 	}
 
 	err = t.u.EnsureMailbox(t.mailbox, nil)
-	if errors.Is(err, model.ErrLimit) {
+
+	switch {
+	case errors.Is(err, model.ErrLimit):
 		return false, err, nil
+	case model.MailboxLockedError(err):
+		// The mailbox, or one above it, is being deleted (stage B17):
+		// the message goes to INBOX like any other failed fileinto.
+		return false, err, nil
+	case err != nil:
+		return false, nil, err
 	}
 
-	return err == nil, nil, err
+	return true, lockedTarget(t), nil
+}
+
+// lockedTarget reports model.ErrMailboxLocked when the target's record
+// (from the lookup cache, no extra read) carries a live mailbox lock.
+func lockedTarget(t target) error {
+	if t.mailbox == inboxName {
+		return nil
+	}
+
+	mb, err := t.u.Lookup(t.mailbox)
+	if err != nil || !mb.Lock.Held("", time.Now()) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s", model.ErrMailboxLocked, t.where)
 }
 
 // resolveTarget resolves a name without any fallback. refused says why
@@ -353,7 +459,7 @@ func (r *run) rollback(done []delivered) bool {
 	ok := true
 
 	for _, d := range done {
-		if err := d.target.u.Expunge(d.target.mailbox, []model.Meta{d.meta}); err != nil {
+		if err := expungeOwn(d.target.u, d.target.mailbox, []model.Meta{d.meta}); err != nil {
 			r.log.Error("delivery rollback failed", "mailbox", d.target.where, "uid", d.meta.UID, "err", err)
 
 			ok = false
@@ -370,4 +476,16 @@ func (r *run) track(d *sieve.Delivery) {
 			r.log.Warn("duplicate record failed", "user", r.req.Account, "err", err)
 		}
 	}
+}
+
+// expungeOwn removes entries this delivery wrote itself: without the
+// mailbox lock check where the store has one (a copy stored before a
+// mailbox_delete locked the mailbox must still be rolled back, or the
+// client would deliver it again).
+func expungeOwn(u model.User, mailbox string, metas []model.Meta) error {
+	if o, ok := u.(model.OwnExpunger); ok {
+		return o.ExpungeOwn(mailbox, metas)
+	}
+
+	return u.Expunge(mailbox, metas)
 }
