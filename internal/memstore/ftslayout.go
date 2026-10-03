@@ -37,7 +37,19 @@ func (u *User) ConvertFTSLayout(req model.FTSLayoutRequest) (model.FTSLayoutRepo
 
 	shape := model.FTSLayoutShape{Layout: model.FTSLayout2}
 
-	return model.FTSLayoutReport{From: shape, To: shape, Noop: true, Reason: "the store has one layout"}, nil
+	// An online rebuild (stage B14i) indexes every message again with the
+	// store's options at once: the switch to them, as a cephstore
+	// generation built with them answers.
+	if req.Online && req.Rebuild {
+		n, err := u.rebuild(func(int, int) {})
+		if err != nil {
+			return model.FTSLayoutReport{}, err
+		}
+
+		return model.FTSLayoutReport{From: shape, To: shape, Online: true, Mode: model.FTSModeReindex, Docs: int64(n), Indexed: int64(n)}, nil
+	}
+
+	return model.FTSLayoutReport{From: shape, To: shape, Noop: true, Reason: "the store has one layout", Online: req.Online}, nil
 }
 
 // ClearFTSLayoutNext implements model.FTSLayouter: there is never an

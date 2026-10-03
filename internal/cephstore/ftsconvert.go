@@ -59,6 +59,9 @@ const (
 	phaseP7 = "P7"
 )
 
+// reasonNothing is the reason of a run that found nothing to do.
+const reasonNothing = "nothing to do"
+
 // errConversionLost: the record no longer carries the run's token.
 var errConversionLost = errors.New("the conversion was taken over or removed meanwhile")
 
@@ -100,7 +103,7 @@ func (u *User) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
 	}
 
 	shape := target.shape()
-	shape.Capped = capped
+	shape.Capped, shape.Docs, shape.Load = capped, u.lastCounts.docs, u.lastCounts.load
 
 	return shape, !sameShape(target, cur) || !target.sameProps(cur), nil
 }
@@ -120,6 +123,8 @@ func (u *User) reshardTarget(cur ftsLoc, dx, sample int) (ftsLoc, []string, erro
 	if err != nil {
 		return ftsLoc{}, nil, err
 	}
+
+	u.lastCounts.docs = docs
 
 	if dx != cur.dx {
 		f, err := u.dictFactor(cur, dx, sample)
@@ -243,15 +248,26 @@ func (u *User) sourceText(src ftsLoc) (string, error) {
 // objects, checks the generation marker of every other object, and
 // reads the document count and the version marker (S + D + H + 1
 // reads).
+//
+// It also notes the load of the generation (lastCounts.load): its
+// largest object relative to its target, by the rules of reshardDue
+// (1.5 asks for a reshard), which the fts_due worker compares with the
+// urgent factor outside the reshard window.
 func (u *User) layoutCounts(cur ftsLoc) (terms, dict, docs int64, v []byte, err error) {
+	z := u.ftsCfg.sizing
+	load := 0.0
+
 	for _, oid := range cur.objects() {
 		vals, err := u.genMarkers(cur, oid)
 		if err != nil {
 			return 0, 0, 0, nil, err
 		}
 
-		terms += atoiMarker(vals[markTerms])
-		dict += atoiMarker(vals[markDict])
+		n, dn := atoiMarker(vals[markTerms]), atoiMarker(vals[markDict])
+		terms += n
+		dict += dn
+
+		load = max(load, float64(n)/float64(z.target), float64(dn)*float64(cur.s)/float64(max(cur.d, 1))/float64(z.dictTarget))
 	}
 
 	vals, err := getOmapKeys(u.idx, oidFTSMap, []string{ftsCountKey, ftsVersionKey3})
@@ -259,7 +275,10 @@ func (u *User) layoutCounts(cur ftsLoc) (terms, dict, docs int64, v []byte, err 
 		return 0, 0, 0, nil, err
 	}
 
-	return terms, dict, atoiMarker(vals[ftsCountKey]), vals[ftsVersionKey3], nil
+	docs = atoiMarker(vals[ftsCountKey])
+	u.lastCounts.load = max(load, float64(docs)/float64(max(cur.h, 1))/float64(z.target))
+
+	return terms, dict, docs, vals[ftsVersionKey3], nil
 }
 
 // genMarkers reads the markers of an object of generation cur; a
@@ -282,6 +301,14 @@ func (u *User) genMarkers(cur ftsLoc, oid string) (map[string][]byte, error) {
 func (u *User) ConvertFTSLayout(req model.FTSLayoutRequest) (rep model.FTSLayoutReport, err error) {
 	if req.Tok == "" {
 		return rep, errors.New("fts layout: a run token is required")
+	}
+
+	if req.Online {
+		return u.convertOnline(req)
+	}
+
+	if req.Rebuild {
+		return rep, errors.New("fts layout: a rebuild through the layout runs online only")
 	}
 
 	req = withRequestDefaults(req)
@@ -315,7 +342,7 @@ func (u *User) ConvertFTSLayout(req model.FTSLayoutRequest) (rep model.FTSLayout
 
 	target, resume, err := u.conversionTarget(req, l, src)
 	if err != nil || target == nil {
-		rep.Noop, rep.Reason, rep.To = err == nil, "nothing to do", src.shape()
+		rep.Noop, rep.Reason, rep.To = err == nil, reasonNothing, src.shape()
 		return rep, err
 	}
 
@@ -430,7 +457,14 @@ func (u *User) ClearFTSLayoutOld(tok string) (bool, error) {
 
 	defer u.ftsForget()
 
-	return true, u.removeOld(l.Old[i])
+	if err := u.removeOld(l.Old[i]); err != nil {
+		return true, err
+	}
+
+	// the records of an online run that stopped in its O8
+	_, err = u.dropBuildKeys(func(t string) bool { return t == tok })
+
+	return true, err
 }
 
 // oldOf returns the index of the "old" entry of tok, or -1.
@@ -1329,8 +1363,11 @@ func (u *User) ClearForeignFTSLayoutNext(own string) (string, error) {
 // clearNext removes the record's "next" when match accepts its token:
 // the record first (a freeze without "next" is stale for every writer),
 // then the freezes of exactly that token are lifted, then the targets
-// deleted. A run that still lives fails at its next fence, at the
-// deleted targets (AssertExists) or at the token check of P6.
+// deleted, and for an online run its "w:" keys and "w#" (only those of
+// its token, each page in a compare-and-swap with the record; what a
+// crash leaves the scrub removes). A run that still lives fails at its
+// next fence, at the deleted targets (AssertExists) or at the token
+// check of P6 (O7).
 func (u *User) clearNext(match func(tok string) bool) (string, error) {
 	l, err := u.readLayout()
 	if err != nil || l == nil || l.Next == nil || !match(l.Next.Tok) {
@@ -1353,6 +1390,12 @@ func (u *User) clearNext(match func(tok string) bool) (string, error) {
 
 	if err := u.deleteObjects(targetObjects(next, u.ftsShards)); err != nil {
 		return next.Tok, err
+	}
+
+	if next.On {
+		if _, err := u.dropBuildKeys(func(t string) bool { return t == next.Tok }); err != nil {
+			return next.Tok, err
+		}
 	}
 
 	return next.Tok, u.presenceAfterClear(next, rest)

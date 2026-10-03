@@ -1945,6 +1945,134 @@ identifiers lack their trigram keys; the scrub reports it as
 the older writers wrote a superset since). The way back is in
 [operations](../operations/README.md#dictionary-filter-and-attached-headers-0500).
 
+<a id="online-runs-of-the-full-text-index"></a>
+### Online runs (0.51.0)
+
+An offline `fts_layout` or `fts_rebuild` holds the account lock for the
+whole job: deliveries get a temporary failure, logins are refused and
+running IMAP and POP3 sessions end within five seconds. With the cluster
+mark `fts/online` both run *online*, without the lock
+([ftsonline.go](../../internal/cephstore/ftsonline.go)): users notice at
+most a search that starts over once at the switch.
+
+**Recording through the id map.** Writers keep writing into the current
+generation only. While `L.next` carries `on`, the compare-and-swap of the
+id map that every indexing does anyway (it allocates the document ids
+and reads `L`) also records the indexed GUIDs for the run, in the same
+write:
+
+| Key in `ftsmap` | Value |
+|---|---|
+| `w:<guid>` | `<tok>:<id>`: the run and the id the GUID had (a GUID indexed again with a new id is recorded again) |
+| `w#` | `<tok>:<n>`: the writes of `w:` keys for the run (starts again for another token) |
+
+`L.next` gets three fields besides the target: `on`, `m` (`copy` from
+the postings, a reshard or a change of the identifier filter;
+`reindex` from the messages, a rebuild or a change of the text
+preparation) and `hold` (Unix milliseconds, see below). `L` itself does
+not change in the id allocation.
+
+**The soft freeze.** The run freezes the source posting objects as an
+offline run does (`!s` = `frozen:<tok>`), but for writers of 0.51.0 the
+freeze is *soft*: an operation that meets it reads `L` once; if the
+generation is still current and `next` is an online run it is recorded
+for, it writes through every freeze of that run (and the one it met)
+for the rest of the operation — one anomaly round per operation, never
+the frozen wait. An indexing that allocated its ids before the run
+began (it read `L` before `next` existed) records itself first
+(`registerBuild`, one compare-and-swap). The state is bound to the
+run's token: a freeze of any other run is an anomaly again, so an
+operation that wrote through run A's freeze never writes through the
+hard freeze of an offline run B that replaced A. A removal records
+nothing: it removes from the current generation, and the target keeps
+at most a dead id, which every search filters. Readers read on through
+a frozen object of the current generation after one look at `L` per
+search.
+
+**The run.**
+
+| Phase | |
+|---|---|
+| O1 | without a lock: the mark (refused without it); the account locked by an import or another job, or another run alive (its job runs, or an import heartbeat is fresh) → *busy*, no change; the `next` and `old` of runs that ended are cleared (with their `w:` keys); the target and the mode; the window (a run the worker or a batch planned starts only when its estimate fits); an account without a layout 3 index → *unsupported* |
+| O2 | fence; the targets are created, then `L.next` = {target, tok, on, m} while `next` is still empty. From here on writers record. The import lock is read again: an import that locked meanwhile wins (the run's `next` goes, busy) |
+| O3 | the soft freeze of every source posting object, each after a look at `L` (a run that was taken over stops before it overwrites the freeze of its successor) |
+| O4 | the snapshot of the id map (after O3: a writer of an older version whose postings came before the freeze is in it); for `reindex` also the mailboxes, listed a page at a time and kept only as GUID → size and chunks |
+| O5 | `copy`: the copy of P5 into the targets, which no one else writes; `reindex`: every live message of the snapshot from its blob, with the target's text preparation and the snapshot's ids, then the messages of the mailboxes that have no id (through the writers, so they are recorded). The run writes with a *fixed* write: every anomaly in the target (a missing object, another generation) means that another run took over, and the run stops (`errConversionLost`) — it never follows `L` into the current generation, waits for a freeze or queues a reshard |
+| O6 | catch-up rounds: read `w#`, then every `w:` key of the run, and index the pairs not done yet from their blobs into the target. Once, before the first switch, the whole `i:` range of the id map is compared with the snapshot: live documents that are neither in it nor recorded (a writer of an older version, a message without terms) are indexed too |
+| O7 | fence; the switch, one compare-and-swap of the id map: only while `next` carries the token and `on`, and `w#` is what the last round read before its listing. `L` names the target, the source goes to `old`; `c` stays. `copy` sets the target's version marker when the source's was trusted (as P6); `reindex` sets it in any case and removes the rebuild key `r` — an online rebuild heals an index an offline rebuild left midway |
+| O8 | fence; the sources go, then the run's `w:` keys and `w#` (each page in a compare-and-swap with `L` that keeps the keys of the run `next` names), then the `old` entry |
+
+Crash hooks follow every phase. The run of a job never continues
+across lease generations: the job that takes over finds a `next` of
+the same job with another token, clears it and starts again.
+
+**Why the target is complete.** Every live document's id allocation
+lies before O2, between O2 and O7, or after O7 (the id map serialises
+it with both). After O7 the document goes into the target directly.
+Between O2 and O7 the allocation recorded it and counted `w#`; O7
+succeeds only when `w#` equals what the last catch-up round read before
+its listing, so the round indexed it from its blob (the blob is written
+before the ids). Before O2 the document is in the snapshot: `reindex`
+indexes it from its blob; `copy` copies each posting it wrote before
+the freeze of that object, and a posting it writes after the freeze
+meets the soft freeze, whose writer records itself (and is caught up
+from the blob) — or, when `L` names the target already, writes there.
+A GUID recorded with id 1 and then again with id 2 (removed and
+indexed again) leaves only `<tok>:2`: id 1 is dead then, and the count
+still matches. Search results after the switch are those of an offline
+run over the same live messages, plus dead ids that are filtered.
+
+**Convergence and the hold.** Each round indexes the deliveries of the
+previous one. When the switch still finds new records after
+`fts.build_catchup_rounds` (5), the run sets `next.hold` = now +
+`fts.build_hold_ms` (2 s, at most 5 s). An id allocation that would
+write sees the hold, ends its round without a write, sleeps once until
+the hold ends (outside the compare-and-swap) and tries again; a
+delivery is that much slower, never refused. The run catches up once
+more and switches. A switch that fails under the hold lifts it; after
+three holds the run fails without a change (metric, log) and the
+worker plans it again.
+
+**Costs.** A delivery during a run costs no operation more (two keys
+more in the compare-and-swap it does anyway); an operation that meets
+the freeze one more read of `L`, one that began before O2 one
+compare-and-swap more. The run reads the messages delivered during it
+once more. Until O8 the account has two generations (the space of the
+target). A search during the run reads `L` once more.
+
+**What it leaves when it stops.** A run that fails or is cancelled
+clears its `next` as an offline run does; `ClearFTSLayoutNext` also
+removes the run's `w:` keys and `w#`. The runner clears it after the
+final state of an online job as well — also after a panic, also for
+`fts_rebuild` (R2.5); a batch clears it for an account whose run
+failed. Anyone who takes the account lock clears a foreign online
+`next` as any other; the online run then fails at its next look at `L`
+or at its switch. Keys a crash leaves are harmless (a later run counts
+only its own token) and the scrub removes them (`fts_build_leftover`,
+repair class `uncovered`: only keys whose token is not the one of
+`L.next` in the state it read, each page in a compare-and-swap with
+`L`).
+
+**Mixed versions.** The capability `fts_online_build` is in every
+registration of 0.51.0, and `shardpostctl fts online enable --pods n`
+sets the mark only when exactly n fresh servers report it. A server of
+an older version does not know `on`: for it the freeze is hard (it waits
+`fts.frozen_wait_seconds`, then a temporary failure, or after O7 it
+follows `L` into the target), so it loses no posting; and its id
+allocation records nothing — its postings before the freeze are in the
+snapshot, a message of it without postings is caught by the one
+comparison of the `i:` range in O6 (one after that comparison would be
+missing from the target, but it has no term to be found by in the
+source either). An older version that rewrites `L` drops `on`; the run
+notices it at its switch and stops. An older runner that claims an
+online plan ignores `online` and runs the job offline under the lock.
+Without the mark everything is as in 0.50.0.
+
+**What stays offline.** Conversions between layout 2 and 3, the import
+reshard (under the import session), and the repairs that need a new id
+map: `fts_rebuild` offline for a missing object of the current
+generation, an unreadable id map or `L`, or a cluster without the mark.
+
 ## Repair and its limits
 
 The scrubber checks references, quota, orphaned blobs,

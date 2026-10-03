@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"syscall"
+
+	"github.com/ceph/go-ceph/rados"
 
 	"shardpost/internal/metrics"
 	"shardpost/internal/model"
@@ -20,7 +23,10 @@ import (
 //     or carries another generation;
 //   - fts_version_drift: the version marker does not fit the generation
 //     (B14h, temp/13 §5.3), see versionDrift; the run repairs it where
-//     the right marker is known, unless it only reports.
+//     the right marker is known, unless it only reports;
+//   - fts_build_leftover: records of online runs ("w:" keys, "w#") the
+//     layout record no longer names (B14i), see checkBuildLeftover;
+//     removed with the repair class uncovered.
 //
 // It keeps the presence index ix.fts_layout in step with the record: an
 // account with layout 3 (or a conversion to it) is entered, one without
@@ -30,9 +36,10 @@ import (
 func (sr *scrubRun) scrubFTSLayout() {
 	u := sr.u
 
-	// the record and the version markers in one read
-	cur, err := getOmapKeys(u.idx, oidFTSMap, versionKeys)
-	if err != nil && errCode(err) != syscall.ENOENT {
+	// the record, the version markers and the first page of the records
+	// of online runs in one read
+	cur, build, more, err := u.readLayoutState()
+	if err != nil {
 		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("fts layout record: %v", err))
 		return
 	}
@@ -49,6 +56,7 @@ func (sr *scrubRun) scrubFTSLayout() {
 	}
 
 	sr.checkVersion(cur)
+	sr.checkBuildLeftover(l, cur, build, more)
 
 	if sr.o.DryRun || (sr.o.Fence != nil && sr.o.Fence() != nil) {
 		return
@@ -152,6 +160,96 @@ func versionDrift(cur map[string][]byte, n int) (kind int, key, value string) {
 // versionKeys are the keys of the id map the scrub's look at the
 // layout reads, once.
 var versionKeys = []string{ftsLayoutKey, ftsVersionKey, ftsVersionKey3}
+
+// readLayoutState reads the keys of versionKeys and "w#" and the first
+// page of the "w:" keys of the id map in one read op (an account
+// without an online run has an empty range there); more is set when
+// the range goes on.
+func (u *User) readLayoutState() (map[string][]byte, map[string][]byte, bool, error) {
+	op := rados.CreateReadOp()
+	defer op.Release()
+
+	kstep := op.GetOmapValuesByKeys(append(slices.Clone(versionKeys), buildCountKey))
+	wstep := op.GetOmapValues("", buildKeyPrefix, omapPageSize)
+
+	if err := op.Operate(u.idx, oidFTSMap, rados.OperationNoFlag); err != nil {
+		if errCode(err) == syscall.ENOENT {
+			return map[string][]byte{}, map[string][]byte{}, false, nil
+		}
+
+		return nil, nil, false, err
+	}
+
+	cur, err := stepValues(kstep)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	build := map[string][]byte{}
+
+	for {
+		kv, err := wstep.Next()
+		if err != nil {
+			return nil, nil, false, err
+		}
+
+		if kv == nil {
+			break
+		}
+
+		build[kv.Key] = append([]byte(nil), kv.Value...)
+	}
+
+	return cur, build, wstep.More(), nil
+}
+
+// checkBuildLeftover reports the records of online runs that the record
+// l no longer names (fts_build_leftover, temp/14 §5.6): "w:" keys and
+// "w#" whose token is not the one of l's "next", left by a run that
+// crashed or was cleared by a version before 0.51.0. Unless the run only
+// reports, or the repair class uncovered is not selected, they go, each
+// page in a compare-and-swap with the record that keeps the keys of the
+// run "next" names in the state read: a run that starts meanwhile and
+// records the same GUID keeps its keys (a blind removal would make it
+// miss its switch).
+func (sr *scrubRun) checkBuildLeftover(l *ftsLayout, cur, build map[string][]byte, more bool) {
+	u := sr.u
+	next := nextTok(l)
+
+	n := foreignBuildKeys(build, next)
+
+	if v, ok := cur[buildCountKey]; ok {
+		n += foreignBuildKeys(map[string][]byte{buildCountKey: v}, next)
+	}
+
+	if more {
+		// a long range (a crashed run of a busy account): count all of it
+		c, err := u.buildLeftover(next)
+		if err != nil {
+			sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("fts build keys: %v", err))
+			return
+		}
+
+		n = c
+	}
+
+	if n == 0 {
+		return
+	}
+
+	sr.rep.FTSBuildLeftover += n
+
+	sr.log.Warn("scrub: records of an online full-text run that the layout record no longer names", "keys", n,
+		"repair", sr.o.Allowed(RepairUncovered))
+
+	if !sr.o.Allowed(RepairUncovered) {
+		return
+	}
+
+	if _, err := u.dropBuildKeys(func(string) bool { return true }); err != nil {
+		sr.rep.Errors = append(sr.rep.Errors, fmt.Sprintf("fts build keys: %v", err))
+	}
+}
 
 // checkVersion reports (and unless the run only reports, corrects) a
 // version marker of the id map cur that does not fit the generation.

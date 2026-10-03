@@ -3,6 +3,7 @@ package cephstore
 import (
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,6 +45,10 @@ const (
 	frozenPoll     = 250 * time.Millisecond
 )
 
+// ftsAnomalyHook, when set (tests), sees every anomaly an operation of
+// the account resolves.
+var ftsAnomalyHook func(account string, an *ftsAnomaly)
+
 // ftsWrite is the state of one indexing or removal.
 type ftsWrite struct {
 	lay    *ftsLayout
@@ -71,15 +76,51 @@ type ftsWrite struct {
 	// a missed document.
 	changedMu sync.Mutex
 	changed   map[string]bool
+
+	// The online runs (stage B14i, ftsonline.go).
+	//
+	// built is the token of the online run this indexing is recorded for
+	// (its id allocation or registerBuild wrote "w:<guid>" for it), ids
+	// are the documents of the indexing (nil for a removal), remove marks
+	// a removal (it records nothing).
+	built  string
+	ids    map[string]uint64
+	remove bool
+	// soft are the freeze values this operation writes through in its
+	// generation, bound to the run softTok: filled after a read of the
+	// layout record found an online run of the generation for which the
+	// operation is recorded; a freeze of any other value is an anomaly
+	// again (R2.1). held: the operation waited for a hold of the run
+	// once already.
+	softTok string
+	soft    map[string]bool
+	held    bool
+	// fixed is the write of an online run into its target (O5r, O6):
+	// every anomaly ends it with errConversionLost; it never follows the
+	// record, waits for a freeze, lifts one or queues a reshard.
+	fixed bool
 }
 
 // follow makes the write go to the current generation of l.
 func (w *ftsWrite) follow(l *ftsLayout, n int) {
 	w.lay, w.loc, w.stale, w.noRecord = l, curLoc(l, n), nil, false
+	w.soft, w.softTok = nil, ""
 
 	w.changedMu.Lock()
 	w.changed = nil
 	w.changedMu.Unlock()
+}
+
+// softFor makes the freeze of the online run tok and state (the value
+// the operation met) ones it writes through, in its generation; a run
+// other than the one the state is bound to starts it afresh.
+func (w *ftsWrite) softFor(tok, state string) {
+	if w.softTok != tok || w.soft == nil {
+		w.soft, w.softTok = map[string]bool{}, tok
+	}
+
+	w.soft[frozenPrefix+tok] = true
+	w.soft[state] = true
 }
 
 // note records terms whose lists a compare-and-swap of this write
@@ -153,15 +194,15 @@ func (u *User) ftsIndexDocs(docs []ftsDoc) (err error) {
 	end := u.trace(spanFTSIndex, attrGUID(docs[0].guid), attrCount(len(docs)), attrBytes(size))
 	defer func() { end(err) }()
 
-	ids, lay, err := u.ensureDocIDs(guids)
+	a, err := u.allocDocIDs(guids)
 	if err != nil {
 		return err
 	}
 
-	w := &ftsWrite{wait: u.ftsCfg.frozenWait}
-	w.follow(lay, u.ftsShards)
+	w := &ftsWrite{wait: u.ftsCfg.frozenWait, built: a.built, ids: a.out}
+	w.follow(a.lay, u.ftsShards)
 
-	return u.indexWith(w, &ftsBatch{docs: docs, ids: ids})
+	return u.indexWith(w, &ftsBatch{docs: docs, ids: a.out})
 }
 
 // ftsBatch are the documents of one indexing and their terms in the
@@ -235,7 +276,22 @@ func (u *User) indexInto(w *ftsWrite, docsOf map[string][]uint64, terms []string
 
 	// The new terms of every attempt in this generation, also of one
 	// that ended at an anomaly after some objects were written.
-	_, err := u.dictApplyAt(w.loc, w.noted(), true)
+	return u.dictApplyOf(w, true)
+}
+
+// dictApplyOf applies the dictionary step of w: dictApplyAt, or for the
+// fixed write of an online run the writes alone, where a missing object
+// means that the run was taken over (errConversionLost).
+func (u *User) dictApplyOf(w *ftsWrite, add bool) error {
+	if !w.fixed {
+		_, err := u.dictApplyAt(w.loc, w.noted(), add)
+		return err
+	}
+
+	_, missing, err := u.dictWriteAt(w.loc, w.noted(), add)
+	if err == nil && missing != "" {
+		err = fmt.Errorf("%w: dictionary object %s is gone", errConversionLost, missing)
+	}
 
 	return err
 }
@@ -252,8 +308,23 @@ func (u *User) indexInto(w *ftsWrite, docsOf map[string][]uint64, terms []string
 //     operation, until the record moves on or the conversion goes away;
 //   - a missing object of the named generation is an error (scrub
 //     finding, repaired by fts_rebuild); in layout 2 without a record it
-//     is created as before.
+//     is created as before;
+//   - a freeze of an online run of the generation (stage B14i) is
+//     written through: once recorded for the run (registerBuild, unless
+//     the id allocation did), the operation passes every freeze of that
+//     run in this generation without reading the record again
+//     (softFreeze);
+//   - the fixed write of an online run into its target stops at every
+//     anomaly: another run took over (errConversionLost).
 func (u *User) resolveAnomaly(w *ftsWrite, an *ftsAnomaly) error {
+	if ftsAnomalyHook != nil {
+		ftsAnomalyHook(u.name, an)
+	}
+
+	if w.fixed {
+		return fmt.Errorf("%w: %v", errConversionLost, an)
+	}
+
 	l, err := u.readLayout()
 	if err != nil {
 		return err
@@ -265,17 +336,7 @@ func (u *User) resolveAnomaly(w *ftsWrite, an *ftsAnomaly) error {
 
 	switch an.kind {
 	case anomFrozen:
-		if l == nil || l.Next == nil {
-			if w.stale == nil {
-				w.stale = map[string]string{}
-			}
-
-			w.lay, w.stale[an.oid] = l, an.state
-
-			return nil
-		}
-
-		return u.waitFrozen(w)
+		return u.resolveFrozen(w, l, an)
 	case anomMissing:
 		if l == nil && !w.loc.v3() && !w.noRecord {
 			w.lay, w.noRecord = nil, true // layout 2 without a record: created as before
@@ -286,6 +347,68 @@ func (u *User) resolveAnomaly(w *ftsWrite, an *ftsAnomaly) error {
 	metrics.FTSShardMissing.Inc()
 
 	return fmt.Errorf("%w: %s", errFTSShardMissing, an.oid)
+}
+
+// resolveFrozen handles a freeze of the generation of w that the record
+// l names as current: stale without "next", written through for an
+// online run, waited for otherwise.
+func (u *User) resolveFrozen(w *ftsWrite, l *ftsLayout, an *ftsAnomaly) error {
+	switch {
+	case l == nil || l.Next == nil:
+		w.staleFreeze(l, an)
+		return nil
+	case onlineNext(l) != nil:
+		return u.softFreeze(w, l, an)
+	default:
+		return u.waitFrozen(w)
+	}
+}
+
+// staleFreeze remembers a freeze no conversion names any more: the next
+// compare-and-swap of the object lifts exactly that one.
+func (w *ftsWrite) staleFreeze(l *ftsLayout, an *ftsAnomaly) {
+	if w.stale == nil {
+		w.stale = map[string]string{}
+	}
+
+	w.lay, w.stale[an.oid] = l, an.state
+}
+
+// softFreeze handles the freeze of an online run of the generation of w
+// (l names it, §4.2 of the plan): an indexing not recorded for the run
+// records itself (registerBuild; the record it reads then decides
+// anew), a removal records nothing (the run's target keeps at most a
+// dead id); then the freezes of the run and the one met are written
+// through for the rest of the operation in this generation.
+func (u *User) softFreeze(w *ftsWrite, l *ftsLayout, an *ftsAnomaly) error {
+	if !w.remove && w.built != l.Next.Tok {
+		nl, err := u.registerBuild(w)
+		if err != nil {
+			return err
+		}
+
+		switch {
+		case !curLoc(nl, u.ftsShards).same(w.loc):
+			return u.followGen(w, nl, "generation")
+		case nl == nil || nl.Next == nil:
+			w.staleFreeze(nl, an)
+			return nil
+		case onlineNext(nl) == nil:
+			return u.waitFrozen(w)
+		}
+
+		l = nl
+	}
+
+	op := "index"
+	if w.remove {
+		op = "remove"
+	}
+
+	metrics.FTSSoftFreezePass.WithLabelValues(op).Inc()
+	w.softFor(l.Next.Tok, an.state)
+
+	return nil
 }
 
 // followGen moves w to the current generation of l, within the budget.
@@ -338,6 +461,12 @@ func (u *User) waitFrozen(w *ftsWrite) error {
 
 			w.lay = l
 
+			return nil
+		}
+
+		// An online run replaced the offline one: the next attempt meets
+		// its freeze and writes through it (softFreeze).
+		if onlineNext(l) != nil {
 			return nil
 		}
 	}
@@ -516,7 +645,11 @@ func (u *User) casShardRound(w *ftsWrite, oid string, keys, marks []string, fn f
 			metrics.FTSStaleFreezeLifted.Inc()
 		}
 
-		u.act(w.loc.g, grow)
+		// The target of an online run is no generation the record names
+		// yet: it queues no reshard (§4.7a).
+		if !w.fixed {
+			u.act(w.loc.g, grow)
+		}
 
 		return true, nil
 	case syscall.ERANGE, syscall.EOVERFLOW, syscall.EEXIST, syscall.ENOENT:
@@ -588,6 +721,12 @@ func (w *ftsWrite) check(oid string, ver uint64, cur map[string][]byte) (lift bo
 
 	an := checkMarkers(w.loc, oid, ver != 0, cur)
 	if an == nil {
+		return false, nil
+	}
+
+	// The freeze of an online run the operation is recorded for: written
+	// through, the freeze stays (§4.3).
+	if an.kind == anomFrozen && w.soft[an.state] {
 		return false, nil
 	}
 
@@ -689,10 +828,33 @@ func (u *User) dropHeaderTextAt(loc ftsLoc, guid string) error {
 // In layout 3 the writes assert that the objects exist. A missing one of
 // another generation than the record names is ignored: the terms are in
 // the source a conversion derives the new dictionary from (§4.3 step 4).
-func (u *User) dictApplyAt(loc ftsLoc, terms []string, add bool) (n int, err error) {
+func (u *User) dictApplyAt(loc ftsLoc, terms []string, add bool) (int, error) {
+	n, missing, err := u.dictWriteAt(loc, terms, add)
+	if err != nil || missing == "" {
+		return n, err
+	}
+
+	l, err := u.readLayout()
+	if err != nil {
+		return n, err
+	}
+
+	if !curLoc(l, u.ftsShards).same(loc) {
+		return n, nil
+	}
+
+	metrics.FTSShardMissing.Inc()
+
+	return n, fmt.Errorf("%w: %s", errFTSShardMissing, missing)
+}
+
+// dictWriteAt writes the dictionary keys of the terms into loc (adds or
+// removes them) and returns their number and, in layout 3, a dictionary
+// object that is missing ("" for none).
+func (u *User) dictWriteAt(loc ftsLoc, terms []string, add bool) (n int, missing string, err error) {
 	byShard, n := dictEntriesAt(loc, terms)
 	if n == 0 {
-		return 0, nil
+		return 0, "", nil
 	}
 
 	if add {
@@ -702,10 +864,7 @@ func (u *User) dictApplyAt(loc ftsLoc, terms []string, add bool) (n int, err err
 	end := u.trace(spanFTSDict, attrCount(n))
 	defer func() { end(err) }()
 
-	var (
-		mu      sync.Mutex
-		missing string
-	)
+	var mu sync.Mutex
 
 	err = parallelN(byShard, dictWriters, func(oid string, keys []string) error {
 		for len(keys) > 0 {
@@ -729,22 +888,8 @@ func (u *User) dictApplyAt(loc ftsLoc, terms []string, add bool) (n int, err err
 
 		return nil
 	})
-	if err != nil || missing == "" {
-		return n, err
-	}
 
-	l, err := u.readLayout()
-	if err != nil {
-		return n, err
-	}
-
-	if !curLoc(l, u.ftsShards).same(loc) {
-		return n, nil
-	}
-
-	metrics.FTSShardMissing.Inc()
-
-	return n, fmt.Errorf("%w: %s", errFTSShardMissing, missing)
+	return n, missing, err
 }
 
 // dictEntriesAt returns the dictionary keys of the terms by object of
@@ -897,15 +1042,35 @@ var ftsMapKeys = []string{"n", ftsVersionKey, ftsRebuildKey, ftsLayoutKey, ftsVe
 // objects and follows the record that won; the presence entry belongs to
 // the account and stays.
 func (u *User) ensureDocIDs(guids []string) (map[string]uint64, *ftsLayout, error) {
+	a, err := u.allocDocIDs(guids)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return a.out, a.lay, nil
+}
+
+// allocDocIDs is ensureDocIDs; the allocation it returns also says for
+// which online run the documents are recorded (built, stage B14i):
+// while the record names one ("next" with "on"), the same
+// compare-and-swap records every GUID whose "w:<guid>" does not carry
+// the run's token and its id yet, and counts the writes in "w#"
+// (captureKeys). It costs no operation more: two keys more to read and
+// write. While the run holds new allocations ("hold", before its
+// switch), a round that would write ends without a write, the
+// allocation sleeps once until the hold ends (at most maxBuildHold),
+// outside the compare-and-swap, and tries again.
+func (u *User) allocDocIDs(guids []string) (*docAlloc, error) {
 	// Deduplicate: a GUID named twice must not get two ids.
 	guids = slices.Compact(slices.Sorted(slices.Values(guids)))
 
-	keys := make([]string, 0, len(guids)+len(ftsMapKeys))
+	keys := make([]string, 0, 2*len(guids)+len(ftsMapKeys)+1)
 	for _, g := range guids {
-		keys = append(keys, docKey(g))
+		keys = append(keys, docKey(g), buildKey(g))
 	}
 
 	keys = append(keys, ftsMapKeys...)
+	keys = append(keys, buildCountKey)
 
 	a := &docAlloc{u: u, guids: guids, out: map[string]uint64{}, fresh: freshUnknown, want3: u.ftsCfg.layout == model.FTSLayout3}
 	if u.ftsHasIDs.Load() {
@@ -916,24 +1081,24 @@ func (u *User) ensureDocIDs(guids []string) (map[string]uint64, *ftsLayout, erro
 
 	for attempt := 0; attempt < casRetries; attempt++ {
 		if err := casOmap(u, u.idx, oidFTSMap, keys, a.round); err != nil {
-			return nil, nil, fmt.Errorf("fts docids: %w", err)
+			return nil, fmt.Errorf("fts docids: %w", err)
 		}
 
 		if a.perr != nil {
-			return nil, nil, a.perr
+			return nil, a.perr
 		}
 
 		done, err := a.next()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		if done {
-			return a.out, a.lay, nil
+			return a, nil
 		}
 	}
 
-	return nil, nil, fmt.Errorf("fts docids: %s: too many concurrent writers", oidFTSMap)
+	return nil, fmt.Errorf("fts docids: %s: too many concurrent writers", oidFTSMap)
 }
 
 // docAlloc is one allocation of document ids (ensureDocIDs).
@@ -951,22 +1116,38 @@ type docAlloc struct {
 	perr                      error
 	lookup, create, installed bool
 	grow                      growth
+	// built is the online run the documents are recorded for ("" none),
+	// captured the "w:" keys the round wrote; hold is a hold of the run
+	// the round met (zero: none), held is set once the allocation waited
+	// for one.
+	built    string
+	captured int
+	hold     time.Time
+	held     bool
 }
 
 // round is the compare-and-swap function of the id map.
 func (a *docAlloc) round(cur map[string][]byte) (map[string][]byte, []string) {
 	a.lookup, a.create, a.installed, a.grow = false, false, false, growth{}
+	a.built, a.captured, a.hold = "", 0, time.Time{}
 
 	if a.lay, a.perr = parseLayout(cur[ftsLayoutKey]); a.perr != nil {
 		return nil, nil
 	}
 
 	set, next := assignDocIDs(cur, a.guids, a.out)
-	if len(set) == 0 {
-		return nil, nil
+	added := int64(len(set) / 2)
+
+	capture, ok := a.capture(cur, set)
+	if !ok {
+		return nil, nil // held
 	}
 
-	added := int64(len(set) / 2)
+	if len(set) == 0 {
+		return capture, nil // every GUID had its id: at most the record of the run
+	}
+
+	maps.Copy(set, capture)
 
 	if _, hasN := cur["n"]; a.lay == nil && !hasN && !a.first(cur, set, added) {
 		return nil, nil
@@ -986,6 +1167,28 @@ func (a *docAlloc) round(cur map[string][]byte) (map[string][]byte, []string) {
 	}
 
 	return set, nil
+}
+
+// capture is the part of a round for an online run the record names:
+// the keys that record the documents with the ids they have now (set
+// are the ids the round allocates); false when the round ends without a
+// write because the run holds new allocations.
+func (a *docAlloc) capture(cur, set map[string][]byte) (map[string][]byte, bool) {
+	run := onlineNext(a.lay)
+	if run == nil {
+		return nil, true
+	}
+
+	capture, n := captureKeys(cur, run.Tok, a.guids, func(g string) (uint64, bool) { return a.out[g], true })
+
+	if (len(set) > 0 || len(capture) > 0) && !a.held && holding(run, time.Now()) {
+		a.hold = time.UnixMilli(run.Hold)
+		return nil, false
+	}
+
+	a.built, a.captured = run.Tok, n
+
+	return capture, true
 }
 
 // markFreshIndex3 sets the layout 3 version marker of generation loc
@@ -1032,6 +1235,17 @@ func (a *docAlloc) next() (bool, error) {
 	case a.create:
 		a.gen, a.want3, err = a.u.prepareGen()
 		return false, err
+	case !a.hold.IsZero():
+		// Outside the compare-and-swap, once per allocation: a round
+		// without a write would otherwise count as done (§4.3).
+		a.held = true
+		time.Sleep(min(time.Until(a.hold), maxBuildHold))
+
+		return false, nil
+	}
+
+	if a.captured > 0 {
+		metrics.FTSBuildRegistered.WithLabelValues("alloc").Add(float64(a.captured))
 	}
 
 	if a.installed {
@@ -1230,7 +1444,7 @@ func (u *User) ftsRemoveWait(m *Meta, wait time.Duration) (err error) {
 		termsOf = rawTerms(raw)
 	}
 
-	w := &ftsWrite{wait: wait}
+	w := &ftsWrite{wait: wait, remove: true}
 	w.follow(lay, u.ftsShards)
 
 	if err := u.removeWith(w, m.GUID, id, hasID, termsOf); err != nil {
@@ -1310,9 +1524,7 @@ func (u *User) removeFrom(w *ftsWrite, guid string, g []byte, id uint64, hasID b
 	}
 
 	// The terms emptied by every attempt in this generation.
-	_, err = u.dictApplyAt(w.loc, w.noted(), false)
-
-	return err
+	return u.dictApplyOf(w, false)
 }
 
 // ftsRemoveShard removes the message from the posting lists of terms on

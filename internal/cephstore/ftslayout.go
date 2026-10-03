@@ -112,6 +112,17 @@ type ftsGen struct {
 	// DX and AH are the generation's properties (see ftsLayout).
 	DX *ftsDX `json:"dx,omitempty"`
 	AH string `json:"ah,omitempty"`
+	// On, M and Hold belong to the "next" of an online run (stage B14i,
+	// ftsonline.go): On makes writers record what they index for the run
+	// (the keys "w:<guid>" and "w#" of the id map) and makes its freeze
+	// one they write through; M is its mode (model.FTSModeCopy or
+	// model.FTSModeReindex); Hold (Unix milliseconds, 0 none) makes new
+	// id allocations wait until then, so that the run's switch can catch
+	// up. A version before 0.51.0 drops all three when it rewrites the
+	// record: the run notices the missing On at its switch and stops.
+	On   bool   `json:"on,omitempty"`
+	M    string `json:"m,omitempty"`
+	Hold int64  `json:"hold,omitempty"`
 }
 
 // ftsDX is the identifier filter of a generation's dictionary (B14h,
@@ -458,7 +469,7 @@ func layoutState(l *ftsLayout, n int) model.FTSLayoutState {
 
 	if l.Next != nil {
 		sh := genLoc(*l.Next, n).shape()
-		st.Next, st.NextTok = &sh, l.Next.Tok
+		st.Next, st.NextTok, st.NextOnline, st.NextMode = &sh, l.Next.Tok, l.Next.On, l.Next.M
 
 		if l.Next.At > 0 {
 			st.NextAt = time.Unix(l.Next.At, 0).UTC()
@@ -702,6 +713,12 @@ func (u *User) deleteObjects(oids []string) error {
 // without a cache (one stat).
 func (s *Store) FTSLayout3Enabled() (bool, error) {
 	return s.markSet(model.FTSLayoutMarkKey, "fts layout mark")
+}
+
+// FTSOnlineEnabled implements model.FTSOnlineMarked: whether the cluster
+// mark "fts/online" of the admin store exists (one stat, no cache).
+func (s *Store) FTSOnlineEnabled() (bool, error) {
+	return s.markSet(model.FTSOnlineMarkKey, "fts online mark")
 }
 
 // FTSDictFilterEnabled implements model.FTSDictFilterMarked: whether the
@@ -1190,6 +1207,8 @@ type ftsUserCfg struct {
 	dictFilter bool
 	dictID     int
 	ah         string
+	// build are the settings of the online runs (stage B14i).
+	build buildCfg
 }
 
 // ftsUserConfig derives the view settings from the store configuration.
@@ -1215,7 +1234,9 @@ func ftsUserConfig(c FTSConfig) ftsUserCfg {
 		dictFilter: c.DictFilter, dictID: dictID, ah: ah,
 		sizing: ftsSizing{min: c.ShardsMin, max: c.ShardsMax, target: c.ShardTargetKeys,
 			dictMax: c.DictShardsMax, dictTarget: c.DictTargetKeys}.withDefaults(),
-		convert: convertCfg{bufferKeys: c.ConvertBufferKeys, writers: c.ConvertWriters}.withDefaults()}
+		convert: convertCfg{bufferKeys: c.ConvertBufferKeys, writers: c.ConvertWriters}.withDefaults(),
+		build: buildCfg{catchupRounds: c.BuildCatchupRounds, hold: c.BuildHold, noHold: c.BuildNoHold,
+			batchDocs: c.ReindexBatchDocs, batchBytes: c.ReindexBatchBytes}.withDefaults()}
 }
 
 // SetImportHint implements model.ImportHinter: a fresh index of this

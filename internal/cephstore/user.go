@@ -140,6 +140,12 @@ type User struct {
 	// index; 0 unknown).
 	ftsCfg  ftsUserCfg
 	ftsHint int
+	// lastCounts is what the last layoutCounts of the view found besides
+	// the sums (FTSLayoutDue reports it).
+	lastCounts struct {
+		docs int64
+		load float64
+	}
 	// ftsRS caches the layout and the trust of the index for the
 	// searches of the view (ftsState); ftsHasIDs that the view has seen
 	// ids in the id map, so that the index is not fresh (ensureDocIDs,

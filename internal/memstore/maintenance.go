@@ -96,6 +96,13 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 		return err
 	}
 
+	_, err := u.rebuild(progress)
+
+	return err
+}
+
+// rebuild indexes every message again; it returns how many.
+func (u *User) rebuild(progress func(done, total int)) (int, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -109,7 +116,7 @@ func (u *User) RebuildFTS(fence func() error, progress func(done, total int)) er
 		progress(done, len(u.blobs))
 	}
 
-	return nil
+	return done, nil
 }
 
 // LegacyFTSDict implements model.FTSDictConverter; this store has no
