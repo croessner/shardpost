@@ -802,6 +802,38 @@ step timeout more per recipient when the relay is that slow for each.
 startup when it does not (counting no recipients). A conversation that
 outlasts it is reported as unknown, never sent twice.
 
+### Push worker partitions (`jmap.push.*`)
+
+The JMAP push worker shares 64 partitions among its pods (0.52.0, see
+[JMAP: Push partitions](jmap.md#push-partitions) and
+[operations](operations/README.md#push-partitions)). The push
+deployment has no configmap; the keys come as environment variables
+and keep their defaults unless there is a reason.
+
+| Key | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `jmap.push.max_partitions` | `JMAP_PUSH_MAX_PARTITIONS` | 0 | partitions one pod holds at most (0–64; 0: all) |
+| `jmap.push.lease_seconds` | `JMAP_PUSH_LEASE_SECONDS` | 30 | TTL of a partition lease, renewed every third of it (15–300); a membership record expires after the same time; a holder that could not renew stops the partition five seconds before it is up |
+| `jmap.push.take_seconds` | `JMAP_PUSH_TAKE_SECONDS` | 5 | cadence of taking and shedding, ± 20 % (1–60); also the deadline of one lock or membership operation |
+| `jmap.push.retry_seconds` | `JMAP_PUSH_RETRY_SECONDS` | 2 | fast cadence for orphaned, contested and refused partitions (1–60, at most `take_seconds`) |
+| `jmap.push.orphan_hold_seconds` | `JMAP_PUSH_ORPHAN_HOLD_SECONDS` | 600 | a partition taken as a replacement is not shed for this long (0–3600) |
+| `jmap.push.full_scan_seconds` | `JMAP_PUSH_FULL_SCAN_SECONDS` | 3600 | every record of a partition is read once in this time, whatever its checksum says (0: never; else at least `scan_seconds`) |
+| `jmap.push.rebalance_seconds` | `JMAP_PUSH_REBALANCE_SECONDS` | 10 | pause between two partitions a pod sheds (1–600) |
+| `jmap.push.rebalance_settle_seconds` | `JMAP_PUSH_REBALANCE_SETTLE_SECONDS` | 60 | the set of pods has to stand still this long before one sheds (0–3600, at least `lease_seconds`) |
+| `jmap.push.handoff_seconds` | `JMAP_PUSH_HANDOFF_SECONDS` | 5 | how long the watchers of a partition get to end when it is given up, and the period of the waves at shutdown (1–30, below `lease_seconds` − 5 and the termination grace period) |
+| `jmap.push.max_watched_accounts` | `JMAP_PUSH_MAX_WATCHED_ACCOUNTS` | 50000 | accounts one pod watches at most; it takes no partition that would put it over, by the estimate the membership gives (at least 100) |
+| `jmap.push.start_rate` | `JMAP_PUSH_START_RATE` | 5000 | watchers a pod starts per second when it takes a partition (10–100000) |
+| `jmap.push.scan_seconds` | `JMAP_PUSH_SCAN_SECONDS` | 30 | how often a holder reads its shard of the subscription index (as before) |
+
+The relations are checked at startup: `lease_seconds ≥ 3 ×
+take_seconds` (a partition free for two cadences is contested),
+`rebalance_settle_seconds ≥ lease_seconds` (a dead record is gone
+before anyone sheds to it), `handoff_seconds < lease_seconds − 5` (a
+hand-over ends before the holder would stop the partition itself),
+`retry_seconds ≤ take_seconds`, and `full_scan_seconds` 0 or at least
+`scan_seconds`. The partition count itself is not configurable: it is
+the shard count of the hint index `ix.jmap/push/acct` (64).
+
 ### Nauthilus client (`nauthilus.timeout`, `nauthilus.http_max_idle_per_host`)
 
 | Key | Env | Default | Meaning |

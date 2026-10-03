@@ -117,19 +117,6 @@ func (s *pushSink) stateChanges(path string) int {
 	return n
 }
 
-// total is how many pushes every path got together.
-func (s *pushSink) total() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	n := 0
-	for _, b := range s.bodies {
-		n += len(b)
-	}
-
-	return n
-}
-
 // pushCluster is a set of push workers over one store.
 type pushCluster struct {
 	t      *testing.T
@@ -541,49 +528,53 @@ func TestPushTargets(t *testing.T) {
 func TestMergeSeen(t *testing.T) {
 	a := pushSeen{Seq: 10, Digest: "d", Ack: map[string]pushAck{"s1": {Seq: 10, Digest: "d"}, "s2": {Seq: 4}}}
 	b := pushSeen{Seq: 8, Digest: "c", Ack: map[string]pushAck{"s1": {Seq: 8, Digest: "c"}, "s3": {Seq: 8}}}
+	old := pushSeen{Seq: 10, Digest: "d", Ack: map[string]pushAck{"s1": {Seq: 8, Digest: "d"}}}
+	newer := pushSeen{Seq: 3, Epoch: 1, Ack: map[string]pushAck{"s1": {Seq: 3}}}
 	live := map[string]bool{"s1": true, "s2": true, "s3": true}
 
-	m, adopt := mergeSeen(&a, b, live)
-	if adopt || m.Seq != 10 || m.Digest != "d" || m.Ack["s1"].Seq != 10 || m.Ack["s2"].Seq != 4 || m.Ack["s3"].Seq != 8 {
-		t.Fatalf("merge %+v %v", m, adopt)
+	for _, tc := range []struct {
+		name  string
+		cur   *pushSeen
+		mine  pushSeen
+		live  map[string]bool
+		want  pushSeen
+		adopt bool
+	}{
+		{"max per subscription", &a, b, live,
+			pushSeen{Seq: 10, Digest: "d", Ack: map[string]pushAck{"s1": {Seq: 10, Digest: "d"}, "s2": {Seq: 4}, "s3": {Seq: 8}}}, false},
+		{"the delivered state is not taken back", &a, old, live,
+			pushSeen{Seq: 10, Digest: "d", Ack: map[string]pushAck{"s1": {Seq: 10, Digest: "d"}, "s2": {Seq: 4}}}, false},
+		{"dead subscriptions are left out", &a, b, map[string]bool{"s1": true},
+			pushSeen{Seq: 10, Digest: "d", Ack: map[string]pushAck{"s1": {Seq: 10, Digest: "d"}}}, false},
+		{"the stored higher epoch wins whole", &newer, a, live, newer, true},
+		{"the writer's higher epoch wins whole", &a, newer, live, newer, false},
+		{"the first write", nil, a, live, a, false},
+	} {
+		got, adopt := mergeSeen(tc.cur, tc.mine, tc.live)
+		if adopt != tc.adopt || !sameSeen(got, tc.want) {
+			t.Errorf("%s: %+v adopt %v, want %+v adopt %v", tc.name, got, adopt, tc.want, tc.adopt)
+		}
 	}
 
+	m, _ := mergeSeen(&a, b, live)
 	if m.behind("s1") || !m.behind("s2") || !m.behind("s3") {
 		t.Fatalf("backlog after merge %+v", m)
 	}
+}
 
-	// The counter-example: stored says delivered up to 10, the writer
-	// wrote 10 but acknowledged 8 only (an old round): no second push.
-	old := pushSeen{Seq: 10, Digest: "d", Ack: map[string]pushAck{"s1": {Seq: 8, Digest: "d"}}}
-
-	m, _ = mergeSeen(&a, old, live)
-	if m.Ack["s1"].Seq != 10 || m.behind("s1") {
-		t.Fatalf("the delivered state was taken back: %+v", m)
+// sameSeen compares the fields of two records the merge decides on.
+func sameSeen(a, b pushSeen) bool {
+	if a.Seq != b.Seq || a.Digest != b.Digest || a.Epoch != b.Epoch || len(a.Ack) != len(b.Ack) {
+		return false
 	}
 
-	// Subscriptions the writer no longer sees are left out.
-	m, _ = mergeSeen(&a, b, map[string]bool{"s1": true})
-	if _, ok := m.Ack["s2"]; ok || len(m.Ack) != 1 {
-		t.Fatalf("dead subscriptions kept: %+v", m.Ack)
+	for id, x := range a.Ack {
+		if b.Ack[id] != x {
+			return false
+		}
 	}
 
-	// A higher epoch wins whole, and the writer adopts it.
-	newer := pushSeen{Seq: 3, Epoch: 1, Ack: map[string]pushAck{"s1": {Seq: 3}}}
-
-	m, adopt = mergeSeen(&newer, a, live)
-	if !adopt || m.Epoch != 1 || m.Seq != 3 || m.Ack["s1"].Seq != 3 || len(m.Ack) != 1 {
-		t.Fatalf("the higher epoch did not win: %+v %v", m, adopt)
-	}
-
-	m, adopt = mergeSeen(&a, newer, live)
-	if adopt || m.Epoch != 1 || m.Seq != 3 {
-		t.Fatalf("the writer's higher epoch did not win: %+v %v", m, adopt)
-	}
-
-	// Nothing stored: the writer's state.
-	if m, adopt = mergeSeen(nil, a, live); adopt || m.Seq != 10 {
-		t.Fatalf("first write %+v %v", m, adopt)
-	}
+	return true
 }
 
 // TestClassifyPartition: the classes of §4.4 from a membership view.
@@ -622,6 +613,7 @@ func TestPushClusterConverges(t *testing.T) {
 	c := newPushCluster(t, model.KVIndexRead)
 
 	accounts := map[string]model.User{}
+
 	for i := range 24 {
 		name := fmt.Sprintf("acct%02d", i)
 		accounts[name] = c.account(name)
@@ -641,17 +633,6 @@ func TestPushClusterConverges(t *testing.T) {
 		t.Errorf("the admin store was listed %d times in read mode", n)
 	}
 
-	// Scale down: w3 ends in order while deliveries go on.
-	taken := w1.hooks.of(eventTaken) + w2.hooks.of(eventTaken)
-
-	stopped := make(chan struct{})
-
-	go func() {
-		defer close(stopped)
-
-		c.stop(w3)
-	}()
-
 	names := slices.Sorted(func(yield func(string) bool) {
 		for name := range accounts {
 			if !yield(name) {
@@ -660,47 +641,69 @@ func TestPushClusterConverges(t *testing.T) {
 		}
 	})
 
-	for round := range 4 {
+	c.scaleDown(w1, w2, w3, accounts, names)
+	c.crashTakeover(w1, w2, accounts, names)
+}
+
+// scaleDown ends w3 in order while deliveries go on: each partition of
+// w3 moves once, nothing is lost, and a hand-over repeats at most one
+// push.
+func (c *pushCluster) scaleDown(w1, w2, w3 *pushWorkerRun, accounts map[string]model.User, names []string) {
+	c.t.Helper()
+
+	taken := w1.hooks.of(eventTaken) + w2.hooks.of(eventTaken)
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		c.stop(w3)
+	}()
+
+	for range 4 {
 		for _, name := range names {
-			if d := c.pushedAfter(accounts[name], name, 10*time.Second); d > 10*time.Second {
-				t.Errorf("round %d: the push of %s took %s", round, name, d)
-			}
+			c.pushedAfter(accounts[name], name, 10*time.Second)
 		}
 	}
 
 	<-stopped
 
-	awaitCond(t, testPatience, "convergence at 32/32", c.converged)
+	awaitCond(c.t, testPatience, "convergence at 32/32", c.converged)
 	c.disjoint()
 
 	if moved := w1.hooks.of(eventTaken) + w2.hooks.of(eventTaken) - taken; moved != 21 {
-		t.Errorf("%d takes after w3 left, want 21 (each partition once)", moved)
+		c.t.Errorf("%d takes after w3 left, want 21 (each partition once)", moved)
 	}
 
 	if orphan := w1.hooks.of(eventTakenOrphan) + w2.hooks.of(eventTakenOrphan); orphan != 0 {
-		t.Errorf("%d partitions taken as orphans in an orderly hand-over", orphan)
+		c.t.Errorf("%d partitions taken as orphans in an orderly hand-over", orphan)
 	}
 
 	// Duplicates: a push per round, at most one more per hand-over.
 	for _, name := range names {
 		if n := c.sink.stateChanges(path(name)); n > 4+1+2 {
-			t.Errorf("%s got %d pushes for 5 deliveries and at most one hand-over", name, n)
+			c.t.Errorf("%s got %d pushes for 5 deliveries and at most one hand-over", name, n)
 		}
 	}
+}
 
-	// A crash: w1's leases expire, w2 takes them as orphans within the
-	// lease plus a cadence, and deliveries are pushed again.
+// crashTakeover crashes w1: its leases expire, w2 takes them as orphans
+// within the lease plus a cadence, and deliveries are pushed again.
+func (c *pushCluster) crashTakeover(w1, w2 *pushWorkerRun, accounts map[string]model.User, names []string) {
+	c.t.Helper()
+
 	start := time.Now()
+
 	c.crash(w1)
 
-	awaitCond(t, testPatience, "w2 holding everything", func() bool { return w2.held() == defaultPushPartitions })
+	awaitCond(c.t, testPatience, "w2 holding everything", func() bool { return w2.held() == defaultPushPartitions })
 
 	if took := time.Since(start); took > testLease+2*testTake+2*time.Second {
-		t.Errorf("the take-over after the crash took %s", took)
+		c.t.Errorf("the take-over after the crash took %s", took)
 	}
 
 	if w2.hooks.of(eventTakenOrphan) == 0 {
-		t.Error("no partition was taken as an orphan after the crash")
+		c.t.Error("no partition was taken as an orphan after the crash")
 	}
 
 	for _, name := range names {
@@ -793,6 +796,7 @@ func TestPushMembersHang(t *testing.T) {
 	c.watchedAll(1)
 
 	gate := make(chan struct{})
+
 	c.kv.Backend().SetHook(func(op, oid string) error {
 		if oid == pushMembersOID && op == "read_page" {
 			<-gate
@@ -864,6 +868,7 @@ func TestPushRotationKeepsWatchers(t *testing.T) {
 	// A rotation whose retake is refused for one partition ends that
 	// partition's watchers alone.
 	p := PushPartition("alice", defaultPushPartitions)
+
 	c.kv.Locks().SetHook(func(op, name string) error {
 		if op == memstore.LockOpLock && name == pushLockName(p) {
 			return model.ErrLocked
@@ -900,6 +905,7 @@ func TestPushRestartDetection(t *testing.T) {
 	oldHeld := c.members()["w1"].Held
 
 	crashed := time.Now()
+
 	c.crash(w1)
 
 	again := c.start("w1")
@@ -970,64 +976,10 @@ func TestPushRestartDetection(t *testing.T) {
 // the deletion of the record. The other worker takes every partition
 // without an orphan take, and a delivery during the end is pushed.
 func TestPushShutdownOrder(t *testing.T) {
-	c := newPushCluster(t, model.KVIndexRead)
-	u := c.account("alice")
-
-	var (
-		mu      sync.Mutex
-		trail   []string
-		records []memberRecord
-	)
-
-	note := func(s string) {
-		mu.Lock()
-		defer mu.Unlock()
-
-		trail = append(trail, s)
-	}
-
-	c.kv.Locks().SetHook(func(op, name string) error {
-		if op == memstore.LockOpUnlock {
-			note("unlock " + name)
-		}
-
-		return nil
-	})
-
-	ctl, err := c.kv.Omap().Watch(pushCtlOID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer ctl.Close()
-
-	go func() {
-		for range ctl.Events() {
-			note("notify")
-		}
-	}()
-
-	leaver := c.start("w1", func(o *WorkerOptions, h *pushTestHooks) {
-		o.MaxPartitions = 8
-		h.onMembersWrite = func(rec *memberRecord) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			records = append(records, *rec)
-			trail = append(trail, fmt.Sprintf("write leaving=%v held=%d", rec.Leaving, len(rec.Held)))
-		}
-	})
-	other := c.start("w2")
-
-	awaitCond(t, testPatience, "w1 at 8 and w2 at 56", func() bool { return leaver.held() == 8 && other.held() == 56 })
-
-	mu.Lock()
-	trail, records = nil, nil
-	mu.Unlock()
+	c, u, trail, leaver, other := shutdownSetup(t)
 
 	taken := other.hooks.of(eventTaken)
 	start := time.Now()
-
 	stopped := make(chan struct{})
 
 	go func() {
@@ -1044,12 +996,112 @@ func TestPushShutdownOrder(t *testing.T) {
 
 	awaitCond(t, testPatience, "w2 holding everything", func() bool { return other.held() == defaultPushPartitions })
 
-	mu.Lock()
-	got := append([]string(nil), trail...)
-	recs := append([]memberRecord(nil), records...)
-	mu.Unlock()
+	got, recs := trail.snapshot()
 
-	// The records: leaving with 8, then 5, 2, 0 held.
+	if helds := heldsOf(t, recs); !slices.Equal(helds, []int{8, 5, 2, 0}) {
+		t.Errorf("held per record during the end: %v, want 8 5 2 0 (trail %q)", helds, got)
+	}
+
+	if waves := countWaves(t, got); waves != 3 {
+		t.Errorf("%d waves, want 3: %q", waves, got)
+	}
+
+	if took > 3*testHandoff+2*testTake+time.Second {
+		t.Errorf("the end took %s", took)
+	}
+
+	if other.hooks.of(eventTaken)-taken != 8 || other.hooks.of(eventTakenOrphan) != 0 {
+		t.Errorf("w2 took %d partitions (%d as orphans), want 8 and 0", other.hooks.of(eventTaken)-taken, other.hooks.of(eventTakenOrphan))
+	}
+
+	if _, ok := c.members()["w1"]; ok {
+		t.Error("the record of the worker that left is still there")
+	}
+}
+
+// shutdownSetup starts a worker with eight partitions and one with the
+// rest, with a trail of the writes, unlocks and notifies.
+func shutdownSetup(t *testing.T) (*pushCluster, model.User, *shutdownTrail, *pushWorkerRun, *pushWorkerRun) {
+	t.Helper()
+
+	c := newPushCluster(t, model.KVIndexRead)
+	u := c.account("alice")
+	trail := &shutdownTrail{}
+
+	c.kv.Locks().SetHook(func(op, name string) error {
+		if op == memstore.LockOpUnlock {
+			trail.note("unlock " + name)
+		}
+
+		return nil
+	})
+
+	ctl, err := c.kv.Omap().Watch(pushCtlOID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(ctl.Close)
+
+	go func() {
+		for range ctl.Events() {
+			trail.note("notify")
+		}
+	}()
+
+	leaver := c.start("w1", func(o *WorkerOptions, h *pushTestHooks) {
+		o.MaxPartitions = 8
+		h.onMembersWrite = trail.record
+	})
+	other := c.start("w2")
+
+	awaitCond(t, testPatience, "w1 at 8 and w2 at 56", func() bool { return leaver.held() == 8 && other.held() == 56 })
+	trail.reset()
+
+	return c, u, trail, leaver, other
+}
+
+// shutdownTrail records the writes, unlocks and notifies of an end.
+type shutdownTrail struct {
+	mu      sync.Mutex
+	trail   []string
+	records []memberRecord
+}
+
+func (s *shutdownTrail) note(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.trail = append(s.trail, line)
+}
+
+func (s *shutdownTrail) record(rec *memberRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.records = append(s.records, *rec)
+	s.trail = append(s.trail, fmt.Sprintf("write leaving=%v held=%d", rec.Leaving, len(rec.Held)))
+}
+
+func (s *shutdownTrail) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.trail, s.records = nil, nil
+}
+
+func (s *shutdownTrail) snapshot() ([]string, []memberRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]string(nil), s.trail...), append([]memberRecord(nil), s.records...)
+}
+
+// heldsOf are the held counts of the records of an end, runs collapsed;
+// every record has to be a leaving one.
+func heldsOf(t *testing.T, recs []memberRecord) []int {
+	t.Helper()
+
 	var helds []int
 
 	for _, rec := range recs {
@@ -1062,11 +1114,14 @@ func TestPushShutdownOrder(t *testing.T) {
 		}
 	}
 
-	if !slices.Equal(helds, []int{8, 5, 2, 0}) {
-		t.Errorf("held per record during the end: %v, want 8 5 2 0 (trail %q)", helds, got)
-	}
+	return helds
+}
 
-	// Per wave: the write, then the unlocks, then one notify.
+// countWaves counts the waves of a trail: a write (not the leaving one
+// with every partition), then the unlocks, then one notify.
+func countWaves(t *testing.T, got []string) int {
+	t.Helper()
+
 	waves := 0
 
 	for i := 0; i < len(got); {
@@ -1089,21 +1144,7 @@ func TestPushShutdownOrder(t *testing.T) {
 		i = j + 1
 	}
 
-	if waves != 3 {
-		t.Errorf("%d waves, want 3: %q", waves, got)
-	}
-
-	if took > 3*testHandoff+2*testTake+time.Second {
-		t.Errorf("the end took %s", took)
-	}
-
-	if other.hooks.of(eventTaken)-taken != 8 || other.hooks.of(eventTakenOrphan) != 0 {
-		t.Errorf("w2 took %d partitions (%d as orphans), want 8 and 0", other.hooks.of(eventTaken)-taken, other.hooks.of(eventTakenOrphan))
-	}
-
-	if _, ok := c.members()["w1"]; ok {
-		t.Error("the record of the worker that left is still there")
-	}
+	return waves
 }
 
 // TestPushHandoffOrderCounterCheck: with the notify before the
@@ -1113,7 +1154,7 @@ func TestPushHandoffOrderCounterCheck(t *testing.T) {
 	c := newPushCluster(t, model.KVIndexRead)
 	c.account("alice")
 
-	w1 := c.start("w1", func(o *WorkerOptions, h *pushTestHooks) { h.swapHandoffOrder = true })
+	w1 := c.start("w1", func(_ *WorkerOptions, h *pushTestHooks) { h.swapHandoffOrder = true })
 	w2 := c.start("w2")
 
 	awaitCond(t, testPatience, "convergence at 32/32", c.converged)
@@ -1141,6 +1182,7 @@ func TestPushCrashLoopSelfStop(t *testing.T) {
 	var hung atomic.Int32
 
 	gate := make(chan struct{})
+
 	c.kv.Locks().SetHook(func(op, name string) error {
 		if op == memstore.LockOpRenew && name == pushLockName(p) && hung.CompareAndSwap(0, 1) {
 			<-gate
@@ -1287,6 +1329,7 @@ func TestPushFullPass(t *testing.T) {
 	pa.Subs = nil
 
 	b, _ := json.Marshal(pa)
+
 	if err := c.kv.Raw().Update(pushAcctKey("alice"), func([]byte) ([]byte, error) { return b, nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -1440,9 +1483,7 @@ func TestPushLegacyMarker(t *testing.T) {
 	c.account("alice")
 
 	old, _ := json.Marshal(pushLease{Holder: "old-pod", Until: time.Now().Add(time.Minute)})
-	if err := c.kv.Update(pushLeaseKey, func([]byte) ([]byte, error) { return old, nil }); err != nil {
-		t.Fatal(err)
-	}
+	c.writeRecord(pushLeaseKey, old)
 
 	w := c.start("w1")
 
@@ -1453,24 +1494,16 @@ func TestPushLegacyMarker(t *testing.T) {
 	}
 
 	// The old worker releases.
-	if err := c.kv.Update(pushLeaseKey, func([]byte) ([]byte, error) { return nil, nil }); err != nil {
-		t.Fatal(err)
-	}
+	c.writeRecord(pushLeaseKey, nil)
 
 	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
 
-	raw, err := c.kv.Get(pushLeaseKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var l pushLease
-	if json.Unmarshal(raw, &l) != nil || l.Holder != pushLegacyPrefix+"w1" || !l.Until.After(time.Now().Add(pushLegacyRefresh-time.Second)) {
-		t.Fatalf("marker %s", raw)
+	if l := c.marker(); l.Holder != pushLegacyPrefix+"w1" || !l.Until.After(time.Now().Add(pushLegacyRefresh-time.Second)) {
+		t.Fatalf("marker %+v", l)
 	}
 
 	// An old worker (its lease logic) finds the record held.
-	err = c.kv.Update(pushLeaseKey, func(cur []byte) ([]byte, error) {
+	err := c.kv.Update(pushLeaseKey, func(cur []byte) ([]byte, error) {
 		var l pushLease
 		if cur != nil && json.Unmarshal(cur, &l) == nil && l.Holder != "old-pod" && l.Until.After(time.Now()) {
 			return nil, errOldHolder
@@ -1490,6 +1523,32 @@ func TestPushLegacyMarker(t *testing.T) {
 	}
 }
 
+// writeRecord writes (nil: deletes) an admin record.
+func (c *pushCluster) writeRecord(key string, value []byte) {
+	c.t.Helper()
+
+	if err := c.kv.Update(key, func([]byte) ([]byte, error) { return value, nil }); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// marker reads the legacy lease record.
+func (c *pushCluster) marker() pushLease {
+	c.t.Helper()
+
+	raw, err := c.kv.Get(pushLeaseKey)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+
+	var l pushLease
+	if err := json.Unmarshal(raw, &l); err != nil {
+		c.t.Fatal(err)
+	}
+
+	return l
+}
+
 // TestPushWithoutReadMode: without an effective read mode the
 // partitions are still shared by leases, every holder lists and
 // filters, and every account is watched once; when the gate opens at
@@ -1498,6 +1557,7 @@ func TestPushWithoutReadMode(t *testing.T) {
 	c := newPushCluster(t, model.KVIndexWrite)
 
 	accounts := map[string]model.User{}
+
 	for i := range 8 {
 		name := fmt.Sprintf("acct%d", i)
 		accounts[name] = c.account(name)

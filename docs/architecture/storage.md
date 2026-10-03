@@ -879,7 +879,12 @@ pool).
 | `ix.job/…` (1 shard) | hint index of `job/`: `{state, account, kind, finished}` |
 | `ix.plan/…` (1 shard) | hint index of `plan/`: `{kind, account, expires}` |
 | `ix.idem/…` (16 shards) | hint index of `idem/`: `{job_id}` |
-| `ix.jmap/push/acct/…` (64 shards) | hint index of `jmap/push/acct/`: `{verified, expires}` (any subscription verified, the latest expiry) |
+| `ix.jmap/push/acct/…` (64 shards) | hint index of `jmap/push/acct/`: `{verified, expires, sum}` (any subscription verified, the latest expiry, and since 0.52.0 a checksum of the record, so the push worker's scan reads only the records that changed); its shard count is the partition count of the push worker |
+| `kv.jmap/push/seen/<account>` | the state the push worker last pushed for the account: `seq`, the digest and the states of the shared accounts, since 0.52.0 an acknowledgement per subscription (`ack`: the position it was delivered up to) and an `epoch` that rises when the account counter jumped back; written with a compare-and-swap that merges by max ([JMAP: Push partitions](../jmap.md#push-partitions)) |
+| `ix.jmap/push/p<nn>/lock` | cls_lock of push partition `nn` (0.52.0), held through key rotations by its holder; the front-ends notify it with the account as payload when a subscription changes |
+| `ix.jmap/push/members` | the membership of the push pods: one key per pod with its partitions, the accounts it watches, its bounds, its clock and whether it is leaving; a reader deletes a record older than ten minutes |
+| `ix.jmap/push/ctl` | the control object every push pod watches; notified after an orderly release of a partition |
+| `kv.jmap/push/lease` | the lease record of the single push worker of before 0.52.0; the partitioned pods keep it occupied as a marker (`holder` `partitioned/<instance>`) and wait while an old pod holds it |
 | `kv.servers/<instance>` | registration of a server (`{version, caps, seen}`), renewed every minute, deleted 24 hours after its last heartbeat ([layout 3](#full-text-mixed-versions)) |
 | `ix.servers/…` (1 shard) | hint index of `servers/`: `{version, caps}`, without `seen`, so a heartbeat does not write it |
 | `kv.fts/layout3` | the cluster mark that allows full-text layout 3 |

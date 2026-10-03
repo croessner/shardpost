@@ -103,6 +103,77 @@ A PROXY rollback requires a sequence: first disable the director's emission and
 let its rollout finish, then remove the receiver's trust. Otherwise
 the header can reach the server as a protocol command.
 
+## Push partitions
+
+Since 0.52.0 the JMAP push workers share 64 partitions
+([JMAP: Push partitions](../jmap.md#push-partitions),
+[configuration](../configuration.md#push-worker-partitions-jmappush)).
+Component `deploy/components/jmap-push`: two replicas with a rolling
+update (`maxSurge 1`, `maxUnavailable 0`, `minReadySeconds 30`), a
+termination grace period of 30 s, a spread over the nodes and a
+disruption budget of one.
+
+**Prerequisite: NTP on every node.** The pods compare the clocks of
+each other's membership records with their own: a pod whose clock is
+behind by more than `jmap.push.lease_seconds` is invisible to the others
+(its partitions count as orphaned; the locks protect them, the others
+only try in vain), one whose clock is ahead counts as alive for longer.
+Both converge once the clocks agree.
+
+**How many pods.** No HPA: the replicas follow the accounts with push
+subscriptions, about `1.3 × accounts / jmap.push.max_watched_accounts`
+and at least two (200 000 accounts: six, up to eight). Every scaling
+moves partitions; from n to n + 1 pods the new one has its share after
+`rebalance_settle_seconds` plus `rebalance_seconds` per partition moved
+(one to two pods: about seven minutes; six to seven: about a minute and
+a half). Each move costs the accounts of that partition one hand-over
+(at most about ten seconds without a push, at most one push repeated).
+
+**The way over from the single pod (0.51.0 and before).** Roll out in
+this order: first every front-end, then the push deployment. The
+front-ends of 0.52.0 write the checksum into the index values and notify
+the workers; while old and new front-ends run, the checksums are not to
+be trusted and the workers fall back to the hourly full pass. Apply the
+push deployment with `replicas: 1` first: the new pod waits while the
+old one holds the lease record (`event=push_legacy_wait`), is ready
+nonetheless, Kubernetes ends the old pod, which releases, and within two
+seconds the new pod writes the marker and takes the 64 partitions. The
+old pod's last stop loses what it had in flight, as every rollout did
+before; roll it out in a quiet hour. Check with `shardpostctl server
+list` (`PARTITIONS` 64) and `imapceph_jmap_push_partitions_held`, then
+set `replicas: 2` and watch the partitions move to 32/32.
+
+**Way back to 0.51.0 (the push deployment only).** With the rolling
+update in the manifest the way back is a full rollout: the 0.51.0 pod
+starts beside the new ones, waits (the marker), is ready, and the new
+pods end one by one; the last one deletes the marker as it ends, and the
+old pod takes the lease at its next renewal (≤ 30 s). Set `replicas: 1`
+before the image change to end exactly one new pod. After a crash of the
+last new pod the old one waits for the marker to expire (≤ 90 s). The
+state records stay readable (the acknowledgements and the checksums are
+ignored by the old pod). Rolling the front-ends back has no effect on
+the workers beyond the checksums.
+
+**A hard end.** A pod killed without its grace period leaves its leases
+to expire: the others take its partitions within the lease plus a
+cadence (about 45 s at most) and keep them for `orphan_hold_seconds`. A
+pod restarted under the same name after a crash waits for its old record
+to expire and starts without a right to its old partitions.
+
+**Alerts** (`docs/observability.md`): `imapceph_jmap_push_partitions_unowned`
+above 0 for two minutes; the p99 of `imapceph_jmap_push_gap_seconds` or
+of `imapceph_jmap_push_handover_seconds` above 10 s;
+`imapceph_jmap_push_verifyq_age_seconds` above 60 s;
+`imapceph_jmap_push_partition_events_total{event="lost"}` rising for
+long (a lock object or an OSD in trouble); `event=push_scan_listing`
+in the logs (no effective `admin.kv_index: read`: run `shardpost index
+backfill kv`).
+
+`shardpost system migrate` refuses while `jmap/push/lease` has a time in
+the future: the marker of the partitioned pods counts like the lease of
+the single one, so the runbook of the migration ("push to 0, exit 2
+right after is normal") holds unchanged.
+
 ## Delayed submissions
 
 Delayed JMAP sending (0.43.0, [JMAP](../jmap.md#delayed-sending),

@@ -15,7 +15,7 @@ repair are in the [storage chapter](docs/architecture/storage.md).
 
 | Component | Task | Boundary |
 |---|---|---|
-| This project's mail server | IMAP, POP3, LMTP, ManageSieve, Sieve, mail store, learning worker | No public SMTP MTA and no user management |
+| This project's mail server | IMAP, POP3, LMTP, ManageSieve, Sieve, mail store, learning worker; the JMAP push workers as a deployment of their own that share 64 partitions | No public SMTP MTA and no user management |
 | nauthilus-director | Public protocol access and backend routing; client IP via PROXY | Its own configuration, certificates and health checks |
 | Nauthilus | Login and resolution of an address to the canonical account | No mail content, no mailbox index |
 | Ceph/Rook | RADOS persistence, replication/EC; provisioning of the Ceph credentials | No global transaction across mail objects |

@@ -94,25 +94,31 @@ func mergeSeen(cur *pushSeen, mine pushSeen, live map[string]bool) (pushSeen, bo
 		out.Seq, out.Digest, out.Shared = cur.Seq, cur.Digest, cur.Shared
 	}
 
-	out.Ack = map[string]pushAck{}
-
-	for id, a := range mine.Ack {
-		if live == nil || live[id] {
-			out.Ack[id] = a
-		}
-	}
-
-	for id, a := range cur.Ack {
-		if live != nil && !live[id] {
-			continue
-		}
-
-		if m, ok := out.Ack[id]; !ok || a.Seq > m.Seq {
-			out.Ack[id] = a
-		}
-	}
+	out.Ack = mergeAcks(cur.Ack, mine.Ack, live)
 
 	return out, false
+}
+
+// mergeAcks merges the acknowledgements of the stored record and the
+// writer's: per subscription the one with the greater seq (the
+// writer's at a tie), only for the subscriptions alive (nil: all).
+func mergeAcks(cur, mine map[string]pushAck, live map[string]bool) map[string]pushAck {
+	alive := func(id string) bool { return live == nil || live[id] }
+	out := map[string]pushAck{}
+
+	for id, a := range mine {
+		if alive(id) {
+			out[id] = a
+		}
+	}
+
+	for id, a := range cur {
+		if m, ok := out[id]; alive(id) && (!ok || a.Seq > m.Seq) {
+			out[id] = a
+		}
+	}
+
+	return out
 }
 
 // pushTypesFrom derives the backlog of a subscription from the account:

@@ -280,24 +280,31 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 
 	defer func() { _ = health.Close() }()
 
-	return jmap.RunPushWorker(ctx, jmap.WorkerOptions{
-		Store:  storeAdapter{store},
-		KV:     kv,
-		Sender: pushSender(c, vapid),
+	o := pushWorkerOptions(settings, store)
+	o.KV, o.Sender, o.Auth, o.Log, o.VAPIDPublicKey, o.Status = kv, pushSender(c, vapid), authn, log.With("component", "push"), vapid.PublicKey(), status
+
+	return jmap.RunPushWorker(ctx, o)
+}
+
+// pushWorkerOptions maps the configured push settings (the partitions
+// of stage B18a among them); the store, the sender, the authenticator,
+// the log, the key and the status are the caller's.
+func pushWorkerOptions(settings *config.Config, store *cephstore.Store) jmap.WorkerOptions {
+	c := settings.JMAP.Push
+
+	return jmap.WorkerOptions{
+		Store: storeAdapter{store},
 		// The same name as the registration: stable across restarts of
 		// the container, so the worker finds its own membership record.
-		Instance:       registrationInstance(model.RolePush),
-		Version:        version.Version,
-		Auth:           authn,
-		Log:            log.With("component", "push"),
-		VAPIDPublicKey: vapid.PublicKey(),
-		Scan:           sec(c.ScanSeconds),
-		Poll:           sec(c.PollSeconds),
+		Instance: registrationInstance(model.RolePush),
+		Version:  version.Version,
+		Scan:     sec(c.ScanSeconds),
+		Poll:     sec(c.PollSeconds),
 		// The shared accounts, built as the front-ends build them.
 		Sharing:          jmapSharing(settings),
 		MaxSharedWatches: int(c.MaxSharedWatches),
 		MaxWatches:       int(c.WorkerMaxWatches),
-		// The partitions (stage B18a).
+		// The partitions.
 		LeaseTTL:           sec(c.LeaseSeconds),
 		Take:               sec(c.TakeSeconds),
 		Retry:              sec(c.RetrySeconds),
@@ -311,8 +318,7 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 		StartRate:          int(c.StartRate),
 		SelfStopMargin:     config.PushSelfStopMargin * time.Second,
 		Rotate:             store,
-		Status:             status,
-	})
+	}
 }
 
 // jmapQuota finds the warnLimit of the Quota objects: per resource the

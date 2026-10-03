@@ -192,73 +192,100 @@ func (w *worker) rebalance(ctx context.Context) bool {
 		target = min(target, w.o.MaxPartitions)
 	}
 
-	est := w.estimate(v, now)
-	fast := false
-	taking := w.counted()
-
-	capacity := func() bool {
-		limit := w.o.MaxPartitions
-		if limit <= 0 || limit > w.n {
-			limit = w.n
-		}
-
-		return taking < limit && int(w.watched.Load())+est <= w.o.MaxWatchedAccounts
-	}
-
+	r := &takeRound{w: w, v: v, now: now, age: age, target: target, est: w.estimate(v, now), taking: w.counted()}
 	start := rand.IntN(w.n) //nolint:gosec // spreads the partitions, no secret
 
 	for i := range w.n {
-		p := w.parts[(start+i)%w.n]
-
-		w.mu.Lock()
-		state := p.state
-		w.mu.Unlock()
-
-		if state != stateFree {
-			p.freeSince = time.Time{}
-
-			continue
-		}
-
-		switch classifyPartition(v, p.n, now, w.o.LeaseTTL, age, w.o.Take) {
-		case classFree:
-			if p.freeSince.IsZero() {
-				p.freeSince = now
-			}
-
-			switch {
-			case p.orphaned || now.Sub(p.freeSince) > 2*w.o.Take: // orphaned before, or contested
-				fast = true
-
-				if capacity() {
-					w.tryTake(p, true)
-					taking++
-				}
-			case taking < target && capacity():
-				w.tryTake(p, false)
-				taking++
-			case p.busy:
-				fast = true
-			}
-		case classOrphan:
-			fast = true
-			p.freeSince, p.orphaned = time.Time{}, true
-
-			if capacity() {
-				w.tryTake(p, true)
-				taking++
-			}
-		case classUnknown:
-			fast = true
-			p.freeSince = time.Time{}
-		default:
-			p.freeSince, p.busy, p.orphaned = time.Time{}, false, false
-		}
+		r.consider(w.parts[(start+i)%w.n])
 	}
 
-	w.maybeShed(v, names, target, est, now)
+	w.maybeShed(v, names, target, r.est, now)
 
-	return fast
+	return r.fast
+}
+
+// takeRound is the taking of one cadence: the view it works on, the
+// share and the capacity estimate, what is held or being taken so far,
+// and whether a partition asked for the fast cadence.
+type takeRound struct {
+	w           *worker
+	v           *membersView
+	now         time.Time
+	age         time.Duration
+	target, est int
+	taking      int
+	fast        bool
+}
+
+// capacity reports whether the pod can take one more partition within
+// its bounds.
+func (r *takeRound) capacity() bool {
+	limit := r.w.o.MaxPartitions
+	if limit <= 0 || limit > r.w.n {
+		limit = r.w.n
+	}
+
+	return r.taking < limit && int(r.w.watched.Load())+r.est <= r.w.o.MaxWatchedAccounts
+}
+
+// try starts a lock attempt when there is capacity.
+func (r *takeRound) try(p *partition, orphan bool) {
+	if r.capacity() {
+		r.w.tryTake(p, orphan)
+		r.taking++
+	}
+}
+
+// consider classifies a partition this pod does not hold and tries it
+// as the class allows (§4.4, second table).
+func (r *takeRound) consider(p *partition) {
+	w := r.w
+
+	w.mu.Lock()
+	state := p.state
+	w.mu.Unlock()
+
+	if state != stateFree {
+		p.freeSince = time.Time{}
+
+		return
+	}
+
+	switch classifyPartition(r.v, p.n, r.now, w.o.LeaseTTL, r.age, w.o.Take) {
+	case classFree:
+		r.considerFree(p)
+	case classOrphan:
+		r.fast = true
+		p.freeSince, p.orphaned = time.Time{}, true
+
+		r.try(p, true)
+	case classUnknown:
+		r.fast = true
+		p.freeSince = time.Time{}
+	default:
+		p.freeSince, p.busy, p.orphaned = time.Time{}, false, false
+	}
+}
+
+// considerFree is consider for a partition no fresh member holds: taken
+// within the share, at once and over it when it was orphaned before or
+// has been free for two cadences (contested), on the fast cadence when
+// this pod's last attempt was refused.
+func (r *takeRound) considerFree(p *partition) {
+	if p.freeSince.IsZero() {
+		p.freeSince = r.now
+	}
+
+	switch {
+	case p.orphaned || r.now.Sub(p.freeSince) > 2*r.w.o.Take:
+		r.fast = true
+
+		r.try(p, true)
+	case r.taking < r.target:
+		r.try(p, false)
+	case p.busy:
+		r.fast = true
+	}
 }
 
 // counted are the partitions held, being given up or being taken: what
@@ -607,9 +634,19 @@ func (w *worker) maybeShed(v *membersView, names []string, target, est int, now 
 		return
 	}
 
+	if pick := w.shedCandidate(now); pick != nil {
+		w.giveUp(pick, eventShed, true)
+	}
+}
+
+// shedCandidate is the partition to shed: the one taken last among
+// those not under the orphan hold (nil: none), and notes the shed.
+func (w *worker) shedCandidate(now time.Time) *partition {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	var pick *partition
 
-	w.mu.Lock()
 	for _, p := range w.parts {
 		if p.state != stateActive || (!p.orphanUntil.IsZero() && now.Before(p.orphanUntil)) {
 			continue
@@ -623,11 +660,8 @@ func (w *worker) maybeShed(v *membersView, names []string, target, est int, now 
 	if pick != nil {
 		w.lastShed = now
 	}
-	w.mu.Unlock()
 
-	if pick != nil {
-		w.giveUp(pick, eventShed, true)
-	}
+	return pick
 }
 
 // someoneUnder reports whether a fresh member other than self holds
@@ -671,6 +705,7 @@ func (w *worker) onRotate() {
 			if err := rt.Retake(); err != nil {
 				w.o.Log.Warn("push worker: lease not moved after the key rotation", "event", "push_partition",
 					"action", eventRotateFailed, "partition", p.n, "err", err)
+
 				w.events <- partEvent{p: p, kind: evRotateFailed}
 
 				return
@@ -703,7 +738,9 @@ func (w *worker) shutdown() {
 
 	for len(held) > 0 {
 		start := time.Now()
+
 		w.releaseWave(held[:min(size, len(held))])
+
 		held = w.activePartitions()
 
 		if len(held) == 0 {

@@ -343,21 +343,60 @@ func (svc *partitionService) scanShard(ctx context.Context) (map[string][]*pushR
 
 	svc.paused = false
 
-	type entry struct {
-		account string
-		sum     uint64
+	entries, ok := svc.readShard()
+	if !ok {
+		return nil, nil, false
 	}
 
-	var entries []entry
+	accounts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		accounts = append(accounts, e.account)
+	}
+
+	full := svc.fullPass(accounts)
+	sc := &shardScan{svc: svc, byAccount: map[string][]*pushRecord{}, ids: map[string]bool{}, known: map[string]bool{}}
+
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return nil, nil, false
+		}
+
+		sc.visit(e, full[e.account])
+	}
+
+	svc.mu.Lock()
+	for account := range svc.sums {
+		if !sc.known[account] {
+			delete(svc.sums, account)
+		}
+	}
+
+	svc.known = sc.known
+	svc.mu.Unlock()
+
+	return sc.byAccount, sc.ids, true
+}
+
+// shardEntry is one entry of the shard: the account and the checksum of
+// its record as the index value carries it (0: none).
+type shardEntry struct {
+	account string
+	sum     uint64
+}
+
+// readShard reads the shard of the partition in pages; ok is false when
+// a page could not be read.
+func (svc *partitionService) readShard() ([]shardEntry, bool) {
+	var entries []shardEntry
 
 	after := ""
 
 	for {
-		page, more, err := w.ix.ListShard(svc.p.n, after, pushScanPage)
+		page, more, err := svc.w.ix.ListShard(svc.p.n, after, pushScanPage)
 		if err != nil {
-			w.o.Log.Warn("push worker: read the subscription index", "partition", svc.p.n, "err", err)
+			svc.w.o.Log.Warn("push worker: read the subscription index", "partition", svc.p.n, "err", err)
 
-			return nil, nil, false
+			return nil, false
 		}
 
 		for _, e := range page {
@@ -372,115 +411,107 @@ func (svc *partitionService) scanShard(ctx context.Context) (map[string][]*pushR
 
 			_ = json.Unmarshal(e.Value, &v)
 
-			entries = append(entries, entry{account: account, sum: v.Sum})
+			entries = append(entries, shardEntry{account: account, sum: v.Sum})
 		}
 
 		if !more {
-			break
+			return entries, true
 		}
 	}
+}
 
-	accounts := make([]string, 0, len(entries))
-	for _, e := range entries {
-		accounts = append(accounts, e.account)
-	}
+// shardScan gathers what one scan of the shard found: the verified
+// subscriptions per account, the ids of every subscription, and the
+// accounts the shard lists.
+type shardScan struct {
+	svc       *partitionService
+	byAccount map[string][]*pushRecord
+	ids       map[string]bool
+	known     map[string]bool
+}
 
-	full := svc.fullPass(accounts)
-
-	byAccount := map[string][]*pushRecord{}
-	ids := map[string]bool{}
-	known := map[string]bool{}
-
-	for _, e := range entries {
-		if ctx.Err() != nil {
-			return nil, nil, false
-		}
-
-		known[e.account] = true
-
-		svc.mu.Lock()
-		prev, had := svc.sums[e.account]
-		cur := svc.subs[e.account]
-		svc.mu.Unlock()
-
-		cause := ""
-
-		switch {
-		case !had, e.sum != 0 && e.sum != prev:
-			cause = "changed"
-		case e.sum == 0:
-			cause = "nosum"
-		case full[e.account]:
-			cause = "full"
-		}
-
-		if cause == "" {
-			// Unchanged: what the last read gave still holds.
-			if len(cur) > 0 {
-				byAccount[e.account] = cur
-			}
-
-			for _, rec := range cur {
-				ids[rec.ID] = true
-			}
-
-			continue
-		}
-
-		metrics.PushScanGets.WithLabelValues(cause).Inc()
-
-		raw, err := w.o.KV.Get(pushAcctKey(e.account))
-
-		switch {
-		case errors.Is(err, model.ErrNotFound):
-			// An entry without record: the index is refreshed, which
-			// removes it (kvindex).
-			if r, ok := w.o.KV.(interface{ Refresh(string) }); ok {
-				r.Refresh(pushAcctKey(e.account))
-			}
-
-			delete(known, e.account)
-
-			continue
-		case err != nil:
-			w.o.Log.Warn("push worker: read subscriptions", "account", e.account, "err", err)
-
-			if len(cur) > 0 {
-				byAccount[e.account] = cur
-			}
-
-			continue
-		}
-
-		svc.mu.Lock()
-		svc.sums[e.account] = kvindex.PushSum(raw)
-		svc.mu.Unlock()
-
-		pa := &pushAccount{}
-		if json.Unmarshal(raw, pa) != nil || pa.Account == "" {
-			continue
-		}
-
-		for _, rec := range pa.Subs {
-			ids[rec.ID] = true
-		}
-
-		if verified := w.sortOut(pa); len(verified) > 0 {
-			byAccount[e.account] = verified
-		}
-	}
+// visit takes one entry: the record is read when its checksum moved,
+// when it has none, or in the full pass; else what the last read gave
+// still holds.
+func (sc *shardScan) visit(e shardEntry, full bool) {
+	svc := sc.svc
+	sc.known[e.account] = true
 
 	svc.mu.Lock()
-	for account := range svc.sums {
-		if !known[account] {
-			delete(svc.sums, account)
-		}
-	}
-
-	svc.known = known
+	prev, had := svc.sums[e.account]
+	cur := svc.subs[e.account]
 	svc.mu.Unlock()
 
-	return byAccount, ids, true
+	cause := ""
+
+	switch {
+	case !had, e.sum != 0 && e.sum != prev:
+		cause = "changed"
+	case e.sum == 0:
+		cause = "nosum"
+	case full:
+		cause = "full"
+	}
+
+	if cause == "" {
+		sc.keep(e.account, cur)
+
+		return
+	}
+
+	metrics.PushScanGets.WithLabelValues(cause).Inc()
+
+	raw, err := svc.w.o.KV.Get(pushAcctKey(e.account))
+
+	switch {
+	case errors.Is(err, model.ErrNotFound):
+		// An entry without record: the index is refreshed, which removes
+		// it (kvindex).
+		if r, ok := svc.w.o.KV.(interface{ Refresh(string) }); ok {
+			r.Refresh(pushAcctKey(e.account))
+		}
+
+		delete(sc.known, e.account)
+	case err != nil:
+		svc.w.o.Log.Warn("push worker: read subscriptions", "account", e.account, "err", err)
+		sc.keep(e.account, cur)
+	default:
+		sc.read(e.account, raw)
+	}
+}
+
+// keep carries the subscriptions of the last read over.
+func (sc *shardScan) keep(account string, cur []*pushRecord) {
+	if len(cur) > 0 {
+		sc.byAccount[account] = cur
+	}
+
+	for _, rec := range cur {
+		sc.ids[rec.ID] = true
+	}
+}
+
+// read takes the record just read: its checksum, its subscriptions and
+// the verified ones among them.
+func (sc *shardScan) read(account string, raw []byte) {
+	svc := sc.svc
+
+	svc.mu.Lock()
+	svc.sums[account] = kvindex.PushSum(raw)
+	svc.mu.Unlock()
+
+	pa := &pushAccount{}
+	if json.Unmarshal(raw, pa) != nil || pa.Account == "" {
+		return
+	}
+
+	for _, rec := range pa.Subs {
+		sc.ids[rec.ID] = true
+	}
+
+	if verified := svc.w.sortOut(pa); len(verified) > 0 {
+		sc.byAccount[account] = verified
+	}
 }
 
 // fullPass picks the accounts of the full pass that are due in this
@@ -716,6 +747,7 @@ func (svc *partitionService) reconcile(ctx context.Context, byAccount map[string
 	for account, wt := range svc.watching {
 		if _, ok := byAccount[account]; !ok {
 			stop = append(stop, wt)
+
 			delete(svc.watching, account)
 		}
 	}
@@ -777,6 +809,7 @@ func (svc *partitionService) firstPassDone(wt *watcher) {
 
 	if wt.first && !wt.firstDone {
 		wt.firstDone = true
+
 		svc.first.Done()
 	}
 }

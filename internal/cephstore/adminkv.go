@@ -76,8 +76,8 @@ func (s *Store) AdminKV() (*AdminKV, error) {
 		// (holdLock); their lock operations are measured for its metrics.
 		LockKeep: func(name string, ttl time.Duration) (model.Lease, error) {
 			start := time.Now()
-
 			l, err := s.holdLock(adminNamespace, sortedindex.LockOID(name), "worker", name+" worker", ttl, false)
+
 			metrics.PushLockOp.WithLabelValues("take").Observe(time.Since(start).Seconds())
 
 			if err != nil {

@@ -299,8 +299,8 @@ func (s *Store) holdLockIn(pool, ns, oid, name, desc string, ttl time.Duration, 
 // closes when it is released (or replaces, on Retake).
 func (s *Store) holdLockOn(u *User, oid, name, desc string, ttl time.Duration, onRotate bool) (*lease, error) {
 	l := &lease{stop: make(chan struct{}), u: u, oid: oid, name: name, desc: desc, ttl: ttl, cookie: newGUID()}
-
 	sent := time.Now()
+
 	if err := l.take(nil); err != nil {
 		u.Close()
 		return nil, err
@@ -524,6 +524,7 @@ func (u *User) keepLock(l *lease, every time.Duration, take func(flags *byte) er
 			case <-t.C:
 				sent := time.Now()
 				err := take(&renew)
+
 				l.observe("renew", sent)
 
 				if err != nil {

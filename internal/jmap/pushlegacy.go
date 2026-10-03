@@ -97,53 +97,58 @@ func (m *legacyMarker) refreshNow(now time.Time, write bool) {
 	m.mu.Unlock()
 
 	go func() {
-		w := m.w
-		holder := pushLegacyPrefix + w.o.Instance
-
 		var old bool
 
-		err := w.o.KV.Update(pushLeaseKey, func(cur []byte) ([]byte, error) {
-			var l pushLease
-			if cur != nil && json.Unmarshal(cur, &l) == nil && l.Holder != "" && !strings.HasPrefix(l.Holder, pushLegacyPrefix) &&
-				l.Until.After(time.Now()) {
-				old = true
+		err := m.w.o.KV.Update(pushLeaseKey, func(cur []byte) ([]byte, error) {
+			next, isOld, err := m.next(cur, write)
+			old = isOld
 
-				return nil, errOldHolder
-			}
-
-			if !write {
-				return nil, errOldHolder // read only
-			}
-
-			return json.Marshal(pushLease{Holder: holder, Until: time.Now().Add(pushLegacyTTL)})
+			return next, err
 		})
 
-		m.mu.Lock()
-		defer m.mu.Unlock()
-
-		wasOld := m.oldHolder
-		m.oldHolder, m.known = old, true
-
-		if !old && (wasOld || !write) {
-			// The pod may take now: a cadence out of turn.
-			select {
-			case w.retick <- struct{}{}:
-			default:
-			}
-		}
-
-		switch {
-		case old:
-			if !wasOld {
-				w.o.Log.Info("push worker: an old push worker holds the lease; waiting for it to release", "event", "push_legacy_wait")
-			}
-		case err == nil && write:
-			m.until = now.Add(pushLegacyTTL)
-		case errors.Is(err, errOldHolder):
-		case err != nil:
-			w.o.Log.Warn("push worker: legacy lease record", "err", err)
-		}
+		m.apply(now, write, old, err)
 	}()
+}
+
+// next is the record to write for cur: none while an old pod holds it
+// (old reports that) or when the look is read-only, else the marker.
+func (m *legacyMarker) next(cur []byte, write bool) ([]byte, bool, error) {
+	var l pushLease
+	if cur != nil && json.Unmarshal(cur, &l) == nil && l.Holder != "" && !strings.HasPrefix(l.Holder, pushLegacyPrefix) &&
+		l.Until.After(time.Now()) {
+		return nil, true, errOldHolder
+	}
+
+	if !write {
+		return nil, false, errOldHolder // read only
+	}
+
+	next, err := json.Marshal(pushLease{Holder: pushLegacyPrefix + m.w.o.Instance, Until: time.Now().Add(pushLegacyTTL)})
+
+	return next, false, err
+}
+
+// apply takes the result of a look at the record.
+func (m *legacyMarker) apply(now time.Time, write, old bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	wasOld := m.oldHolder
+	m.oldHolder, m.known = old, true
+
+	if !old && (wasOld || !write) {
+		m.w.wakeup(wakeFast) // the pod may take now: a cadence out of turn
+	}
+
+	switch {
+	case old && !wasOld:
+		m.w.o.Log.Info("push worker: an old push worker holds the lease; waiting for it to release", "event", "push_legacy_wait")
+	case old, errors.Is(err, errOldHolder):
+	case err != nil:
+		m.w.o.Log.Warn("push worker: legacy lease record", "err", err)
+	case write:
+		m.until = now.Add(pushLegacyTTL)
+	}
 }
 
 // clear deletes the marker at the orderly end when no other fresh,

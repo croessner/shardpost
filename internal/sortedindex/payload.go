@@ -65,17 +65,7 @@ func (p *PayloadPump) run() {
 		}
 
 		for {
-			p.mu.Lock()
-			var item []byte
-
-			more := len(p.q) > 0
-			if more {
-				item, p.q = p.q[0], p.q[1:]
-			} else if p.overflow {
-				item, p.overflow, more = nil, false, true
-			}
-			p.mu.Unlock()
-
+			item, more := p.pop()
 			if !more {
 				break
 			}
@@ -87,4 +77,24 @@ func (p *PayloadPump) run() {
 			}
 		}
 	}
+}
+
+// pop takes the next item of the queue, or the empty event of an
+// overflow; more is false when there is nothing.
+func (p *PayloadPump) pop() (item []byte, more bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch {
+	case len(p.q) > 0:
+		item, p.q = p.q[0], p.q[1:]
+
+		return item, true
+	case p.overflow:
+		p.overflow = false
+
+		return nil, true
+	}
+
+	return nil, false
 }

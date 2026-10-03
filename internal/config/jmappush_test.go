@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // TestJMAPPushFromEnvironment: the nested push settings come from the
 // environment, and a VAPID subject that is no URI is refused.
@@ -38,18 +41,26 @@ func TestJMAPPushPartitionSettings(t *testing.T) {
 	}
 
 	p := c.JMAP.Push
-	if p.LeaseSeconds != 30 || p.TakeSeconds != 5 || p.RetrySeconds != 2 || p.OrphanHoldSeconds != 600 ||
-		p.FullScanSeconds != 3600 || p.RebalanceSeconds != 10 || p.RebalanceSettleSeconds != 60 ||
-		p.HandoffSeconds != 5 || p.MaxWatchedAccounts != 50000 || p.StartRate != 5000 || p.MaxPartitions != 0 {
-		t.Fatalf("defaults %+v", p)
+	got := []int64{p.MaxPartitions, p.LeaseSeconds, p.TakeSeconds, p.RetrySeconds, p.OrphanHoldSeconds, p.FullScanSeconds,
+		p.RebalanceSeconds, p.RebalanceSettleSeconds, p.HandoffSeconds, p.MaxWatchedAccounts, p.StartRate}
+	want := []int64{0, 30, 5, 2, 600, 3600, 10, 60, 5, 50000, 5000}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("defaults %v, want %v", got, want)
 	}
 
 	t.Setenv("JMAP_PUSH_MAX_PARTITIONS", "8")
 	t.Setenv("JMAP_PUSH_START_RATE", "10000")
 	t.Setenv("JMAP_PUSH_FULL_SCAN_SECONDS", "0")
 
-	if c, err = Load(""); err != nil || c.JMAP.Push.MaxPartitions != 8 || c.JMAP.Push.StartRate != 10000 || c.JMAP.Push.FullScanSeconds != 0 {
-		t.Fatalf("from the environment: %+v %v", c.JMAP.Push, err)
+	c, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p = c.JMAP.Push
+	if got, want := []int64{p.MaxPartitions, p.StartRate, p.FullScanSeconds}, []int64{8, 10000, 0}; !slices.Equal(got, want) {
+		t.Fatalf("from the environment: %v, want %v", got, want)
 	}
 
 	for _, bad := range []struct{ key, value string }{

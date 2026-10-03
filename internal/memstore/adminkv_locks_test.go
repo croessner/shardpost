@@ -62,8 +62,8 @@ func TestMemLeaseRenewsAndExpires(t *testing.T) {
 	}
 }
 
-// TestMemLockHook: the hook refuses a lock, loses a lease on a refused
-// renewal, and holds a renewal so that Release waits for it.
+// TestMemLockHook: the hook refuses a lock and loses a lease on a
+// refused renewal.
 func TestMemLockHook(t *testing.T) {
 	kv := NewAdminKV()
 
@@ -84,7 +84,7 @@ func TestMemLockHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	kv.Locks().SetHook(func(op, name string) error {
+	kv.Locks().SetHook(func(op, _ string) error {
 		if op == LockOpRenew {
 			return errors.New("renewal refused")
 		}
@@ -99,9 +99,15 @@ func TestMemLockHook(t *testing.T) {
 	}
 
 	l.Release()
+}
 
+// TestMemLockHookHoldsRenewal: a hook that holds a renewal makes
+// Release wait for it.
+func TestMemLockHookHoldsRenewal(t *testing.T) {
+	kv := NewAdminKV()
 	gate := make(chan struct{})
-	kv.Locks().SetHook(func(op, name string) error {
+
+	kv.Locks().SetHook(func(op, _ string) error {
 		if op == LockOpRenew {
 			<-gate
 		}
@@ -143,16 +149,7 @@ func TestMemLockHook(t *testing.T) {
 // moves a lease to the new handle; RevokeLocks loses both kinds.
 func TestMemRotate(t *testing.T) {
 	kv := NewAdminKV()
-
-	plain, err := kv.LockQueue("plain", time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	keep, err := kv.LockQueueKeep("keep", time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain, keep := twoLeases(t, kv)
 
 	rotated := 0
 	off := kv.OnRotate(func() { rotated++ })
@@ -163,17 +160,13 @@ func TestMemRotate(t *testing.T) {
 		t.Fatalf("after the rotation: hooks %d, plain lost %v, keep lost %v", rotated, plain.Lost(), keep.Lost())
 	}
 
-	if cur, old := kv.LockHandles(); cur != 0 || old != 1 {
-		t.Fatalf("handles after the rotation: current %d, old %d", cur, old)
-	}
+	expectHandles(t, kv, 0, 1)
 
 	if err := keep.(model.LeaseRetaker).Retake(); err != nil {
 		t.Fatal(err)
 	}
 
-	if cur, old := kv.LockHandles(); cur != 1 || old != 0 {
-		t.Fatalf("handles after the retake: current %d, old %d", cur, old)
-	}
+	expectHandles(t, kv, 1, 0)
 
 	off()
 	kv.Rotate()
@@ -192,6 +185,32 @@ func TestMemRotate(t *testing.T) {
 	keep.Release()
 }
 
+// twoLeases takes a LockQueue and a LockQueueKeep lease.
+func twoLeases(t *testing.T, kv *AdminKV) (plain, keep model.Lease) {
+	t.Helper()
+
+	plain, err := kv.LockQueue("plain", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keep, err = kv.LockQueueKeep("keep", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return plain, keep
+}
+
+// expectHandles checks the leases per handle.
+func expectHandles(t *testing.T, kv *AdminKV, current, old int) {
+	t.Helper()
+
+	if cur, o := kv.LockHandles(); cur != current || o != old {
+		t.Fatalf("handles: current %d, old %d; want %d and %d", cur, o, current, old)
+	}
+}
+
 // TestMemBackendHook: the omap hook holds a read and refuses a write.
 func TestMemBackendHook(t *testing.T) {
 	kv := NewAdminKV()
@@ -202,6 +221,7 @@ func TestMemBackendHook(t *testing.T) {
 	}
 
 	gate := make(chan struct{})
+
 	kv.Backend().SetHook(func(op, oid string) error {
 		switch {
 		case oid == "obj" && op == "read_page":
@@ -221,6 +241,7 @@ func TestMemBackendHook(t *testing.T) {
 
 	go func() {
 		_, _, _ = om.ReadPage("obj", "", 10)
+
 		close(read)
 	}()
 
@@ -261,15 +282,7 @@ func TestMemPayloadWatch(t *testing.T) {
 	defer plain.Close()
 
 	om.NotifyPayload("obj", []byte("one"))
-
-	select {
-	case data := <-pw.Events():
-		if string(data) != "one" {
-			t.Fatalf("payload %q", data)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no payload")
-	}
+	expectPayload(t, pw, "one")
 
 	select {
 	case <-plain.Events():
@@ -281,24 +294,43 @@ func TestMemPayloadWatch(t *testing.T) {
 		om.NotifyPayload("obj", []byte{byte(i)})
 	}
 
-	got, empty := 0, 0
+	// The queue holds PayloadBuffer events, and the pump may hold one more
+	// in its hand.
+	if got := untilOverflow(t, pw); got > sortedindex.PayloadBuffer+1 || got == 0 {
+		t.Fatalf("%d events before the overflow event, want up to %d", got, sortedindex.PayloadBuffer+1)
+	}
+}
 
-	for empty == 0 {
+// expectPayload reads one payload.
+func expectPayload(t *testing.T, pw model.PayloadWatch, want string) {
+	t.Helper()
+
+	select {
+	case data := <-pw.Events():
+		if string(data) != want {
+			t.Fatalf("payload %q, want %q", data, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no payload")
+	}
+}
+
+// untilOverflow counts the events with data before the empty one.
+func untilOverflow(t *testing.T, pw model.PayloadWatch) int {
+	t.Helper()
+
+	got := 0
+
+	for {
 		select {
 		case data := <-pw.Events():
 			if len(data) == 0 {
-				empty++
-			} else {
-				got++
+				return got
 			}
+
+			got++
 		case <-time.After(time.Second):
 			t.Fatalf("after %d events no overflow event", got)
 		}
-	}
-
-	// The queue holds PayloadBuffer events, and the pump may hold one more
-	// in its hand.
-	if got > sortedindex.PayloadBuffer+1 || got == 0 {
-		t.Fatalf("%d events before the overflow event, want up to %d", got, sortedindex.PayloadBuffer+1)
 	}
 }

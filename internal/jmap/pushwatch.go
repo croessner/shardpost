@@ -60,8 +60,6 @@ func (w *worker) watchAccount(ctx context.Context, svc *partitionService, accoun
 		w.saveState(u, account, f, svc)
 	}
 
-	shared := f.shared
-
 	feed := newAccountFeed(u)
 	defer feed.Close()
 
@@ -73,17 +71,9 @@ func (w *worker) watchAccount(ctx context.Context, svc *partitionService, accoun
 	trigger <- struct{}{} // what happened while no worker watched
 
 	for {
-		full := false
-
-		select {
-		case <-ctx.Done():
+		full, ok := awaitChange(ctx, feed, f.shared, poll, trigger)
+		if !ok {
 			return
-		case <-feed.Events():
-		case <-shared.Wake():
-		case <-poll.C:
-			full = true
-		case <-trigger:
-			full = true
 		}
 
 		woke := time.Now()
@@ -96,28 +86,58 @@ func (w *worker) watchAccount(ctx context.Context, svc *partitionService, accoun
 		case <-time.After(w.o.Coalesce):
 		}
 
-		// The round has a budget of its own: the stop of the partition
-		// does not cut a push short, and the loop looks at the stop only
-		// once the round is saved.
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.o.RoundBudget)
-		res := w.pushChanges(rctx, u, account, f, full, svc, woke)
-		cancel()
-
-		if res.rollback {
-			// The account counter jumped back (purged and created again
-			// under a running watcher): the watcher ends without saving;
-			// the next start raises the epoch.
-			w.o.Log.Info("push worker: account counter jumped back; the watcher restarts", "account", account)
-
+		if !w.round(ctx, u, account, f, full, svc, self, woke) {
 			return
 		}
-
-		if (res.moved || res.ackChanged) && self.saves() {
-			w.saveState(u, account, f, svc)
-		}
-
-		svc.firstPassDone(self)
 	}
+}
+
+// awaitChange waits for something that may have changed: the account's
+// watch, a shared account, the poll or the first trigger (both full).
+// ok is false when the watcher is to end.
+func awaitChange(ctx context.Context, feed *accountFeed, shared *sharedPush, poll *time.Ticker, trigger <-chan struct{}) (full, ok bool) {
+	select {
+	case <-ctx.Done():
+		return false, false
+	case <-feed.Events():
+		return false, true
+	case <-shared.Wake():
+		return false, true
+	case <-poll.C:
+		return true, true
+	case <-trigger:
+		return true, true
+	}
+}
+
+// round is one round of the watcher: it has a budget of its own, so the
+// stop of the partition does not cut a push short, and the loop looks
+// at the stop only once the round is saved. It reports whether the
+// watcher goes on.
+func (w *worker) round(ctx context.Context, u model.User, account string, f *follow, full bool, svc *partitionService,
+	self *watcher, woke time.Time,
+) bool {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.o.RoundBudget)
+	res := w.pushChanges(rctx, u, account, f, full, svc, woke)
+
+	cancel()
+
+	if res.rollback {
+		// The account counter jumped back (purged and created again
+		// under a running watcher): the watcher ends without saving; the
+		// next start raises the epoch.
+		w.o.Log.Info("push worker: account counter jumped back; the watcher restarts", "account", account)
+
+		return false
+	}
+
+	if (res.moved || res.ackChanged) && self.saves() {
+		w.saveState(u, account, f, svc)
+	}
+
+	svc.firstPassDone(self)
+
+	return true
 }
 
 // follow is where one account's watcher stands: the personal state last
@@ -318,16 +338,27 @@ func (w *worker) saveState(u model.User, account string, f *follow, svc *partiti
 	f.dirty = false
 
 	if adopted != nil {
-		f.last, f.digest, f.epoch = adopted.Seq, adopted.Digest, adopted.Epoch
-		f.ack = map[string]pushAck{}
-
-		for id, a := range adopted.Ack {
-			f.ack[id] = a
-		}
-
-		f.rebuildPending(u, account, subs, adopted.Shared)
+		f.adopt(u, account, subs, adopted)
 	}
 
+	f.reportPending(w, f.countBehind(subs))
+}
+
+// adopt takes a stored record of a higher epoch over: its state and
+// acknowledgements whole, and the backlog built from them.
+func (f *follow) adopt(u model.User, account string, subs []*pushRecord, seen *pushSeen) {
+	f.last, f.digest, f.epoch = seen.Seq, seen.Digest, seen.Epoch
+	f.ack = map[string]pushAck{}
+
+	for id, a := range seen.Ack {
+		f.ack[id] = a
+	}
+
+	f.rebuildPending(u, account, subs, seen.Shared)
+}
+
+// countBehind counts the subscriptions with a backlog.
+func (f *follow) countBehind(subs []*pushRecord) int {
 	behind := 0
 
 	for _, rec := range subs {
@@ -336,7 +367,7 @@ func (w *worker) saveState(u model.User, account string, f *follow, svc *partiti
 		}
 	}
 
-	f.reportPending(w, behind)
+	return behind
 }
 
 // roundResult is what one round of pushChanges reports: the state
@@ -371,36 +402,13 @@ func (w *worker) pushChanges(ctx context.Context, u model.User, account string, 
 	digest := f.shared.digest()
 	at := pushAck{Seq: f.last, Digest: digest}
 	live := map[string]bool{}
-	now := time.Now()
 
 	var res roundResult
 
 	for _, rec := range subs {
 		live[rec.ID] = true
 
-		if len(f.pending[rec.ID]) == 0 {
-			// Nothing to send: a subscription that is behind only in
-			// what it does not want, or new, is acknowledged up to here.
-			if a, ok := f.ack[rec.ID]; !ok || a != at {
-				f.ack[rec.ID] = at
-				res.ackChanged = true
-			}
-
-			continue
-		}
-
-		if now.Before(svc.backoffOf(rec.ID)) || !svc.leaseValid() {
-			continue
-		}
-
-		payload, _ := json.Marshal(&stateChange{Type: typeStateChange, Changed: f.pending[rec.ID]})
-
-		out := w.send(ctx, rec, payload, svc.hold)
-		metrics.PushDelay.Observe(time.Since(woke).Seconds())
-
-		if out == webpush.Delivered || out == webpush.Gone || out == webpush.Refused {
-			delete(f.pending, rec.ID)
-			f.ack[rec.ID] = at
+		if w.pushOne(ctx, rec, f, at, svc, woke) {
 			res.ackChanged = true
 		}
 	}
@@ -415,6 +423,41 @@ func (w *worker) pushChanges(ctx context.Context, u model.User, account string, 
 	f.digest = digest
 
 	return res
+}
+
+// pushOne pushes the backlog of one subscription, unless it is in
+// backoff or the lease is no longer valid, and reports whether its
+// acknowledgement changed. A subscription without backlog — behind only
+// in what it does not want, or new — is acknowledged up to the state of
+// the round.
+func (w *worker) pushOne(ctx context.Context, rec *pushRecord, f *follow, at pushAck, svc *partitionService, woke time.Time) bool {
+	if len(f.pending[rec.ID]) == 0 {
+		if a, ok := f.ack[rec.ID]; !ok || a != at {
+			f.ack[rec.ID] = at
+
+			return true
+		}
+
+		return false
+	}
+
+	if time.Now().Before(svc.backoffOf(rec.ID)) || !svc.leaseValid() {
+		return false
+	}
+
+	payload, _ := json.Marshal(&stateChange{Type: typeStateChange, Changed: f.pending[rec.ID]})
+	out := w.send(ctx, rec, payload, svc.hold)
+
+	metrics.PushDelay.Observe(time.Since(woke).Seconds())
+
+	if out == webpush.Delivered || out == webpush.Gone || out == webpush.Refused {
+		delete(f.pending, rec.ID)
+		f.ack[rec.ID] = at
+
+		return true
+	}
+
+	return false
 }
 
 // queueChanges adds what changed to what each subscription has not been

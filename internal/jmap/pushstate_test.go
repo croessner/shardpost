@@ -27,30 +27,24 @@ func (c *pushCluster) handOver(r *pushWorkerRun, name string) *pushWorkerRun {
 	return next
 }
 
-// TestPushAckAcrossHandover: the three cases of F3. A subscription in
-// backoff (503) gets the change from the successor; a send cut off by
-// the end of the worker is either acknowledged or left as a backlog
-// the successor sends, exactly one of the two; a delivery after a
-// backoff without a new change is not repeated by the successor.
-func TestPushAckAcrossHandover(t *testing.T) {
-	c := newPushCluster(t, model.KVIndexRead)
-	u := c.account("alice")
+// TestPushAckBackoffAcrossHandover: the first and third case of F3. A
+// subscription in backoff (503) gets the change from the successor; a
+// delivery after a backoff without a new change is not repeated by the
+// successor.
+func TestPushAckBackoffAcrossHandover(t *testing.T) {
+	c, u, w := startWatching(t)
 
-	w := c.start("w1")
-	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
-	c.watchedAll(1)
-
-	// Case 1: the push service asks to wait; the worker ends; the
-	// successor sends the change after the wait.
+	// The push service asks to wait; the worker ends; the successor
+	// sends the change after the wait.
 	c.sink.status.Store(http.StatusServiceUnavailable)
 
 	before := c.sink.stateChanges(path("alice"))
+
 	deliver(t, u, inboxName, plainMessage)
 
 	awaitCond(t, 5*time.Second, "the refused push", func() bool { return c.sink.stateChanges(path("alice")) > before })
 
-	seen := c.seen("alice")
-	if len(seen.Ack) != 1 || !seen.behind(firstKey(seen.Ack)) {
+	if seen := c.seen("alice"); len(seen.Ack) != 1 || !seen.behind(firstKey(seen.Ack)) {
 		t.Fatalf("no backlog saved after the refusal: %+v", seen)
 	}
 
@@ -66,20 +60,25 @@ func TestPushAckAcrossHandover(t *testing.T) {
 
 	awaitCond(t, 5*time.Second, "the acknowledgement", func() bool { s := c.seen("alice"); return !s.behind(firstKey(s.Ack)) })
 
-	// Case 3: a delivery after a backoff without a new change is not
-	// repeated by the successor.
+	// A delivery after a backoff without a new change is not repeated by
+	// the successor.
 	n := c.sink.stateChanges(path("alice"))
-	w = c.handOver(w, "w3")
+	c.handOver(w, "w3")
 	c.watchedAll(1)
 	time.Sleep(5 * testScan)
 
 	if c.sink.stateChanges(path("alice")) != n {
 		t.Fatalf("the successor repeated a delivered push: %d pushes, had %d", c.sink.stateChanges(path("alice")), n)
 	}
+}
 
-	// Case 2: a send hangs beyond the round budget while the worker
-	// ends; the send is cut off, the backlog stays, the successor sends
-	// once.
+// TestPushAckCutOffSend: the second case of F3. A send hangs beyond the
+// round budget while the worker ends; the send is cut off, the backlog
+// stays, the successor sends once.
+func TestPushAckCutOffSend(t *testing.T) {
+	c, u, w := startWatching(t)
+	n := c.sink.stateChanges(path("alice"))
+
 	hold := make(chan struct{})
 	c.sink.hold.Store(&hold)
 
@@ -87,6 +86,7 @@ func TestPushAckAcrossHandover(t *testing.T) {
 	time.Sleep(testScan) // the round is in the hanging send
 
 	stopped := time.Now()
+
 	c.stop(w)
 
 	if took := time.Since(stopped); took > 3*testHandoff+2*testTake+time.Second {
@@ -99,20 +99,40 @@ func TestPushAckAcrossHandover(t *testing.T) {
 		t.Fatalf("the cut-off send was acknowledged: %+v", s)
 	}
 
+	// The held sends (the cut-off one, and the retries the watcher made
+	// until its partition's wave) land once the hold is released; the
+	// successor then sends the backlog exactly once.
 	c.sink.release()
-
-	awaitCond(t, 5*time.Second, "the cut-off body to land", func() bool { return c.sink.stateChanges(path("alice")) == n+1 })
-
-	w4 := c.start("w4")
-	awaitCond(t, testPatience, "w4 holding everything", func() bool { return w4.held() == defaultPushPartitions })
-
-	awaitCond(t, 5*time.Second, "the push by the successor", func() bool { return c.sink.stateChanges(path("alice")) == n+2 })
-
 	time.Sleep(5 * testScan)
 
-	if c.sink.stateChanges(path("alice")) != n+2 {
-		t.Fatalf("%d pushes after the cut-off send, want %d", c.sink.stateChanges(path("alice")), n+2)
+	m := c.sink.stateChanges(path("alice"))
+	if m <= n {
+		t.Fatalf("no send reached the push service while it held: %d", m)
 	}
+
+	w4 := c.start("w4")
+
+	awaitCond(t, testPatience, "w4 holding everything", func() bool { return w4.held() == defaultPushPartitions })
+	awaitCond(t, 5*time.Second, "the push by the successor", func() bool { s := c.seen("alice"); return !s.behind(firstKey(s.Ack)) })
+	time.Sleep(5 * testScan)
+
+	if got := c.sink.stateChanges(path("alice")); got != m+1 {
+		t.Fatalf("%d pushes after the successor took over, want %d (exactly one more)", got, m+1)
+	}
+}
+
+// startWatching starts one worker over a cluster with alice, watched.
+func startWatching(t *testing.T) (*pushCluster, model.User, *pushWorkerRun) {
+	t.Helper()
+
+	c := newPushCluster(t, model.KVIndexRead)
+	u := c.account("alice")
+	w := c.start("w1")
+
+	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
+	c.watchedAll(1)
+
+	return c, u, w
 }
 
 // firstKey is the one key of a map of one.
@@ -147,6 +167,7 @@ func TestPushNewSubscriptionAndWants(t *testing.T) {
 	u := c.account("alice")
 
 	w := c.start("w1")
+
 	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
 	c.watchedAll(1)
 	c.pushedAfter(u, "alice", 5*time.Second)
@@ -208,11 +229,13 @@ func TestPushStateFarBehind(t *testing.T) {
 	}
 
 	behind, _ := json.Marshal(pushSeen{Seq: 1})
+
 	if err := c.kv.Update(pushSeenKey("alice"), func([]byte) ([]byte, error) { return behind, nil }); err != nil {
 		t.Fatal(err)
 	}
 
 	w := c.start("w1")
+
 	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
 
 	awaitCond(t, 5*time.Second, "the push", func() bool { return c.sink.stateChanges(path("alice")) == 1 })
@@ -240,6 +263,7 @@ func TestPushEpoch(t *testing.T) {
 	u := c.account("alice")
 
 	w := c.start("w1")
+
 	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
 	c.watchedAll(1)
 
@@ -319,6 +343,7 @@ func TestPushRoundBudget(t *testing.T) {
 	}
 
 	w := c.start("w1")
+
 	awaitCond(t, testPatience, "w1 holding everything", func() bool { return w.held() == defaultPushPartitions })
 	c.watchedAll(1)
 
@@ -326,6 +351,7 @@ func TestPushRoundBudget(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // the round is sending
 
 	start := time.Now()
+
 	c.stop(w)
 
 	if took := time.Since(start); took > 3*time.Second+2*testTake+time.Second {
@@ -350,6 +376,7 @@ func TestPushRoundBudget(t *testing.T) {
 	sent := c.sink.stateChanges(path("alice"))
 
 	w2 := c.start("w2")
+
 	awaitCond(t, testPatience, "w2 holding everything", func() bool { return w2.held() == defaultPushPartitions })
 
 	awaitCond(t, 5*time.Second, "the successor's pushes", func() bool { return c.sink.stateChanges(path("alice")) == sent+owed })

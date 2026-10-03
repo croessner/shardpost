@@ -324,10 +324,11 @@ type worker struct {
 	// watched counts the accounts watched, pending the subscriptions
 	// with a backlog.
 	watched, pending atomic.Int64
-	// verifyKick wakes the verification sender (a notify on partition 0);
-	// retick asks for a cadence out of turn (the legacy lease record was
-	// read: the pod knows now whether it may take).
-	verifyKick, retick chan struct{}
+	// verifyKick wakes the verification sender (a notify on partition 0,
+	// the verification interval); wake asks the loop for a cadence (the
+	// tick, the fast cadence, a control notify).
+	verifyKick chan struct{}
+	wake       chan wakeKind
 	// listedWarned is when the scan last warned that it lists.
 	listedWarned time.Time
 
@@ -413,7 +414,7 @@ func runPushWorker(ctx context.Context, o WorkerOptions, hooks *pushTestHooks) e
 		watches:    newWatchHub(o.Store, o.MaxWatches, o.Log),
 		events:     make(chan partEvent, 256),
 		verifyKick: make(chan struct{}, 1),
-		retick:     make(chan struct{}, 1),
+		wake:       make(chan wakeKind, 8),
 		limiter:    newRateLimiter(float64(o.StartRate)),
 	}
 	w.kv, _ = o.KV.(model.IndexedKV)
@@ -482,61 +483,35 @@ func jittered(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * f)
 }
 
+// wakeKind is what asks the loop for a cadence.
+type wakeKind int
+
+const (
+	wakeTick   wakeKind = iota // the cadence itself
+	wakeFast                   // the fast cadence, or a result that lets the pod take now
+	wakeNotify                 // a control notify, or the recheck after one
+)
+
+// wakeup asks the loop for a cadence out of turn (never blocks).
+func (w *worker) wakeup(k wakeKind) {
+	select {
+	case w.wake <- k:
+	default:
+	}
+}
+
 // run is the loop of the worker: the cadence, the fast cadence while a
 // partition needs it, the control notifies, the heartbeat of the
 // membership, the verifications and what the partition goroutines
 // report.
 func (w *worker) run(ctx context.Context) {
-	tick := time.NewTimer(0)
-	defer tick.Stop()
-
-	fast := time.NewTimer(w.o.Retry)
-	defer fast.Stop()
-
-	fast.Stop()
+	c := &cadence{w: w}
 
 	heartbeat := time.NewTicker(w.o.LeaseTTL / pushHeartbeatsPerLease)
 	defer heartbeat.Stop()
 
-	verify := time.NewTicker(w.o.Verify)
-	defer verify.Stop()
-
-	ctl := w.watchCtl(ctx)
-
-	var (
-		// readDone is closed when the membership read of the cadence
-		// ends; readDeadline fires when it took too long.
-		readDone     <-chan struct{}
-		readDeadline <-chan time.Time
-		// recheck fires when a control notify showed no change.
-		recheck <-chan time.Time
-		// fromNotify tells the pending tick apart from the cadence.
-		fromNotify bool
-	)
-
-	startRead := func(notify bool) {
-		if readDone != nil {
-			fromNotify = fromNotify || notify
-
-			return
-		}
-
-		fromNotify = notify
-		readDone = w.members.read()
-		readDeadline = time.After(w.o.Take)
-	}
-
-	finishRead := func() {
-		readDone, readDeadline = nil, nil
-
-		if w.rebalance(ctx) {
-			fast.Reset(w.o.Retry)
-		}
-
-		if fromNotify && !w.members.changed() {
-			recheck = time.After(pushRecheck)
-		}
-	}
+	go w.ticks(ctx)
+	go w.watchCtl(ctx)
 
 	var crash chan struct{}
 	if w.hooks != nil {
@@ -553,76 +528,132 @@ func (w *worker) run(ctx context.Context) {
 			w.abandon()
 
 			return
-		case <-tick.C:
-			tick.Reset(jittered(w.o.Take))
-			w.beforeTick()
-			startRead(false)
-		case <-fast.C:
-			w.beforeTick()
-			startRead(false)
-		case <-w.retick:
-			w.beforeTick()
-			startRead(false)
-		case <-recheck:
-			recheck = nil
-
-			startRead(true)
-		case <-ctl:
-			startRead(true)
-		case <-readDone:
-			finishRead()
-		case <-readDeadline:
-			finishRead()
+		case k := <-w.wake:
+			c.woken(k)
+		case <-c.readDone:
+			c.finish(ctx)
+		case <-c.readDeadline:
+			c.finish(ctx)
 		case ev := <-w.events:
 			w.onEvent(ev)
 		case <-heartbeat.C:
 			w.heartbeat()
-		case <-verify.C:
-			w.verifyIfOwner(ctx)
 		case <-w.verifyKick:
 			w.verifyIfOwner(ctx)
 		}
 	}
 }
 
-// watchCtl watches the control object; the channel fires on every
-// notify, and the watch is set up again when the store fails it.
-func (w *worker) watchCtl(ctx context.Context) <-chan struct{} {
-	out := make(chan struct{}, 1)
+// ticks sends the cadence (take_seconds ± 20 %, the first at once) and
+// the verification interval to the loop until ctx ends.
+func (w *worker) ticks(ctx context.Context) {
+	verify := time.NewTicker(w.o.Verify)
+	defer verify.Stop()
 
-	go func() {
-		for {
-			watch, err := w.omap.Watch(pushCtlOID)
-			if err != nil {
-				w.o.Log.Warn("push worker: watch the control object", "err", err)
-			} else {
-				w.followCtl(ctx, watch, out)
-				watch.Close()
-			}
+	tick := time.NewTimer(0)
+	defer tick.Stop()
 
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			w.wakeup(wakeTick)
+			tick.Reset(jittered(w.o.Take))
+		case <-verify.C:
 			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(rewatchWait()):
+			case w.verifyKick <- struct{}{}:
+			default:
 			}
 		}
-	}()
+	}
+}
 
-	return out
+// cadence is the membership read of one tick and what follows it: the
+// loop starts the read and goes on; when it ends, or took longer than a
+// cadence, the rebalance runs on the view there is.
+type cadence struct {
+	w *worker
+	// readDone is closed when the membership read ends; readDeadline
+	// fires when it took too long (both nil while none runs).
+	readDone     <-chan struct{}
+	readDeadline <-chan time.Time
+	// fromNotify tells the pending tick apart from the cadence.
+	fromNotify bool
+	// fastArmed and recheckArmed are set while a fast cadence or a
+	// recheck is scheduled, so that they do not pile up.
+	fastArmed, recheckArmed atomic.Bool
+}
+
+// woken starts the read of a tick (a tick, the fast cadence or a
+// control notify); a read in flight is shared.
+func (c *cadence) woken(k wakeKind) {
+	if k != wakeNotify {
+		c.w.beforeTick()
+	}
+
+	if c.readDone != nil {
+		c.fromNotify = c.fromNotify || k == wakeNotify
+
+		return
+	}
+
+	c.fromNotify = k == wakeNotify
+	c.readDone = c.w.members.read()
+	c.readDeadline = time.After(c.w.o.Take)
+}
+
+// finish is the rebalance after the read; it schedules the fast
+// cadence when a partition needs it, and a recheck when a control
+// notify showed no change yet (the releaser writes before it notifies,
+// but the write may have been slow).
+func (c *cadence) finish(ctx context.Context) {
+	c.readDone, c.readDeadline = nil, nil
+
+	if c.w.rebalance(ctx) && c.fastArmed.CompareAndSwap(false, true) {
+		time.AfterFunc(c.w.o.Retry, func() {
+			c.fastArmed.Store(false)
+			c.w.wakeup(wakeFast)
+		})
+	}
+
+	if c.fromNotify && !c.w.members.changed() && c.recheckArmed.CompareAndSwap(false, true) {
+		time.AfterFunc(pushRecheck, func() {
+			c.recheckArmed.Store(false)
+			c.w.wakeup(wakeNotify)
+		})
+	}
+}
+
+// watchCtl watches the control object until ctx ends and wakes the loop
+// on every notify; the watch is set up again when the store fails it.
+func (w *worker) watchCtl(ctx context.Context) {
+	for {
+		watch, err := w.omap.Watch(pushCtlOID)
+		if err != nil {
+			w.o.Log.Warn("push worker: watch the control object", "err", err)
+		} else {
+			w.followCtl(ctx, watch)
+			watch.Close()
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(rewatchWait()):
+		}
+	}
 }
 
 // followCtl forwards the events of one watch until it breaks or ctx
 // ends.
-func (w *worker) followCtl(ctx context.Context, watch model.Watch, out chan<- struct{}) {
+func (w *worker) followCtl(ctx context.Context, watch model.Watch) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-watch.Events():
-			select {
-			case out <- struct{}{}:
-			default:
-			}
+			w.wakeup(wakeNotify)
 		case <-watch.Errors():
 			return
 		}
