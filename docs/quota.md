@@ -172,6 +172,86 @@ counted. On shutdown the server waits up to 10 s for running programs.
 Metrics: `imap_quota_events_total{event,result}` (`dispatched`,
 `dropped`) and `imap_extprograms_runs_total{program,result}`.
 
+
+## Recounting the usage
+
+The counters are kept exactly by the writers (every reservation,
+release and rollback is one compare-and-swap on the registry), but a
+crash between a removal and its release, or an older version's drift,
+can leave them off. The job `quota_recalc` recounts them from the index
+records; the scrubber does the same with a two-run rule (`quota_drift`).
+
+**Offline (the default).** The job takes the account's maintenance lock
+and waits `jobs.settle_seconds`, so that no delivery holds a reservation
+while it replaces the counters. For that time LMTP answers 451, logins
+are refused and open sessions end with `BYE`.
+
+**Online (since 0.52.0, cluster mark `quota/online`).** With the mark
+(`shardpostctl quota online enable -pods n`) and `online: true` (or
+`quota.online_recount: auto`) the job recounts beside the writers:
+
+- The run sets a run key in the registry (one CAS that also reads the
+  account lock, the mailbox locks of `mailbox_delete`, the scrub's
+  repair mark and the import steps; any of them makes the run `busy`,
+  and it is planned again). From then on every change of the usage
+  captures itself in the same write: arrivals as a sum, departures with
+  mailbox and UID, so that the run can deduplicate them.
+- It waits (the *barrier*, at most `quota.recount_barrier_seconds`)
+  until every reservation and every MOVE that started before the run
+  key is linked or given back. An intent older than
+  `quota.recount_dead_intent_seconds` counts as abandoned
+  (`imapceph_quota_recount_dead_intents_total`).
+- It lists every counted mailbox: the header first, the higher shards
+  from the top, shard 0 last. Entries of captured reservations carry the
+  run's tag in their record and are skipped (their usage is in the
+  captures). An entry removed meanwhile whose release is still to come
+  is counted through its removal intent (`r:` with `d` and without `f`,
+  see [storage](architecture/storage.md#online-quota-recount-and-the-mailbox-lock-0520)).
+- One CAS replaces the counters by *counted + arrivals − departures* and
+  removes the run key and the captures. The quota warnings fire once if
+  the correction crosses a threshold. When writers keep the CAS from
+  going through (`quota.recount_switch_attempts` calls of 16 rounds
+  each), the run holds the usage writers for `quota.recount_hold_ms`
+  once; logins, flag writes, subscriptions and searches never wait.
+  A run that still cannot switch is `busy` and planned again: on a
+  distribution account with dozens of registry writes a second that is
+  an expected result, not a failure.
+
+What users notice: nothing. A delivery, COPY or login costs no extra
+operation outside a run; a MOVE between two counted mailboxes one read;
+a release (EXPUNGE, MOVE into an ignored mailbox) one extra write for
+the release flag of its removal intents — with and without a run.
+
+The result is exact (the counter after the switch is what a quiet
+recount would give), with named exceptions, each bounded to one run and
+corrected by the next:
+
+- an intent older than the dead-intent time whose operation does link
+  after all (a delivery that took longer than 600 s);
+- a tombstone of a deleted mailbox whose deleting session died between
+  the unregistration and the release: the scrubber completes the
+  deletion but never releases usage, so the usage stays in the counter
+  until the next run no longer lists the tombstone (the scrubber's
+  `fixQuota` is suspended for accounts with a live run);
+- a crash between the release CAS and the write of the release flag:
+  one run counts the entry once too often until the scrubber removes the
+  intent after `scrub.intent_grace_seconds`;
+- a phase 2 of an expunge over higher shards that hangs longer than 30 s.
+
+An offline recount, an import, a purge or a rename across the quota
+rules ends a live run (`lost`); the counters are untouched and the job is
+planned again. The scrubber skips an account with a live run
+(`OnlineSkipped: qr`) and sets a repair mark before its first repair of
+entries or counters, which makes a run started meanwhile `busy`; captures
+a dead run left behind are the finding `quota_capture_leftover`.
+
+Settings: `quota.online_recount`, `quota.recount_barrier_seconds`,
+`quota.recount_dead_intent_seconds` (at most
+`scrub.intent_grace_seconds`), `quota.recount_switch_attempts`,
+`quota.recount_hold_ms`, `quota.recount_max_capture_keys`,
+`quota.recount_max_capture_entries`, `quota.recount_release_chunk`; see
+[configuration](configuration.md#quota-recount-quota) and the runbook in
+[operations](operations/README.md#online-quota-recount-and-mailbox-lock).
 ## Bundled programs
 
 The image contains two programs under

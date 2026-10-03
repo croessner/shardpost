@@ -1100,6 +1100,85 @@ older version cleared). The scrub removes them with the repair class
 `uncovered`, keeping those of the run `L.next` names; they are harmless
 either way.
 
+## Online quota recount and mailbox lock
+
+Since 0.52.0 two more maintenance jobs run without the account lock
+(temp/16): `quota_recalc` with the mark `quota/online` recounts the
+usage beside the writers ([quota](../quota.md#recounting-the-usage)),
+and `mailbox_delete` with the mark `mailbox/lock` locks only the
+mailboxes it removes. Without the marks both behave as before 0.52.0.
+
+**What users notice.** Nothing of a recount. Of a mailbox deletion only
+the mailboxes it removes: a write into one is refused (IMAP `NO
+[UNAVAILABLE] Mailbox is being deleted`, JMAP `forbidden` or
+`invalidProperties` on `mailboxIds`), a Sieve `fileinto` into one goes
+to INBOX (`imapceph_lmtp_fileinto_redirected_total{reason="locked"}`),
+and a session that has one selected is closed with `BYE [UNAVAILABLE]
+Selected mailbox is being deleted` — at once when it idles, otherwise at
+its next command. No 451, no refused login, no `BYE` for anybody else.
+
+**The mark `quota/online`.** Rollout:
+
+1. Roll out 0.52.0 to every pod; wait three minutes.
+2. `shardpostctl quota online status`: every fresh pod reports
+   `quota_online_recount`.
+3. `shardpostctl quota online enable -pods <number of running pods>`.
+4. Optionally `quota.online_recount: auto` in the overlay: plans without
+   `-online`/`-offline` then run online; `plan -all quota_recalc -online`
+   recounts every account without a lock.
+
+A server before 0.52.0 does not capture its usage changes: with the mark
+set too early the counters a run switches to would be wrong (a following
+run corrects them; no mail is lost). `plan -online` without the mark is
+refused with 409.
+
+A run that ends `busy` (an open reservation older than the barrier, an
+import or scrub on the account, a switch that did not go through on an
+account with dozens of registry writes a second) is planned again with
+a backoff; `imapceph_quota_recount_runs_total{result="busy"}` is no
+alarm. Alarms: `result="error"`, `imapceph_quota_recount_dead_intents_total`
+above 0 (a crash or an operation hanging for longer than
+`quota.recount_dead_intent_seconds`, default 600 s: look for the intent
+in the registry, the scrubber removes it after
+`scrub.intent_grace_seconds`), and a growing
+`imapceph_quota_recount_hold_seconds`. A reservation intent that stands
+without being removed (a hanging pod) keeps every run `busy` with
+`reason="intent"` and the key in the report for up to the dead-intent
+time; after it the run goes through.
+
+Way back: `shardpostctl quota online disable` (new plans offline), wait
+for the running jobs or cancel them (the cancel clears the run key),
+remove the `quota.recount_*` keys from the overlay, roll the image back.
+Leftovers after an emergency rollback (a run key, captures) are harmless
+to an older version, which never reads them; the scrub of 0.52.0 removes
+them later (`quota_capture_leftover`).
+
+**The mark `mailbox/lock`.** Rollout as above with `shardpostctl mailbox
+lock status|enable -pods <n>` (capability `mailbox_lock`) and optionally
+`jobs.mailbox_delete_online: auto` (needs `jobs.settle_seconds` of at
+least 7: the time IMAP sessions take to see the lock). A server before
+0.52.0 does not see the lock and would deliver into a mailbox that is
+being deleted — with the mark set too early such a mail is lost with the
+mailbox.
+
+The job locks the targets (M1), waits `jobs.settle_seconds` and, at most
+`jobs.mailbox_lock_barrier_seconds`, for the operations that started
+before the lock (M3), checks the plan (a delivery into a target since the
+plan is `ErrDrift`, the mail stays), unregisters the targets (M5) and
+frees the account for account locks (M6, phase `destroying`) before it
+releases blobs and shards (M7). A `busy` run (an import holds the
+account, a scrub repairs it, another `mailbox_delete` locks a target, a
+MOVE into or out of a target stands — also an abandoned one, which the
+scrub completes after `scrub.intent_grace_seconds` or `shardpostctl
+account scrub` at once) is planned again. The plan's fingerprint leaves
+`HIGHESTMODSEQ` out online: flag changes until the lock are no drift.
+
+Way back: `shardpostctl mailbox lock disable`, wait for the running jobs
+or cancel them (the cancel unlocks their mailboxes), remove the keys from
+the overlay, roll the image back. A `lock` field an older version finds
+in a record is ignored and dropped when it rewrites the record; a job of
+0.52.0 that meets such a record stops without deleting (fail safe).
+
 ## Pools
 
 Three pools (`deploy/base/ceph/pools.yaml`):

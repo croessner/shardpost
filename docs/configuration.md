@@ -458,9 +458,31 @@ and granted through the admin API, see
 | `jobs.settle_seconds` | 10 | how long an exclusive job waits after setting the maintenance lock, so that running deliveries can finish and open IMAP/POP3 sessions notice the lock (they check it at most every 5 s when a command starts and disconnect with BYE) |
 
 | `jobs.batch_parallel` | 2 | how many accounts a batch over all accounts works on at once in the server that runs it (1–32; a batch scrub uses `scrub.parallel`) |
+| `jobs.mailbox_delete_online` | `off` | what a plan of `mailbox_delete` without `online` gets (since 0.52.0): `auto` the mailbox lock while the cluster mark `mailbox/lock` is set (only the mailboxes it removes are locked, users notice nothing else), `off` the account lock as before. `auto` needs `jobs.settle_seconds` of at least 7, the time IMAP sessions take to see the lock. `online: true` needs the mark either way (409 without) |
+| `jobs.mailbox_lock_barrier_seconds` | 120 | how long a `mailbox_delete` with the mailbox lock waits for the operations that started before its lock (10–900); after it the job is given back and tried again later |
 
 YAML only. For operating them see [Admin API: maintenance jobs](admin-api.md#maintenance-jobs-stage-8c)
 and [batches over all accounts](admin-api.md#batches-over-all-accounts).
+
+### Quota recount (`quota`)
+
+The online recount of `quota_recalc` (since 0.52.0, see [Quota:
+recounting the usage](quota.md#recounting-the-usage) and the runbook in
+[operations](operations/README.md#online-quota-recount-and-mailbox-lock)):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `quota.online_recount` | `off` | what a plan of `quota_recalc` without `online` gets: `auto` online while the cluster mark `quota/online` is set (no account lock; the writers capture their changes for the run), `off` offline under the account lock as before 0.52.0. `online: true` needs the mark either way (409 without) |
+| `quota.recount_barrier_seconds` | 120 | how long an online run waits for the reservations and MOVEs that started before it (10–900); after it the run is `busy` and planned again |
+| `quota.recount_dead_intent_seconds` | 600 | how old an intent may be before a run takes it for abandoned (60–3600, at most `scrub.intent_grace_seconds`); every such intent counts `imapceph_quota_recount_dead_intents_total` |
+| `quota.recount_switch_attempts` | 10 | switch calls (of 16 compare-and-swap rounds each) before a run holds the usage writers (1–50) |
+| `quota.recount_hold_ms` | 2000 | how long a run holds the usage writers at most while it switches (0–5000; 0: never, the run is `busy` instead); logins, flag writes and searches never wait |
+| `quota.recount_max_capture_keys` | 1000 | a run whose captures grow beyond this many registry keys ends (10–100000); the writer that crosses the bound ends it |
+| `quota.recount_max_capture_entries` | 1000000 | the same for the entries in the captures (1000–10000000) |
+| `quota.recount_release_chunk` | 10000 | entries one capture key holds (100–50000; keeps a value below 1 MiB) |
+
+The other `quota` keys (grace, rules, warnings, the over flag) are in
+[Quota](quota.md).
 
 ### Scrub (`scrub`)
 

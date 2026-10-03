@@ -276,6 +276,7 @@ Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267),
 | `STATUS` items | ✅ | `MESSAGES RECENT UIDNEXT UIDVALIDITY UNSEEN DELETED DELETED-STORAGE SIZE HIGHESTMODSEQ MAILBOXID APPENDLIMIT`; no `RECENT` after `ENABLE IMAP4rev2`. |
 | `SELECT` responses | ✅ | `EXISTS`, `RECENT`, `[UNSEEN]`, `[UIDVALIDITY]`, `[UIDNEXT]`, `FLAGS`, `[PERMANENTFLAGS]`, `[HIGHESTMODSEQ]`, `[MAILBOXID]`, `[READ-WRITE]`/`[READ-ONLY]`. After `ENABLE IMAP4rev2` a `LIST` response replaces `RECENT` and `[UNSEEN]`. |
 | `COPY`/`MOVE` to a missing mailbox | ✅ | `[TRYCREATE]` in the own namespace, `[NONEXISTENT]` in shared ones. |
+| Mailbox being deleted | ✅ | While a `mailbox_delete` job with the mailbox lock (since 0.52.0) holds a mailbox, `SELECT`, `EXAMINE`, `STATUS`, `APPEND`, `COPY`/`MOVE` into it, `STORE`/`EXPUNGE` in it, `CREATE` under it, `RENAME` of it or into it and `DELETE` answer `NO [UNAVAILABLE] Mailbox is being deleted`; `LIST` shows it until it is gone. A session that has it selected is closed with `BYE [UNAVAILABLE] Selected mailbox is being deleted` — at once in IDLE, otherwise at its next command — and a session whose selected mailbox another session deleted with `BYE [UNAVAILABLE] Selected mailbox was deleted` (RFC 2180 §3.3), only after a registry read confirmed it, never on a transport error. No other session is touched. |
 | Auto-created folders | ✅ | `Drafts`, `Sent`, `Trash`, `Junk`, `Archive` with special-use, created (and subscribed) at IMAP login and on the first JMAP session when missing; the list is configurable with `server.autocreate` (`name`, `special_use`, `subscribe`). |
 | Other users' folders | ✅ | `Shared/<account>/<mailbox>` per ACL; the account part is case-insensitive. |
 | Public folders | ✅ | `Public/…`, stored in the `~public` account with its own quota. |
@@ -476,7 +477,7 @@ configured.
 | Extension | RFC | Status | Notes |
 |---|---|---|---|
 | Base language (`keep`, `discard`, `redirect`, `stop`, `if`, `address`, `header`, `exists`, `size`, …) | RFC 5228 | ✅ | |
-| `fileinto` | RFC 5228 | ✅ | With `:copy`, `:flags`, `:create`, `:specialuse`. |
+| `fileinto` | RFC 5228 | ✅ | With `:copy`, `:flags`, `:create`, `:specialuse`. A target a `mailbox_delete` job is about to remove (since 0.52.0) takes the message like any other failed `fileinto`: it goes to INBOX (implicit keep), once — a `keep` beside it does not store a second copy, in either order — with a delivery intent that names INBOX, so a rollback after a crash finds it there. |
 | `envelope` | RFC 5228 | ✅ | `from`, `to`, `auth`. |
 | `encoded-character` | RFC 5228 | ✅ | |
 | `comparator-i;octet`, `comparator-i;ascii-casemap` | RFC 4790 | ✅ | Built in. |
@@ -776,6 +777,7 @@ See [Observability](observability.md).
 | Limit source | IMAP `SETQUOTA` (with `server.quota_self_service`), the user-database attribute `server.quota_attribute` (default `rnsMSQuota`, storage only), or the defaults `server.quota_bytes`/`server.quota_msgs`. |
 | Rules | Grace, per-mailbox rules (ignore, extra allowance by name or special-use). |
 | Warnings | External programs per resource and percent threshold, in the direction `over` or `under`. An over-quota flag in the user database is checked at login, after delivery and when usage crosses the limit. |
+| Recount | The job `quota_recalc`, under the account lock or (since 0.52.0, cluster mark `quota/online`) online beside the writers, exact and unnoticed by users; see [Quota: recounting the usage](quota.md#recounting-the-usage). |
 
 See [Quota](quota.md).
 
