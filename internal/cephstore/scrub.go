@@ -53,9 +53,17 @@ type ScrubReport struct {
 	UnknownShards    int
 	UnknownRemoved   int  // of those, deleted (older than the grace period)
 	ImportSkipped    bool // an import holds the account: nothing was checked
-	RetiredRepaired  int  // mailboxes left retired by an interrupted import replacement
-	UncoveredEntries int  // entries at or above UIDNEXT (interrupted import) removed
-	StaleMarkObjects int  // private \Seen marks of public folders that are gone
+	// OnlineSkipped says why nothing was repaired or checked: "qr" (an
+	// online quota recount is under way), "mblock" (a mailbox_delete
+	// locks mailboxes). RepairsStopped says why the repairs stopped
+	// midway (the repair mark could not be renewed). QuotaCaptureLeftover
+	// reports captures of an online recount without a run.
+	OnlineSkipped        string `json:",omitempty"`
+	RepairsStopped       string `json:",omitempty"`
+	QuotaCaptureLeftover bool   `json:",omitempty"`
+	RetiredRepaired      int    // mailboxes left retired by an interrupted import replacement
+	UncoveredEntries     int    // entries at or above UIDNEXT (interrupted import) removed
+	StaleMarkObjects     int    // private \Seen marks of public folders that are gone
 	// IndexIncomplete: an index could not be read in full (or a registry
 	// entry did not parse), so the destructive repairs were skipped.
 	IndexIncomplete bool `json:",omitempty"`
@@ -110,7 +118,7 @@ func (r *ScrubReport) Findings() int {
 
 // Complete implements model.ScrubOutcome.
 func (r *ScrubReport) Complete() bool {
-	return !r.ImportSkipped && !r.IndexIncomplete && len(r.Errors) == 0
+	return !r.ImportSkipped && r.OnlineSkipped == "" && r.RepairsStopped == "" && !r.IndexIncomplete && len(r.Errors) == 0
 }
 
 // ScrubOptions tunes a scrub run.
@@ -124,9 +132,13 @@ type ScrubOptions struct {
 	// Fence (if set) is checked before each repair; failing, the repair
 	// is skipped.
 	Fence func() error
+	// Holder names the run's repair mark (scrubmark.go): the sweep's
+	// lease, the job's token or the admin request ("" a random name).
+	Holder string
 	// afterList runs between the read of a mailbox's entries and of its
-	// removal intents (tests).
+	// removal intents (tests); afterMark after the repair mark was set.
 	afterList func(Mailbox)
+	afterMark func()
 }
 
 // Repair classes of the scrubber (model.Repair*).
@@ -210,6 +222,7 @@ type scrubRun struct {
 	byID         map[string]Mailbox
 	source       model.OrphanSource
 	intents      *intentScan
+	mark         scrubMarkState
 }
 
 // scrubIndex is what phase 1 (the index scan) collects.
@@ -232,7 +245,7 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 	source := u.orphanSource()
 	rep := &ScrubReport{User: u.name, OrphanSource: source}
 
-	if u.importing(rep, log) {
+	if u.importing(rep, log) || u.heldOnline(rep, log) {
 		return rep, nil
 	}
 
@@ -257,6 +270,9 @@ func (u *User) Scrub(o ScrubOptions) (*ScrubReport, error) {
 
 	sr := &scrubRun{u: u, o: o, log: log, rep: rep, cutoff: time.Now().Add(-o.Grace), icut: time.Now().Add(-u.intentGrace()),
 		byID: byID, source: source, intents: newIntentScan()}
+	sr.mark.holder = scrubHolder(o)
+
+	defer sr.endMark()
 
 	// 0a. Abandoned multi-target deliveries (Sieve fileinto into several
 	//     mailboxes, MULTIAPPEND). The client never saw a success, so what
@@ -309,8 +325,9 @@ func (sr *scrubRun) repair(idx *scrubIndex) error {
 	// 4. METADATA of mailboxes that are gone.
 	sr.cleanMetadata()
 
-	// 5. Quota counters.
+	// 5. Quota counters, and captures of an online recount without a run.
 	sr.fixQuota(idx.quota)
+	sr.quotaLeftover()
 
 	// 6. The layout of the full-text index.
 	sr.scrubFTSLayout()
@@ -438,7 +455,7 @@ func (u *User) scrubRegistryOK(log *slog.Logger) bool {
 
 // rollbackDeliveries rolls back abandoned multi-target deliveries.
 func (sr *scrubRun) rollbackDeliveries() {
-	u, rep, log, o := sr.u, sr.rep, sr.log, sr.o
+	u, rep, log := sr.u, sr.rep, sr.log
 
 	intents, err := u.deliveryIntents()
 	if err != nil {
@@ -457,7 +474,7 @@ func (sr *scrubRun) rollbackDeliveries() {
 
 		log.Warn("abandoned delivery, rolling back", "intent", in.ID, "entries", len(in.Entries))
 
-		if !o.Allowed(RepairDeliveries) {
+		if !sr.mayRepair(RepairDeliveries) {
 			continue
 		}
 		// Entries name mailbox id and GUID: a mailbox deleted (and
@@ -502,7 +519,7 @@ func (sr *scrubRun) rollbackEntry(e deliveryEntry) bool {
 			continue
 		}
 
-		if err := u.Expunge(mb.Name, []Meta{m}); err != nil && !errors.Is(err, ErrNoMailbox) {
+		if err := u.ExpungeOwn(mb.Name, []Meta{m}); err != nil && !errors.Is(err, ErrNoMailbox) {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("rollback %s uid %d: %v", mb.Name, m.UID, err))
 			failed = true
 		}
@@ -528,7 +545,7 @@ func (sr *scrubRun) finishMoves(boxes []Mailbox) {
 
 // finishMove completes one MOVE intent recorded on mailbox mb.
 func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
-	u, rep, log, o := sr.u, sr.rep, sr.log, sr.o
+	u, rep, log := sr.u, sr.rep, sr.log
 
 	if time.Unix(in.Started, 0).After(sr.cutoff) {
 		sr.protectAll(in.GUIDs) // the MOVE is still running
@@ -541,7 +558,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 
 	log.Warn("unfinished MOVE", "mailbox", mb.Name, "intent", in.ID, "uids", in.UIDs)
 
-	if !o.Allowed(RepairMoves) {
+	if !sr.mayRepair(RepairMoves) {
 		return
 	}
 
@@ -561,7 +578,7 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 		// destination stays until fixQuota recounts.
 		log.Warn("MOVE destination vanished, keeping source", "intent", in.ID)
 
-		if _, _, _, err := u.unlink(&src, nil, in.ID); err != nil {
+		if _, err := u.unlink(&src, nil, in.ID, false); err != nil {
 			rep.Errors = append(rep.Errors, err.Error())
 		}
 
@@ -586,19 +603,34 @@ func (sr *scrubRun) finishMove(mb Mailbox, in moveIntent) {
 		return // intent stays, next run retries
 	}
 
-	removed, rkeys, err := sr.unlinkLogged(&src, srcMetas, in.ID)
+	sr.finishMoveSource(&src, &dst, in, srcMetas)
+}
+
+// finishMoveSource is the second half of finishMove: the source entries
+// are unlinked, their usage released like Move does (leaving a counted
+// mailbox for an ignored one frees the space, directly after the
+// removal and before the blob references go; the opposite direction was
+// reserved before the intent), then their blob references.
+func (sr *scrubRun) finishMoveSource(src, dst *Mailbox, in moveIntent, srcMetas []Meta) {
+	u, rep := sr.u, sr.rep
+	released := u.rules.Counts(src) && !u.rules.Counts(dst)
+
+	res, err := sr.unlinkLogged(src, srcMetas, in.ID, released)
 	if err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
 		return
 	}
 
-	if failed := u.releaseRemoved(&src, removed, rkeys); failed > 0 {
-		rep.Errors = append(rep.Errors, fmt.Sprintf("move %s: %d blob references not released", in.ID, failed))
+	if released {
+		if err := u.moveUsage(src, dst, res.removed); err != nil {
+			rep.Errors = append(rep.Errors, err.Error())
+		}
+
+		u.flagReleased(src, res.removed, res.nonce)
 	}
-	// Like Move: leaving a counted mailbox for an ignored one frees the
-	// space. The opposite direction was reserved before the intent.
-	if err := u.moveUsage(&src, &dst, sizeOf(removed)); err != nil {
-		rep.Errors = append(rep.Errors, err.Error())
+
+	if failed := u.releaseRemoved(src, res.removed, res.rkeys); failed > 0 {
+		rep.Errors = append(rep.Errors, fmt.Sprintf("move %s: %d blob references not released", in.ID, failed))
 	}
 }
 
@@ -626,17 +658,17 @@ func (sr *scrubRun) linkMissingLogged(dst *Mailbox, metas []Meta, inDest map[str
 
 // unlinkLogged is unlink bracketed by the account change log; it returns
 // the removed entries and the keys of their removal intents.
-func (sr *scrubRun) unlinkLogged(src *Mailbox, metas []Meta, intentID string) ([]Meta, []string, error) {
+func (sr *scrubRun) unlinkLogged(src *Mailbox, metas []Meta, intentID string, released bool) (unlinkResult, error) {
 	acct, err := sr.u.beginPartial(model.KindEmail, src.ID, src.Name)
 	if err != nil {
-		return nil, nil, err
+		return unlinkResult{}, err
 	}
 
-	removed, _, rkeys, err := sr.u.unlink(src, metas, intentID)
+	res, err := sr.u.unlink(src, metas, intentID, released)
 
 	acct.partial()
 
-	return removed, rkeys, err
+	return res, err
 }
 
 // linkMissing links every source entry not yet in dst into dst, each with
@@ -648,6 +680,13 @@ func (sr *scrubRun) linkMissing(dst *Mailbox, srcMetas []Meta, inDest map[string
 	for _, m := range srcMetas {
 		if inDest[m.GUID] {
 			continue
+		}
+
+		// Inside the group of writes the mark is checked before every
+		// link, locally: a mark that is about to expire must not let an
+		// entry come into being after a recount started.
+		if !sr.markValid() {
+			return false
 		}
 
 		if _, err := u.blobRef(m.GUID, +1); err != nil {
@@ -749,7 +788,7 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 	sr.log.Warn("mailbox retired by an interrupted import", "mailbox", mb.Name)
 	scrubFinding("retired_mailbox")
 
-	if !sr.o.Allowed(RepairRetired) {
+	if !sr.mayRepair(RepairRetired) {
 		return
 	}
 
@@ -762,7 +801,7 @@ func (sr *scrubRun) unregisterRetired(mb Mailbox) {
 	// The retired object is left to the deletion tombstone (a later run
 	// deletes it, scrubintents.go), or to the listing.
 	info, _ := u.retired(&mb)
-	tomb := deletionTombstone(&mb, info)
+	tomb := deletionTombstone(&mb, info, nil)
 
 	err = casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
 		var rec MailboxRec
@@ -814,7 +853,7 @@ func (sr *scrubRun) removeUncovered(mb *Mailbox, info *MailboxInfo) {
 	// An import that resumed since the scrub started writes such entries
 	// before its header: leave them to it. Entries that stay keep their
 	// blobs, which the import's intent names, from being collected.
-	if locked, err := u.ImportLocked(); !sr.o.Allowed(RepairUncovered) || err != nil || locked {
+	if locked, err := u.ImportLocked(); !sr.mayRepair(RepairUncovered) || err != nil || locked {
 		for _, v := range seen {
 			var m Meta
 			if json.Unmarshal(v, &m) == nil {
@@ -854,7 +893,9 @@ func (u *User) unlinkUncovered(mb *Mailbox, oid string, seen map[string][]byte) 
 		}
 	}
 
-	rset := removalSet(time.Now().Unix(), metas)
+	// Entries above UIDNEXT were never counted: nothing is released.
+	nonce := newGUID()
+	rset := announcedSet(time.Now().Unix(), metas, false, nonce)
 	rkeys := slices.Collect(maps.Keys(rset))
 
 	shard0 := oid == mboxOID(mb.ID)
@@ -881,7 +922,7 @@ func (u *User) unlinkUncovered(mb *Mailbox, oid string, seen map[string][]byte) 
 		}
 
 		if shard0 && len(rm) > 0 {
-			return removalSet(time.Now().Unix(), removed), rm
+			return announcedSet(time.Now().Unix(), removed, true, nonce), rm
 		}
 
 		return nil, rm
@@ -959,7 +1000,7 @@ func (sr *scrubRun) scanMessage(mb *Mailbox, m Meta, idx *scrubIndex) {
 
 		sr.log.Warn("index entry without blob", "mailbox", mb.Name, "uid", m.UID, "guid", m.GUID)
 
-		if sr.o.Allowed(RepairEntries) {
+		if sr.mayRepair(RepairEntries) {
 			sr.dropEntry(mb, m, rep)
 		}
 
@@ -1132,14 +1173,14 @@ func (sr *scrubRun) removeOrphans(refs map[string][]Meta) (map[string]bool, erro
 // dropEntry removes an index entry whose blob is gone, bracketed by the
 // account change log like every other removal.
 func (sr *scrubRun) dropEntry(mb *Mailbox, m Meta, rep *ScrubReport) {
-	removed, rkeys, err := sr.unlinkLogged(mb, []Meta{m}, "")
+	res, err := sr.unlinkLogged(mb, []Meta{m}, "", false)
 	if err != nil {
 		rep.Errors = append(rep.Errors, err.Error())
 		return
 	}
 
 	// The blob is gone; releasing finds nothing and drops the intents.
-	sr.u.releaseRemoved(mb, removed, rkeys)
+	sr.u.releaseRemoved(mb, res.removed, res.rkeys)
 }
 
 // vanishedCandidates returns the remembered orphan candidates that are
@@ -1325,7 +1366,7 @@ func (sr *scrubRun) fixQuota(quota Quota) {
 	if err == nil && cur.Bytes == quota.Bytes && cur.Msgs == quota.Msgs {
 		// No drift: a count an earlier run remembered is moot, and left
 		// behind it would keep a batch scrub from skipping the account.
-		if sr.o.Allowed(RepairQuota) {
+		if sr.mayRepair(RepairQuota) {
 			if prev, err := u.scrubState(scrubKeyQuotaCounted); err == nil && prev != "" {
 				_ = u.clearScrubState(scrubKeyQuotaCounted)
 			}
@@ -1345,7 +1386,7 @@ func (sr *scrubRun) fixQuota(quota Quota) {
 
 			log.Warn("quota drift", "counted", quota, "stored", cur)
 
-			if sr.o.Allowed(RepairQuota) {
+			if sr.mayRepair(RepairQuota) {
 				if err := u.SetQuotaUsage(quota); err != nil {
 					rep.Errors = append(rep.Errors, err.Error())
 				}
@@ -1354,7 +1395,7 @@ func (sr *scrubRun) fixQuota(quota Quota) {
 			log.Info("quota differs from index, confirming next run", "counted", quota, "stored", cur)
 		}
 
-		if sr.o.Allowed(RepairQuota) {
+		if sr.mayRepair(RepairQuota) {
 			_ = u.setScrubState(scrubKeyQuotaCounted, counted)
 		}
 	}

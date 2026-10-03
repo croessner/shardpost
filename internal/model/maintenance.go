@@ -28,6 +28,9 @@ type ScrubRequest struct {
 	// Fence (if set) is checked before each repair; failing, the repair
 	// is skipped (the job lost its lease).
 	Fence func() error
+	// Holder names the run's repair mark (stage B16): the job's token,
+	// the admin request; "" for a name of the store's choosing.
+	Holder string
 }
 
 // Scrubber is implemented by user views that can check and repair their

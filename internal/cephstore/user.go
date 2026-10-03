@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,6 +119,7 @@ var (
 	ErrNoScript      = model.ErrNoScript
 	ErrScriptActive  = model.ErrScriptActive
 	ErrScriptExists  = model.ErrScriptExists
+	ErrMailboxLocked = model.ErrMailboxLocked
 )
 
 // HasFlag reports whether flags contains f (case-insensitive).
@@ -162,12 +162,18 @@ type User struct {
 	shardSize     uint32
 	limit         QuotaLimit
 	rules         *quota.Policy
+	recount       QuotaRecountConfig
 	onQuota       func(account string, before, after, limit Quota)
-	noEnforce     bool           // reservations skip the limit check (still counted)
-	inflight      sync.WaitGroup // background work still using the IOContexts
-	release       func()         // drops the reference on the connection
-	idxPool       *verPool       // private contexts for versioned reads
-	dataPool      *verPool
+	// hooks are test hooks between the steps of the online recount and
+	// of the writers it captures (nil in production); recountRun is the
+	// online recount running on this view (*quotaRecount, nil none).
+	hooks      *recountHooks
+	recountRun atomic.Value
+	noEnforce  bool           // reservations skip the limit check (still counted)
+	inflight   sync.WaitGroup // background work still using the IOContexts
+	release    func()         // drops the reference on the connection
+	idxPool    *verPool       // private contexts for versioned reads
+	dataPool   *verPool
 
 	cacheMu sync.Mutex
 	cache   map[string]cachedMailbox
@@ -446,10 +452,28 @@ func (u *User) CreateMailbox(name string, specialUse []string) error {
 // carries over into the record.
 func (u *User) claimName(name string, rec *MailboxRec) (exists bool, err error) {
 	b, _ := json.Marshal(rec)
+	locked := false
 
-	err = casOmap(u, u.idx, oidRegistry, []string{regKey(name), regSubMissing + name}, func(cur map[string][]byte) (map[string][]byte, []string) {
+	defer func() {
+		if err == nil && locked {
+			err = ErrMailboxLocked
+		}
+	}()
+
+	keys := append([]string{regKey(name), regSubMissing + name}, ancestorKeys(name)...)
+
+	err = casOmap(u, u.idx, oidRegistry, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
 		if _, ok := cur[regKey(name)]; ok {
 			exists = true
+
+			return nil, nil
+		}
+
+		// Nothing is created under a mailbox a mailbox_delete locks (it
+		// would be a child the plan does not know): the ancestors are
+		// read in the CAS that claims the name.
+		if lockedAncestor(cur, name, time.Now()) {
+			locked = true
 
 			return nil, nil
 		}
@@ -476,8 +500,30 @@ func (u *User) claimName(name string, rec *MailboxRec) (exists bool, err error) 
 // and creates its index object with the shard size; it fails if the
 // object exists (the intent is then dropped again).
 func (u *User) createIntended(rec *MailboxRec, name string, shardSize uint32) error {
-	if err := u.setIntent(map[string][]byte{createKey(rec.ID): encode(mailboxIntent{Time: time.Now().Unix(), Name: name})}); err != nil {
-		return err
+	// An id whose deletion is still under way (a live tombstone, stage
+	// B17 M7) is not reused: the deletion would take the new mailbox's
+	// shards with it. The import then chooses a fresh id.
+	deleting := false
+	done := u.takeIntents()
+
+	err := casOmap(u, u.idx, oidRegistry, []string{deleteKey(rec.ID)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		if v, ok := cur[deleteKey(rec.ID)]; ok && intentTime(v).After(time.Now().Add(-u.intentGrace())) {
+			deleting = true
+			return nil, nil
+		}
+
+		return map[string][]byte{createKey(rec.ID): encode(mailboxIntent{Time: time.Now().Unix(), Name: name})}, done
+	})
+	if err != nil || deleting {
+		u.restoreIntents(done)
+	}
+
+	if err != nil {
+		return fmt.Errorf("record intent: %w", err)
+	}
+
+	if deleting {
+		return errIDDeleting
 	}
 
 	// On an error the intent stays: an object of that id may exist (a
@@ -608,7 +654,9 @@ func (u *User) DeleteMailbox(name string) error {
 
 	u.dropSharedRefs(snap.ACL, mb.Name)
 
-	return u.destroyUnregistered(mb, info, metas, name)
+	_, err = u.destroyUnregistered(mb, info, metas, name)
+
+	return err
 }
 
 // destroyUnregistered is the part of DeleteMailbox after the registry
@@ -619,35 +667,40 @@ func (u *User) DeleteMailbox(name string) error {
 // another session may have removed (and released) an entry meanwhile.
 //
 // The usage of the entries is released in any case: the mailbox is no
-// longer registered, so its entries count nowhere. Whatever is left
-// undone stays with the tombstone, from which the scrubber completes the
-// deletion (it recounts the blobs, it never releases twice).
-func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta, name string) error {
+// longer registered, so its entries count nowhere. It is released
+// directly after the entries are read, before the blob references go
+// (stage B16, temp/16 §4.3), and the tombstone says with q whether that
+// happened. Whatever is left undone stays with the tombstone, from which
+// the scrubber completes the deletion (it recounts the blobs, it never
+// releases twice).
+func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta, name string) (Quota, error) {
 	final, inFlight, err := u.retireDeleted(mb, info)
 	if err != nil {
 		u.log.Warn("delete: header not retired, left to the scrubber", "mailbox", name, "err", err)
 
-		q := sizeOf(metas)
-
-		return u.releaseUsage(mb, Quota{Bytes: -q.Bytes, Msgs: -q.Msgs})
+		return sizeOf(metas), u.releaseDeleted(mb, metas)
 	}
 
 	if final == nil {
 		// No shard 0 and no header read before. Higher shards that are
 		// left keep the tombstone, which names them for the scrubber
 		// (it probes above the range); otherwise nothing is left.
+		err := u.releaseDeleted(mb, nil)
+
 		if u.lastShard(mb.ID, nil) == 0 {
 			u.dropTombstone(mb, name)
 		}
 
-		return u.releaseUsage(mb, Quota{})
+		return Quota{}, err
 	}
 
 	entries, foreign, err := u.entriesToRelease(mb.ID, final)
 	if err != nil {
 		u.log.Warn("delete: entries not read, left to the scrubber", "mailbox", name, "err", err)
-		return nil
+		return Quota{}, nil
 	}
+
+	q := sizeOf(entries)
 
 	// A removal of another session whose release is still to come (its
 	// r: key on shard 0) or a delivery whose entry is still on its way:
@@ -658,23 +711,25 @@ func (u *User) destroyUnregistered(mb *Mailbox, info *MailboxInfo, metas []Meta,
 		u.keepTombstone(mb, final, name)
 	}
 
-	q, failed := u.releaseMessages(entries)
+	rerr := u.releaseDeleted(mb, entries)
+
+	_, failed := u.releaseMessages(entries)
 	if failed > 0 || foreign || inFlight {
 		// The shards are the only record of which blobs still hold a
 		// reference too many: they stay with the tombstone.
 		u.log.Warn("delete: shards left to the scrubber", "mailbox", name, "failed", failed, "foreign_removals", foreign,
 			"in_flight", inFlight)
 
-		return u.releaseUsage(mb, q)
+		return q, rerr
 	}
 
 	if err := u.deleteShardRange(mb.ID, u.lastShard(mb.ID, final)); err != nil {
-		return errors.Join(err, u.releaseUsage(mb, q))
+		return q, errors.Join(err, rerr)
 	}
 
 	u.dropTombstone(mb, name)
 
-	return u.releaseUsage(mb, q)
+	return q, rerr
 }
 
 // dropTombstone removes the tombstone of a finished deletion.
@@ -685,9 +740,22 @@ func (u *User) dropTombstone(mb *Mailbox, name string) {
 }
 
 // keepTombstone rewrites the tombstone with the range of the retired
-// header, for the scrubber.
+// header and a fresh time, for the scrubber. Whether the usage is
+// released (q) is carried over from the tombstone as it is: a tombstone
+// that lost its q = 1 would be listed by every online recount as a
+// release still to come.
 func (u *User) keepTombstone(mb *Mailbox, final *MailboxInfo, name string) {
-	if err := u.setIntent(map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final)}); err != nil {
+	done := u.takeIntents()
+
+	err := casOmap(u, u.idx, oidRegistry, []string{deleteKey(mb.ID)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		var old mailboxIntent
+
+		_ = json.Unmarshal(cur[deleteKey(mb.ID)], &old)
+
+		return map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, final, old.Released)}, done
+	})
+	if err != nil {
+		u.restoreIntents(done)
 		u.log.Warn("delete: tombstone not updated", "mailbox", name, "err", err)
 	}
 }
@@ -782,12 +850,18 @@ func (u *User) retireDeleted(mb *Mailbox, info *MailboxInfo) (*MailboxInfo, bool
 // every reader resynchronise after the deletion of a mailbox, which is
 // an ordinary thing for a client to do — most often of an empty one.
 func (u *User) unregisterLogged(mb *Mailbox, lease model.Lease, metas []Meta, info *MailboxInfo) (MailboxRec, bool, error) {
+	return u.unregisterLoggedAs(mb, lease, metas, info, "")
+}
+
+// unregisterLoggedAs is unregisterLogged for the mailbox lock session
+// ("" none: a locked mailbox is refused).
+func (u *User) unregisterLoggedAs(mb *Mailbox, lease model.Lease, metas []Meta, info *MailboxInfo, session string) (MailboxRec, bool, error) {
 	acct, err := u.beginAccount(emailSpec(mb.ID), mailboxSpec(mb.ID, mb.Name))
 	if err != nil {
 		return MailboxRec{}, false, err
 	}
 
-	snap, lost, err := u.unregisterMailbox(mb, lease, info)
+	snap, lost, err := u.unregisterMailbox(mb, lease, info, session)
 
 	switch {
 	case err != nil:
@@ -820,15 +894,24 @@ func (u *User) readForDelete(mb *Mailbox) (*MailboxInfo, []Meta, error) {
 // unregisterMailbox removes the registry entry of mb if it still names
 // this mailbox (same id) and the lease is held, and records the deletion
 // tombstone with the range of info in the same CAS. It returns the record
-// it removed and lost=true if it did not remove it.
-func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease, info *MailboxInfo) (MailboxRec, bool, error) {
+// it removed and lost=true if it did not remove it. With a mailbox lock
+// session the record must carry that session's lock (a record a server
+// before 0.52.0 rewrote lost it: the deletion is then not done, fail
+// safe), and the session's overview record moves to the phase
+// unregistering; without one a locked record is refused.
+func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease, info *MailboxInfo, session string) (MailboxRec, bool, error) {
 	var snap MailboxRec
 
-	lost := false
-	tomb := map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, info)}
+	lost, locked := false, false
+	tomb := map[string][]byte{deleteKey(mb.ID): deletionTombstone(mb, info, nil)}
 
-	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
-		lost = true
+	keys := []string{regKey(mb.Name)}
+	if session != "" {
+		keys = append(keys, mailboxLockKey(session))
+	}
+
+	err := casOmap(u, u.idx, oidRegistry, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+		lost, locked = true, false
 
 		if lease.Lost() {
 			return nil, nil
@@ -839,9 +922,15 @@ func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease, info *MailboxIn
 			return nil, nil
 		}
 
+		if locked = !unregisterAllowed(&snap, session); locked {
+			return nil, nil
+		}
+
 		lost = false
 
 		set := maps.Clone(tomb)
+		maps.Copy(set, unregisterPhase(cur, session))
+
 		if snap.Subscribed { // the subscription survives as one to a missing name
 			set[regSubMissing+mb.Name] = []byte("1")
 		}
@@ -849,14 +938,58 @@ func (u *User) unregisterMailbox(mb *Mailbox, lease model.Lease, info *MailboxIn
 		return set, []string{regKey(mb.Name)}
 	})
 
+	if err == nil && locked {
+		if session == "" {
+			return snap, true, ErrMailboxLocked
+		}
+
+		return snap, true, fmt.Errorf("%w: the mailbox lock of %s is gone", model.ErrLocked, session)
+	}
+
 	return snap, lost, err
 }
 
-// deletionTombstone is the "dm:" value of a mailbox about to be deleted.
-func deletionTombstone(mb *Mailbox, info *MailboxInfo) []byte {
-	t := mailboxIntent{Time: time.Now().Unix(), Name: mb.Name}
+// unregisterAllowed reports whether the record may be unregistered:
+// without a mailbox lock session the record must not be locked by one;
+// with one it must carry exactly that session's lock (a record a server
+// before 0.52.0 rewrote lost it: fail safe, nothing is deleted).
+func unregisterAllowed(rec *MailboxRec, session string) bool {
+	if session == "" {
+		return !rec.Lock.Held("", time.Now())
+	}
+
+	return rec.Lock != nil && rec.Lock.Session == session
+}
+
+// unregisterPhase moves the session's lock record to the phase
+// unregistering (nothing without a session or a record).
+func unregisterPhase(cur map[string][]byte, session string) map[string][]byte {
+	if session == "" {
+		return nil
+	}
+
+	var r mailboxLockRec
+	if json.Unmarshal(cur[mailboxLockKey(session)], &r) != nil || r.Phase == "" {
+		return nil
+	}
+
+	r.Phase = model.MailboxLockUnregistering
+
+	return map[string][]byte{mailboxLockKey(session): encode(r)}
+}
+
+// deletionTombstone is the "dm:" value of a mailbox about to be deleted;
+// released says whether its usage was released (nil: not yet, written
+// as 0).
+func deletionTombstone(mb *Mailbox, info *MailboxInfo, released *int) []byte {
+	t := mailboxIntent{Time: time.Now().Unix(), Name: mb.Name, Released: released}
 	if info != nil {
 		t.UIDNext, t.ShardSize = info.UIDNext, info.ShardSize
+	}
+
+	if t.Released == nil {
+		zero := 0
+		t.Released = &zero
 	}
 
 	return encode(t)
@@ -934,7 +1067,16 @@ func (u *User) RenameMailbox(oldName, newName string) error {
 		return err
 	}
 
-	err = casOmap(u, u.idx, oidRegistry, keys, u.renameUpdate(oldName, newName, &conflict))
+	// A rename across the quota rules books the moved sum after the
+	// rename CAS (recountRenamed), not atomically with it. The rename CAS
+	// records an intent for that booking, so that an online recount
+	// started between the two waits for it (stage B16, temp/16 §4.2).
+	intentKey := ""
+	if u.renameFlips(all, oldName, newName) {
+		intentKey = quotaIntentKey(newGUID())
+	}
+
+	err = casOmap(u, u.idx, oidRegistry, keys, u.renameUpdate(oldName, newName, intentKey, &conflict))
 	if err != nil {
 		acct.partial()
 		return fmt.Errorf("rename %q: %w", oldName, err)
@@ -949,18 +1091,42 @@ func (u *User) RenameMailbox(oldName, newName string) error {
 	if conflict == nil {
 		// Grantees keep their pointers under the new names.
 		u.moveSubtreeSharedRefs(all, oldName, newName)
-		u.recountRenamed(all, oldName, newName)
+		u.recountRenamed(all, oldName, newName, intentKey)
 	}
 
 	return conflict
 }
 
+// renameFlips reports whether the rename moves a mailbox of the subtree
+// in or out of the usage count.
+func (u *User) renameFlips(all []Mailbox, oldName, newName string) bool {
+	if !u.rules.RenameMayRecount() {
+		return false
+	}
+
+	for i := range all {
+		m := &all[i]
+		if m.Name != oldName && !strings.HasPrefix(m.Name, oldName+Delim) {
+			continue
+		}
+
+		renamed := Mailbox{Name: newName + m.Name[len(oldName):], MailboxRec: m.MailboxRec}
+		if u.rules.Counts(m) != u.rules.Counts(&renamed) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // recountRenamed moves the messages of renamed mailboxes that a name
 // rule now ignores (or no longer ignores) out of (into) the usage. The
 // rename is not refused for it, like a lowered limit; a failure here is
-// left to the scrubber, which recounts from the indexes.
-func (u *User) recountRenamed(all []Mailbox, oldName, newName string) {
-	if !u.rules.RenameMayRecount() {
+// left to the scrubber, which recounts from the indexes. The booking
+// removes the rename intent of the rename CAS and ends an online
+// recount that may be under way: the sum is one a run cannot see.
+func (u *User) recountRenamed(all []Mailbox, oldName, newName string, intentKey string) {
+	if intentKey == "" {
 		return
 	}
 
@@ -994,7 +1160,7 @@ func (u *User) recountRenamed(all []Mailbox, oldName, newName string) {
 		d.Msgs += q.Msgs
 	}
 
-	if err := u.adjustQuota(d); err != nil {
+	if err := u.applyUsage(usageChange{d: d, notify: true, rm: []string{intentKey}, abort: true}); err != nil {
 		u.log.Warn("quota recount after rename failed", "err", err)
 	}
 }
@@ -1060,7 +1226,7 @@ func renameSpecs(all []Mailbox, oldName, newName string) []acctSpec {
 // renameUpdate returns the registry CAS function of a rename of the
 // oldName subtree to newName. *conflict receives why the rename was not
 // done (nil if it was).
-func (u *User) renameUpdate(oldName, newName string, conflict *error) func(map[string][]byte) (map[string][]byte, []string) {
+func (u *User) renameUpdate(oldName, newName, intentKey string, conflict *error) func(map[string][]byte) (map[string][]byte, []string) {
 	return func(_ map[string][]byte) (map[string][]byte, []string) {
 		*conflict = nil
 		// Collision check against the live registry: any create after
@@ -1071,6 +1237,15 @@ func (u *User) renameUpdate(oldName, newName string, conflict *error) func(map[s
 			return nil, nil
 		}
 
+		now := time.Now()
+		// A mailbox a mailbox_delete locks (stage B17) is neither renamed
+		// nor moved under; the lock is read in the CAS that rewrites the
+		// names, so it cannot be missed.
+		if lockedAncestor(all, newName, now) {
+			*conflict = ErrMailboxLocked
+			return nil, nil
+		}
+
 		set := map[string][]byte{}
 
 		var rm []string
@@ -1078,6 +1253,11 @@ func (u *User) renameUpdate(oldName, newName string, conflict *error) func(map[s
 		for k, v := range all {
 			n := strings.TrimPrefix(k, regMboxPrefix)
 			if n == oldName || strings.HasPrefix(n, oldName+Delim) {
+				if lockedRecord(v, "", now) {
+					*conflict = ErrMailboxLocked
+					return nil, nil
+				}
+
 				target := regKey(newName + n[len(oldName):])
 				// Every resulting name must be free: "X" may be an implicit
 				// parent while "X/B" already exists.
@@ -1094,6 +1274,10 @@ func (u *User) renameUpdate(oldName, newName string, conflict *error) func(map[s
 
 		if len(set) == 0 {
 			*conflict = ErrNoMailbox
+		}
+
+		if intentKey != "" {
+			set[intentKey] = newQuotaIntent(quotaIntentRename, "", Quota{})
 		}
 
 		return set, rm
@@ -1269,9 +1453,6 @@ func (u *User) QuotaLimit() (Quota, error) {
 	return l, nil
 }
 
-// quotaKeys are the registry keys of the usage counters and the limit.
-var quotaKeys = []string{regQuotaBytes, regQuotaMsgs, regQuotaLBytes, regQuotaLMsgs}
-
 // quotaState reads the usage and the limit (per-user value or the
 // configured default) from registry values.
 func (u *User) quotaState(cur map[string][]byte) (usage, limit Quota) {
@@ -1318,9 +1499,42 @@ func (u *User) SetStorageLimit(bytes int64) error {
 	})
 }
 
-// SetQuotaUsage overwrites the usage counters (used by the scrubber).
+// SetQuotaUsage overwrites the usage counters (the scrubber, the offline
+// recount). Whoever overwrites the counters invalidates a running online
+// recount: its run key and its captures go in the same write (the rest
+// of a capture set beyond one page in further version-checked writes).
 func (u *User) SetQuotaUsage(q Quota) error {
-	return u.setQuotaPair(regQuotaBytes, regQuotaMsgs, q)
+	more := false
+
+	err := casOmapPrefix(u, u.idx, oidRegistry, []string{regQuotaRun, regQuotaCaptureHead},
+		[]string{regQuotaReleasePrefix, regQuotaMailboxPrefix},
+		func(cur map[string][]byte, pages map[string]prefixPage) (map[string][]byte, []string) {
+			set := usageValues(q)
+			rm := []string{}
+
+			for _, k := range []string{regQuotaRun, regQuotaCaptureHead} {
+				if _, ok := cur[k]; ok {
+					rm = append(rm, k)
+				}
+			}
+
+			more = false
+
+			for _, p := range pages {
+				more = more || p.more
+
+				for k := range p.vals {
+					rm = append(rm, k)
+				}
+			}
+
+			return set, rm
+		})
+	if err != nil || !more {
+		return err
+	}
+
+	return u.ClearQuotaRecount("")
 }
 
 // setQuotaPair overwrites the registry keys bytesKey and msgsKey with the
@@ -1334,46 +1548,6 @@ func (u *User) setQuotaPair(bytesKey, msgsKey string, q Quota) error {
 	})
 }
 
-// adjustQuota adds the delta to the usage counters and reports the
-// change (quota warnings). The counters live on the registry object, so
-// they are eventually consistent with the mailbox indexes (the scrubber
-// recomputes them from the Meta records).
-func (u *User) adjustQuota(d Quota) error { return u.changeQuota(d, true) }
-
-// rollbackQuota gives back the unused part of a reservation; it is not
-// reported, the usage only returns to where it was.
-func (u *User) rollbackQuota(d Quota) {
-	if err := u.changeQuota(d, false); err != nil {
-		u.log.Warn("quota release failed", "err", err)
-	}
-}
-
-// changeQuota adds the delta to the usage counters in one
-// compare-and-swap; with notify the change goes to OnQuotaChange.
-func (u *User) changeQuota(d Quota, notify bool) error {
-	if d.Bytes == 0 && d.Msgs == 0 {
-		return nil
-	}
-
-	var before, after, limit Quota
-
-	err := casOmap(u, u.idx, oidRegistry, quotaKeys, func(cur map[string][]byte) (map[string][]byte, []string) {
-		before, limit = u.quotaState(cur)
-		after = Quota{Bytes: max(before.Bytes+d.Bytes, 0), Msgs: max(before.Msgs+d.Msgs, 0)}
-
-		return usageValues(after), nil
-	})
-	if err != nil {
-		return err
-	}
-
-	if notify {
-		u.quotaChanged(before, after, limit)
-	}
-
-	return nil
-}
-
 // reservation is quota taken for an operation before it writes
 // anything. settle ends it: the used part is kept and reported as one
 // change, the rest is given back silently. The reported change starts
@@ -1381,33 +1555,42 @@ func (u *User) changeQuota(d Quota, notify bool) error {
 // counters since, so "after" is this operation's own step (which is
 // what the edge-triggered warnings need), not the current usage. A reservation for a mailbox
 // that a rule ignores is inactive and settles to nothing.
+//
+// tag is the hash of the online recount that captured the reservation
+// ("" none): the entries it produces carry it (Meta.QuotaTag), and only
+// such a reservation is uncaptured when it is given back. intent is a
+// registry intent the reservation set ("qi:" of a COPY or MOVE) that
+// settle removes: at once in the write that gives something back,
+// otherwise with the next registry write of the view.
 type reservation struct {
 	u      *User
 	total  Quota
 	before Quota
 	limit  Quota
 	active bool
+	tag    string
+	intent string
 }
 
-// reserve checks the limit for saving total into mb (with the mailbox's
-// extra allowance and the grace) and adds it to the usage in one
-// compare-and-swap on the registry object, so concurrent deliveries and
-// COPY batches cannot jointly overshoot the limit (each sees the
+// reserveWith checks the limit for saving total into mb (with the
+// mailbox's extra allowance and the grace) and adds it to the usage in
+// one compare-and-swap on the registry object, so concurrent deliveries
+// and COPY batches cannot jointly overshoot the limit (each sees the
 // reservations of the others). ErrOverQuota leaves the counters
-// untouched.
-func (u *User) reserve(mb *Mailbox, total Quota) (*reservation, error) {
-	return u.reserveWith(mb, total, nil)
-}
-
-// reserveWith is reserve that also sets the registry keys intents in the
-// same CAS (written even when nothing is to be reserved, then in a CAS of
-// their own, and not at all on ErrOverQuota). Finished intents of the
-// view go along with either write (intents.go).
+// untouched. The registry keys intents are set in the same CAS (written
+// even when nothing is to be reserved, then in a CAS of their own, and
+// not at all on ErrOverQuota). Finished intents of the view go along
+// with either write (intents.go).
+//
+// The CAS reads the mailbox record of mb as well: a mailbox a
+// mailbox_delete job locks (stage B17) takes nothing (ErrMailboxLocked),
+// exactly, in the same write that would reserve. A live online recount
+// (stage B16) captures the reservation.
 func (u *User) reserveWith(mb *Mailbox, total Quota, intents map[string][]byte) (*reservation, error) {
 	r := &reservation{u: u, total: total}
 	if !u.rules.Counts(mb) || (total.Bytes == 0 && total.Msgs == 0) {
 		if len(intents) > 0 {
-			if err := u.setIntent(intents); err != nil {
+			if err := u.setIntentFor(mb, intents); err != nil {
 				return nil, err
 			}
 		}
@@ -1415,33 +1598,17 @@ func (u *User) reserveWith(mb *Mailbox, total Quota, intents map[string][]byte) 
 		return r, nil
 	}
 
-	over := false
-	done := u.takeIntents()
-
-	err := casOmap(u, u.idx, oidRegistry, quotaKeys, func(cur map[string][]byte) (map[string][]byte, []string) {
-		over = false
-		r.before, r.limit = u.quotaState(cur)
-
-		if !u.noEnforce && !u.rules.Allows(r.before, u.rules.Limit(r.limit, mb), total.Bytes, total.Msgs) {
-			over = true
-			return nil, nil
-		}
-
-		set := usageValues(Quota{Bytes: max(r.before.Bytes+total.Bytes, 0), Msgs: max(r.before.Msgs+total.Msgs, 0)})
-		maps.Copy(set, intents)
-
-		return set, done
-	})
-	if err != nil || over {
-		u.restoreIntents(done)
-	}
-
+	out, err := u.reserveRounds(mb, total, intents, r)
 	if err != nil {
 		return nil, err
 	}
 
-	if over {
-		return nil, ErrOverQuota
+	if err := out.refusal(); err != nil {
+		return nil, err
+	}
+
+	if r.tag != "" {
+		mh.recountCapture("reserve")
 	}
 
 	r.active = true
@@ -1449,16 +1616,139 @@ func (u *User) reserveWith(mb *Mailbox, total Quota, intents map[string][]byte) 
 	return r, nil
 }
 
+// reserveRounds runs the reservation CAS, again after a hold of an
+// online recount (at most three times).
+func (u *User) reserveRounds(mb *Mailbox, total Quota, intents map[string][]byte, r *reservation) (reserveOutcome, error) {
+	var out reserveOutcome
+
+	keys := append(append([]string(nil), quotaKeys...), regKey(mb.Name))
+
+	for round := 0; round < 3; round++ {
+		done := u.takeIntents()
+
+		err := casOmap(u, u.idx, oidRegistry, keys, func(cur map[string][]byte) (map[string][]byte, []string) {
+			return u.reserveRound(mb, total, intents, done, r, &out, cur)
+		})
+		if err != nil || out.refusal() != nil {
+			u.restoreIntents(done)
+		}
+
+		if err != nil {
+			return out, err
+		}
+
+		if out.hold.IsZero() {
+			return out, nil
+		}
+
+		u.recountHeld(out.hold)
+	}
+
+	return out, nil
+}
+
+// reserveOutcome is why a round of the reservation CAS wrote nothing.
+type reserveOutcome struct {
+	over, locked bool
+	hold         time.Time
+}
+
+// refusal is the error the outcome stands for (nil: reserved).
+func (o reserveOutcome) refusal() error {
+	switch {
+	case o.locked:
+		return ErrMailboxLocked
+	case o.over:
+		return ErrOverQuota
+	case !o.hold.IsZero():
+		return fmt.Errorf("quota: the usage counters are held by a recount, try again")
+	}
+
+	return nil
+}
+
+// reserveRound is one round of the reservation CAS.
+func (u *User) reserveRound(mb *Mailbox, total Quota, intents map[string][]byte, done []string, r *reservation, out *reserveOutcome,
+	cur map[string][]byte,
+) (map[string][]byte, []string) {
+	*out = reserveOutcome{}
+	r.before, r.limit = u.quotaState(cur)
+
+	if lockedRecord(cur[regKey(mb.Name)], "", time.Now()) {
+		out.locked = true
+		return nil, nil
+	}
+
+	st := readCapture(cur)
+	if h := st.holdUntil(); !h.IsZero() {
+		out.hold = h
+		return nil, nil
+	}
+
+	if !u.noEnforce && !u.rules.Allows(r.before, u.rules.Limit(r.limit, mb), total.Bytes, total.Msgs) {
+		out.over = true
+		return nil, nil
+	}
+
+	set := usageValues(Quota{Bytes: max(r.before.Bytes+total.Bytes, 0), Msgs: max(r.before.Msgs+total.Msgs, 0)})
+	maps.Copy(set, intents)
+
+	r.tag = ""
+
+	if st.live() {
+		st.arrive(total)
+		r.tag = st.hash()
+	}
+
+	set, rm, aborted := st.finish(set, done, u.recount)
+	if aborted {
+		mh.recountCapture("abort")
+	}
+
+	return set, rm
+}
+
+// setIntentFor is setIntent for a write into mb that reserves nothing
+// (an ignored mailbox): the mailbox lock is checked in the same CAS.
+func (u *User) setIntentFor(mb *Mailbox, set map[string][]byte) error {
+	done := u.takeIntents()
+	locked := false
+
+	err := casOmap(u, u.idx, oidRegistry, []string{regKey(mb.Name)}, func(cur map[string][]byte) (map[string][]byte, []string) {
+		if locked = lockedRecord(cur[regKey(mb.Name)], "", time.Now()); locked {
+			return nil, nil
+		}
+
+		return set, done
+	})
+	if err != nil || locked {
+		u.restoreIntents(done)
+	}
+
+	if err != nil {
+		return fmt.Errorf("record intent: %w", err)
+	}
+
+	if locked {
+		return ErrMailboxLocked
+	}
+
+	return nil
+}
+
 // settle keeps used of the reservation and gives back the rest.
 func (r *reservation) settle(used Quota) {
 	if !r.active {
+		r.dropIntent(false)
 		return
 	}
 
 	r.active = false
 
 	if rest := (Quota{Bytes: used.Bytes - r.total.Bytes, Msgs: used.Msgs - r.total.Msgs}); rest != (Quota{}) {
-		r.u.rollbackQuota(rest)
+		r.giveBack(rest)
+	} else {
+		r.dropIntent(false)
 	}
 
 	if used != (Quota{}) {
@@ -1466,25 +1756,78 @@ func (r *reservation) settle(used Quota) {
 	}
 }
 
+// giveBack returns rest (negative) and removes the reservation's intent
+// in the same write: a standing intent of an abandoned copy would hold
+// the barrier of a recount up.
+func (r *reservation) giveBack(rest Quota) {
+	ch := usageChange{d: rest, tag: r.tag}
+	if r.intent != "" {
+		ch.rm = []string{r.intent}
+		r.u.intentAgain(r.intent)
+	}
+
+	if err := r.u.applyUsage(ch); err != nil {
+		r.u.log.Warn("quota release failed", "err", err)
+		r.dropIntent(true)
+	}
+}
+
+// dropIntent queues the reservation's intent for removal (now: at once).
+func (r *reservation) dropIntent(now bool) {
+	if r.intent == "" {
+		return
+	}
+
+	if now {
+		if err := rmKeys(r.u.idx, oidRegistry, []string{r.intent}); err != nil {
+			r.u.log.Warn("intent not removed", "key", r.intent, "err", err)
+		}
+
+		return
+	}
+
+	r.u.intentDone(r.intent)
+}
+
 // moveUsage releases the entries a MOVE removed from src when they now
 // sit in a mailbox that a rule ignores. The opposite direction is
 // reserved up front by Move.
-func (u *User) moveUsage(src, dst *Mailbox, removed Quota) error {
+func (u *User) moveUsage(src, dst *Mailbox, removed []Meta) error {
 	if !u.rules.Counts(src) || u.rules.Counts(dst) {
 		return nil
 	}
 
-	return u.adjustQuota(Quota{Bytes: -removed.Bytes, Msgs: -removed.Msgs})
+	return u.releaseUsage(src, removed)
 }
 
-// releaseUsage applies the (negative) delta of entries removed from mb,
-// unless a rule ignores mb.
-func (u *User) releaseUsage(mb *Mailbox, d Quota) error {
+// releaseUsage takes the entries removed from mb out of the usage,
+// unless a rule ignores mb. A live online recount captures them with
+// their identity (an empty release too, which costs nothing).
+func (u *User) releaseUsage(mb *Mailbox, removed []Meta) error {
 	if !u.rules.Counts(mb) {
 		return nil
 	}
 
-	return u.adjustQuota(d)
+	q := sizeOf(removed)
+
+	return u.applyUsage(usageChange{d: Quota{Bytes: -q.Bytes, Msgs: -q.Msgs}, notify: true, mailbox: mb.ID, released: removed})
+}
+
+// releaseDeleted takes the entries of a deleted mailbox out of the usage
+// (unless a rule ignores it) and marks its tombstone released in the
+// same write; a live online recount captures the tagged entries under
+// "qm:". The tombstone is marked even for an ignored mailbox and even
+// when there is nothing to release: a tombstone with q = 0 is listed by
+// every run as a release still to come.
+func (u *User) releaseDeleted(mb *Mailbox, entries []Meta) error {
+	ch := usageChange{notify: true, mailbox: mb.ID, released: entries, tombstone: true}
+
+	if u.rules.Counts(mb) {
+		q := sizeOf(entries)
+		ch.d = Quota{Bytes: -q.Bytes, Msgs: -q.Msgs}
+	}
+
+	return u.applyUsage(ch)
 }
 
 // quotaChanged reports a committed change of the usage.
@@ -1685,7 +2028,7 @@ func (u *User) headerWritten(mb *Mailbox, info *MailboxInfo, hc *headerChange, m
 // commitPending flips a pending change record to committed (and removes
 // extra keys, e.g. a MOVE intent) in one write. It is the second phase of
 // a two-phase change; no modseq is consumed.
-func (u *User) commitPending(mb *Mailbox, modseq uint64, chg *changeRec, rm []string) error {
+func (u *User) commitPending(mb *Mailbox, modseq uint64, chg *changeRec, rm []string, extra map[string][]byte) error {
 	chg.Pending = false
 	b, _ := json.Marshal(chg)
 
@@ -1697,6 +2040,7 @@ func (u *User) commitPending(mb *Mailbox, modseq uint64, chg *changeRec, rm []st
 	op.AssertExists()
 
 	set := map[string][]byte{chgKey(modseq): b}
+	maps.Copy(set, extra)
 
 	if chg.Expunged {
 		vb, _ := json.Marshal(chg.UIDs)
@@ -2202,7 +2546,7 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 
 	u.intentAgain(intent)
 
-	res, err := u.reserveWith(mb, size, map[string][]byte{intent: u.newBlobIntent(size.Bytes)})
+	res, err := u.reserveWith(mb, size, map[string][]byte{intent: u.newBlobIntent(size.Bytes, mb.ID)})
 	if err != nil {
 		return nil, err
 	}
@@ -2224,7 +2568,7 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 		res.settle(Quota{})
 	}
 
-	meta, err := u.storeAndLink(mb, guid, raw, flags, when, undo)
+	meta, err := u.storeAndLink(mb, guid, raw, flags, when, res.tag, undo)
 	if err != nil {
 		return nil, err
 	}
@@ -2236,8 +2580,9 @@ func (u *User) DeliverGUID(name, guid string, raw []byte, flags []string, when t
 }
 
 // storeAndLink writes the blob and its postings and links the entry; on
-// failure it calls undo with what is to be given back.
-func (u *User) storeAndLink(mb *Mailbox, guid string, raw []byte, flags []string, when time.Time, undo func(chunks int, indexed bool)) (*Meta, error) {
+// failure it calls undo with what is to be given back. tag is the online
+// recount that captured the reservation ("" none): the entry carries it.
+func (u *User) storeAndLink(mb *Mailbox, guid string, raw []byte, flags []string, when time.Time, tag string, undo func(chunks int, indexed bool)) (*Meta, error) {
 	if when.IsZero() {
 		when = time.Now()
 	}
@@ -2259,7 +2604,7 @@ func (u *User) storeAndLink(mb *Mailbox, guid string, raw []byte, flags []string
 	p := mailmeta.Parse(raw)
 	m := Meta{GUID: guid, Size: int64(len(raw)), Chunks: chunks, Flags: flags,
 		InternalDate: when.UTC(), SaveDate: time.Now().UTC(), Envelope: p.Envelope, Routes: p.Routes, References: p.Refs, Preview: p.Preview,
-		HasAttachment: mailmeta.HasAttachment(raw)}
+		HasAttachment: mailmeta.HasAttachment(raw), QuotaTag: tag}
 
 	meta, err := u.linkLogged(mb, m)
 	if err != nil {
@@ -2461,7 +2806,7 @@ func (u *User) linkPending(mb *Mailbox, learningLease model.Lease, e linkEntry, 
 		return fmt.Errorf("write entry shard: %w", err)
 	}
 
-	if err := u.commitPending(mb, modseq, chg, nil); err != nil {
+	if err := u.commitPending(mb, modseq, chg, nil, nil); err != nil {
 		// The entry is durable and visible to full reloads; the
 		// pending mark expires on its own. Not an error for the caller:
 		// undoing (deleting the blob) would leave an entry without data.
@@ -2513,6 +2858,10 @@ func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply
 	mb, err := u.Lookup(name)
 	if err != nil {
 		return nil, err
+	}
+
+	if lockedMailbox(mb, "", time.Now()) {
+		return nil, ErrMailboxLocked
 	}
 
 	acct, err := u.beginAccount(emailSpec(mb.ID))
@@ -2721,7 +3070,7 @@ func (u *User) setFlagsHigher(mb *Mailbox, name string, fa flagsApply, higher ma
 		u.registerKeywords(mb, newKeywords)
 	}
 
-	if err := u.commitPending(mb, modseq, chg, nil); err != nil {
+	if err := u.commitPending(mb, modseq, chg, nil, nil); err != nil {
 		u.log.Warn("commit of pending change failed, entries are written", "mailbox", mb.Name, "modseq", modseq, "err", err)
 	}
 
@@ -2886,30 +3235,73 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 		return nil
 	}
 
+	if lockedMailbox(mb, "", time.Now()) {
+		return ErrMailboxLocked
+	}
+
+	return u.expunge(mb, metas)
+}
+
+// ExpungeOwn implements model.OwnExpunger: Expunge without the mailbox
+// lock check, for entries the caller wrote itself (the rollback of a
+// delivery, the scrub's rollback of an abandoned one). A copy a
+// delivery stored before the lock came would otherwise stay until the
+// scrub removes it, and the client would deliver again: a duplicate.
+func (u *User) ExpungeOwn(name string, metas []Meta) error {
+	mb, err := u.Lookup(name)
+	if err != nil {
+		return err
+	}
+
+	if len(metas) == 0 {
+		return nil
+	}
+
+	return u.expunge(mb, metas)
+}
+
+// expunge is Expunge after the checks. The usage is released directly
+// after the removal (stage B16, temp/16 §4.3), before the blob
+// references go: the window in which an entry is removed but still in
+// the counters holds no blob access any more, and the removal intents
+// say which section an entry is in (d without f).
+func (u *User) expunge(mb *Mailbox, metas []Meta) error {
 	acct, err := u.beginAccount(emailSpec(mb.ID))
 	if err != nil {
 		return err
 	}
 
-	removed, modseq, rkeys, err := u.unlink(mb, metas, "")
+	res, err := u.unlink(mb, metas, "", true)
 	if err != nil {
 		acct.partial()
+		// Phase 2 failed on a shard: what phase 1 removed is released
+		// all the same (the intents of the rest stay for the scrubber).
+		if len(res.removed) > 0 {
+			err = errors.Join(err, u.releaseAfterUnlink(mb, res))
+		}
+
 		return err
 	}
 
-	if len(removed) == 0 {
+	if len(res.removed) == 0 {
 		acct.withdraw()
 	} else {
-		acct.commit(emailChange(model.OpDestroyed, modseq, removed))
+		acct.commit(emailChange(model.OpDestroyed, res.modseq, res.removed))
 	}
 	// Index no longer references the blobs; drop our reference. A failure
-	// here leaves the removal intent for the scrubber, never dangling
+	// there leaves the removal intent for the scrubber, never dangling
 	// index entries.
-	u.releaseRemoved(mb, removed, rkeys)
+	return u.releaseAfterUnlink(mb, res)
+}
 
-	q := sizeOf(removed)
-
-	return u.releaseUsage(mb, Quota{Bytes: -q.Bytes, Msgs: -q.Msgs})
+// unlinkResult is what unlink did: the entries it removed, the source
+// MODSEQ the removal was written at, the "r:" keys it set and the nonce
+// it set them with.
+type unlinkResult struct {
+	removed []Meta
+	modseq  uint64
+	rkeys   []string
+	nonce   string
 }
 
 // unlink removes index entries and writes the change/vanished records.
@@ -2918,13 +3310,21 @@ func (u *User) Expunge(name string, metas []Meta) (err error) {
 // version, and the commit records what was actually removed. intentID,
 // if set, is the MOVE intent to drop with the last durable step. Returns
 // the entries that were removed, so callers release exactly those
-// references.
+// references; when phase 2 fails, the entries phase 1 removed come with
+// the error (their usage is released all the same).
 //
 // The header CAS also records a removal intent ("r:<uid>", intents.go) for
 // every entry it removes from shard 0 or announces on a higher shard;
 // their keys are returned as rkeys, and the caller drops them with
-// releaseRemoved once the blob references are released.
-func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) (removed []Meta, modseq uint64, rkeys []string, err error) {
+// releaseRemoved once the blob references are released. The value says
+// whether this removal (nonce) removed the entry: set by the header CAS
+// for shard 0, by the commit of the pending change for higher shards. An
+// intent that is already there is only refreshed, never overwritten:
+// what another session recorded about its removal stays. released says
+// that a release of the usage follows (Expunge, a MOVE into an ignored
+// mailbox); otherwise the intents say at once that nothing is to be
+// released (quotacapture.go).
+func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string, released bool) (unlinkResult, error) {
 	byUID := map[uint32]Meta{}
 	for _, m := range metas {
 		byUID[m.UID] = m
@@ -2937,25 +3337,29 @@ func (u *User) unlink(mb *Mailbox, metas []Meta, intentID string) (removed []Met
 		extraRm = []string{keyIntentPrefix + intentID}
 	}
 
-	removed, chg, modseq, rkeys, err := u.unlinkHeader(mb, metas, extraRm, higher)
+	res := unlinkResult{nonce: newGUID()}
+
+	removed, chg, modseq, rkeys, err := u.unlinkHeader(mb, metas, extraRm, higher, res.nonce, released)
 	if err != nil {
-		return nil, 0, nil, err
+		return unlinkResult{}, err
 	}
+
+	res.removed, res.modseq, res.rkeys = removed, modseq, rkeys
 
 	if chg == nil || !chg.Pending {
-		return removed, modseq, rkeys, nil
+		return res, nil
 	}
 
-	removed, err = u.unlinkHigher(mb, byUID, higher, removed, chg, modseq, extraRm)
+	res.removed, err = u.unlinkHigher(mb, byUID, higher, removed, chg, modseq, extraRm, res.nonce, released)
 
-	return removed, modseq, rkeys, err
+	return res, err
 }
 
 // unlinkHeader is phase 1 of unlink: the header CAS removes the shard 0
 // entries that still exist and announces the UIDs on higher shards
 // (filled into higher) as pending. It returns the removed shard 0 entries
 // and the change record.
-func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher map[string][]string) ([]Meta, *changeRec, uint64, []string, error) {
+func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher map[string][]string, nonce string, released bool) ([]Meta, *changeRec, uint64, []string, error) {
 	var (
 		removed []Meta
 		chg     *changeRec
@@ -2971,7 +3375,7 @@ func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher 
 
 		shard0 := u.partitionMetas(mb, info.ShardSize, metas, higher)
 
-		cur, err := u.getEntries(mb.ID, info.ShardSize, shard0)
+		cur, existing, err := u.readUnlinkKeys(mb.ID, shard0, metas)
 		if err != nil {
 			return nil, err
 		}
@@ -2995,7 +3399,7 @@ func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher 
 			return nil, nil
 		}
 
-		set := removalSet(time.Now().Unix(), append(slices.Clone(removed), announcedMetas(metas, higher)...))
+		set := removalSet(time.Now().Unix(), removed, announcedMetas(metas, higher), existing, nonce, released)
 		for k := range set {
 			rkeys = append(rkeys, k)
 		}
@@ -3009,6 +3413,49 @@ func (u *User) unlinkHeader(mb *Mailbox, metas []Meta, extraRm []string, higher 
 	})
 
 	return removed, chg, modseq, rkeys, err
+}
+
+// readUnlinkKeys reads, in one op on shard 0, the entries of the shard 0
+// UIDs and the removal intents of all UIDs of a removal: the entries to
+// remove in the header CAS and the intents that are already there.
+func (u *User) readUnlinkKeys(id string, shard0 []uint32, metas []Meta) ([]Meta, map[string][]byte, error) {
+	keys := make([]string, 0, len(shard0)+len(metas))
+	for _, uid := range shard0 {
+		keys = append(keys, uidKey(uid))
+	}
+
+	for i := range metas {
+		keys = append(keys, removeKey(metas[i].UID))
+	}
+
+	if len(keys) == 0 {
+		return nil, nil, nil
+	}
+
+	vals, err := getOmapKeys(u.idx, mboxOID(id), keys)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var cur []Meta
+
+	existing := map[string][]byte{}
+
+	for k, v := range vals {
+		if strings.HasPrefix(k, keyRemovePrefix) {
+			existing[k] = v
+			continue
+		}
+
+		var m Meta
+		if json.Unmarshal(v, &m) == nil {
+			cur = append(cur, m)
+		}
+	}
+
+	sort.Slice(cur, func(i, j int) bool { return cur[i].UID < cur[j].UID })
+
+	return cur, existing, nil
 }
 
 // announcedMetas returns the entries of metas whose keys higher lists
@@ -3056,9 +3503,16 @@ func (u *User) partitionMetas(mb *Mailbox, shardSize uint32, metas []Meta, highe
 
 // unlinkHigher is phase 2 of unlink: it removes the entries on the higher
 // shards under each shard's own version and commits what was actually
-// removed (dropping the entries of extraRm with it).
-func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[string][]string, removed []Meta, chg *changeRec, modseq uint64, extraRm []string) ([]Meta, error) {
+// removed (dropping the entries of extraRm with it, and recording in
+// their removal intents that this removal removed them). When a shard
+// fails, the entries removed so far (phase 1 and the shards that went
+// through) are returned with the error.
+func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[string][]string, removed []Meta, chg *changeRec, modseq uint64,
+	extraRm []string, nonce string, released bool,
+) ([]Meta, error) {
 	var mu sync.Mutex
+
+	phase1 := len(removed)
 
 	err := parallel(higher, func(oid string, keys []string) error {
 		gone, err := u.modifyEntries(oid, nil, keys, false)
@@ -3080,7 +3534,7 @@ func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[strin
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("remove entries shard: %w", err)
+		return removed, fmt.Errorf("remove entries shard: %w", err)
 	}
 
 	chg.UIDs = chg.UIDs[:0]
@@ -3088,13 +3542,37 @@ func (u *User) unlinkHigher(mb *Mailbox, byUID map[uint32]Meta, higher map[strin
 		chg.UIDs = append(chg.UIDs, m.UID)
 	}
 
-	if err := u.commitPending(mb, modseq, chg, extraRm); err != nil {
+	now := time.Now().Unix()
+	set := map[string][]byte{}
+
+	for i := phase1; i < len(removed); i++ {
+		set[removeKey(removed[i].UID)] = removalValue(now, &removed[i], true, nonce, !released)
+	}
+
+	if err := u.commitPending(mb, modseq, chg, extraRm, set); err != nil {
 		u.log.Warn("commit of pending expunge failed, entries are removed", "mailbox", mb.Name, "modseq", modseq, "err", err)
 	}
 
 	sort.Slice(removed, func(i, j int) bool { return removed[i].UID < removed[j].UID })
 
 	return removed, nil
+}
+
+// releaseAfterUnlink is what follows a removal that releases the usage
+// (Expunge, the scrub's rollback): the usage goes first, directly after
+// the removal, then the flag on the removal intents, then the blob
+// references (and with them the intents), as before.
+func (u *User) releaseAfterUnlink(mb *Mailbox, res unlinkResult) error {
+	u.at(hookAfterUnlink, mb.ID)
+
+	err := u.releaseUsage(mb, res.removed)
+
+	u.at(hookAfterRelease, mb.ID)
+	u.flagReleased(mb, res.removed, res.nonce)
+	u.at(hookAfterFlag, mb.ID)
+	u.releaseRemoved(mb, res.removed, res.rkeys)
+
+	return err
 }
 
 // Copy links the messages into dest. Only the reference count on the
@@ -3114,10 +3592,21 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		return nil, err
 	}
 
-	res, err := u.reserve(mb, sizeOf(metas))
+	if lockedMailbox(mb, "", time.Now()) {
+		return nil, ErrMailboxLocked
+	}
+	// The intent "qi:" names the batch for the barriers of an online
+	// recount and of a mailbox lock, as "bi:" names a delivery; it goes
+	// with the reservation and leaves with it (reservation.settle).
+	total := sizeOf(metas)
+	key := quotaIntentKey(newGUID())
+
+	res, err := u.reserveWith(mb, total, map[string][]byte{key: newQuotaIntent(quotaIntentCopy, mb.ID, total)})
 	if err != nil {
 		return nil, err
 	}
+
+	res.intent = key
 
 	acct, err := u.beginAccount(emailSpec(mb.ID))
 	if err != nil {
@@ -3125,28 +3614,38 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		return nil, err
 	}
 
+	out, used, err := u.copyLinks(mb, metas, res.tag)
+	if err != nil {
+		acct.partial()
+		res.settle(used)
+
+		return nil, err
+	}
+
+	acct.commit(emailChange(model.OpCreated, 0, out))
+	res.settle(used)
+
+	return out, nil
+}
+
+// copyLinks takes a blob reference and links an entry into mb for each
+// of metas (with the tag of the reservation); it returns the entries
+// and the usage of those linked, also on an error.
+func (u *User) copyLinks(mb *Mailbox, metas []Meta, tag string) ([]Meta, Quota, error) {
 	out := make([]Meta, 0, len(metas))
 
 	var used Quota
 
-	giveBack := func() { res.settle(used) }
-
 	for _, m := range metas {
 		if _, err := u.blobRef(m.GUID, +1); err != nil {
-			acct.partial()
-			giveBack()
-
-			return nil, err
+			return out, used, err
 		}
 
-		nm, err := u.link(mb, relink(m))
+		nm, err := u.link(mb, relinkTagged(m, tag))
 		if err != nil {
 			_, _ = u.blobRef(m.GUID, -1)
 
-			acct.partial()
-			giveBack()
-
-			return nil, err
+			return out, used, err
 		}
 
 		out = append(out, *nm)
@@ -3154,10 +3653,7 @@ func (u *User) Copy(metas []Meta, dest string) (copied []Meta, err error) {
 		used.Msgs++
 	}
 
-	acct.commit(emailChange(model.OpCreated, 0, out))
-	res.settle(used)
-
-	return out, nil
+	return out, used, nil
 }
 
 // moveIntent records a MOVE in progress on the source mailbox. If the
@@ -3209,15 +3705,12 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 	if err := u.checkKeywordRoom(dmb, metas); err != nil {
 		return nil, err
 	}
-	// A move between two counted (or two ignored) mailboxes leaves the
-	// usage alone. Out of an ignored mailbox the batch is reserved like a
-	// COPY; into one the removed source entries are released.
-	var want Quota
-	if !u.rules.Counts(smb) {
-		want = sizeOf(metas)
+
+	if now := time.Now(); lockedMailbox(smb, "", now) || lockedMailbox(dmb, "", now) {
+		return nil, ErrMailboxLocked
 	}
 
-	res, err := u.reserve(dmb, want)
+	res, err := u.reserveMove(smb, dmb, metas)
 	if err != nil {
 		return nil, err
 	}
@@ -3229,7 +3722,7 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 		return nil, err
 	}
 
-	mv, err := u.moveLinks(smb, dmb, metas)
+	mv, err := u.moveLinks(smb, dmb, metas, res.tag)
 	if err != nil {
 		acct.partial()
 		// Once the intent is written the scrubber completes the move
@@ -3250,11 +3743,35 @@ func (u *User) Move(src string, metas []Meta, dest string) (moved []Meta, err er
 	)
 	res.settle(sizeOf(mv.out))
 
-	if err := u.moveUsage(smb, dmb, mv.freed); err != nil {
-		u.log.Warn("quota release after move failed", "err", err)
+	return mv.out, nil
+}
+
+// reserveMove reserves the usage of a MOVE. A move between two counted
+// (or two ignored) mailboxes leaves the usage alone. Out of an ignored
+// mailbox into a counted one the batch is reserved like a COPY (with an
+// intent, as a COPY); into an ignored one the removed source entries
+// are released afterwards.
+func (u *User) reserveMove(smb, dmb *Mailbox, metas []Meta) (*reservation, error) {
+	var (
+		want    Quota
+		intents map[string][]byte
+		key     string
+	)
+
+	if !u.rules.Counts(smb) && u.rules.Counts(dmb) {
+		want = sizeOf(metas)
+		key = quotaIntentKey(newGUID())
+		intents = map[string][]byte{key: newQuotaIntent(quotaIntentMove, dmb.ID, want)}
 	}
 
-	return mv.out, nil
+	res, err := u.reserveWith(dmb, want, intents)
+	if err != nil {
+		return nil, err
+	}
+
+	res.intent = key
+
+	return res, nil
 }
 
 // moveResult is what moveLinks did: the entries linked into dest, the
@@ -3270,10 +3787,52 @@ type moveResult struct {
 	started bool
 }
 
-// moveLinks runs the intent, link, unlink and release steps of Move.
-func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
+// moveLinks runs the intent, link, unlink and release steps of Move. tag
+// is the online recount that captured the reservation of a move out of
+// an ignored mailbox ("" none); a move between two counted mailboxes
+// goes through the gate (moveGate) after its intent, which captures it
+// when a run is live. Into an ignored mailbox the usage of the removed
+// source entries is released directly after the removal, before the
+// blob references go (stage B16, temp/16 §4.3).
+func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta, tag string) (moveResult, error) {
 	var mv moveResult
 
+	intentID, err := u.writeMoveIntent(smb, dmb, metas)
+	if err != nil {
+		return mv, err
+	}
+
+	mv.started = true
+
+	counted := u.rules.Counts(smb) && u.rules.Counts(dmb)
+
+	if counted {
+		gateTag, err := u.moveGate(smb, dmb, metas)
+		if err != nil {
+			// Nothing is linked yet: the intent goes, the move is off.
+			_, uerr := u.unlink(smb, nil, intentID, false)
+
+			return moveResult{}, errors.Join(err, uerr)
+		}
+
+		tag = gateTag
+	}
+
+	skipped, err := u.moveLinkAll(dmb, metas, tag, &mv)
+	if err != nil {
+		return mv, err // intent stays; scrubber reconciles
+	}
+
+	if counted && tag != "" && len(skipped) > 0 {
+		u.moveGateSkipped(tag, skipped)
+	}
+
+	return mv, u.moveUnlink(smb, dmb, metas, intentID, &mv)
+}
+
+// writeMoveIntent writes the MOVE intent on the source mailbox and
+// returns its id.
+func (u *User) writeMoveIntent(smb, dmb *Mailbox, metas []Meta) (string, error) {
 	intent := moveIntent{ID: newGUID(), Dest: dmb.ID, Started: time.Now().Unix()}
 	for _, m := range metas {
 		intent.GUIDs = append(intent.GUIDs, m.GUID)
@@ -3285,11 +3844,49 @@ func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
 	if err := casOmap(u, u.idx, mboxOID(smb.ID), nil, func(_ map[string][]byte) (map[string][]byte, []string) {
 		return map[string][]byte{keyIntentPrefix + intent.ID: ib}, nil
 	}); err != nil {
-		return mv, fmt.Errorf("move intent: %w", err)
+		return "", fmt.Errorf("move intent: %w", err)
 	}
 
-	mv.started = true
+	return intent.ID, nil
+}
+
+// moveUnlink is the last step of moveLinks: the source entries are
+// unlinked, their usage released when the destination is ignored, then
+// their blob references.
+func (u *User) moveUnlink(smb, dmb *Mailbox, metas []Meta, intentID string, mv *moveResult) error {
+	released := u.rules.Counts(smb) && !u.rules.Counts(dmb)
+
+	res, err := u.unlink(smb, metas, intentID, released)
+	if err != nil {
+		return err
+	}
+
+	mv.modseq = res.modseq
+	mv.removed = res.removed
+	mv.freed = sizeOf(res.removed)
+
+	u.at(hookAfterUnlink, smb.ID)
+
+	if released {
+		if err := u.moveUsage(smb, dmb, res.removed); err != nil {
+			u.log.Warn("quota release after move failed", "err", err)
+		}
+
+		u.flagReleased(smb, res.removed, res.nonce)
+	}
+
+	u.releaseRemoved(smb, res.removed, res.rkeys)
+
+	return nil
+}
+
+// moveLinkAll takes a blob reference and links an entry into dmb for
+// each of metas; entries whose blob is gone (expunged meanwhile) are
+// skipped and returned.
+func (u *User) moveLinkAll(dmb *Mailbox, metas []Meta, tag string, mv *moveResult) ([]Meta, error) {
 	mv.out = make([]Meta, 0, len(metas))
+
+	var skipped []Meta
 
 	for _, m := range metas {
 		if _, err := u.blobRef(m.GUID, +1); err != nil {
@@ -3297,37 +3894,26 @@ func (u *User) moveLinks(smb, dmb *Mailbox, metas []Meta) (moveResult, error) {
 				// expunged meanwhile; the source unlink removes nothing
 				mv.skipped.Bytes += m.Size
 				mv.skipped.Msgs++
+				skipped = append(skipped, m)
 
 				continue
 			}
 
-			return mv, err // intent stays; scrubber reconciles
+			return skipped, err
 		}
 
 		// The keyword limit was checked before the intent (Move); from
 		// here on the move completes, as the scrubber would complete it.
-		nm, err := u.linkAs(dmb, relink(m), false)
+		nm, err := u.linkAs(dmb, relinkTagged(m, tag), false)
 		if err != nil {
 			_, _ = u.blobRef(m.GUID, -1)
-			return mv, err // intent stays; scrubber reconciles
+			return skipped, err
 		}
 
 		mv.out = append(mv.out, *nm)
 	}
 
-	removed, modseq, rkeys, err := u.unlink(smb, metas, intent.ID)
-	if err != nil {
-		return mv, err
-	}
-
-	mv.modseq = modseq
-
-	u.releaseRemoved(smb, removed, rkeys)
-
-	mv.removed = removed
-	mv.freed = sizeOf(removed)
-
-	return mv, nil
+	return skipped, nil
 }
 
 // sizeOf sums the sizes and the number of the entries.
@@ -3480,8 +4066,18 @@ func (u *User) pendingIntents(id string) ([]moveIntent, error) {
 // relink prepares the entry of a copied or moved message. An imported
 // POP3 UIDL stays with the source entry: it must stay unique per maildrop.
 func relink(m Meta) Meta {
-	m.UID, m.ModSeq, m.POP3UIDL = 0, 0, ""
+	m.UID, m.ModSeq, m.POP3UIDL, m.QuotaTag = 0, 0, "", ""
 	m.SaveDate = time.Now().UTC()
+
+	return m
+}
+
+// relinkTagged is relink with the tag of the online recount that
+// captured the copy or move ("" none): the copy's own tag, never the
+// source's, which a run that never captured the copy may have set.
+func relinkTagged(m Meta, tag string) Meta {
+	m = relink(m)
+	m.QuotaTag = tag
 
 	return m
 }

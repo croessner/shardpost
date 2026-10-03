@@ -53,6 +53,13 @@ type MailboxRec struct {
 	// has no such thing and never reads it; it is stored here because
 	// it belongs to the mailbox, not to a session.
 	SortOrder uint32 `json:"sortorder,omitempty"`
+	// Lock is set while a mailbox_delete job with the mailbox lock
+	// (stage B17) is about to remove the mailbox: writes into it are
+	// refused with ErrMailboxLocked. Every writer of the record carries
+	// it over (it is part of the struct); a server before 0.52.0 drops
+	// it when it rewrites the record, which the job detects when it
+	// unregisters the mailbox.
+	Lock *MailboxLock `json:"lock,omitempty"`
 }
 
 // SharedRef is a pointer in a user's registry to a mailbox of another
@@ -136,6 +143,13 @@ type Meta struct {
 	// POP3UIDL is the POP3 unique-id kept from an imported source; ""
 	// means the GUID (see UIDL).
 	POP3UIDL string `json:"pop3uidl,omitempty"`
+	// QuotaTag is the hash of the online quota recount (stage B16) whose
+	// reservation the entry comes from: the recount's listing skips such
+	// entries (their usage is in the run's captures). It stays with the
+	// entry; a later run has another hash and counts it. Copies and
+	// moves get the tag of the run that captured them, not the source's
+	// (relink clears it).
+	QuotaTag string `json:"qt,omitempty"`
 }
 
 // The envelope fields of Meta.Routes.

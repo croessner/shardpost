@@ -17,6 +17,7 @@ import (
 	"shardpost/internal/fts"
 	"shardpost/internal/mailmeta"
 	"shardpost/internal/model"
+	"shardpost/internal/quota"
 )
 
 const (
@@ -33,8 +34,9 @@ type Store struct {
 	mu     sync.Mutex
 	users  map[string]*User
 	ix     indexes
-	limits model.Limits // see SetLimits
-	fts    FTSOptions   // see SetFTSOptions
+	limits model.Limits  // see SetLimits
+	fts    FTSOptions    // see SetFTSOptions
+	rules  *quota.Policy // see SetQuotaRules
 	// dueLocks is the worker lease of the reshard queue (FTSDueQueue).
 	dueLocks *memLocks
 }
@@ -130,6 +132,9 @@ type User struct {
 	// subCopies are the intents of submission copies (the "sub:" keys of
 	// the RADOS registry), by GUID; the copies are in blobs.
 	subCopies map[string]model.SubmissionCopy
+	// mlocks are the mailbox locks of mailbox_delete jobs by session
+	// (the "mblock:" keys of the RADOS registry).
+	mlocks map[string]*memLock
 }
 
 // Close is a no-op; a memstore user holds no resources.
@@ -226,6 +231,10 @@ func (u *User) CreateMailbox(name string, use []string) error {
 		return model.ErrMailboxExists
 	}
 
+	if u.lockedAbove(name) {
+		return lockReason(name)
+	}
+
 	if err := u.checkNewMailbox(name); err != nil {
 		return err
 	}
@@ -264,6 +273,17 @@ func (u *User) DeleteMailbox(name string) error {
 	b, n, err := u.lookup(name)
 	if err != nil {
 		return err
+	}
+
+	if lockedBox(b, "") {
+		return lockReason(n)
+	}
+
+	if u.counts(n, b) {
+		for _, m := range b.msgs {
+			u.usage.Bytes -= m.Size
+			u.usage.Msgs--
+		}
 	}
 
 	delete(u.boxes, n)
@@ -323,6 +343,16 @@ func (u *User) RenameMailbox(oldName, newName string) error {
 
 	if _, ok := u.boxes[newName]; ok {
 		return model.ErrMailboxExists
+	}
+
+	if u.lockedAbove(newName) {
+		return lockReason(newName)
+	}
+
+	for n, b := range u.boxes {
+		if (n == oldName || strings.HasPrefix(n, oldName+"/")) && lockedBox(b, "") {
+			return lockReason(n)
+		}
 	}
 
 	found := false
@@ -533,6 +563,27 @@ func (u *User) newGUID() string {
 	return fmt.Sprintf("%032x", u.guidN)
 }
 
+// admitInto looks the mailbox up and checks that a delivery of size
+// bytes with flags may go into it: not while a mailbox_delete locks it,
+// within the storage limit (with enforce, for a counted mailbox) and the
+// keyword limit. u.mu is held.
+func (u *User) admitInto(name string, size int, flags []string, enforce bool) (*box, string, error) {
+	b, n, err := u.lookup(name)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if lockedBox(b, "") {
+		return nil, "", lockReason(n)
+	}
+
+	if err := u.admit(b, size, flags, enforce && u.counts(n, b)); err != nil {
+		return nil, "", err
+	}
+
+	return b, n, nil
+}
+
 // deliver stores a message; enforce checks the storage limit first.
 func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.Time, enforce bool) (*model.Meta, error) {
 	if err := u.register(""); err != nil {
@@ -542,12 +593,8 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	b, _, err := u.lookup(name)
+	b, n, err := u.admitInto(name, len(raw), flags, enforce)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := u.admit(b, len(raw), flags, enforce); err != nil {
 		return nil, err
 	}
 
@@ -577,8 +624,11 @@ func (u *User) deliver(name, guid string, raw []byte, flags []string, when time.
 		}
 	}
 
-	u.usage.Bytes += m.Size
-	u.usage.Msgs++
+	if u.counts(n, b) {
+		u.usage.Bytes += m.Size
+		u.usage.Msgs++
+	}
+
 	u.emailChange(model.OpCreated, b, m.ModSeq, []model.Meta{m})
 
 	return &m, nil
@@ -604,9 +654,13 @@ func (u *User) SetFlags(name string, uids []uint32, unchangedSince uint64, apply
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	b, _, err := u.lookup(name)
+	b, n, err := u.lookup(name)
 	if err != nil {
 		return nil, err
+	}
+
+	if lockedBox(b, "") {
+		return nil, lockReason(n)
 	}
 
 	// As in cephstore: the keywords a change can add are those apply
@@ -723,16 +777,28 @@ func (u *User) Expunge(name string, metas []model.Meta) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	b, _, err := u.lookup(name)
+	return u.expunge(name, metas, true)
+}
+
+// expunge is Expunge; checkLock refuses a mailbox a mailbox_delete locks.
+// u.mu is held.
+func (u *User) expunge(name string, metas []model.Meta, checkLock bool) error {
+	b, n, err := u.lookup(name)
 	if err != nil {
 		return err
 	}
 
+	if checkLock && lockedBox(b, "") {
+		return lockReason(n)
+	}
+
 	u.remove(b, metas)
 
-	for _, m := range metas {
-		u.usage.Bytes -= m.Size
-		u.usage.Msgs--
+	if u.counts(n, b) {
+		for _, m := range metas {
+			u.usage.Bytes -= m.Size
+			u.usage.Msgs--
+		}
 	}
 
 	return nil
@@ -743,9 +809,13 @@ func (u *User) Copy(metas []model.Meta, dest string) ([]model.Meta, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	b, _, err := u.lookup(dest)
+	b, n, err := u.lookup(dest)
 	if err != nil {
 		return nil, err
+	}
+
+	if lockedBox(b, "") {
+		return nil, lockReason(n)
 	}
 
 	var flags []string
@@ -871,6 +941,18 @@ func (u *User) PendingFloor(id string, _ uint64) (uint64, bool, error) {
 
 // Move copies the messages to dest and removes them from src.
 func (u *User) Move(src string, metas []model.Meta, dest string) ([]model.Meta, error) {
+	u.mu.Lock()
+
+	if b, n, err := u.lookup(src); err != nil {
+		u.mu.Unlock()
+		return nil, err
+	} else if lockedBox(b, "") {
+		u.mu.Unlock()
+		return nil, lockReason(n)
+	}
+
+	u.mu.Unlock()
+
 	out, err := u.Copy(metas, dest)
 	if err != nil {
 		return nil, err

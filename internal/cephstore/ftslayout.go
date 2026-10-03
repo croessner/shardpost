@@ -721,6 +721,18 @@ func (s *Store) FTSOnlineEnabled() (bool, error) {
 	return s.markSet(model.FTSOnlineMarkKey, "fts online mark")
 }
 
+// QuotaOnlineEnabled implements model.QuotaOnlineMarked: whether the
+// cluster mark of online quota recounts is set (stage B16).
+func (s *Store) QuotaOnlineEnabled() (bool, error) {
+	return s.markSet(model.QuotaOnlineMarkKey, "quota online mark")
+}
+
+// MailboxLockEnabled implements model.MailboxLockMarked: whether the
+// cluster mark of the mailbox lock of mailbox_delete is set (stage B17).
+func (s *Store) MailboxLockEnabled() (bool, error) {
+	return s.markSet(model.MailboxLockMarkKey, "mailbox lock mark")
+}
+
 // FTSDictFilterEnabled implements model.FTSDictFilterMarked: whether the
 // cluster mark "fts/dictfilter" of the admin store exists (one stat, no
 // cache).
