@@ -35,10 +35,12 @@ func TestFixRefsSkipsReleaseInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, _, rkeys, err := u.unlink(a, []Meta{m}, "")
+	ures, err := u.unlink(a, []Meta{m}, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	removed, rkeys := ures.removed, ures.rkeys
 
 	if rep := scrubNow(t, u); rep.RefsFixed != 0 || refsOf(t, u, m.GUID) != "2" {
 		t.Fatalf("refs fixed %d, refs %s; want 0, 2", rep.RefsFixed, refsOf(t, u, m.GUID))
@@ -68,7 +70,7 @@ func TestFixRefsSkipsDeletionInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info); err != nil || lost {
+	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info, ""); err != nil || lost {
 		t.Fatalf("unregister: %v %v", err, lost)
 	}
 
@@ -76,7 +78,7 @@ func TestFixRefsSkipsDeletionInFlight(t *testing.T) {
 		t.Fatalf("refs fixed %d, refs %s; want 0, 2", rep.RefsFixed, refsOf(t, u, m.GUID))
 	}
 
-	if err := u.destroyUnregistered(mb, info, metas, "Trash"); err != nil {
+	if _, err := u.destroyUnregistered(mb, info, metas, "Trash"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,10 +167,12 @@ func TestReleaseKeepsForeignRemovalIntent(t *testing.T) {
 	metas := deliverN(t, u, "INBOX", 6, 300)
 	m := metas[5] // shard 1
 
-	removed, _, rkeys, err := u.unlink(mb, []Meta{m}, "") // session A, not released yet
-	if err != nil || len(removed) != 1 {
-		t.Fatalf("unlink: %v, %d", err, len(removed))
+	ures, err := u.unlink(mb, []Meta{m}, "", true) // session A, not released yet
+	if err != nil || len(ures.removed) != 1 {
+		t.Fatalf("unlink: %v, %d", err, len(ures.removed))
 	}
+
+	removed, rkeys := ures.removed, ures.rkeys
 
 	if err := u.Expunge("INBOX", []Meta{m}); err != nil { // session B, stale snapshot
 		t.Fatal(err)

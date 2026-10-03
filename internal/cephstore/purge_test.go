@@ -53,7 +53,7 @@ func populateAll(t *testing.T, u *User) {
 func populateCrashes(t *testing.T, u *User, inbox *Mailbox, metas []Meta) {
 	t.Helper()
 
-	if _, _, _, err := u.unlink(inbox, metas[5:6], ""); err != nil {
+	if _, err := u.unlink(inbox, metas[5:6], "", true); err != nil {
 		t.Fatal(err)
 	}
 

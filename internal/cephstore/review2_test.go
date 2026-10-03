@@ -36,9 +36,10 @@ func TestRemovalBetweenEntriesAndIntents(t *testing.T) {
 			return
 		}
 
-		var err error
-		if removed, _, rkeys, err = u.unlink(a, []Meta{m}, ""); err != nil {
-			t.Error(err)
+		if ures, uerr := u.unlink(a, []Meta{m}, "", true); uerr != nil {
+			t.Error(uerr)
+		} else {
+			removed, rkeys = ures.removed, ures.rkeys
 		}
 	}})
 	if err != nil {
@@ -78,11 +79,11 @@ func TestDeleteAfterForeignExpunge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info); err != nil || lost {
+	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info, ""); err != nil || lost {
 		t.Fatalf("unregister: %v %v", err, lost)
 	}
 
-	if err := u.destroyUnregistered(mb, info, metas, "Trash"); err != nil {
+	if _, err := u.destroyUnregistered(mb, info, metas, "Trash"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,16 +111,18 @@ func TestDeleteLeavesForeignRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, _, rkeys, err := u.unlink(mb, []Meta{m}, "") // the other session, not released yet
+	ures, err := u.unlink(mb, []Meta{m}, "", true) // the other session, not released yet
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info); err != nil || lost {
+	removed, rkeys := ures.removed, ures.rkeys
+
+	if _, lost, err := u.unregisterMailbox(mb, &lease{}, info, ""); err != nil || lost {
 		t.Fatalf("unregister: %v %v", err, lost)
 	}
 
-	if err := u.destroyUnregistered(mb, info, metas, "Trash"); err != nil {
+	if _, err := u.destroyUnregistered(mb, info, metas, "Trash"); err != nil {
 		t.Fatal(err)
 	}
 
