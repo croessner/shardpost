@@ -69,6 +69,15 @@ type Jobs struct {
 	// on at once in the server that runs it (scrub batches use
 	// scrub.parallel).
 	BatchParallel int `mapstructure:"batch_parallel" validate:"gte=1,lte=32"`
+	// MailboxDeleteOnline is what a plan of mailbox_delete without
+	// "online" gets (stage B17): "auto" the mailbox lock while the
+	// cluster mark is set ("shardpostctl mailbox lock enable"), "off" the
+	// account lock as before 0.52.0.
+	MailboxDeleteOnline string `mapstructure:"mailbox_delete_online" validate:"oneof=auto off"`
+	// MailboxLockBarrierSeconds bounds how long a mailbox_delete with the
+	// mailbox lock waits for the operations that started before its
+	// lock; after it the job is given back and tried again later.
+	MailboxLockBarrierSeconds int `mapstructure:"mailbox_lock_barrier_seconds" validate:"gte=10,lte=900"`
 }
 
 // Trace configures the per-account protocol trace (role trace): an

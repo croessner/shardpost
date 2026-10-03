@@ -40,6 +40,11 @@ type Run struct {
 	// window: an online run of this run is admitted only when it fits
 	// into the reshard window (a batch without "anytime").
 	window bool
+	// keepAlive is called with every lease renewal (KeepAlive): the run
+	// key of an online recount, the mailbox lock of a mailbox_delete.
+	keepMu     sync.Mutex
+	keepAlive  func() error
+	keepReason string
 }
 
 // subRun is the run of one account inside a batch: the kind and its
@@ -405,13 +410,32 @@ func buildsLayout(kind string) bool { return kind == KindFTSLayout || kind == Ki
 // clearFinished removes the unfinished full-text conversion of a run
 // whose final state is stored (exactly its token).
 func (m *Manager) clearFinished(run *Run, log interface{ Warn(string, ...any) }) {
-	if !buildsLayout(run.Job.Kind) || run.User == nil {
+	if run.User == nil {
 		return
 	}
 
-	if lay, ok := run.User.(model.FTSLayouter); ok {
-		if _, err := lay.ClearFTSLayoutNext(run.layoutToken()); err != nil {
-			log.Warn("fts layout: unfinished conversion not cleared", "err", err)
+	switch run.Job.Kind {
+	case KindFTSLayout, KindFTSRebuild:
+		if lay, ok := run.User.(model.FTSLayouter); ok {
+			if _, err := lay.ClearFTSLayoutNext(run.layoutToken()); err != nil {
+				log.Warn("fts layout: unfinished conversion not cleared", "err", err)
+			}
+		}
+	case KindQuotaRecalc:
+		// The run key of an online recount goes with the final state
+		// (also after a panic); an offline run has none.
+		if rc, ok := run.User.(model.QuotaOnlineRecounter); ok {
+			if err := rc.ClearQuotaRecount(run.token()); err != nil {
+				log.Warn("online recount: run key not cleared", "err", err)
+			}
+		}
+	case KindMailboxDelete:
+		// The mailbox locks of a run go with its final state (also after
+		// a panic); the records of the unregistered targets are gone.
+		if ml, ok := run.User.(model.MailboxLocker); ok {
+			if err := ml.UnlockMailboxes(lockSession(run.Job.ID)); err != nil {
+				log.Warn("mailbox_delete: mailboxes not unlocked", "err", err)
+			}
 		}
 	}
 }
@@ -451,6 +475,8 @@ func (m *Manager) lock(run *Run, j *Job, gen uint64, log *slog.Logger) bool {
 	switch {
 	case err == nil:
 		clearForeignLayout(run.User, run.layoutToken(), log)
+		clearForeignRecount(run.User, log)
+
 		return true
 	case j.State == StateCancelRequested:
 		err = context.Canceled
@@ -578,6 +604,10 @@ func (m *Manager) renew(run *Run, exclusive bool, log interface{ Warn(string, ..
 
 			return false
 		}
+	}
+
+	if !run.keep(log) {
+		return false
 	}
 
 	return !stop

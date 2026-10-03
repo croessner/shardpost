@@ -162,7 +162,7 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
 	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store,
-		FTSOnline: store}
+		FTSOnline: store, QuotaOnline: store, MailboxLock: store}
 
 	// validated with the configuration
 	win, err := settings.FTS.Window()
@@ -192,7 +192,11 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 		ScrubParallel: settings.Scrub.Parallel, ScrubInterval: time.Duration(settings.Scrub.IntervalDays) * 24 * time.Hour,
 		FTSBuild: jobs.FTSBuild{OnlineAuto: settings.FTS.OnlineBuild == config.OnlineBuildAuto, Window: win, MaxRunning: settings.FTS.BuildMaxRunning,
 			MsPerMessageCopy: settings.FTS.BuildMsPerMessageCopy, MsPerMessageReindex: settings.FTS.BuildMsPerMessageReindex,
-			UrgentFactor: settings.FTS.ReshardUrgentFactor}},
+			UrgentFactor: settings.FTS.ReshardUrgentFactor},
+		QuotaOnlineAuto:         settings.Quota.OnlineRecount == config.OnlineAuto,
+		MailboxDeleteOnlineAuto: settings.Jobs.MailboxDeleteOnline == config.OnlineAuto,
+		MailboxLockBarrier:      sec(c.MailboxLockBarrierSeconds),
+		DeadIntent:              sec(settings.Quota.RecountDeadIntentSeconds)},
 		instance, jobs.Kinds(time.Duration(settings.Scrub.GraceSeconds)*time.Second)...)
 
 	warnUnbackfilled(log, kv)

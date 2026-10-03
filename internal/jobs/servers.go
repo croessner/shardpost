@@ -55,7 +55,7 @@ type Registration struct {
 // record is the value of the registration at now.
 func (r Registration) record(now time.Time) model.ServerRecord {
 	return model.ServerRecord{Version: r.Version, Caps: []string{model.CapFTSLayout3, model.CapSystemPool, model.CapFTSDictFilter,
-		model.CapFTSOnlineBuild}, Seen: now.UTC(),
+		model.CapFTSOnlineBuild, model.CapQuotaOnlineRecount, model.CapMailboxLock}, Seen: now.UTC(),
 		Role: r.Role, SystemPool: r.SystemPool, StartedAt: r.StartedAt.UTC()}
 }
 

@@ -37,7 +37,7 @@ const KindBatch = "batch"
 
 // FanOutKinds are the kinds a batch can run. Their Run must not rely on
 // a plan of the account: a batch has one plan for all accounts.
-var FanOutKinds = []string{KindIndexCheck, KindScrub, KindFTSRebuild, KindAttachments, KindFTSLayout}
+var FanOutKinds = []string{KindIndexCheck, KindScrub, KindFTSRebuild, KindAttachments, KindFTSLayout, KindQuotaRecalc}
 
 // ErrDirectoryNotReady refuses a batch while the account directory
 // cannot be trusted to name every account.
@@ -122,7 +122,7 @@ func (m *Manager) RoleOf(kind Kind, params json.RawMessage) string {
 // lock: for a batch, per account when the kind it runs does.
 func (m *Manager) ExclusiveOf(kind Kind, params json.RawMessage) bool {
 	if !IsBatch(kind) {
-		return kind.Exclusive()
+		return exclusive(kind, params)
 	}
 
 	sub, p, err := m.batchOf(params)
@@ -153,6 +153,9 @@ func checkBatchParams(p BatchParams) error {
 		return err
 	case KindFTSRebuild:
 		_, err := parseFTSRebuild(p.Params)
+		return err
+	case KindQuotaRecalc:
+		_, err := parseQuotaRecalc(p.Params)
 		return err
 	}
 
@@ -1065,6 +1068,7 @@ func (b *batch) lock(ctx context.Context, u model.User) (context.Context, func()
 	}
 
 	clearForeignLayout(u, b.run.layoutToken(), b.run.Env.Log)
+	clearForeignRecount(u, b.run.Env.Log)
 
 	actx, cancel := context.WithCancel(ctx)
 	stop := b.keepLock(u, cancel)

@@ -19,7 +19,38 @@ type Quota struct {
 	Rules    []QuotaRule    `mapstructure:"rules" validate:"dive"`
 	Warnings []QuotaWarning `mapstructure:"warnings" validate:"dive"`
 	OverFlag QuotaOverFlag  `mapstructure:"over_flag"`
+
+	// The online recount (quota_recalc without the account lock, stage
+	// B16): it needs the cluster mark ("shardpostctl quota online
+	// enable").
+	//
+	// OnlineRecount is what a plan of quota_recalc without "online" gets:
+	// "auto" online while the mark is set, "off" offline under the lock.
+	OnlineRecount string `mapstructure:"online_recount" validate:"oneof=auto off"`
+	// RecountBarrierSeconds bounds how long a run waits for the
+	// operations that started before it; after it the run is busy and
+	// planned again.
+	RecountBarrierSeconds int `mapstructure:"recount_barrier_seconds" validate:"gte=10,lte=900"`
+	// RecountDeadIntentSeconds is how old an intent may be before a run
+	// takes it for abandoned; at most scrub.intent_grace_seconds.
+	RecountDeadIntentSeconds int `mapstructure:"recount_dead_intent_seconds" validate:"gte=60,lte=3600"`
+	// RecountSwitchAttempts are the switch calls before a run holds the
+	// usage writers; RecountHoldMS how long it holds them (0: never).
+	RecountSwitchAttempts int `mapstructure:"recount_switch_attempts" validate:"gte=1,lte=50"`
+	RecountHoldMS         int `mapstructure:"recount_hold_ms" validate:"gte=0,lte=5000"`
+	// RecountMaxCaptureKeys and RecountMaxCaptureEntries end a run whose
+	// captures grow beyond them; RecountReleaseChunk is how many entries
+	// one capture key holds.
+	RecountMaxCaptureKeys    int `mapstructure:"recount_max_capture_keys" validate:"gte=10,lte=100000"`
+	RecountMaxCaptureEntries int `mapstructure:"recount_max_capture_entries" validate:"gte=1000,lte=10000000"`
+	RecountReleaseChunk      int `mapstructure:"recount_release_chunk" validate:"gte=100,lte=50000"`
 }
+
+// Values of quota.online_recount and jobs.mailbox_delete_online.
+const (
+	OnlineAuto = "auto"
+	OnlineOff  = "off"
+)
 
 // QuotaRule applies to the mailboxes it matches; the first matching rule
 // wins. Ignore takes the mailbox out of the usage count; the extras raise
