@@ -1747,6 +1747,18 @@ In an emergency (an older server already runs): export
 `shardpostctl fts layout3 list`, run `fts_rebuild` for those accounts
 under the older version, and the sweep later under 0.45.0 or newer.
 
+**The separate caps (0.49.0) and older versions.** The shape of a
+generation is in `L`, so a version before 0.49.0 reads and writes a
+generation of any D. But it computes the target D with
+`fts.shards_max` and its trigger has no cap: a generation whose D is
+above that version's `fts.shards_max` counts as due for its `due_only`
+jobs (`sameShape` compares the counts only) and would be shrunk. While
+such a version holds the `fts_due` worker (a rolling update) and on the
+way back, either `fts.auto_reshard: false` on every pod or
+`fts.shards_max` at least the largest D in the store (`shardpostctl fts
+layout3 list -verify` prints it per page) prevents it; see
+[operations](../operations/README.md#separate-dictionary-caps-0490-rollout-and-way-back).
+
 ## Repair and its limits
 
 The scrubber checks references, quota, orphaned blobs,

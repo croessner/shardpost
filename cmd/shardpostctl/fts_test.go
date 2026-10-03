@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"shardpost/internal/admin"
+	"shardpost/internal/adminapi"
 	"shardpost/internal/auth"
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
@@ -139,5 +140,26 @@ func TestFTSStatsCommand(t *testing.T) {
 		if code, _, _ := call(socket, "", args...); code != exUsage {
 			t.Errorf("%v: exit %d", args, code)
 		}
+	}
+}
+
+// TestLargestDict (temp/13 §5.4): list -verify names the account with
+// the most dictionary objects on the page, the conversion target
+// included.
+func TestLargestDict(t *testing.T) {
+	n := func(v int) *int { return &v }
+	items := []adminapi.FTSLayoutAccount{
+		{Account: "a", Layout: &adminapi.FTSLayoutState{Current: adminapi.FTSLayoutShape{Layout: 3, S: n(32), D: n(128), H: n(1)}}},
+		{Account: "b", Layout: &adminapi.FTSLayoutState{Current: adminapi.FTSLayoutShape{Layout: 3, S: n(1), D: n(1), H: n(1)},
+			Next: &adminapi.FTSLayoutShape{Layout: 3, S: n(1), D: n(256), H: n(1)}}},
+		{Account: "c"},
+	}
+
+	if account, d := largestDict(items); account != "b" || d != 256 {
+		t.Errorf("largest %s %d", account, d)
+	}
+
+	if _, d := largestDict(items[2:]); d != 0 {
+		t.Errorf("without layouts %d", d)
 	}
 }

@@ -125,9 +125,15 @@ Lists the presence index of the accounts with a layout 3 index (or a
 conversion to it), a page at a time, with the time each was entered.
 With
 .B \-verify
-each account's layout record is read and an entry whose account has no
+each account's layout record is read, an entry whose account has no
 layout 3 index is marked
-.BR MISMATCH .
+.BR MISMATCH ,
+and the largest number of dictionary objects D on the page is printed
+with its account: before a way back to a version before 0.49.0,
+.I fts.shards_max
+must be at least the largest D of all pages (see
+.BR shardpostctl-job (1),
+.BR fts_layout ).
 Export the list before an emergency downgrade. Role:
 .B diagnose
 with the scope of all accounts.

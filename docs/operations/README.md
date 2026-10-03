@@ -774,6 +774,59 @@ little): export `shardpostctl fts layout3 list`, run `fts_rebuild` for
 those accounts under the older version, and let the sweep remove the
 layout 3 objects later under 0.45.0 or newer.
 
+### Separate dictionary caps (0.49.0): rollout and way back
+
+Since 0.49.0 the dictionary objects have a cap and a target of their own
+(`fts.dict_shards_max`, 512; `fts.dict_target_keys`), `fts.shards_max`
+(now 128) bounds the posting and header objects only, and the trigger
+of the writers is silent at a cap. A version before 0.49.0 knows one cap
+for all three kinds: it computes D with `fts.shards_max`, and its
+trigger checks no cap. A generation whose D is above that version's
+`fts.shards_max` counts as due for it, and a `due_only` job of that
+version (its `fts_due` worker, `plan -due-only`) **shrinks** it: a full
+copy under the account lock, and objects above their target afterwards.
+
+**Order of overlay and image.** A version that does not know a
+configuration key refuses to start (the configuration is read strictly).
+
+- Rollout: first the image, then the new keys (`fts.dict_shards_max`,
+  `fts.dict_target_keys`, `fts.convert_*`, `fts.stats_test_accounts`)
+  into the overlay.
+- Way back: first the new keys out of the overlay, then the image.
+  `fts.shards_max` is known to every version.
+
+**Against the shrinking (one of them is required):**
+
+- **a:** `fts.auto_reshard: false` on every pod for the duration of the
+  rollout and the way back, `true` again afterwards; meanwhile plan
+  `-due-only` jobs only from pods of the new version, or after the
+  rollout. Recommended for both.
+- **b:** go back only with `fts.shards_max` at least the largest D in
+  the store. `shardpostctl fts layout3 list -verify` prints the largest
+  D of each page; the older version then computes D within it and
+  shrinks nothing, at the price of posting and header objects that may
+  grow up to the same count. Use it when the way back takes longer.
+
+**The croessner overlay.** It sets `fts.shards_max: 128` since V0
+(2026-10-03), when that cap applied to the dictionary of the largest
+account (S/D/H 32/128/1). From 0.49.0 on the same value is the default
+and bounds S and H only; D is bounded by `fts.dict_shards_max` (512 by
+default, no overlay entry needed). Keep `fts.shards_max: 128` in the
+overlay: it is the default anyway, and it is measure b for a way back
+to 0.48 as long as no dictionary has more than 128 objects. The largest
+account keeps its shape: its counts ask for 32/128/1 under both
+versions. Set `fts.stats_test_accounts` (for example
+`rbdpoc2@exampleserver.de` for the measurement) only after the image runs
+everywhere.
+
+**Changing a cap.** A cap takes effect after a restart of the pods.
+The next delivery into an account whose objects outgrew their target
+below the new cap queues it, and the `fts_due` worker reshards it (the
+account is locked for the job). To choose the time for a large account,
+run the job by hand right after the restart (`shardpostctl plan
+-due-only fts_layout <account>`, `apply -wait`) or set
+`fts.auto_reshard: false` until then.
+
 ## Pools
 
 Three pools (`deploy/base/ceph/pools.yaml`):

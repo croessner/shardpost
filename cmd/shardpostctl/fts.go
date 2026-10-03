@@ -193,12 +193,51 @@ func layout3List(ctx context.Context, c *adminapi.ClientWithResponses, a ftsArgs
 			sayln(stdout, layoutAccountLine(it))
 		}
 
+		if a.verify {
+			if account, d := largestDict(page.Items); d > 0 {
+				sayf(stdout, "largest D on this page: %d (%s)\n", d, account)
+			}
+		}
+
 		if page.Next != nil {
 			sayf(stdout, "more: -after %s\n", *page.Next)
 		}
 
 		return exOK
 	})
+}
+
+// largestDict is the account with the most dictionary objects among
+// verified items and their number (0: none). Before a way back to a
+// version before 0.49.0, fts.shards_max must be at least the largest D
+// in the store, or that version shrinks the dictionary (temp/13 §5.4).
+func largestDict(items []adminapi.FTSLayoutAccount) (string, int) {
+	var (
+		account string
+		top     int
+	)
+
+	for _, it := range items {
+		if it.Layout == nil {
+			continue
+		}
+
+		for _, sh := range append([]adminapi.FTSLayoutShape{it.Layout.Current}, derefShapes(it.Layout.Next)...) {
+			if sh.D != nil && *sh.D > top {
+				account, top = it.Account, *sh.D
+			}
+		}
+	}
+
+	return account, top
+}
+
+func derefShapes(s *adminapi.FTSLayoutShape) []adminapi.FTSLayoutShape {
+	if s == nil {
+		return nil
+	}
+
+	return []adminapi.FTSLayoutShape{*s}
 }
 
 // layoutAccountLine is one account of the presence index.

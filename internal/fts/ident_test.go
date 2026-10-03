@@ -18,8 +18,9 @@ func TestIsIdentifier(t *testing.T) {
 		{"a1b2c3d4e5f6g7h8i9j0k1l2", 25, false},
 		{"1234567890123456789012345", 25, false},
 		{"abcdefghijklmnopqrstuvwxy", 25, false},
-		{"ä1ö2ü3ä4ö5ü6ä7ö8ü9ä0ö1ü2ß", 25, true}, // 25 runes, more bytes
-		{"ä1ö2ü3ä4ö5ü6", 13, false},              // 12 runes, 18 bytes
+		// 25 runes, more bytes; 12 runes, 18 bytes
+		{"ä1ö2ü3ä4ö5ü6ä7ö8ü9ä0ö1ü2ß", 25, true},
+		{"ä1ö2ü3ä4ö5ü6", 13, false},
 		{strings.Repeat("ab", 19) + "c9", 40, true},
 		{strings.Repeat("ab", 20), 40, false},
 		{"a1", 0, false},
