@@ -91,8 +91,16 @@ func newPartitionService(w *worker, p *partition) *partitionService {
 // shard and starts the watchers, the payload watch on the lock object
 // wakes it for single accounts, and the scan goes round on its
 // interval.
-func (w *worker) servePartition(ctx context.Context, p *partition) {
+func (w *worker) servePartition(ctx context.Context, p *partition, retake bool) {
 	defer close(p.done)
+
+	w.mu.Lock()
+	l := p.lease
+	w.mu.Unlock()
+
+	if retake && !w.moveLease(p, l) {
+		return
+	}
 
 	svc := newPartitionService(w, p)
 
@@ -198,6 +206,15 @@ type pushWake struct {
 // woken acts on a payload notify: the account named is read again; an
 // empty payload (an overflow, a watch set up again) means a scan.
 func (svc *partitionService) woken(ctx context.Context, data []byte) {
+	// A verification is queued with the notify on partition 0, whatever
+	// partition the account named belongs to.
+	if svc.p.n == 0 {
+		select {
+		case svc.w.verifyKick <- struct{}{}:
+		default:
+		}
+	}
+
 	var wk pushWake
 	if len(data) == 0 || json.Unmarshal(data, &wk) != nil || wk.Account == "" {
 		svc.scan(ctx, false)
@@ -210,14 +227,6 @@ func (svc *partitionService) woken(ctx context.Context, data []byte) {
 	}
 
 	svc.refreshAccount(ctx, wk.Account)
-
-	// A verification is queued with the notify on partition 0.
-	if svc.p.n == 0 {
-		select {
-		case svc.w.verifyKick <- struct{}{}:
-		default:
-		}
-	}
 }
 
 // refreshAccount reads one account's record and brings its watcher in
@@ -892,5 +901,5 @@ func (svc *partitionService) leaseValid() bool {
 	l := svc.p.lease
 	svc.w.mu.Unlock()
 
-	return l != nil && svc.w.leaseValid(l)
+	return l != nil && svc.p.retaking.Load() == 0 && svc.w.leaseValid(l)
 }

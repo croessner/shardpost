@@ -2,6 +2,7 @@ package jmap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -139,6 +140,12 @@ type membership struct {
 	prev *membersView
 
 	writes chan memberWrite
+	// closed is set by close (under wmu, which is held across the send
+	// of a write, apart from mu so that a full queue does not hold up
+	// the reads): a write after it is refused with errMembersClosed
+	// instead of sending on the closed channel.
+	wmu    sync.Mutex
+	closed bool
 	// writeHook, when set, is called with every record about to be
 	// written (tests record the order of writes, unlocks and notifies).
 	writeHook func(rec *memberRecord)
@@ -294,10 +301,24 @@ func (m *membership) changed() bool {
 	return false
 }
 
+// errMembersClosed is the result of a write after the membership was
+// closed (a release that outlasted the shutdown).
+var errMembersClosed = errors.New("the membership is closed")
+
 // write queues the pod's record (nil deletes it) and returns the
-// channel its result arrives on.
+// channel its result arrives on; after close the result is
+// errMembersClosed at once.
 func (m *membership) write(rec *memberRecord) <-chan error {
 	done := make(chan error, 1)
+
+	m.wmu.Lock()
+	defer m.wmu.Unlock()
+
+	if m.closed {
+		done <- errMembersClosed
+
+		return done
+	}
 
 	if rec != nil && m.writeHook != nil {
 		m.writeHook(rec)
@@ -328,8 +349,17 @@ func (m *membership) writer() {
 	}
 }
 
-// close ends the writer once the queued writes are done.
-func (m *membership) close() { close(m.writes) }
+// close ends the writer once the queued writes are done; later writes
+// are refused. It may be called more than once.
+func (m *membership) close() {
+	m.wmu.Lock()
+	defer m.wmu.Unlock()
+
+	if !m.closed {
+		m.closed = true
+		close(m.writes)
+	}
+}
 
 // pushTargets is the share of n partitions each of the sorted members
 // should hold: floor(n / len) for all, plus one for the first n mod len

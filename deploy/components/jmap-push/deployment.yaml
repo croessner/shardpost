@@ -38,8 +38,10 @@ spec:
       serviceAccountName: shardpost-server
       automountServiceAccountToken: true # needed to fetch the cephx key from Rook
       # Three waves of jmap.push.handoff_seconds (5) plus the waits on the
-      # membership: about 25 s at most.
-      terminationGracePeriodSeconds: 30
+      # membership (jmap.push.take_seconds each) and on single releases
+      # still running: about 25 s normally, 40-45 s when the membership
+      # object hangs.
+      terminationGracePeriodSeconds: 45
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

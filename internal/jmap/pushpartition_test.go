@@ -2,6 +2,7 @@ package jmap
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -886,6 +887,137 @@ func TestPushRotationKeepsWatchers(t *testing.T) {
 	awaitCond(t, testPatience, "the partition taken again", func() bool { return w.held() == defaultPushPartitions })
 	c.watchedAll(1)
 	c.pushedAfter(u, "alice", 5*time.Second)
+}
+
+// TestPushRotationDuringTake: a rotation that comes after a lock
+// attempt checked for one and before the loop took the partition into
+// service moves that lease too; onRotate skips the partition while it
+// is being started, so activate has to.
+func TestPushRotationDuringTake(t *testing.T) {
+	c := newPushCluster(t, model.KVIndexRead)
+
+	const late = 5
+
+	var once sync.Once
+
+	w := c.start("w1", func(_ *WorkerOptions, h *pushTestHooks) {
+		h.afterTake = func(p int) {
+			if p == late {
+				once.Do(c.kv.Rotate)
+			}
+		}
+	})
+
+	awaitCond(t, testPatience, "w1 holding everything on the current handle", func() bool {
+		cur, old := c.kv.LockHandles()
+
+		return w.held() == defaultPushPartitions && cur == defaultPushPartitions && old == 0
+	})
+
+	if w.hooks.of(eventRotateFailed) != 0 {
+		t.Errorf("%d leases not moved", w.hooks.of(eventRotateFailed))
+	}
+}
+
+// TestPushLateTakeAtShutdown: a lock attempt that comes back after the
+// shutdown stopped waiting for the attempts in flight gives its lock
+// back at once, instead of holding it until its TTL.
+func TestPushLateTakeAtShutdown(t *testing.T) {
+	c := newPushCluster(t, model.KVIndexRead)
+
+	const late = 5
+
+	gate := make(chan struct{})
+	name := pushLockName(late)
+
+	c.kv.Locks().SetHook(func(op, n string) error {
+		if op == memstore.LockOpLock && n == name {
+			<-gate
+		}
+
+		return nil
+	})
+
+	w := c.start("w1")
+
+	awaitCond(t, testPatience, "w1 holding all but one", func() bool { return w.held() == defaultPushPartitions-1 })
+
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		c.stop(w)
+	}()
+
+	// The shutdown waits a cadence for the attempts in flight; the
+	// lock comes back after that, while the waves still run.
+	time.Sleep(2 * testTake)
+	close(gate)
+
+	<-stopped
+	c.kv.Locks().SetHook(nil)
+
+	if c.kv.Locks().Held(name) {
+		t.Fatal("the lock taken during the shutdown is still held")
+	}
+}
+
+// TestPushMembersClosed: a membership write after close is refused at
+// once instead of sending on the closed queue; close may come twice.
+func TestPushMembersClosed(t *testing.T) {
+	c := newPushCluster(t, model.KVIndexRead)
+	m := newMembership(c.kv.Omap(), "w1", testLease, time.Now, c.log)
+
+	if err := <-m.write(&memberRecord{Seen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	m.close()
+	m.close()
+
+	for _, rec := range []*memberRecord{{Seen: time.Now()}, nil} {
+		select {
+		case err := <-m.write(rec):
+			if !errors.Is(err, errMembersClosed) {
+				t.Fatalf("a write after close: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("a write after close did not come back")
+		}
+	}
+}
+
+// TestPushLeaseInvalidWhileRetaking: the watchers of a partition send
+// nothing while its lease is being moved after a rotation.
+func TestPushLeaseInvalidWhileRetaking(t *testing.T) {
+	c := newPushCluster(t, model.KVIndexRead)
+
+	l, err := c.kv.LockQueueKeep("retaking", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer l.Release()
+
+	p := &partition{n: 0, lease: l}
+	svc := &partitionService{w: &worker{o: WorkerOptions{SelfStopMargin: testMargin}}, p: p}
+
+	if !svc.leaseValid() {
+		t.Fatal("a fresh lease is not valid")
+	}
+
+	p.retaking.Add(1)
+
+	if svc.leaseValid() {
+		t.Fatal("the lease is valid while it is being moved")
+	}
+
+	p.retaking.Add(-1)
+
+	if !svc.leaseValid() {
+		t.Fatal("the lease is not valid after the move")
+	}
 }
 
 // TestPushRestartDetection: a worker that starts under the name of one

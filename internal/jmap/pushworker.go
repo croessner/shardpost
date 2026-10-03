@@ -316,6 +316,10 @@ type worker struct {
 	events chan partEvent
 	// leaving is set at shutdown: no partition is tried any more.
 	leaving atomic.Bool
+	// releasing counts the releases of single partitions in flight
+	// (giveUp); the shutdown waits for them before it deletes the
+	// record.
+	releasing sync.WaitGroup
 	// rotGen counts the key rotations seen; a lock taken before one has
 	// to be moved.
 	rotGen atomic.Int64
@@ -366,6 +370,10 @@ type pushTestHooks struct {
 	crash chan struct{}
 	// onMembersWrite sees every membership record written.
 	onMembersWrite func(rec *memberRecord)
+	// afterTake runs in a lock attempt that succeeded, after its check
+	// for a rotation and before it reports the take (a rotation in that
+	// gap is the case activate catches).
+	afterTake func(p int)
 }
 
 // count counts an event.

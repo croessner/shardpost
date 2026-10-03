@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"shardpost/internal/metrics"
@@ -46,14 +47,18 @@ type partition struct {
 	// (contested after two cadences); orphaned marks a partition seen
 	// orphaned, tried over the target until a fresh member holds it (a
 	// record of the crashed pod's name that comes back empty does not
-	// make it an ordinary free one); rotGen is the rotation count a
-	// lock attempt started under.
+	// make it an ordinary free one); rotGen is the rotation count the
+	// lease is on (a lock attempt: the count it started under; an
+	// active partition: the count of its last move, under worker.mu);
+	// retaking counts the moves of the lease to the new connection in
+	// flight (the watchers send nothing in that gap).
 	takenAt     time.Time
 	orphanUntil time.Time
 	busy        bool
 	freeSince   time.Time
 	orphaned    bool
 	rotGen      int64
+	retaking    atomic.Int32
 	// opStart is when the operation in flight started (a warning when
 	// it takes longer than the cadence).
 	opStart time.Time
@@ -89,10 +94,11 @@ const (
 type partEvent struct {
 	p    *partition
 	kind eventKind
-	// lease is set for a take that succeeded; orphan marks a take over
-	// the target (orphaned or contested); err the error of a failed
-	// take.
+	// lease is set for a take that succeeded, rotGen the rotation count
+	// it is on; orphan marks a take over the target (orphaned or
+	// contested); err the error of a failed take.
 	lease  model.Lease
+	rotGen int64
 	orphan bool
 	err    error
 }
@@ -282,6 +288,10 @@ func (r *takeRound) considerFree(p *partition) {
 
 		r.try(p, true)
 	case r.taking < r.target:
+		// An own attempt that was refused within the share is tried
+		// again on the fast cadence (§4.4).
+		r.fast = r.fast || p.busy
+
 		r.try(p, false)
 	case p.busy:
 		r.fast = true
@@ -359,7 +369,8 @@ func (w *worker) tryTake(p *partition, orphan bool) {
 	w.legacy.ensure(w.now())
 
 	w.mu.Lock()
-	p.state, p.opStart, p.rotGen = stateStarting, w.now(), w.rotGen.Load()
+	gen := w.rotGen.Load()
+	p.state, p.opStart, p.rotGen = stateStarting, w.now(), gen
 	w.mu.Unlock()
 
 	if w.hooks != nil {
@@ -382,18 +393,27 @@ func (w *worker) tryTake(p *partition, orphan bool) {
 
 		// A lock taken through the connection of before a rotation is
 		// moved to the new one at once; a lock the loop no longer wants
-		// (the pod is leaving) is given back.
-		if p.rotGen != w.rotGen.Load() {
+		// (the pod is leaving) is given back. A rotation after this
+		// check is caught by activate.
+		if cur := w.rotGen.Load(); gen != cur {
 			if rt, ok := l.(model.LeaseRetaker); ok {
 				if err := rt.Retake(); err != nil {
+					l.Release()
+
 					w.events <- partEvent{p: p, kind: evFailed, err: err}
 
 					return
 				}
 			}
+
+			gen = cur
 		}
 
-		w.events <- partEvent{p: p, kind: evTaken, lease: l, orphan: orphan}
+		if w.hooks != nil && w.hooks.afterTake != nil {
+			w.hooks.afterTake(p.n)
+		}
+
+		w.events <- partEvent{p: p, kind: evTaken, lease: l, rotGen: gen, orphan: orphan}
 	}()
 }
 
@@ -415,7 +435,7 @@ func (w *worker) onEvent(ev partEvent) {
 			return
 		}
 
-		w.activate(p, ev.lease, ev.orphan)
+		w.activate(p, ev.lease, ev.rotGen, ev.orphan)
 	case evBusy:
 		w.mu.Lock()
 		p.state, p.busy = stateFree, true
@@ -441,13 +461,20 @@ func (w *worker) onEvent(ev partEvent) {
 }
 
 // activate takes a partition into service: the record is written at
-// once, the serving goroutine and the guard of the lease start.
-func (w *worker) activate(p *partition, l model.Lease, orphan bool) {
+// once, the serving goroutine and the guard of the lease start. A lease
+// that is on the connection of before a rotation that came while the
+// lock attempt ran (onRotate skips a partition being started) is moved
+// first, in the serving goroutine.
+func (w *worker) activate(p *partition, l model.Lease, gen int64, orphan bool) {
 	now := w.now()
 
 	w.mu.Lock()
 	p.state, p.lease, p.takenAt, p.busy, p.freeSince, p.orphaned = stateActive, l, now, false, time.Time{}, false
 	p.orphanUntil = time.Time{}
+
+	cur := w.rotGen.Load()
+	stale := gen != cur
+	p.rotGen = cur
 
 	if orphan {
 		p.orphanUntil = now.Add(w.o.OrphanHold)
@@ -468,7 +495,7 @@ func (w *worker) activate(p *partition, l model.Lease, orphan bool) {
 
 	w.writeMembers()
 
-	go w.servePartition(ctx, p)
+	go w.servePartition(ctx, p, stale)
 	go w.guardLease(p, l, p.guard)
 }
 
@@ -548,6 +575,8 @@ func (w *worker) giveUp(p *partition, event string, notify bool) {
 	p.state = stateShedding
 	w.mu.Unlock()
 
+	w.releasing.Add(1)
+
 	go w.releasePartition(p, event, notify)
 }
 
@@ -555,8 +584,11 @@ func (w *worker) giveUp(p *partition, event string, notify bool) {
 // watchers end their rounds and save, the record is written without
 // the partition and confirmed, the lock is unlocked, and the control
 // object is notified when the release is one others should take up at
-// once. It runs in a goroutine of its own and reports evReleased.
+// once. It runs in a goroutine of its own (counted in releasing) and
+// reports evReleased.
 func (w *worker) releasePartition(p *partition, event string, notify bool) {
+	defer w.releasing.Done()
+
 	w.stopServing(p)
 
 	w.mu.Lock()
@@ -684,49 +716,85 @@ func someoneUnder(v *membersView, names []string, n int, o WorkerOptions, est in
 
 // onRotate is the rotation hook: every active partition moves its lease
 // to the new connection, each in a goroutine of its own; one that
-// cannot is given up.
+// cannot is given up. A partition activated after the count went up
+// moved its lease itself (activate) and is skipped.
 func (w *worker) onRotate() {
-	w.rotGen.Add(1)
+	gen := w.rotGen.Add(1)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	for _, p := range w.parts {
-		if p.state != stateActive {
+		if p.state != stateActive || p.rotGen >= gen {
 			continue
 		}
 
-		rt, ok := p.lease.(model.LeaseRetaker)
-		if !ok {
-			continue
-		}
+		p.rotGen = gen
 
-		go func(p *partition) {
-			if err := rt.Retake(); err != nil {
-				w.o.Log.Warn("push worker: lease not moved after the key rotation", "event", "push_partition",
-					"action", eventRotateFailed, "partition", p.n, "err", err)
-
-				w.events <- partEvent{p: p, kind: evRotateFailed}
-
-				return
-			}
-
-			w.event(eventRotated)
-		}(p)
+		go w.moveLease(p, p.lease)
 	}
+}
+
+// moveLease moves the lease of an active partition to the new
+// connection after a key rotation; while it runs, the watchers of the
+// partition send nothing (partitionService.leaseValid), since the lock
+// is free in the gap between the unlock and the new take. A lease that
+// cannot be moved gives the partition up; it reports whether the lease
+// was moved.
+func (w *worker) moveLease(p *partition, l model.Lease) bool {
+	rt, ok := l.(model.LeaseRetaker)
+	if !ok {
+		return true
+	}
+
+	if err := retakeMarked(p, rt); err != nil {
+		w.o.Log.Warn("push worker: lease not moved after the key rotation", "event", "push_partition",
+			"action", eventRotateFailed, "partition", p.n, "err", err)
+
+		w.events <- partEvent{p: p, kind: evRotateFailed}
+
+		return false
+	}
+
+	w.event(eventRotated)
+
+	return true
+}
+
+// retakeMarked moves a lease with the move counted in the partition's
+// retaking.
+func retakeMarked(p *partition, rt model.LeaseRetaker) error {
+	p.retaking.Add(1)
+	defer p.retaking.Add(-1)
+
+	return rt.Retake()
 }
 
 // shutdown is the orderly end (§4.4): the pod is leaving, lock attempts
 // in flight are discarded, the record is written with leaving set, the
 // partitions are shed in waves of a third each, one control notify per
-// wave, and the record is deleted at the end (with the legacy marker
-// when no other pod is left).
+// wave, the releases of single partitions still running are waited
+// for, and the record is deleted at the end (with the legacy marker
+// when no other pod is left); no membership write follows the
+// deletion.
 func (w *worker) shutdown() {
 	w.leaving.Store(true)
 
 	w.o.Log.Info("push worker: leaving", "event", "push_partition", "action", "leaving", "held", w.heldList())
 
 	w.drainStarting()
+
+	// The loop reads no events any more: a lock that comes back late
+	// is given back here instead of being held until its TTL.
+	stopEvents := make(chan struct{})
+	eventsDone := make(chan struct{})
+
+	go w.eventsWhileLeaving(stopEvents, eventsDone)
+
+	defer func() {
+		close(stopEvents)
+		<-eventsDone
+	}()
 
 	w.writeMembersWait()
 
@@ -753,6 +821,8 @@ func (w *worker) shutdown() {
 		}
 	}
 
+	w.waitReleasing()
+
 	w.legacy.clear()
 
 	select {
@@ -760,8 +830,57 @@ func (w *worker) shutdown() {
 	case <-time.After(w.o.Take):
 	}
 
+	w.members.close()
+
 	w.updateStatus()
 	w.o.Log.Info("push worker: left", "event", "push_partition", "action", "left")
+}
+
+// eventsWhileLeaving reads the partition events during the shutdown,
+// after drainStarting, until stop is closed: a lock that was taken is
+// released at once, the end of a lock attempt or a release frees the
+// partition, and everything else is dropped (the waves give up what is
+// still active).
+func (w *worker) eventsWhileLeaving(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+
+	for {
+		select {
+		case <-stop:
+			return
+		case ev := <-w.events:
+			switch ev.kind {
+			case evTaken:
+				w.mu.Lock()
+				ev.p.state = stateFree
+				w.mu.Unlock()
+
+				ev.lease.Release()
+			case evBusy, evFailed, evReleased:
+				w.onEvent(ev)
+			default:
+			}
+		}
+	}
+}
+
+// waitReleasing waits for the releases of single partitions in flight,
+// at most for the hand-off time and a cadence (a release waits up to
+// the hand-off time for its watchers and up to a cadence for its
+// membership write).
+func (w *worker) waitReleasing() {
+	done := make(chan struct{})
+
+	go func() {
+		w.releasing.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(w.o.Handoff + w.o.Take):
+		w.o.Log.Warn("push worker: a partition release did not end in time", "event", "push_partition", "action", "release_slow")
+	}
 }
 
 // drainStarting waits up to a cadence for the lock attempts in flight;

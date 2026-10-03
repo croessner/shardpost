@@ -110,7 +110,8 @@ Since 0.52.0 the JMAP push workers share 64 partitions
 [configuration](../configuration.md#push-worker-partitions-jmappush)).
 Component `deploy/components/jmap-push`: two replicas with a rolling
 update (`maxSurge 1`, `maxUnavailable 0`, `minReadySeconds 30`), a
-termination grace period of 30 s, a spread over the nodes and a
+termination grace period of 45 s (an end takes about 25 s, up to 40–45 s
+while the membership object hangs), a spread over the nodes and a
 disruption budget of one.
 
 **Prerequisite: NTP on every node.** The pods compare the clocks of
@@ -130,10 +131,14 @@ a half). Each move costs the accounts of that partition one hand-over
 (at most about ten seconds without a push, at most one push repeated).
 
 **The way over from the single pod (0.51.0 and before).** Roll out in
-this order: first every front-end, then the push deployment. The
-front-ends of 0.52.0 write the checksum into the index values and notify
-the workers; while old and new front-ends run, the checksums are not to
-be trusted and the workers fall back to the hourly full pass. Apply the
+this order: first every front-end, then the push deployment. Every
+front-end must run 0.52.0 before the push deployment rolls: a 0.51.0
+front-end that is still running writes subscriptions without the
+checksum and without the notify, so the partitioned workers keep a stale
+checksum for that account until the hourly full pass. The front-ends of
+0.52.0 write the checksum into the index values and notify the workers;
+while old and new front-ends run, the checksums are not to be trusted
+and the workers fall back to the hourly full pass. Apply the
 push deployment with `replicas: 1` first: the new pod waits while the
 old one holds the lease record (`event=push_legacy_wait`), is ready
 nonetheless, Kubernetes ends the old pod, which releases, and within two

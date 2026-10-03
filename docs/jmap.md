@@ -1137,7 +1137,11 @@ third of it. A holder that could not renew stops the partition itself
 five seconds before the TTL is up and releases it, so two holders never
 overlap; a holder whose lease was lost gives the partition up the same
 way. The leases stand through a cephx key rotation: the holder moves
-them to the new connection without stopping a watcher.
+them to the new connection without stopping a watcher (a lease taken
+while the rotation ran is moved before its partition is served). The
+lock is free for a moment during the move, so the watchers of the
+partition send nothing until it is taken again; a move that fails gives
+the partition up.
 
 **Sharing out.** Every push pod writes a record of itself into
 `ix.jmap/push/members` (its partitions, the accounts it watches, its
@@ -1175,7 +1179,9 @@ free until it drops them — discards lock attempts in flight, and sheds
 its partitions in three waves at the period of `jmap.push.handoff_seconds`
 (5), one notify per wave, so that no single successor has to start every
 watcher at once; the whole end stays within the pod's termination grace
-period of 30 s. A pod that finds a fresh record of its own name with
+period of 45 s (about 25 s normally; up to 40–45 s when the membership
+object hangs, since every membership write and the wait for single
+releases still running have a deadline of their own). A pod that finds a fresh record of its own name with
 partitions (its predecessor crashed) waits for the record to expire and
 a little beyond before it takes anything, so that the healthy pods get
 the orphaned partitions and a pod in a crash loop does not win its old
