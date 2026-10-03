@@ -191,7 +191,8 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 		Settle: sec(c.SettleSeconds), ExpiryPoll: sec(c.ExpirySeconds), BatchParallel: c.BatchParallel,
 		ScrubParallel: settings.Scrub.Parallel, ScrubInterval: time.Duration(settings.Scrub.IntervalDays) * 24 * time.Hour,
 		FTSBuild: jobs.FTSBuild{OnlineAuto: settings.FTS.OnlineBuild == config.OnlineBuildAuto, Window: win, MaxRunning: settings.FTS.BuildMaxRunning,
-			MsPerMessageCopy: settings.FTS.BuildMsPerMessageCopy, MsPerMessageReindex: settings.FTS.BuildMsPerMessageReindex}},
+			MsPerMessageCopy: settings.FTS.BuildMsPerMessageCopy, MsPerMessageReindex: settings.FTS.BuildMsPerMessageReindex,
+			UrgentFactor: settings.FTS.ReshardUrgentFactor}},
 		instance, jobs.Kinds(time.Duration(settings.Scrub.GraceSeconds)*time.Second)...)
 
 	warnUnbackfilled(log, kv)

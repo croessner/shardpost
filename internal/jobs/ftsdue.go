@@ -269,9 +269,11 @@ func (m *Manager) ftsDueAfterDeferred(ctx context.Context, e model.DueEntry, gen
 }
 
 // ftsDueDeferred handles a job whose online run ended without a change:
-// busy waits as for a locked account (the backoff), window until the
-// next window starts, window_too_small a day. The record notes it, so
-// that the entry that fires next plans a new job.
+// busy (and mark_off: the mark was removed after the plan) waits as for
+// a locked account (the backoff), window and window_too_small until the
+// next window starts (plus the account's spread). The record notes it,
+// so that the entry that fires next plans a new job (offline after
+// mark_off).
 func (m *Manager) ftsDueDeferred(e model.DueEntry, rec *model.FTSDueRecord, deferred string, lost func() bool) error {
 	if lost() {
 		return nil
@@ -298,11 +300,10 @@ func (m *Manager) ftsDueDeferred(e model.DueEntry, rec *model.FTSDueRecord, defe
 	now := m.now()
 	due := now.Add(model.FTSDueBackoffAfter(waits))
 
-	switch deferred {
-	case model.FTSDeferredWindow:
+	// window_too_small: once a day, at the next window start, as the
+	// worker's own check
+	if deferred == model.FTSDeferredWindow || deferred == model.FTSDeferredTooSmall {
 		due = m.windowStart(e.ID, now)
-	case model.FTSDeferredTooSmall:
-		due = now.Add(ftsDueTooSmallWait)
 	}
 
 	return m.ftsDueMove(e, &model.DueKey{Due: due, Gen: e.Gen}, lost)
@@ -321,15 +322,18 @@ func (m *Manager) windowStart(account string, now time.Time) time.Time {
 }
 
 // ftsDueGate is the window step before the worker plans (temp/14
-// §4.12): without a window nothing. Outside it only an urgent account
-// is planned (its largest object at ftsUrgentLoad times its target, near
-// the 2·T at which Ceph reports large omap objects); the others wait for
-// the next window. Inside it at most fts.build_max_running jobs the
-// worker planned run at once, and a run starts only when its estimate
-// fits into what is left of the window; one longer than the whole
-// window is not planned (window_too_small, a day later again). It
-// returns where to move the entry instead of planning (nil: plan), and
-// whether the account is urgent.
+// §4.12): without a window nothing. An urgent account — its largest
+// object at fts.reshard_urgent_factor times its target, near the 2·T at
+// which Ceph reports large omap objects — is planned at once, in or out
+// of the window and whatever build_max_running and the estimate say.
+// Outside the window the others wait for the next window. Inside it at
+// most fts.build_max_running jobs the worker planned run at once, and a
+// run starts only when its estimate fits into what is left of the
+// window; one longer than the whole window is not planned
+// (window_too_small: it is looked at again at the next window start
+// plus the account's spread, so once a day). It returns where to move
+// the entry instead of planning (nil: plan), and whether the account is
+// urgent.
 func (m *Manager) ftsDueGate(e model.DueEntry) (*model.DueKey, bool, error) {
 	b := m.cfg.FTSBuild
 	if !b.Window.Set() {
@@ -341,15 +345,14 @@ func (m *Manager) ftsDueGate(e model.DueEntry) (*model.DueKey, bool, error) {
 		return nil, false, err
 	}
 
+	if shape.Load >= b.UrgentFactor {
+		return nil, true, nil
+	}
+
 	now := m.now()
 
 	if !b.Window.In(now) {
-		if shape.Load >= ftsUrgentLoad {
-			return nil, true, nil
-		}
-
 		metrics.FTSBuildWindowDeferred.Inc()
-
 		return &model.DueKey{Due: m.windowStart(e.ID, now), Gen: e.Gen}, false, nil
 	}
 
@@ -364,7 +367,7 @@ func (m *Manager) ftsDueGate(e model.DueEntry) (*model.DueKey, bool, error) {
 			"plan it with fts_layout for the account, or widen fts.reshard_window", "account", e.ID, "docs", shape.Docs,
 			"window", b.Window.String())
 
-		return &model.DueKey{Due: now.Add(ftsDueTooSmallWait), Gen: e.Gen}, false, nil
+		return &model.DueKey{Due: m.windowStart(e.ID, now), Gen: e.Gen}, false, nil
 	case err != nil:
 		metrics.FTSBuildWindowDeferred.Inc()
 		return &model.DueKey{Due: m.windowStart(e.ID, now), Gen: e.Gen}, false, nil

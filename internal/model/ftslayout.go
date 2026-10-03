@@ -368,6 +368,10 @@ const (
 	// FTSDeferredTooSmall: the run's estimate is longer than the whole
 	// reshard window (window_too_small).
 	FTSDeferredTooSmall = "window_too_small"
+	// FTSDeferredMarkOff: the cluster mark of online runs was removed
+	// after the plan; the job ends without a change (plan it again: it
+	// runs offline then).
+	FTSDeferredMarkOff = "mark_off"
 )
 
 // Errors of FTSLayoutRequest.Admit.

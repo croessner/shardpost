@@ -319,7 +319,9 @@ rebuild key, so it also heals an index an offline rebuild left midway.
 .B \-skip-unreadable
 skips a live message whose blob cannot be read (counted as
 .IR unreadable )
-instead of failing after five attempts;
+instead of failing after five attempts; a rebuild that skipped one does
+not set the version marker nor remove the rebuild key (searches keep
+reading the messages instead of trusting an index that misses a mail);
 .B \-keep-orphan-ids
 only counts the ids that have neither a blob nor a mailbox entry
 .RI ( orphan_ids )
@@ -479,7 +481,9 @@ and ends without a change and without an error as
 or
 .B window_too_small
 (a run the fts_due worker or a batch planned that does not fit into the
-reshard window), or as
+reshard window),
+.B mark_off
+(the cluster mark of online runs was removed after the plan), or as
 .I unsupported
 (no layout 3 index). Without
 .B \-online

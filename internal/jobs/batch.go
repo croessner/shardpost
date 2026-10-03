@@ -951,6 +951,8 @@ func layoutOutcome(rep model.FTSLayoutReport, r acctResult) acctResult {
 		r.out = outDeferred
 	case rep.Deferred == model.FTSDeferredWindow:
 		r.out = outLater
+	case rep.Deferred == model.FTSDeferredMarkOff:
+		r.err = "the cluster mark fts/online was removed after the plan; plan the batch again (it runs offline then)"
 	default:
 		r.err = "window_too_small: the run's estimate is longer than the reshard window; run the account with anytime, or widen the window"
 	}

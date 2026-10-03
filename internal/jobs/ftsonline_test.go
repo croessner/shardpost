@@ -364,7 +364,8 @@ func TestFTSDueWindowInside(t *testing.T) {
 	c.set(time.Date(2026, 10, 3, 2, 30, 0, 0, time.UTC))
 	fire(t, m, onlyEntry(t, q))
 
-	if e := onlyEntry(t, q); !e.Due.Equal(c.now().Add(ftsDueTooSmallWait)) || dueRecord(t, m, "alice") != nil {
+	// once a day: at the next window start plus the spread
+	if e := onlyEntry(t, q); e.Due.Before(nextWindow) || !e.Due.Before(nextWindow.Add(90*time.Minute)) || dueRecord(t, m, "alice") != nil {
 		t.Fatalf("window too small: %+v", e)
 	}
 
@@ -377,10 +378,48 @@ func TestFTSDueWindowInside(t *testing.T) {
 	}
 }
 
+// TestFTSDueUrgentInside (Fable review): an urgent account is planned
+// inside the window too, although build_max_running is reached and its
+// estimate is longer than the whole window; the factor is
+// fts.reshard_urgent_factor.
+func TestFTSDueUrgentInside(t *testing.T) {
+	m, f, q, c := windowDue(t, 2, 10)
+	m.cfg.FTSBuild.UrgentFactor = 1.7
+	f.due.Load, f.due.Docs = 1.75, 10_000_000
+
+	m.ftsDueStarted("still-running")
+
+	_ = m.st.kv.Update(prefixJob+"still-running", func([]byte) ([]byte, error) {
+		return json.Marshal(Job{ID: "still-running", State: StateRunning})
+	})
+
+	fire(t, m, queueDue(t, q, "alice", "g1", c.now()))
+
+	rec := dueRecord(t, m, "alice")
+	if rec == nil {
+		t.Fatal("urgent account not planned inside the window")
+	}
+
+	if j, err := m.Get(rec.JobID); err != nil || j.Principal != ftsDueUrgentPrincipal {
+		t.Fatalf("urgent job %+v %v", j, err)
+	}
+}
+
 // TestFTSDueBusy (R2.10): a planned job whose online run found the
 // account busy is handled like a locked account (a backoff, not a
 // no-op); the next fire plans a new job.
 func TestFTSDueBusy(t *testing.T) {
+	// mark_off (Fable review): the mark of online runs went after the
+	// plan; the same backoff, then a new (offline) plan
+	for _, deferred := range []string{model.FTSDeferredBusy, model.FTSDeferredMarkOff} {
+		t.Run(deferred, func(t *testing.T) { dueDeferred(t, deferred) })
+	}
+}
+
+// dueDeferred is TestFTSDueBusy for one outcome of the job.
+func dueDeferred(t *testing.T, deferred string) {
+	t.Helper()
+
 	m, o, _, q := dueSetup(t, "alice")
 	f := o.fake("alice")
 	f.gen = "g1"
@@ -389,7 +428,7 @@ func TestFTSDueBusy(t *testing.T) {
 
 	rec := dueRecord(t, m, "alice")
 
-	res, _ := json.Marshal(model.FTSLayoutReport{Online: true, Deferred: model.FTSDeferredBusy})
+	res, _ := json.Marshal(model.FTSLayoutReport{Online: true, Deferred: deferred})
 
 	if _, err := m.updateJob(rec.JobID, nil, func(j *Job) error {
 		j.State, j.Finished, j.Result = StateSucceeded, m.now(), res

@@ -74,7 +74,8 @@ func TestFTSLayoutKeys(t *testing.T) {
 		ConvertBufferKeys: 262144, ConvertWriters: 8, AutoReshard: true, FrozenWaitSeconds: 10, ImportReshardSyncSeconds: 60,
 		DictFilter: "none", DictIDMinRunes: 25, AttachedHeaders: "all",
 		OnlineBuild: "off", ReshardWindowTZ: "UTC", BuildMaxRunning: 1, BuildCatchupRounds: 5, BuildHoldMS: 2000,
-		BuildMsPerMessageCopy: 3, BuildMsPerMessageReindex: 20, ReindexBatchDocs: 200, ReindexBatchBytes: 8 << 20}
+		BuildMsPerMessageCopy: 3, BuildMsPerMessageReindex: 20, ReindexBatchDocs: 200, ReindexBatchBytes: 8 << 20,
+		ReshardUrgentFactor: 1.8}
 
 	got := c.FTS
 	got.FallbackCharset, got.HTML, got.IMAPSearch, got.VerifyParallel = "", "", "", 0
@@ -224,6 +225,8 @@ func TestFTSOnlineKeys(t *testing.T) {
 		"fts:\n  build_ms_per_message_reindex: 0.5\n",
 		"fts:\n  reindex_batch_docs: 49\n",
 		"fts:\n  reindex_batch_bytes: 1000\n",
+		"fts:\n  reshard_urgent_factor: 1.4\n",
+		"fts:\n  reshard_urgent_factor: 2\n",
 	} {
 		if _, err := Load(configFile(t, body)); err == nil {
 			t.Errorf("accepted %q", body)

@@ -3106,7 +3106,8 @@ type ClientInterface interface {
 	// Removes the cluster mark of online runs: new plans of
 	// `fts_layout` and `fts_rebuild` run offline (`online: true` is
 	// refused with `conflict`), a planned online run that has not
-	// started fails its check. Runs that already started finish;
+	// started ends without a change (`deferred: mark_off`, not a
+	// failed job). Runs that already started finish;
 	// before a downgrade to a version before 0.51.0 wait until no
 	// account shows an online run (`next_online` in the layout state)
 	// or clear it with `POST
@@ -5253,7 +5254,8 @@ func (c *Client) GetFTSOnline(ctx context.Context, reqEditors ...RequestEditorFn
 // Removes the cluster mark of online runs: new plans of
 // `fts_layout` and `fts_rebuild` run offline (`online: true` is
 // refused with `conflict`), a planned online run that has not
-// started fails its check. Runs that already started finish;
+// started ends without a change (`deferred: mark_off`, not a
+// failed job). Runs that already started finish;
 // before a downgrade to a version before 0.51.0 wait until no
 // account shows an online run (`next_online` in the layout state)
 // or clear it with `POST
@@ -10722,7 +10724,8 @@ type ClientWithResponsesInterface interface {
 	// Removes the cluster mark of online runs: new plans of
 	// `fts_layout` and `fts_rebuild` run offline (`online: true` is
 	// refused with `conflict`), a planned online run that has not
-	// started fails its check. Runs that already started finish;
+	// started ends without a change (`deferred: mark_off`, not a
+	// failed job). Runs that already started finish;
 	// before a downgrade to a version before 0.51.0 wait until no
 	// account shows an online run (`next_online` in the layout state)
 	// or clear it with `POST
@@ -16288,7 +16291,8 @@ func (c *ClientWithResponses) GetFTSOnlineWithResponse(ctx context.Context, reqE
 // Removes the cluster mark of online runs: new plans of
 // `fts_layout` and `fts_rebuild` run offline (`online: true` is
 // refused with `conflict`), a planned online run that has not
-// started fails its check. Runs that already started finish;
+// started ends without a change (`deferred: mark_off`, not a
+// failed job). Runs that already started finish;
 // before a downgrade to a version before 0.51.0 wait until no
 // account shows an online run (`next_online` in the layout state)
 // or clear it with `POST

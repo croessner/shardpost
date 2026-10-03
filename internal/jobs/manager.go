@@ -145,6 +145,11 @@ type FTSBuild struct {
 	// MsPerMessageCopy and MsPerMessageReindex estimate a run from the
 	// documents of the account, to tell whether it fits into the window.
 	MsPerMessageCopy, MsPerMessageReindex float64
+	// UrgentFactor (fts.reshard_urgent_factor): an account whose largest
+	// index object holds this many times its target is planned by the
+	// fts_due worker at once, whatever the window, build_max_running and
+	// the estimate say.
+	UrgentFactor float64
 }
 
 // Defaults of FTSBuild.
@@ -152,9 +157,8 @@ const (
 	defaultBuildMaxRunning  = 1
 	defaultMsPerMsgCopy     = 3
 	defaultMsPerMsgReindex  = 20
+	defaultUrgentFactor     = 1.8
 	ftsDueBusyWait          = 5 * time.Minute
-	ftsDueTooSmallWait      = 24 * time.Hour
-	ftsUrgentLoad           = 1.8
 	ftsDueRunningMemoryJobs = 4096
 )
 
@@ -169,6 +173,10 @@ func (b FTSBuild) withDefaults() FTSBuild {
 
 	if b.MsPerMessageReindex <= 0 {
 		b.MsPerMessageReindex = defaultMsPerMsgReindex
+	}
+
+	if b.UrgentFactor <= 0 {
+		b.UrgentFactor = defaultUrgentFactor
 	}
 
 	return b

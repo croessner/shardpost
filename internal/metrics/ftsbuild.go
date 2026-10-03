@@ -15,7 +15,8 @@ const (
 var (
 	// FTSBuildRuns counts online runs by mode ("copy", "reindex") and
 	// result ("ok", "busy", "lost", "error", "noop", "deferred",
-	// "unsupported").
+	// "unsupported", "mark_off": the mark of online runs went after the
+	// plan).
 	FTSBuildRuns = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: subsystemFTS, Name: "build_runs_total",
 		Help: "Online runs of the full-text index (fts_layout, fts_rebuild without lock), by mode and result.",

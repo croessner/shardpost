@@ -167,17 +167,32 @@ func TestSwitchOnline(t *testing.T) {
 	target := ftsLoc{f: 3, g: "t", s: 2, d: 2, h: 2, ah: fts.AttachedHeadersNoSig}
 	c := &ftsLayout{F: 3, G: "s", S: 1, D: 1, H: 1, Dict: true, LG: true}
 
-	set, rm := switchOnline(map[string][]byte{ftsRebuildKey: []byte("x")}, c, src, target, "job-a/1", model.FTSModeReindex)
+	set, rm := switchOnline(map[string][]byte{ftsRebuildKey: []byte("x")}, c, src, target, "job-a/1", model.FTSModeReindex, true)
 	if string(set[ftsVersionKey3]) != ftsVersionText || !slices.Contains(rm, ftsRebuildKey) || set[ftsCountKey] != nil {
 		t.Errorf("reindex: %v %v", set, rm)
 	}
 
-	set, rm = switchOnline(map[string][]byte{}, c, src, target, "job-a/1", model.FTSModeCopy)
+	// a rebuild that skipped an unreadable message trusts nothing new
+	set, rm = switchOnline(map[string][]byte{ftsRebuildKey: []byte("x"), ftsVersionKey3: []byte(ftsVersion)}, c, src, target, "job-a/1",
+		model.FTSModeReindex, false)
+	if set[ftsVersionKey3] != nil || slices.Contains(rm, ftsRebuildKey) || !slices.Contains(rm, ftsVersionKey3) {
+		t.Errorf("incomplete reindex: %v %v", set, rm)
+	}
+}
+
+// TestSwitchOnlineCopy: a copy keeps the rule of switchTo3 and names the
+// source in "old" with the run's token.
+func TestSwitchOnlineCopy(t *testing.T) {
+	src := ftsLoc{f: 3, g: "s", s: 1, d: 1, h: 1}
+	target := ftsLoc{f: 3, g: "t", s: 2, d: 2, h: 2, ah: fts.AttachedHeadersNoSig}
+	c := &ftsLayout{F: 3, G: "s", S: 1, D: 1, H: 1, Dict: true, LG: true}
+
+	set, rm := switchOnline(map[string][]byte{}, c, src, target, "job-a/1", model.FTSModeCopy, true)
 	if set[ftsVersionKey3] != nil || !slices.Contains(rm, ftsVersionKey3) {
 		t.Errorf("copy of an untrusted source: %v %v", set, rm)
 	}
 
-	set, _ = switchOnline(map[string][]byte{ftsVersionKey3: []byte(ftsVersion)}, c, src, target, "job-a/1", model.FTSModeCopy)
+	set, _ = switchOnline(map[string][]byte{ftsVersionKey3: []byte(ftsVersion)}, c, src, target, "job-a/1", model.FTSModeCopy, true)
 
 	l, _ := parseLayout(set[ftsLayoutKey])
 	if string(set[ftsVersionKey3]) != ftsVersionText || l.G != "t" || l.Next != nil || len(l.Old) != 1 || l.Old[0].Tok != "job-a/1" || !l.LG {

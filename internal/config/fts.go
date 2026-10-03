@@ -123,6 +123,12 @@ type FTS struct {
 	// reindex: fts_rebuild), to tell whether it fits into the window.
 	BuildMsPerMessageCopy    float64 `mapstructure:"build_ms_per_message_copy" validate:"gte=0.1,lte=1000"`
 	BuildMsPerMessageReindex float64 `mapstructure:"build_ms_per_message_reindex" validate:"gte=1,lte=10000"`
+	// ReshardUrgentFactor: an account whose largest index object holds
+	// this many times its target is resharded by the fts_due worker at
+	// once, outside the window and whatever build_max_running and the
+	// estimate say (below the 2·T at which Ceph reports large omap
+	// objects).
+	ReshardUrgentFactor float64 `mapstructure:"reshard_urgent_factor" validate:"gte=1.5,lte=1.95"`
 	// ReindexBatchDocs and ReindexBatchBytes bound a batch of messages an
 	// online rebuild indexes at once.
 	ReindexBatchDocs  int `mapstructure:"reindex_batch_docs" validate:"gte=50,lte=5000"`

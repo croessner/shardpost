@@ -445,6 +445,7 @@ var defaults = []struct {
 	{"fts.build_hold_ms", 2000},
 	{"fts.build_ms_per_message_copy", 3.0},
 	{"fts.build_ms_per_message_reindex", 20.0},
+	{"fts.reshard_urgent_factor", 1.8},
 	{"fts.reindex_batch_docs", 200},
 	{"fts.reindex_batch_bytes", 8 << 20},
 	{"limits.mailboxes", defaultLimitMailboxes},

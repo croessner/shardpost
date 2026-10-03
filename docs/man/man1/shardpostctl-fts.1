@@ -230,7 +230,7 @@ worker included). Role:
 .SS fts online disable
 Removes the mark: new plans run offline, a plan with
 .B \-online
-is refused, a planned online job that has not started fails. Runs that
+is refused, a planned online job that has not started ends without a change (result mark_off; the fts_due worker plans it again, offline). Runs that
 started finish; before a downgrade to a version before 0.51.0 wait until
 no account shows
 .B next_online

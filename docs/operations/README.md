@@ -1015,7 +1015,9 @@ there are no online runs.
 **Way back.**
 
 1. `shardpostctl fts online disable`: new plans run offline (`-online`
-   409); a planned online job that has not started fails its check.
+   409); a planned online job that has not started ends without a change
+   (`deferred: mark_off`, no failed job; the `fts_due` worker plans it
+   again, offline).
 2. Wait for the online runs that started: `shardpostctl fts layout show
    <account>` shows `next_online` while one runs (`fts layout3 list
    -verify` for all accounts), or `shardpostctl fts layout clear
@@ -1035,15 +1037,17 @@ The `fts_due` worker plans its reshards inside the window, at most
 `fts.build_max_running` at a time, and only when the estimate
 (`fts.build_ms_per_message_copy` × documents) fits into what is left of
 it; the others wait for the next window start plus a stable spread per
-account. Outside the window only an account whose largest object holds
-1.8 times its target is planned (near 2·T, where Ceph reports large omap
-objects). A batch of `fts_layout` or `fts_rebuild` keeps the window
+account. An account whose largest object holds
+`fts.reshard_urgent_factor` (1.8) times its target is planned at once,
+in or out of the window and whatever `build_max_running` and the
+estimate say (near 2·T, where Ceph reports large omap objects). A batch of `fts_layout` or `fts_rebuild` keeps the window
 too: outside it the job shows `waiting for the reshard window`, gives
 itself back until the next window starts and goes on from its
 checkpoint; `-anytime` ignores the window. A run whose estimate is longer
 than the whole window does not start (`window_too_small`, metric
-`imapceph_fts_build_window_too_small_total`; the worker looks again a
-day later, a batch fails the account): plan the account on its own (a
+`imapceph_fts_build_window_too_small_total`; the worker looks again at
+the next window start plus the account's spread, so once a day, and a
+batch fails the account): plan the account on its own (a
 single plan runs at once) or widen the window. A run that overruns its
 window ends normally; runs over several nights come with a later stage.
 On the days the clocks change the window is an hour shorter or longer.
@@ -1066,7 +1070,14 @@ rebuilds, each locking its account for minutes):
 3. The dictionary filter as in steps 1–4 of the runbook above: the
    overlay with `dict_filter: ids`, `dict_id_min_runes: 25`,
    `attached_headers: nosig`, then `fts dictfilter enable -pods <n>`.
-4. The test account first, online, and measure:
+4. The protocol-level smoke test on the test account:
+   `hack/online-smoke.sh` runs an online `fts_rebuild` of
+   `rbdpoc2@exampleserver.de` while it delivers at a low rate, keeps an
+   IMAP session logged in and tries POP3 and JMAP logins, and checks
+   that no delivery failed, no login was refused, the session got no
+   `BYE` and the logs show no lock for the account (credentials from the
+   secret `imaptest-creds`, never printed). Then measure the test
+   account's own run:
    `shardpostctl plan -online fts_rebuild rbdpoc2@exampleserver.de`,
    `shardpostctl apply -wait <plan-id>`. The result shows `mode
    reindex`, `rounds`, `caught_up`, `hold_ms`, `orphan_ids`;

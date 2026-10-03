@@ -518,8 +518,12 @@ func (u *User) convertOnline(req model.FTSLayoutRequest) (rep model.FTSLayoutRep
 	r := &onlineRun{u: u, req: req, rep: &rep, done: map[buildPair]bool{}}
 
 	defer func() {
-		if errors.Is(err, errOnlineBusy) {
+		switch {
+		case errors.Is(err, errOnlineBusy):
 			rep.Deferred, rep.Reason, err = model.FTSDeferredBusy, "another run of the account is alive, or it is locked", nil
+		case errors.Is(err, model.ErrFTSOnlineMark):
+			// the mark went after the plan: no failure, nothing changed
+			rep.Deferred, rep.Reason, err = model.FTSDeferredMarkOff, err.Error(), nil
 		}
 
 		countOnline(rep, err)
@@ -545,6 +549,8 @@ func countOnline(rep model.FTSLayoutReport, err error) {
 		result = "error"
 	case rep.Deferred == model.FTSDeferredBusy:
 		result = "busy"
+	case rep.Deferred == model.FTSDeferredMarkOff:
+		result = model.FTSDeferredMarkOff
 	case rep.Deferred != "":
 		result = "deferred"
 	case rep.Unsupported:
@@ -857,7 +863,9 @@ func (r *onlineRun) notRecorded(next ftsGen, err error) error {
 
 	_ = u.deleteObjects(r.target.objects())
 
-	if l, lerr := u.readLayout(); lerr == nil && ftsLayout3(l) {
+	// Props follows the current generation again, unless the run that
+	// recorded itself meanwhile has a target with properties.
+	if l, lerr := u.readLayout(); lerr == nil && ftsLayout3(l) && (l.Next == nil || !genLoc(*l.Next, u.ftsShards).hasProps()) {
 		_ = u.presenceAfterClear(next, l)
 	}
 
@@ -1067,12 +1075,12 @@ func (r *onlineRun) indexUnknown() error {
 			continue
 		}
 
-		ref := r.proj[g]
-
-		raw, err := u.readBlob(&Meta{GUID: g, Size: ref.size, Chunks: ref.chunks})
+		raw, ok, err := r.readUnknown(g, r.proj[g])
 		if err != nil {
-			// gone meanwhile, or unreadable: the source misses it as well
-			u.log.Warn("fts online rebuild: message without id not readable", "guid", g, "err", err)
+			return err
+		}
+
+		if !ok {
 			continue
 		}
 
@@ -1087,6 +1095,50 @@ func (r *onlineRun) indexUnknown() error {
 	}
 
 	return flush()
+}
+
+// readUnknown reads the blob of a message of the mailboxes that has no
+// id: false when its blob is gone (the message was expunged meanwhile;
+// a blob missing for good is a scrub finding, and no search can check
+// that message either). Any other error is tried buildReadAttempts
+// times; then the run fails, or with skip_unreadable skips the message
+// and counts it (the target is then not trusted, see switchOnline).
+func (r *onlineRun) readUnknown(guid string, ref blobLoc) ([]byte, bool, error) {
+	var last error
+
+	for attempt := 0; attempt < buildReadAttempts; attempt++ {
+		raw, err := r.u.readBlob(&Meta{GUID: guid, Size: ref.size, Chunks: ref.chunks})
+		if err == nil {
+			return raw, true, nil
+		}
+
+		if errors.Is(err, model.ErrNoBlob) {
+			r.u.log.Info("fts online rebuild: message without id gone meanwhile", "guid", guid)
+			return nil, false, nil
+		}
+
+		last = err
+
+		if attempt+1 < buildReadAttempts {
+			time.Sleep(time.Duration(100<<attempt) * time.Millisecond)
+		}
+	}
+
+	return nil, false, r.unreadable(guid, last)
+}
+
+// unreadable ends the run for a live message that cannot be read, or
+// with skip_unreadable counts and skips it.
+func (r *onlineRun) unreadable(guid string, err error) error {
+	if !r.req.SkipUnreadable {
+		return fmt.Errorf("read %s: %w", guid, err)
+	}
+
+	r.rep.Unreadable++
+
+	r.u.log.Warn("fts online run: live message not readable, skipped", "guid", guid, "err", err)
+
+	return nil
 }
 
 // indexPairs indexes documents from their blobs into the target with the
@@ -1198,8 +1250,6 @@ func (u *User) indexFixed(loc ftsLoc, docs []ftsDoc, ids map[string]uint64) erro
 // buildReadAttempts times; then the run fails, or with skip_unreadable
 // skips it.
 func (r *onlineRun) readDoc(p buildPair) ([]byte, bool, error) {
-	u := r.u
-
 	var last error
 
 	for attempt := 0; attempt < buildReadAttempts; attempt++ {
@@ -1228,15 +1278,7 @@ func (r *onlineRun) readDoc(p buildPair) ([]byte, bool, error) {
 		}
 	}
 
-	if r.req.SkipUnreadable {
-		r.rep.Unreadable++
-
-		u.log.Warn("fts online run: live message not readable, skipped", "guid", p.guid, "err", last)
-
-		return nil, false, nil
-	}
-
-	return nil, false, fmt.Errorf("read %s: %w", p.guid, last)
+	return nil, false, r.unreadable(p.guid, last)
 }
 
 // readOnce reads the blob of a document: its size and chunks from the
@@ -1624,7 +1666,7 @@ func (r *onlineRun) trySwitch(count []byte) error {
 				return nil, nil
 			}
 
-			return switchOnline(cur, c, r.src, r.target, req.Tok, r.mode)
+			return switchOnline(cur, c, r.src, r.target, req.Tok, r.mode, r.rep.Unreadable == 0)
 		})
 
 	switch {
@@ -1653,18 +1695,24 @@ func (r *onlineRun) trySwitch(count []byte) error {
 // current, the source goes to "old" with the token until O8; the
 // document count stays (dropDocID keeps it for both generations). The
 // version marker: a copy keeps the rule of switchTo3 (a trusted source
-// gives the target's marker, an untrusted one none); a rebuild indexed
-// every message of the mailboxes, so it sets the target's marker and
-// removes the rebuild key whatever the source had (it heals an offline
-// rebuild that stopped midway).
-func switchOnline(cur map[string][]byte, c *ftsLayout, src, target ftsLoc, tok, mode string) (map[string][]byte, []string) {
+// gives the target's marker, an untrusted one none); a rebuild that
+// indexed every message of the mailboxes (complete) sets the target's
+// marker and removes the rebuild key whatever the source had (it heals
+// an offline rebuild that stopped midway). A rebuild that skipped an
+// unreadable message removes the marker and leaves the rebuild key as it
+// was: no index is trusted that misses a mail (searches read the
+// messages until a complete rebuild).
+func switchOnline(cur map[string][]byte, c *ftsLayout, src, target ftsLoc, tok, mode string, complete bool) (map[string][]byte, []string) {
 	set, rm := map[string][]byte{}, []string(nil)
 
 	switch {
-	case mode == model.FTSModeReindex:
+	case mode == model.FTSModeReindex && complete:
 		set[ftsVersionKey3] = []byte(versionFor(target))
 
 		rm = append(rm, ftsRebuildKey)
+	case mode == model.FTSModeReindex:
+		// it skipped a message the source may have: trusted by no one
+		rm = append(rm, ftsVersionKey3)
 	case knownVersion(cur[ftsVersionKey3]):
 		set[ftsVersionKey3] = []byte(versionFor(target))
 	default:
