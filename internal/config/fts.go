@@ -83,6 +83,12 @@ type FTS struct {
 // osd_deep_scrub_large_omap_object_key_threshold is raised.
 const shardTargetWarn = 133000
 
+// Keys of the targets (defaults, warnings).
+const (
+	keyShardTargetKeys = "fts.shard_target_keys"
+	keyDictTargetKeys  = "fts.dict_target_keys"
+)
+
 // ShardTargetWarnings are the warnings the server logs at startup for
 // targets whose objects may pass Ceph's large omap threshold before a
 // reshard (none: nil).
@@ -92,7 +98,7 @@ func (f FTS) ShardTargetWarnings() []string {
 	for _, t := range []struct {
 		key string
 		n   int
-	}{{"fts.shard_target_keys", f.ShardTargetKeys}, {"fts.dict_target_keys", f.DictTargetKeys}} {
+	}{{keyShardTargetKeys, f.ShardTargetKeys}, {keyDictTargetKeys, f.DictTargetKeys}} {
 		if t.n > shardTargetWarn {
 			out = append(out, fmt.Sprintf("%s %d is above %d: an object grows to 1.5 times its target (%d keys) before a reshard, "+
 				"beyond the 200000 keys at which Ceph reports large omap objects; raise osd_deep_scrub_large_omap_object_key_threshold accordingly",

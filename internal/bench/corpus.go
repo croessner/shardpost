@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"math/rand/v2"
@@ -109,9 +108,6 @@ func (g Generator) RefID(account string, n int) string {
 	return string(id)
 }
 
-// ErrNoIDs: the identifier queries need the identifier corpus.
-var ErrNoIDs = errors.New("identifier queries need the corpus ids")
-
 // idMessage writes message n of account of the identifier corpus.
 func (g Generator) idMessage(account string, n int) ([]byte, *rand.Rand) {
 	r := g.rng(account, n)
@@ -121,15 +117,7 @@ func (g Generator) idMessage(account string, n int) ([]byte, *rand.Rand) {
 	var b bytes.Buffer
 
 	b.Grow(size + 4096)
-
-	date := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Hour)
-
-	fmt.Fprintf(&b, "From: %s <%s@example.org>%s", term(zipf.Uint64()), term(zipf.Uint64()), crlf)
-	fmt.Fprintf(&b, "To: <%s@bench.invalid>%s", account, crlf)
-	fmt.Fprintf(&b, "Subject: %s%s", words(zipf, 3+r.IntN(6)), crlf)
-	fmt.Fprintf(&b, "Date: %s%s", date.Format(time.RFC1123Z), crlf)
-	fmt.Fprintf(&b, "Message-ID: <%016x.%d@bench.invalid>%s", r.Uint64(), n, crlf)
-	b.WriteString("MIME-Version: 1.0" + crlf)
+	header(&b, r, zipf, account, n)
 
 	// What the message carries, drawn before any of it is written.
 	attached := r.IntN(100) < attachedShare
@@ -158,6 +146,7 @@ func (g Generator) idMessage(account string, n int) ([]byte, *rand.Rand) {
 
 	b.WriteString("--" + boundary + crlf + "Content-Type: text/plain; charset=utf-8" + crlf + crlf)
 	b.Write(ids.Bytes())
+
 	textEnd := size
 	if size > textMax {
 		textEnd = b.Len() + attachmentText

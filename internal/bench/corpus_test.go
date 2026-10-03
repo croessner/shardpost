@@ -161,7 +161,6 @@ func TestParseCorpus(t *testing.T) {
 // a message, whole or cut.
 func TestIdentifierQueries(t *testing.T) {
 	g := Generator{Seed: 5, Corpus: Corpus{IDs: true}}
-	qs := SearchQueriesFor(12, g.Corpus)
 
 	if !slices.Equal(SearchQueriesFor(12, Corpus{}), SearchQueries(12)) {
 		t.Error("the plain corpus changed its queries")
@@ -169,37 +168,38 @@ func TestIdentifierQueries(t *testing.T) {
 
 	kinds := map[string]int{}
 
-	for _, q := range qs {
+	for _, q := range SearchQueriesFor(12, g.Corpus) {
 		kinds[q.Kind]++
 
 		r := ResolveQuery(g, "bench-000002", q)
-		id := g.RefID("bench-000002", q.Msg)
-
-		switch q.Kind {
-		case QueryIDWhole:
-			if r.Text != id {
-				t.Errorf("whole %q", r.Text)
-			}
-		case QueryIDStart:
-			if r.Text != id[:8] {
-				t.Errorf("start %q", r.Text)
-			}
-		case QueryIDInner:
-			if !strings.Contains(id[1:len(id)-1], r.Text) || strings.HasPrefix(id, r.Text) || len(r.Text) != 8 {
-				t.Errorf("inner %q of %q", r.Text, id)
-			}
-		default:
-			if r != q {
-				t.Errorf("a word query changed: %+v", r)
-			}
+		if want := expectedText(g, "bench-000002", q); r.Text != want {
+			t.Errorf("%s: %q, want %q", q.Kind, r.Text, want)
 		}
 	}
 
-	if kinds[QueryIDWhole] != 2 || kinds[QueryIDStart] != 2 || kinds[QueryIDInner] != 2 {
+	if got := [3]int{kinds[QueryIDWhole], kinds[QueryIDStart], kinds[QueryIDInner]}; got != [3]int{2, 2, 2} {
 		t.Errorf("kinds %v", kinds)
 	}
 
 	if id := g.RefID("bench-000002", 0); len(id) != 32 || !fts.IsIdentifier(id, 32) {
 		t.Errorf("reference %q", id)
+	}
+}
+
+// expectedText is the text a query has in account: the reference of its
+// message whole, its first 8 characters, 8 inner characters; a word
+// query keeps its text.
+func expectedText(g Generator, account string, q SearchQuery) string {
+	id := g.RefID(account, q.Msg)
+
+	switch q.Kind {
+	case QueryIDWhole:
+		return id
+	case QueryIDStart:
+		return id[:8]
+	case QueryIDInner:
+		return id[12:20]
+	default:
+		return q.Text
 	}
 }

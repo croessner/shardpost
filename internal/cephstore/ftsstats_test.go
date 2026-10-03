@@ -23,36 +23,68 @@ func TestFTSStats(t *testing.T) {
 	deliverDocs(t, u, layoutDocs(30))
 	convert(t, u, model.FTSLayoutRequest{Layout: 3, Shape: &model.FTSForcedShape{S: 4, D: 8, H: 2}})
 
-	st, err := u.FTSStats(model.FTSStatsRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if st.Exact || st.Docs != 30 || st.Shape.S != 4 || len(st.Objects) != 4 || st.Terms == 0 || st.DictKeys == 0 {
+	st := statsOf(t, u, model.FTSStatsRequest{})
+	if got := summaryOf(st); got != (statsSummary{docs: 30, s: 4, objects: 4, postings: 4, terms: st.Terms, dict: st.DictKeys}) || st.Terms == 0 {
 		t.Fatalf("counters %+v", st)
 	}
 
+	ex := statsOf(t, u, model.FTSStatsRequest{Exact: true, Parallel: 3, Classes: true, Context: context.Background()})
+	if got := summaryOf(ex); got != (statsSummary{exact: true, docs: 30, s: 4, objects: 14, postings: 4, terms: st.Terms, dict: st.DictKeys, headers: 30}) {
+		t.Fatalf("exact %+v, counters %+v", got, summaryOf(st))
+	}
+
+	if c := ex.Classes; c == nil || (statsSummary{terms: c.Terms, dict: c.DictKeys, objects: len(c.ByIdent)}) != (statsSummary{terms: st.Terms, dict: st.DictKeys, objects: 28}) {
+		t.Fatalf("classes %+v", c)
+	}
+
+	checkProjection(t, u, ex.Classes)
+	noTerms(t, ex)
+
+	// A cancelled count ends.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := u.FTSStats(model.FTSStatsRequest{Exact: true, Context: ctx}); err == nil {
+		t.Error("a cancelled exact count went on")
+	}
+}
+
+// statsSummary are the numbers of statistics a test compares.
+type statsSummary struct {
+	exact                       bool
+	docs, terms, dict, headers  int64
+	s, objects, postings        int
+}
+
+func summaryOf(st model.FTSStats) statsSummary {
+	out := statsSummary{exact: st.Exact, docs: st.Docs, terms: st.Terms, dict: st.DictKeys, headers: st.HeaderKeys,
+		s: st.Shape.S, objects: len(st.Objects)}
+
 	for _, o := range st.Objects {
-		if o.Kind != model.FTSObjectPostings {
-			t.Errorf("the default read %s", o.Object)
+		if o.Kind == model.FTSObjectPostings {
+			out.postings++
 		}
 	}
 
-	ex, err := u.FTSStats(model.FTSStatsRequest{Exact: true, Parallel: 3, Classes: true, Context: context.Background()})
+	return out
+}
+
+func statsOf(t *testing.T, u *User, req model.FTSStatsRequest) model.FTSStats {
+	t.Helper()
+
+	st, err := u.FTSStats(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !ex.Exact || ex.Terms != st.Terms || ex.DictKeys != st.DictKeys || ex.HeaderKeys != 30 || len(ex.Objects) != 4+8+2 {
-		t.Fatalf("exact %+v, counters %+v", ex, st)
-	}
+	return st
+}
 
-	c := ex.Classes
-	if c == nil || c.Terms != st.Terms || c.DictKeys != st.DictKeys || len(c.ByIdent) != 28 {
-		t.Fatalf("classes %+v", c)
-	}
+// checkProjection: the projection per bound is fts.DictKeys with the
+// bound over the terms of the posting objects.
+func checkProjection(t *testing.T, u *User, c *model.FTSTermClasses) {
+	t.Helper()
 
-	// The projection is fts.DictKeys with the bound over the terms.
 	loc := curLoc(layoutOf(t, u), u.ftsShards)
 
 	for _, b := range c.ByIdent {
@@ -68,20 +100,17 @@ func TestFTSStats(t *testing.T) {
 			t.Errorf("bound %d: %d, want %d", b.MinRunes, b.DictKeys, want)
 		}
 	}
+}
 
-	js, _ := json.Marshal(ex)
+// noTerms: the statistics name none of the words of layoutDocs.
+func noTerms(t *testing.T, st model.FTSStats) {
+	t.Helper()
+
+	js, _ := json.Marshal(st)
 	for _, w := range []string{"photosynthesis", "rechnung", "unique1word"} {
 		if strings.Contains(string(js), w) {
 			t.Errorf("the statistics name the term %q", w)
 		}
-	}
-
-	// A cancelled count ends.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if _, err := u.FTSStats(model.FTSStatsRequest{Exact: true, Context: ctx}); err == nil {
-		t.Error("a cancelled exact count went on")
 	}
 }
 

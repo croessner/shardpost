@@ -274,6 +274,43 @@ func TestFTSDueNoopExpires(t *testing.T) {
 		return model.FTSLayoutReport{Noop: req.DueOnly}, nil
 	}
 
+	first, rec, entry := noopBackoff(t, m, q)
+
+	// The clock passes the backoff: the entry fires and goes, with the
+	// record.
+	later := rec.NoopAt.Add(model.FTSDueNoopBackoff + time.Minute)
+	m.now = func() time.Time { return later }
+
+	fire(t, m, entry)
+	nothingLeft(t, m, q, "after the backoff (the entry was moved instead of removed)")
+
+	// Further looks of the worker do nothing.
+	for range 3 {
+		m.ftsDueOnce(context.Background(), notLost)
+	}
+
+	nothingLeft(t, m, q, "after looks without an entry")
+
+	// A writer queues the account again: a new job is planned.
+	fire(t, m, queueDue(t, q, "alice", "g1", later))
+
+	again := dueRecord(t, m, "alice")
+	if again == nil || again.JobID == first.JobID || !again.NoopAt.IsZero() {
+		t.Fatalf("no new job after a new trigger: %+v", again)
+	}
+
+	if jobs, _, _ := m.List("alice", "", "", 10); len(jobs) != 2 {
+		t.Errorf("%d jobs, want 2", len(jobs))
+	}
+}
+
+// noopBackoff plans a job for alice that finds nothing to do and fires
+// the entry after it: the record has noop_at, the one entry is due six
+// hours later. It returns the first record, the record after the no-op
+// and the entry.
+func noopBackoff(t *testing.T, m *Manager, q model.DueQueue) (*model.FTSDueRecord, *model.FTSDueRecord, model.DueEntry) {
+	t.Helper()
+
 	fire(t, m, queueDue(t, q, "alice", "g1", time.Now()))
 
 	first := dueRecord(t, m, "alice")
@@ -291,40 +328,15 @@ func TestFTSDueNoopExpires(t *testing.T) {
 		t.Fatalf("after the no-op: record %+v entries %+v", rec, left)
 	}
 
-	// The clock passes the backoff: the entry fires and goes, with the
-	// record.
-	later := rec.NoopAt.Add(model.FTSDueNoopBackoff + time.Minute)
-	m.now = func() time.Time { return later }
+	return first, rec, left[0]
+}
 
-	fire(t, m, left[0])
+// nothingLeft: alice has neither an entry nor a record.
+func nothingLeft(t *testing.T, m *Manager, q model.DueQueue, when string) {
+	t.Helper()
 
-	if e := entriesOf(t, q, "alice"); len(e) != 0 {
-		t.Fatalf("entries after the backoff %+v (the entry was moved instead of removed)", e)
-	}
-
-	if r := dueRecord(t, m, "alice"); r != nil {
-		t.Fatalf("record after the backoff %+v", r)
-	}
-
-	// Further looks of the worker do nothing.
-	for range 3 {
-		m.ftsDueOnce(context.Background(), notLost)
-	}
-
-	if e := entriesOf(t, q, "alice"); len(e) != 0 || dueRecord(t, m, "alice") != nil {
-		t.Fatalf("looks without an entry changed something: %+v", e)
-	}
-
-	// A writer queues the account again: a new job is planned.
-	fire(t, m, queueDue(t, q, "alice", "g1", later))
-
-	again := dueRecord(t, m, "alice")
-	if again == nil || again.JobID == first.JobID || !again.NoopAt.IsZero() {
-		t.Fatalf("no new job after a new trigger: %+v", again)
-	}
-
-	if jobs, _, _ := m.List("alice", "", "", 10); len(jobs) != 2 {
-		t.Errorf("%d jobs, want 2", len(jobs))
+	if e, r := entriesOf(t, q, "alice"), dueRecord(t, m, "alice"); len(e) != 0 || r != nil {
+		t.Fatalf("%s: entries %+v record %+v", when, e, r)
 	}
 }
 

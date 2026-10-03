@@ -8,42 +8,43 @@ import (
 	"shardpost/internal/fts"
 )
 
-// TestCensus: terms are counted by field, class and length; the
-// projection per bound equals fts.DictKeys with that bound; nothing of a
-// term reaches the result.
-func TestCensus(t *testing.T) {
-	id32 := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
-	terms := []string{"b:rechnung", "b:2026", "b:" + id32, "s:" + id32, "h:" + id32, "b:" + strings.Repeat("x9", 20), "b:~~", "f:ab"}
+// censusTerms are the terms of the census tests: words, numbers,
+// identifiers in several fields, a 40-rune window, a marker.
+var censusTerms = []string{"b:rechnung", "b:2026", "b:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "s:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+	"h:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "b:" + strings.Repeat("x9", 20), "b:~~", "f:ab"}
 
-	c := New()
+// dictKeysOf sums fts.DictKeys with a bound over terms.
+func dictKeysOf(terms []string, bound int) int64 {
+	var n int64
 	for _, term := range terms {
+		n += int64(fts.DictKeys(term, bound))
+	}
+
+	return n
+}
+
+// TestCensus: terms are counted by field, class and length; the
+// projection per bound equals fts.DictKeys with that bound.
+func TestCensus(t *testing.T) {
+	c := New()
+	for _, term := range censusTerms {
 		c.Add(term)
 	}
 
 	r := c.Result()
 
-	var want int64
-	for _, term := range terms {
-		want += int64(fts.DictKeys(term, 0))
-	}
-
-	if r.Terms != int64(len(terms)) || r.DictKeys != want {
-		t.Errorf("totals %d %d, want %d %d", r.Terms, r.DictKeys, len(terms), want)
+	if r.Terms != int64(len(censusTerms)) || r.DictKeys != dictKeysOf(censusTerms, 0) {
+		t.Errorf("totals %d %d", r.Terms, r.DictKeys)
 	}
 
 	for _, b := range r.ByIdent {
-		var keys int64
-		for _, term := range terms {
-			keys += int64(fts.DictKeys(term, b.MinRunes))
-		}
-
-		if b.DictKeys != keys {
-			t.Errorf("bound %d: %d dictionary keys, want %d", b.MinRunes, b.DictKeys, keys)
+		if want := dictKeysOf(censusTerms, b.MinRunes); b.DictKeys != want {
+			t.Errorf("bound %d: %d dictionary keys, want %d", b.MinRunes, b.DictKeys, want)
 		}
 	}
 
-	if first, last := r.ByIdent[0], r.ByIdent[len(r.ByIdent)-1]; first.MinRunes != 13 || last.MinRunes != 40 ||
-		first.Identifiers != 2 || last.Identifiers != 1 {
+	first, last := r.ByIdent[0], r.ByIdent[len(r.ByIdent)-1]
+	if [4]int64{int64(first.MinRunes), int64(last.MinRunes), first.Identifiers, last.Identifiers} != [4]int64{13, 40, 2, 1} {
 		t.Errorf("bounds %+v … %+v", first, last)
 	}
 
@@ -57,11 +58,19 @@ func TestCensus(t *testing.T) {
 			t.Errorf("class %s missing in %v", k, classes)
 		}
 	}
+}
 
-	b, _ := json.Marshal(r)
-	for _, term := range terms {
-		_, tok, _ := strings.Cut(term, ":")
-		if len(tok) > 3 && strings.Contains(string(b), tok) {
+// TestCensusNamesNoTerm: nothing of a term reaches the result.
+func TestCensusNamesNoTerm(t *testing.T) {
+	c := New()
+	for _, term := range censusTerms {
+		c.Add(term)
+	}
+
+	b, _ := json.Marshal(c.Result())
+
+	for _, term := range censusTerms {
+		if _, tok, _ := strings.Cut(term, ":"); len(tok) > 3 && strings.Contains(string(b), tok) {
 			t.Errorf("the result names the term %q", term)
 		}
 	}

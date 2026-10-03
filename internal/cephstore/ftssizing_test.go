@@ -17,41 +17,48 @@ import (
 // TestSizingSeparateCaps (B14g): the dictionary has a cap and a target
 // of its own; withDefaults fills both caps.
 func TestSizingSeparateCaps(t *testing.T) {
-	if z := (ftsSizing{}).withDefaults(); z.min != 1 || z.max != 32 || z.dictMax != 512 || z.target != 100000 || z.dictTarget != 100000 {
+	if z := (ftsSizing{}).withDefaults(); z != (ftsSizing{min: 1, max: 32, target: 100000, dictMax: 512, dictTarget: 100000}) {
 		t.Errorf("defaults %+v", z)
 	}
 
-	if z := (ftsSizing{min: 600, max: 4, dictMax: 8}).withDefaults(); z.max != 600 || z.dictMax != 600 {
+	if z := (ftsSizing{min: 600, max: 4, dictMax: 8}).withDefaults(); z != (ftsSizing{min: 600, max: 600, target: 100000, dictMax: 600, dictTarget: 100000}) {
 		t.Errorf("caps below the lower bound %+v", z)
 	}
 
 	z := ftsSizing{min: 1, max: 128, target: 100000, dictMax: 512, dictTarget: 100000}.withDefaults()
-
-	// The counts of the largest account on croessner (temp/13 §1.1).
-	if s, _ := z.count(2069828); s != 32 {
-		t.Errorf("S = %d, want 32", s)
-	}
-
-	if d, capped := z.dictCount(10138532); d != 128 || capped {
-		t.Errorf("D = %d %v, want 128 uncapped", d, capped)
-	}
-
-	if d, capped := z.dictCount(84_000_000); d != 512 || !capped {
-		t.Errorf("D for 84 million = %d %v, want 512 capped", d, capped)
-	}
-
-	// The same counts under the single cap of 32 before B14g: D capped.
 	old := ftsSizing{min: 1, max: 32, target: 100000, dictMax: 32, dictTarget: 100000}
-	if d, capped := old.dictCount(10138532); d != 32 || !capped {
-		t.Errorf("single cap: D = %d %v", d, capped)
+
+	for _, c := range []struct {
+		name      string
+		got, want countResult
+	}{
+		// The counts of the largest account on croessner (temp/13 §1.1).
+		{"S of 2069828 terms", resultOf(z.count(2069828)), countResult{32, false}},
+		{"D of 10138532 keys", resultOf(z.dictCount(10138532)), countResult{128, false}},
+		{"D of 84 million keys", resultOf(z.dictCount(84_000_000)), countResult{512, true}},
+		// The same counts under the single cap of 32 before B14g.
+		{"D under the single cap", resultOf(old.dictCount(10138532)), countResult{32, true}},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: %+v, want %+v", c.name, c.got, c.want)
+		}
 	}
 
 	// A smaller dictionary target asks for more dictionary objects only.
 	z.dictTarget = 50000
-	if s, d, h := z.shapeFor(36246); s != 32 || d != 256 || h != 1 {
+
+	if s, d, h := z.shapeFor(36246); [3]int{s, d, h} != [3]int{32, 256, 1} {
 		t.Errorf("shape for 36246 messages with T_d 50000: %d/%d/%d", s, d, h)
 	}
 }
+
+// countResult is a count and whether a cap cut it.
+type countResult struct {
+	n      int
+	capped bool
+}
+
+func resultOf(n int, capped bool) countResult { return countResult{n, capped} }
 
 // TestEstimateKeysCalibration (R2.4): the measured point is met, beyond
 // it the slope of the last section continues (≈ 63.5 terms and ≈ 310.9
@@ -117,6 +124,7 @@ func TestReshardTriggerAtCap(t *testing.T) {
 // cappedOf is the capped field with kind k set.
 func cappedOf(k int) [len(objectKinds)]bool {
 	var c [len(objectKinds)]bool
+
 	c[k] = true
 
 	return c
@@ -247,16 +255,16 @@ func TestLayoutSeparateCaps(t *testing.T) {
 		t.Errorf("entries %+v, want one for the dictionary", e)
 	}
 
-	if cappedCount(t, kindPostings)-pBefore != 1 || cappedCount(t, kindDictionary) != dBefore {
-		t.Error("capped counts: postings once, dictionary never")
+	if got := [2]float64{cappedCount(t, kindPostings) - pBefore, cappedCount(t, kindDictionary) - dBefore}; got != [2]float64{1, 0} {
+		t.Errorf("capped counts %v: postings once, dictionary never", got)
 	}
 
 	target, due, err := u.FTSLayoutDue()
-	if err != nil || !due || target.S != 1 || target.D < 2 || target.H != 1 {
+	if err != nil || !due || [2]int{target.S, target.H} != [2]int{1, 1} || target.D < 2 {
 		t.Fatalf("target %+v %v %v", target, due, err)
 	}
 
-	if !slices.Contains(target.Capped, kindPostings) || slices.Contains(target.Capped, kindDictionary) {
+	if !slices.Equal(target.Capped, []string{kindPostings, kindHeaders}) {
 		t.Errorf("capped kinds %v", target.Capped)
 	}
 
@@ -285,4 +293,45 @@ func TestLayoutForcedShape(t *testing.T) {
 	sameSearches(t, "shape 2/8/3", want, searchState(t, u))
 
 	reshardTo(t, u, 4, want)
+}
+
+// TestLayoutOlderVersionShrinks (temp/13 §5.4 R2.2, §10): a version
+// before 0.49.0 bounds D by fts.shards_max; against a generation with
+// more dictionary objects its due_only target shrinks D. With
+// fts.shards_max at least the largest D (measure b) it does not.
+func TestLayoutOlderVersionShrinks(t *testing.T) {
+	s := layout3Store(t, nil)
+	u := testUser(t, s)
+	mustMailbox(t, u, "INBOX")
+	deliverDocs(t, u, layoutDocs(30))
+
+	// A small dictionary target asks for many dictionary objects: this
+	// version reshards to them.
+	u.ftsCfg.sizing.dictTarget = 10
+
+	want, _, err := u.FTSLayoutDue()
+	if err != nil || want.D < 8 || want.S != 1 || want.H != 1 {
+		t.Fatalf("target %+v %v", want, err)
+	}
+
+	convert(t, u, model.FTSLayoutRequest{DueOnly: true})
+
+	if _, due, err := u.FTSLayoutDue(); err != nil || due {
+		t.Fatalf("this version after its reshard: due %v %v", due, err)
+	}
+
+	// The older version: one cap for all kinds, fts.shards_max 4.
+	u.ftsCfg.sizing.dictMax, u.ftsCfg.sizing.max = 4, 4
+
+	target, due, err := u.FTSLayoutDue()
+	if err != nil || !due || target.D != 4 {
+		t.Fatalf("an older version with fts.shards_max 4 would not shrink: %+v %v %v", target, due, err)
+	}
+
+	// Measure b: fts.shards_max at least the largest D.
+	u.ftsCfg.sizing.dictMax, u.ftsCfg.sizing.max = want.D, want.D
+
+	if target, due, err := u.FTSLayoutDue(); err != nil || due {
+		t.Errorf("fts.shards_max 16: %+v due %v %v", target, due, err)
+	}
 }

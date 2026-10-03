@@ -23,10 +23,7 @@ func (m *measurer) search(ctx context.Context, k int) (*bench.SearchReport, erro
 	queries := bench.SearchQueriesFor(k, m.o.Gen.Corpus)
 	plain, traced := bench.NewSearchResults(queries), bench.NewSearchResults(queries)
 
-	var (
-		mu     sync.Mutex
-		byKind = map[string]*bench.Latency{}
-	)
+	var byKind kindLatency
 
 	query := func(s *cephstore.Store, account string, i int) error {
 		start := time.Now()
@@ -50,15 +47,7 @@ func (m *measurer) search(ctx context.Context, k int) (*bench.SearchReport, erro
 		}
 
 		plain.Add(i, account, h)
-
-		mu.Lock()
-		if byKind[q.Kind] == nil {
-			byKind[q.Kind] = &bench.Latency{}
-		}
-		l := byKind[q.Kind]
-		mu.Unlock()
-
-		l.Add(time.Since(start))
+		byKind.add(q.Kind, time.Since(start))
 
 		return nil
 	}
@@ -72,11 +61,7 @@ func (m *measurer) search(ctx context.Context, k int) (*bench.SearchReport, erro
 		Accounts: len(m.accounts), Count: n, Latency: lat.Summary()}}
 	r.Ops, r.Total = bench.Rates(ops, n)
 	r.Queries = plain.Results()
-	r.ByKind = map[string]bench.LatencySummary{}
-
-	for kind, l := range byKind {
-		r.ByKind[kind] = l.Summary()
-	}
+	r.ByKind = byKind.summary()
 	r.Fingerprint = bench.Fingerprint(r.Queries)
 
 	if !slices.Equal(fingerprints(r.Queries), fingerprints(traced.Results())) {
@@ -84,6 +69,40 @@ func (m *measurer) search(ctx context.Context, k int) (*bench.SearchReport, erro
 	}
 
 	return r, nil
+}
+
+// kindLatency is the latency of the queries by kind; safe for
+// concurrent use.
+type kindLatency struct {
+	mu     sync.Mutex
+	byKind map[string]*bench.Latency
+}
+
+func (k *kindLatency) add(kind string, d time.Duration) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	if k.byKind == nil {
+		k.byKind = map[string]*bench.Latency{}
+	}
+
+	if k.byKind[kind] == nil {
+		k.byKind[kind] = &bench.Latency{}
+	}
+
+	k.byKind[kind].Add(d)
+}
+
+func (k *kindLatency) summary() map[string]bench.LatencySummary {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	out := make(map[string]bench.LatencySummary, len(k.byKind))
+	for kind, l := range k.byKind {
+		out[kind] = l.Summary()
+	}
+
+	return out
 }
 
 func fingerprints(rs []bench.SearchQueryResult) []string {

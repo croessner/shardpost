@@ -76,12 +76,6 @@ func TestFTSLayoutKeys(t *testing.T) {
 	got := c.FTS
 	got.FallbackCharset, got.HTML, got.IMAPSearch, got.VerifyParallel = "", "", "", 0
 
-	if len(got.StatsTestAccounts) != 0 {
-		t.Errorf("default test accounts %v", got.StatsTestAccounts)
-	}
-
-	got.StatsTestAccounts = nil
-
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("defaults %+v", got)
 	}

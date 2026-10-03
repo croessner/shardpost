@@ -40,22 +40,29 @@ func parseFTSLayout(params json.RawMessage) (ftsLayoutParams, error) {
 		}
 	}
 
-	switch {
-	case p.Layout != 0 && p.Layout != model.FTSLayout2 && p.Layout != model.FTSLayout3:
+	if p.Layout != 0 && p.Layout != model.FTSLayout2 && p.Layout != model.FTSLayout3 {
 		return p, fmt.Errorf("%w: layout must be 2 or 3", ErrInvalidParams)
+	}
+
+	return p, p.checkForced()
+}
+
+// checkForced checks the forced counts: shards or shape, layout 3 only.
+func (p ftsLayoutParams) checkForced() error {
+	switch {
 	case p.Shards < 0 || p.Shards > maxForcedShards:
-		return p, fmt.Errorf("%w: shards must be 0 to 4096", ErrInvalidParams)
+		return fmt.Errorf("%w: shards must be 0 to 4096", ErrInvalidParams)
 	case p.Shards > 0 && p.Shape != "":
-		return p, fmt.Errorf("%w: shards and shape exclude each other", ErrInvalidParams)
+		return fmt.Errorf("%w: shards and shape exclude each other", ErrInvalidParams)
 	case (p.Shards > 0 || p.Shape != "") && p.Layout == model.FTSLayout2:
-		return p, fmt.Errorf("%w: shards and shape apply to layout 3 only", ErrInvalidParams)
+		return fmt.Errorf("%w: shards and shape apply to layout 3 only", ErrInvalidParams)
 	}
 
 	if _, err := ParseFTSShape(p.Shape); err != nil {
-		return p, fmt.Errorf("%w: %v", ErrInvalidParams, err)
+		return fmt.Errorf("%w: %v", ErrInvalidParams, err)
 	}
 
-	return p, nil
+	return nil
 }
 
 // ParseFTSShape parses the forced shape "s/d/h" of fts_layout: three

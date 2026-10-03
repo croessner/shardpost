@@ -133,6 +133,7 @@ func SearchQueriesFor(k int, c Corpus) []SearchQuery {
 		}
 
 		j := i / 2
+
 		key := KeyBody
 		if (j/len(idKinds))%2 == 1 {
 			key = KeyText

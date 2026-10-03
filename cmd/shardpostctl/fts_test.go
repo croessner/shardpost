@@ -114,21 +114,17 @@ func TestFTSLayoutCommands(t *testing.T) {
 func TestFTSStatsCommand(t *testing.T) {
 	socket := serveFilled(t, admin.RoleDiagnose)
 
-	code, out, errOut := call(socket, "", "fts", "stats", "alice")
-	if code != exOK || !strings.Contains(out, "dict_keys") || !strings.Contains(out, "per message") {
-		t.Fatalf("stats: %d %s %s", code, out, errOut)
-	}
-
-	code, out, errOut = call(socket, "", "fts", "stats", "-classes", "alice")
-	if code != exOK || !strings.Contains(out, "identifier bound") || !strings.Contains(out, "letters") {
-		t.Fatalf("stats -classes: %d %s %s", code, out, errOut)
-	}
-
-	_, js, _ := call(socket, "", "fts", "stats", "-classes", "-exact", "-json", "alice")
-
-	for _, text := range []string{out, js} {
-		if strings.Contains(text, "body") {
-			t.Errorf("a term of the account is printed:\n%s", text)
+	for _, c := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"fts", "stats", "alice"}, []string{"dict_keys", "per message"}},
+		{[]string{"fts", "stats", "-classes", "alice"}, []string{"identifier bound", "letters"}},
+		{[]string{"fts", "stats", "-classes", "-exact", "-json", "alice"}, []string{`"by_ident_min_runes"`}},
+	} {
+		code, out, errOut := call(socket, "", c.args...)
+		if code != exOK || !containsAll(out, c.want) || strings.Contains(out, "body") {
+			t.Errorf("%v: %d %s %s (no term of the account may be printed)", c.args, code, out, errOut)
 		}
 	}
 
@@ -141,6 +137,16 @@ func TestFTSStatsCommand(t *testing.T) {
 			t.Errorf("%v: exit %d", args, code)
 		}
 	}
+}
+
+func containsAll(s string, parts []string) bool {
+	for _, p := range parts {
+		if !strings.Contains(s, p) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // TestLargestDict (temp/13 §5.4): list -verify names the account with

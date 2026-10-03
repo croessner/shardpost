@@ -96,15 +96,7 @@ func (g Generator) Message(account string, n int) ([]byte, *rand.Rand) {
 	var b bytes.Buffer
 
 	b.Grow(size + 256)
-
-	date := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Hour)
-
-	fmt.Fprintf(&b, "From: %s <%s@example.org>%s", term(zipf.Uint64()), term(zipf.Uint64()), crlf)
-	fmt.Fprintf(&b, "To: <%s@bench.invalid>%s", account, crlf)
-	fmt.Fprintf(&b, "Subject: %s%s", words(zipf, 3+r.IntN(6)), crlf)
-	fmt.Fprintf(&b, "Date: %s%s", date.Format(time.RFC1123Z), crlf)
-	fmt.Fprintf(&b, "Message-ID: <%016x.%d@bench.invalid>%s", r.Uint64(), n, crlf)
-	b.WriteString("MIME-Version: 1.0" + crlf)
+	header(&b, r, zipf, account, n)
 
 	if size <= textMax {
 		b.WriteString("Content-Type: text/plain; charset=utf-8" + crlf + crlf)
@@ -126,6 +118,18 @@ func (g Generator) Message(account string, n int) ([]byte, *rand.Rand) {
 	b.WriteString("--" + boundary + "--" + crlf)
 
 	return b.Bytes(), r
+}
+
+// header writes the header fields every bench message starts with.
+func header(b *bytes.Buffer, r *rand.Rand, zipf *rand.Zipf, account string, n int) {
+	date := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Hour)
+
+	fmt.Fprintf(b, "From: %s <%s@example.org>%s", term(zipf.Uint64()), term(zipf.Uint64()), crlf)
+	fmt.Fprintf(b, "To: <%s@bench.invalid>%s", account, crlf)
+	fmt.Fprintf(b, "Subject: %s%s", words(zipf, 3+r.IntN(6)), crlf)
+	fmt.Fprintf(b, "Date: %s%s", date.Format(time.RFC1123Z), crlf)
+	fmt.Fprintf(b, "Message-ID: <%016x.%d@bench.invalid>%s", r.Uint64(), n, crlf)
+	b.WriteString("MIME-Version: 1.0" + crlf)
 }
 
 // words returns n terms separated by spaces.

@@ -70,6 +70,22 @@ func TestPieceWriterBuffer(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	checkPieces(t, log, want)
+
+	if f := log.fences.Load(); [2]int64{f, w.writes.Load()} != [2]int64{int64(len(log.pieces)), int64(len(log.pieces))} {
+		t.Errorf("fences %d, pieces %d, writes %d", f, len(log.pieces), w.writes.Load())
+	}
+
+	if w.peak > w.limit+1 {
+		t.Errorf("peak %d above the limit %d", w.peak, w.limit)
+	}
+}
+
+// checkPieces: want keys were written, each once, in pieces of at most
+// dictWriteChunk keys.
+func checkPieces(t *testing.T, log *pieceLog, want int) {
+	t.Helper()
+
 	if len(log.keys) != want {
 		t.Errorf("%d keys written, want %d", len(log.keys), want)
 	}
@@ -84,14 +100,6 @@ func TestPieceWriterBuffer(t *testing.T) {
 		if n > dictWriteChunk {
 			t.Fatalf("piece of %d keys", n)
 		}
-	}
-
-	if f := log.fences.Load(); f != int64(len(log.pieces)) || w.writes.Load() != f {
-		t.Errorf("fences %d, pieces %d, writes %d", f, len(log.pieces), w.writes.Load())
-	}
-
-	if w.peak > w.limit+1 {
-		t.Errorf("peak %d above the limit %d", w.peak, w.limit)
 	}
 }
 

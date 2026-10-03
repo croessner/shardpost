@@ -33,6 +33,9 @@ func registrations() (*memstore.AdminKV, *model.PoolRef) {
 
 // serveFilled is an admin socket over a memstore where alice has INBOX
 // (two messages), A, B and "Shared" (bob lr).
+// isAlice is the test account of fts stats -classes.
+func isAlice(a string) bool { return a == "alice" }
+
 func serveFilled(t *testing.T, roles ...string) string {
 	t.Helper()
 
@@ -73,8 +76,7 @@ func serveFilled(t *testing.T, roles ...string) string {
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
 		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Directory: store, KV: regs,
 		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000,
-		SharedPrefix: "Shared/", PublicPrefix: "Public/", Placement: func() (string, *model.PoolRef) { return "native", pool },
-		FTSStatsTestAccount: func(a string) bool { return a == "alice" }})
+		SharedPrefix: "Shared/", PublicPrefix: "Public/", Placement: func() (string, *model.PoolRef) { return "native", pool }, FTSStatsTestAccount: isAlice})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ended := make(chan struct{})
