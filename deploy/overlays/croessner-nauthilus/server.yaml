@@ -236,3 +236,8 @@ fts:
   # to stay below Ceph's large-omap threshold (temp/13, V0, 2026-10-03);
   # the cap applies to postings and dictionary alike until B14g.
   shards_max: 128
+  # Online reshards and rebuilds without an account lock (0.51.0, mark
+  # fts/online set on 2026-10-03); automatic reshards only at night.
+  online_build: auto
+  reshard_window: "02:00-05:00"
+  reshard_window_tz: Europe/Berlin

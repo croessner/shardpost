@@ -32,7 +32,9 @@ SELECTOR=${SELECTOR:-app.kubernetes.io/name=shardpost-server}
 SERVICE=${SERVICE:-svc/shardpost}
 POP3_URL=${POP3_URL:-pop3://shardpost:110/}
 JMAP_URL=${JMAP_URL:-https://shardpost-jmap:9443}
-LMTP=${LMTP:-shardpost:24}
+# The LMTP listener of the server pod itself: the NetworkPolicy of the
+# service does not admit the server pods as clients of port 24.
+LMTP=${LMTP:-127.0.0.1:2424}
 LOCAL_IMAP=${LOCAL_IMAP:-14300}
 ACCOUNT=${1:-rbdpoc2@exampleserver.de}
 # RATE deliveries per second, BATCH messages per shardpost-load exec,
@@ -129,7 +131,7 @@ while :; do
 	esac
 
 	out=$($K exec "$DEPLOY" -c server -- shardpost-load -lmtp "$LMTP" -corpus plain -rcpt "$ACCOUNT" -count "$BATCH" \
-		-first "$first" -rate "$RATE" -parallel 1 2>&1 | tail -1) || true
+		-first "$first" -rate "$RATE" -parallel 1 2>&1 | grep -E '^shardpost-load: .* delivered') || true
 	first=$((first + BATCH))
 	loads=$((loads + BATCH))
 	f=$(echo "$out" | sed -n 's/.* \([0-9][0-9]*\) failed.*/\1/p')
@@ -142,7 +144,7 @@ while :; do
 	jmaps=$((jmaps + 1))
 	code=$({
 		curlcfg
-		printf 'url = "%s/jmap/session"\nwrite-out = "%%{http_code}"\noutput = "/dev/null"\n' "$JMAP_URL"
+		printf 'url = "%s/.well-known/jmap"\nwrite-out = "%%{http_code}"\noutput = "/dev/null"\n' "$JMAP_URL"
 	} | $K exec -i "$TOOLS" -- curl -sS -K - --insecure 2>/dev/null || true)
 	[ "$code" = 200 ] || jmapfail=$((jmapfail + 1))
 
