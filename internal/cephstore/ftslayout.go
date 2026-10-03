@@ -1019,6 +1019,7 @@ func (u *User) reportCapped(gen, kind string) {
 type ftsUserCfg struct {
 	layout      int
 	sizing      ftsSizing
+	convert     convertCfg
 	autoReshard bool
 	frozenWait  time.Duration
 }
@@ -1032,7 +1033,8 @@ func ftsUserConfig(c FTSConfig) ftsUserCfg {
 
 	return ftsUserCfg{layout: layout, autoReshard: c.AutoReshard, frozenWait: max(c.FrozenWait, 0),
 		sizing: ftsSizing{min: c.ShardsMin, max: c.ShardsMax, target: c.ShardTargetKeys,
-			dictMax: c.DictShardsMax, dictTarget: c.DictTargetKeys}.withDefaults()}
+			dictMax: c.DictShardsMax, dictTarget: c.DictTargetKeys}.withDefaults(),
+		convert: convertCfg{bufferKeys: c.ConvertBufferKeys, writers: c.ConvertWriters}.withDefaults()}
 }
 
 // SetImportHint implements model.ImportHinter: a fresh index of this

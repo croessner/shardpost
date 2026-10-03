@@ -228,6 +228,7 @@ func (u *User) runPhases(req model.FTSLayoutRequest, rep *model.FTSLayoutReport,
 	}
 
 	rep.Terms, rep.Dict, rep.Headers, rep.Docs = stats.terms, stats.dict, stats.headers, stats.docs
+	rep.Writes, rep.BufferKeys = stats.writes, stats.buffer
 
 	if err := u.phase6(req, src, target, stats); err != nil {
 		return err
@@ -666,79 +667,12 @@ func (u *User) phase3(req model.FTSLayoutRequest, src ftsLoc) error {
 // convertStats count what P5 wrote.
 type convertStats struct {
 	terms, dict, headers, docs int64
+	// writes are the writes of the copy, buffer the most keys it held.
+	writes int64
+	buffer int
 	// nextID is the id map's next id when P5 read the documents (P6
 	// counts the documents indexed after it).
 	nextID uint64
-}
-
-// chunkWriter collects the keys of target objects and writes them in
-// pieces of at most dictWriteChunk keys, fenced.
-type chunkWriter struct {
-	u      *User
-	exists bool
-	fence  func() error
-	keys   map[string]map[string][]byte
-	sizes  map[string]int64
-}
-
-func (w *chunkWriter) add(oid, key string, v []byte) error {
-	if w.keys[oid] == nil {
-		w.keys[oid] = map[string][]byte{}
-	}
-
-	w.keys[oid][key] = v
-	w.sizes[oid]++
-
-	if len(w.keys[oid]) >= dictWriteChunk {
-		return w.flush(oid)
-	}
-
-	return nil
-}
-
-func (w *chunkWriter) flush(oid string) error {
-	set := w.keys[oid]
-	if len(set) == 0 {
-		return nil
-	}
-
-	if err := w.fence(); err != nil {
-		return err
-	}
-
-	op := rados.CreateWriteOp()
-	defer op.Release()
-
-	if w.exists {
-		op.AssertExists()
-	}
-
-	op.SetOmap(set)
-
-	if err := op.Operate(w.u.idx, oid, rados.OperationNoFlag); err != nil {
-		return fmt.Errorf("write %s: %w", oid, err)
-	}
-
-	delete(w.keys, oid)
-
-	return nil
-}
-
-func (w *chunkWriter) flushAll() error {
-	oids := make([]string, 0, len(w.keys))
-	for oid := range w.keys {
-		oids = append(oids, oid)
-	}
-
-	slices.Sort(oids)
-
-	for _, oid := range oids {
-		if err := w.flush(oid); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // phase5 builds the target from the frozen sources.
@@ -767,14 +701,24 @@ func (u *User) phase5(req model.FTSLayoutRequest, src, target ftsLoc) (convertSt
 
 	st.docs, st.nextID = int64(len(live)), next
 
+	w := u.newPieceWriter(target, req.Fence)
+	defer w.stop()
+
 	c := &copier{u: u, target: target, live: live, byGUID: byGUID, st: &st, terms: map[string]int64{}, dicts: map[string]int64{},
-		posts: newChunkWriter(u, target, req.Fence), dict: newChunkWriter(u, target, req.Fence), heads: newChunkWriter(u, target, req.Fence)}
+		posts: newChunkWriter(w), dict: newChunkWriter(w), heads: newChunkWriter(w)}
 
 	if err := c.postings(req, src); err != nil {
 		return st, err
 	}
 
 	if err := c.headers(src); err != nil {
+		return st, err
+	}
+
+	err = w.finish()
+	st.writes, st.buffer = w.writes.Load(), w.peak
+
+	if err != nil {
 		return st, err
 	}
 
@@ -815,11 +759,7 @@ func (c *copier) postings(req model.FTSLayoutRequest, src ftsLoc) error {
 		}
 	}
 
-	if err := c.posts.flushAll(); err != nil {
-		return err
-	}
-
-	return c.dict.flushAll()
+	return nil
 }
 
 // term writes one term's list and dictionary keys.
@@ -864,12 +804,7 @@ func (c *copier) headers(src ftsLoc) error {
 		}
 	}
 
-	return c.heads.flushAll()
-}
-
-// newChunkWriter is a chunkWriter into the objects of target.
-func newChunkWriter(u *User, target ftsLoc, fence func() error) *chunkWriter {
-	return &chunkWriter{u: u, exists: target.v3(), fence: fence, keys: map[string]map[string][]byte{}, sizes: map[string]int64{}}
+	return nil
 }
 
 // shardGauge records the largest object of a kind.

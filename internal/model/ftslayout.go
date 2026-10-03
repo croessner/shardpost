@@ -259,6 +259,10 @@ type FTSLayoutReport struct {
 	Dict    int64  `json:"dict_keys"`
 	Headers int64  `json:"headers"`
 	Docs    int64  `json:"docs"`
+	// Writes are the writes of the copy (each fenced first), BufferKeys
+	// the most keys its write buffer held (since 0.49.0).
+	Writes     int64 `json:"writes,omitempty"`
+	BufferKeys int   `json:"buffer_keys,omitempty"`
 }
 
 // FTSLayoutState is the layout record of an account as an operator sees
