@@ -3587,14 +3587,15 @@ type lease struct {
 	// lock's object, name, description and TTL, how to open a view on
 	// the current connection (Retake), the deadline of the last
 	// successful take (ValidUntil) and an observer of the durations of
-	// its operations (nil: none).
+	// its operations (nil: none; set after the take, while the renewal
+	// goroutine already runs, hence atomic).
 	u               *User
 	oid, name, desc string
 	cookie          string
 	ttl             time.Duration
 	reopen          func() (*User, error)
 	validUntil      atomic.Pointer[time.Time]
-	observer        func(op string, d time.Duration)
+	observer        atomic.Pointer[func(op string, d time.Duration)]
 }
 
 var (

@@ -382,8 +382,8 @@ func (l *lease) ValidUntil() time.Time {
 // observe reports the duration of a lock operation to the lease's
 // observer, if it has one.
 func (l *lease) observe(op string, start time.Time) {
-	if l.observer != nil {
-		l.observer(op, time.Since(start))
+	if fn := l.observer.Load(); fn != nil {
+		(*fn)(op, time.Since(start))
 	}
 }
 
