@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sync"
+	"time"
 
 	"shardpost/internal/bench"
 	"shardpost/internal/cephstore"
@@ -14,29 +16,49 @@ import (
 // view of its own, as a new IMAP session would, so the view's first
 // check of the full-text index is part of a search.
 
-// search runs the queries of bench.SearchQueries(k) in every probe
-// account and compares the results of the two rounds.
+// search runs the queries of bench.SearchQueriesFor(k, corpus) in every
+// probe account and compares the results of the two rounds; the
+// identifier queries take their text from the account.
 func (m *measurer) search(ctx context.Context, k int) (*bench.SearchReport, error) {
-	queries := bench.SearchQueries(k)
+	queries := bench.SearchQueriesFor(k, m.o.Gen.Corpus)
 	plain, traced := bench.NewSearchResults(queries), bench.NewSearchResults(queries)
 
+	var (
+		mu     sync.Mutex
+		byKind = map[string]*bench.Latency{}
+	)
+
 	query := func(s *cephstore.Store, account string, i int) error {
+		start := time.Now()
+
 		u, err := s.User(account)
 		if err != nil {
 			return err
 		}
 		defer u.Close()
 
-		h, err := bench.Search(u, queries[i])
+		q := bench.ResolveQuery(m.o.Gen, account, queries[i])
+
+		h, err := bench.Search(u, q)
 		if err != nil {
-			return fmt.Errorf("query %d %+v: %w", i, queries[i], err)
+			return fmt.Errorf("query %d %+v: %w", i, q, err)
 		}
 
-		if s == m.o.Store {
-			plain.Add(i, account, h)
-		} else {
+		if s != m.o.Store {
 			traced.Add(i, account, h)
+			return nil
 		}
+
+		plain.Add(i, account, h)
+
+		mu.Lock()
+		if byKind[q.Kind] == nil {
+			byKind[q.Kind] = &bench.Latency{}
+		}
+		l := byKind[q.Kind]
+		mu.Unlock()
+
+		l.Add(time.Since(start))
 
 		return nil
 	}
@@ -50,6 +72,11 @@ func (m *measurer) search(ctx context.Context, k int) (*bench.SearchReport, erro
 		Accounts: len(m.accounts), Count: n, Latency: lat.Summary()}}
 	r.Ops, r.Total = bench.Rates(ops, n)
 	r.Queries = plain.Results()
+	r.ByKind = map[string]bench.LatencySummary{}
+
+	for kind, l := range byKind {
+		r.ByKind[kind] = l.Summary()
+	}
 	r.Fingerprint = bench.Fingerprint(r.Queries)
 
 	if !slices.Equal(fingerprints(r.Queries), fingerprints(traced.Results())) {

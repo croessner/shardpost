@@ -69,6 +69,9 @@ func term(i uint64) string {
 type Generator struct {
 	Seed  uint64
 	Sizes SizeDist
+	// Corpus is the content: the plain corpus (the zero value) or the
+	// identifier corpus (corpus.go).
+	Corpus Corpus
 }
 
 // rng is the random source of message n of account.
@@ -82,6 +85,10 @@ func (g Generator) rng(account string, n int) *rand.Rand {
 // Message returns message n of account and the random source that
 // produced it (the caller draws its target mailbox from it).
 func (g Generator) Message(account string, n int) ([]byte, *rand.Rand) {
+	if g.Corpus.IDs {
+		return g.idMessage(account, n)
+	}
+
 	r := g.rng(account, n)
 	size := g.Sizes.Pick(r)
 	zipf := rand.NewZipf(r, zipfS, 1, vocabSize-1)

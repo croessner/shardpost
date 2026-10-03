@@ -67,6 +67,9 @@ type benchFlags struct {
 	// ftsLayout is the layout of new full-text indexes (0: the
 	// configuration's); 3 sets the cluster mark in the bench pools.
 	ftsLayout int
+
+	// corpus is the content of the messages (bench.ParseCorpus).
+	corpus string
 }
 
 func (f *benchFlags) register(fs *flag.FlagSet) {
@@ -78,6 +81,8 @@ func (f *benchFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.jsonOut, "json", "", "write the report as JSON to this file (- for standard output)")
 	fs.StringVar(&f.sizes, "sizes", bench.DefaultSizes, "message size distribution <weight>:<min>-<max>,...")
 	fs.Uint64Var(&f.seed, "seed", 1, "seed of the message generator")
+	fs.StringVar(&f.corpus, "corpus", bench.CorpusPlain, "message content: plain, ids (with identifiers and attached headers) or ids,nosig "+
+		"(the same messages without the signature and trace fields of attached headers)")
 	fs.IntVar(&f.ftsLayout, "fts-layout", 0, "layout of new full-text indexes: 2 or 3 (3 sets the layout 3 mark in the bench pools; 0: the configuration's)")
 }
 
@@ -225,9 +230,15 @@ func benchPopulate(ctx context.Context, log *slog.Logger, settings *config.Confi
 		return benchRefused
 	}
 
+	corpus, err := bench.ParseCorpus(f.corpus)
+	if err != nil {
+		log.Error("bench: --corpus", "err", err)
+		return benchRefused
+	}
+
 	o.Prefix, o.Parallel, o.Log = f.prefix, f.parallel, log
 	o.Mailboxes = bench.ParseMailboxes(mailboxes)
-	o.Gen = bench.Generator{Seed: f.seed, Sizes: sizeParsed}
+	o.Gen = bench.Generator{Seed: f.seed, Sizes: sizeParsed, Corpus: corpus}
 
 	if err := o.Validate(); err != nil {
 		log.Error("bench: refused", "err", err)
@@ -282,6 +293,12 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 		return benchRefused
 	}
 
+	corpus, err := bench.ParseCorpus(f.corpus)
+	if err != nil {
+		log.Error("bench: --corpus", "err", err)
+		return benchRefused
+	}
+
 	g, cfg, store, code := benchSetup(ctx, log, settings, &f)
 	if store == nil {
 		return code
@@ -289,7 +306,7 @@ func benchMeasure(ctx context.Context, log *slog.Logger, settings *config.Config
 	defer cephbench.Close(store)
 
 	o.Guard, o.Config, o.Store, o.EC, o.Log, o.Parallel = g, cfg, store, ec, log, f.parallel
-	o.Gen = bench.Generator{Seed: f.seed, Sizes: sizes}
+	o.Gen = bench.Generator{Seed: f.seed, Sizes: sizes, Corpus: corpus}
 	o.NewDeliverer = benchDeliverer(log, settings)
 
 	rep, err := cephbench.Measure(ctx, o)

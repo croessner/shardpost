@@ -1,4 +1,4 @@
-.TH SHARDPOST-BENCH 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
+.TH SHARDPOST-BENCH 1 "2026-10-03" "ShardPost 0.49.0" "ShardPost Manual"
 .SH NAME
 shardpost-bench \- fill separate bench pools with accounts and measure what an account costs in Ceph
 .SH SYNOPSIS
@@ -147,7 +147,38 @@ the full-text index sees frequent and rare terms), and a message above
 32 KiB carries a base64 attachment for the rest of its size. Message
 .I n
 of an account is the same for the same
-.BR \-\-seed .
+.B \-\-seed
+and
+.BR \-\-corpus .
+.PP
+.B \-\-corpus ids
+adds what real mail carries and the plain vocabulary does not:
+identifiers new in every message. Each message has a reference of 32 hex
+digits
+.RB ( "Ref: " ),
+sometimes hex ids of 16, 32 or 64 digits, up to one tracking link with a
+base64url token of 20 to 120 characters, a line of 40 to 70 short
+numbers, codes and names, in 2 % of the messages a base64 block in the
+text, and in 5 % a forwarded message (message/rfc822) or a bounce
+(text/rfc822-headers) with full headers: three Received fields, ARC,
+authentication results, DKIM and X-Google-DKIM signatures.
+.B \-\-corpus ids,nosig
+is the same messages from the same random draws without the signature
+and trace fields of those attached headers (DKIM-Signature, ARC-Seal,
+ARC-Message-Signature, ARC-Authentication-Results,
+Authentication-Results, Received, Received-SPF,
+X-Google-DKIM-Signature, X-*-Signature): the difference of two runs is
+what those fields cost the dictionary. One account of 12 000 messages of
+the default sizes has about 50 terms and 325 dictionary keys per message
+with
+.BR ids ,
+about 45 and 230 with
+.BR ids,nosig ,
+and about 10 and 40 with the plain corpus, whose vocabulary is exhausted
+by then (the largest real account measured: 57 and 280 at 36 000
+messages). The same messages can be delivered to a real test account
+over LMTP with
+.BR "shardpost-load \-corpus" .
 An account continues at its current message count, so a run that was
 stopped is resumed by running it again with the same options, and a run
 with a higher
@@ -240,7 +271,17 @@ search queries each, before any delivery, in two rounds like the
 deliveries. The queries are a fixed set drawn from the vocabulary of the
 message generator (the same for every account and every run): whole
 words, word starts and parts from inside a word of 3 to 6 characters,
-frequent and rare words, as TEXT, BODY, SUBJECT and FROM. Each query
+frequent and rare words, as TEXT, BODY, SUBJECT and FROM. With
+.B "\-\-corpus ids"
+every second query is an identifier query instead, as BODY and TEXT:
+the reference of one of the first five messages of the account as a
+whole
+.RB ( id\-whole ),
+its first 8 characters
+.RB ( id\-start )
+and 8 characters from inside it
+.RB ( id\-inner );
+the report gives the latency per kind of query. Each query
 asks the full-text index the way IMAP SEARCH does (the candidates of a
 substring search, TEXT as header and body) and the way the word search
 does, in a view of its own. The report gives the latency and the
@@ -378,6 +419,16 @@ separated by commas, sizes in bytes or with
 .TP
 .BI \-\-seed " n"
 The seed of the message generator (1).
+.TP
+.BI \-\-corpus " name"
+The content of the messages:
+.B plain
+(the default),
+.B ids
+(with identifiers and attached headers) or
+.B ids,nosig
+(the same without the signature and trace fields of the attached
+headers). Populate and measure an account with the same corpus.
 .TP
 .BI \-\-json " file"
 Also write the report as JSON to

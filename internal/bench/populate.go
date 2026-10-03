@@ -103,6 +103,7 @@ type PopulateReport struct {
 	Mailboxes          []string       `json:"mailboxes"`
 	Sizes              string         `json:"sizes"`
 	Seed               uint64         `json:"seed"`
+	Corpus             string         `json:"corpus"`
 	AccountsComplete   int64          `json:"accounts_already_complete"`
 	AccountsFailed     int64          `json:"accounts_failed"`
 	Deliveries         int64          `json:"deliveries"`
@@ -295,7 +296,7 @@ func Request(account string, raw []byte, mailbox string) delivery.Request {
 func (p *populator) report(took time.Duration, cas0 CASReading) *PopulateReport {
 	n := p.delivered.Load()
 	rep := &PopulateReport{Prefix: p.o.Prefix, First: p.o.First, Accounts: p.o.Accounts, MessagesPerAccount: p.o.Messages,
-		Mailboxes: p.o.Mailboxes, Sizes: p.o.Gen.Sizes.String(), Seed: p.o.Gen.Seed,
+		Mailboxes: p.o.Mailboxes, Sizes: p.o.Gen.Sizes.String(), Seed: p.o.Gen.Seed, Corpus: p.o.Gen.Corpus.String(),
 		AccountsComplete: p.complete.Load(), AccountsFailed: p.failedAccts.Load(),
 		Deliveries: n, Failures: p.failures.Load(), Bytes: p.bytes.Load(),
 		Seconds: round3(took.Seconds()), Latency: p.lat.Summary(), CASRetries: CASDelta(cas0, CASRetries(), n)}
