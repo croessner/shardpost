@@ -209,9 +209,18 @@ func ftsLayoutNoop(j *Job) bool {
 // ftsDueNoop handles an account whose job found nothing to do (R4.6):
 // the per-object trigger and the target from the sum can disagree, so
 // the entry waits FTSDueNoopBackoff instead of planning a job every time
-// the writers' memory of it expires.
+// the writers' memory of it expires. An entry that fires when the
+// backoff is over goes, with the record (temp/13 R2.1): a writer whose
+// trigger still asks for a reshard queues the account afresh, and
+// without a record the worker plans a new job then. Before 0.49.0 the
+// entry was moved to the same past time on every look, once a minute,
+// and never planned again.
 func (m *Manager) ftsDueNoop(e model.DueEntry, rec *model.FTSDueRecord, lost func() bool) error {
 	now := m.now()
+
+	if !rec.NoopAt.IsZero() && !now.Before(rec.NoopAt.Add(model.FTSDueNoopBackoff)) {
+		return m.ftsDueForget(e, rec, lost)
+	}
 
 	if rec.NoopAt.IsZero() {
 		if lost() {
@@ -236,6 +245,31 @@ func (m *Manager) ftsDueNoop(e model.DueEntry, rec *model.FTSDueRecord, lost fun
 	}
 
 	return m.ftsDueMove(e, &model.DueKey{Due: rec.NoopAt.Add(model.FTSDueNoopBackoff), Gen: e.Gen}, lost)
+}
+
+// ftsDueForget removes the record of a no-op job, exactly that one,
+// and then the entry that fired; nothing after a lost lease. The record
+// goes first: an entry left behind by a failed removal fires again and
+// plans a job, while a record left behind would answer every later
+// entry of the generation with this branch again.
+func (m *Manager) ftsDueForget(e model.DueEntry, rec *model.FTSDueRecord, lost func() bool) error {
+	if lost() {
+		return nil
+	}
+
+	err := m.st.kv.Update(model.FTSDueRecordKey(e.ID), func(cur []byte) ([]byte, error) {
+		var c model.FTSDueRecord
+		if cur == nil || json.Unmarshal(cur, &c) != nil || c.JobID != rec.JobID || c.Gen != rec.Gen {
+			return cur, nil
+		}
+
+		return nil, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	return m.ftsDueMove(e, nil, lost)
 }
 
 // ftsDueLater postpones the entry by the record's backoff.

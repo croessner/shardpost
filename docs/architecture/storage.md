@@ -1631,7 +1631,14 @@ otherwise it plans and applies `fts_layout {"due_only": true}` and
 remembers the job in the admin record `fts_due/<account>` (deleted with
 the account). A job that switched removes entry and record; one that
 found nothing to do (the per-object trigger and the target from the sums
-can disagree) leaves the entry six hours alone. The targets are
+can disagree) leaves the entry six hours alone, and when it fires after
+them, entry and record go (exactly the record of that job, the record
+first). A writer whose trigger still asks for a reshard then queues the
+account afresh, and the worker plans a new job: at most one no-op job
+per generation every six hours and ten minutes. Before 0.49.0 the entry
+was moved to the same past time on every look of the worker, once a
+minute and for good, and the account was never planned again — a cap
+raised later (or real growth) needed a job by hand. The targets are
 S′ = 2^⌈log2(Σ`!n` / T_p)⌉ and H′ from `c`, each at most
 `fts.shards_max`, and D′ = 2^⌈log2(Σ`!dn` / T_d)⌉, at most
 `fts.dict_shards_max`; all at least `fts.shards_min`. `FTSLayoutDue`

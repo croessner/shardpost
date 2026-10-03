@@ -262,6 +262,72 @@ func TestFTSDueNoop(t *testing.T) {
 	}
 }
 
+// TestFTSDueNoopExpires (temp/13 R2.1): an entry that fires once the
+// six hours after a no-op are over is removed with the record, without
+// a move; later looks of the worker find nothing; a writer that queues
+// the account again gets a new job. Before the fix the entry was moved
+// to the same past time on every look and no job was planned again.
+func TestFTSDueNoopExpires(t *testing.T) {
+	m, o, _, q := dueSetup(t, "alice")
+	o.fake("alice").gen = "g1"
+	o.fake("alice").convert = func(req model.FTSLayoutRequest) (model.FTSLayoutReport, error) {
+		return model.FTSLayoutReport{Noop: req.DueOnly}, nil
+	}
+
+	fire(t, m, queueDue(t, q, "alice", "g1", time.Now()))
+
+	first := dueRecord(t, m, "alice")
+
+	runManagerNoDue(t, m)
+	waitState(t, m, first.JobID, StateSucceeded)
+	waitUnlocked(t, m, "alice")
+
+	fire(t, m, entriesOf(t, q, "alice")[0])
+
+	rec := dueRecord(t, m, "alice")
+	left := entriesOf(t, q, "alice")
+
+	if rec == nil || rec.NoopAt.IsZero() || len(left) != 1 || !left[0].Due.Equal(rec.NoopAt.Add(model.FTSDueNoopBackoff)) {
+		t.Fatalf("after the no-op: record %+v entries %+v", rec, left)
+	}
+
+	// The clock passes the backoff: the entry fires and goes, with the
+	// record.
+	later := rec.NoopAt.Add(model.FTSDueNoopBackoff + time.Minute)
+	m.now = func() time.Time { return later }
+
+	fire(t, m, left[0])
+
+	if e := entriesOf(t, q, "alice"); len(e) != 0 {
+		t.Fatalf("entries after the backoff %+v (the entry was moved instead of removed)", e)
+	}
+
+	if r := dueRecord(t, m, "alice"); r != nil {
+		t.Fatalf("record after the backoff %+v", r)
+	}
+
+	// Further looks of the worker do nothing.
+	for range 3 {
+		m.ftsDueOnce(context.Background(), notLost)
+	}
+
+	if e := entriesOf(t, q, "alice"); len(e) != 0 || dueRecord(t, m, "alice") != nil {
+		t.Fatalf("looks without an entry changed something: %+v", e)
+	}
+
+	// A writer queues the account again: a new job is planned.
+	fire(t, m, queueDue(t, q, "alice", "g1", later))
+
+	again := dueRecord(t, m, "alice")
+	if again == nil || again.JobID == first.JobID || !again.NoopAt.IsZero() {
+		t.Fatalf("no new job after a new trigger: %+v", again)
+	}
+
+	if jobs, _, _ := m.List("alice", "", "", 10); len(jobs) != 2 {
+		t.Errorf("%d jobs, want 2", len(jobs))
+	}
+}
+
 // TestFTSDueDuplicates (F11): two entries of one account (another
 // server's, an expired memory) plan one job; the second waits.
 func TestFTSDueDuplicates(t *testing.T) {
