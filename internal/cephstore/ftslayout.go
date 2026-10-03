@@ -422,15 +422,8 @@ func itoaMarker(n int64) []byte { return []byte(strconv.FormatInt(max(n, 0), 10)
 
 // dictKeysOf is the number of dictionary keys a term has: one per
 // distinct trigram of its token, none in a field without substring
-// matching.
-func dictKeysOf(term string) int {
-	field, tok, _ := strings.Cut(term, ":")
-	if !fts.Substring(field) {
-		return 0
-	}
-
-	return len(fts.Trigrams(tok))
-}
+// matching (fts.DictKeys without the identifier rule).
+func dictKeysOf(term string) int { return fts.DictKeys(term, 0) }
 
 // --- sizes --------------------------------------------------------------------
 

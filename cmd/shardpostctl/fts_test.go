@@ -107,3 +107,37 @@ func TestFTSLayoutCommands(t *testing.T) {
 		t.Errorf("list: %d %q", code, out)
 	}
 }
+
+// TestFTSStatsCommand (temp/13 §7.1): the key counts of any account;
+// classes only for a test account, otherwise exit 77; no term printed.
+func TestFTSStatsCommand(t *testing.T) {
+	socket := serveFilled(t, admin.RoleDiagnose)
+
+	code, out, errOut := call(socket, "", "fts", "stats", "alice")
+	if code != exOK || !strings.Contains(out, "dict_keys") || !strings.Contains(out, "per message") {
+		t.Fatalf("stats: %d %s %s", code, out, errOut)
+	}
+
+	code, out, errOut = call(socket, "", "fts", "stats", "-classes", "alice")
+	if code != exOK || !strings.Contains(out, "identifier bound") || !strings.Contains(out, "letters") {
+		t.Fatalf("stats -classes: %d %s %s", code, out, errOut)
+	}
+
+	_, js, _ := call(socket, "", "fts", "stats", "-classes", "-exact", "-json", "alice")
+
+	for _, text := range []string{out, js} {
+		if strings.Contains(text, "body") {
+			t.Errorf("a term of the account is printed:\n%s", text)
+		}
+	}
+
+	if code, _, errOut := call(socket, "", "fts", "stats", "-classes", "bob"); code != exNoPerm || !strings.Contains(errOut, "fts.stats_test_accounts") {
+		t.Errorf("classes of a real account: %d %s", code, errOut)
+	}
+
+	for _, args := range [][]string{{"fts", "stats"}, {"fts", "stats", "-parallel", "17", "-exact", "alice"}, {"fts", "stats", "a", "b"}} {
+		if code, _, _ := call(socket, "", args...); code != exUsage {
+			t.Errorf("%v: exit %d", args, code)
+		}
+	}
+}

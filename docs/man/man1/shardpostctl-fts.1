@@ -1,6 +1,6 @@
-.TH SHARDPOSTCTL-FTS 1 "2026-10-02" "ShardPost 0.47.0" "ShardPost Manual"
+.TH SHARDPOSTCTL-FTS 1 "2026-10-03" "ShardPost 0.49.0" "ShardPost Manual"
 .SH NAME
-shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accounts with layout 3, the layout record of an account
+shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accounts with layout 3, the layout record and the key counts of an account
 .SH SYNOPSIS
 .B shardpostctl fts layout3 status
 .RB [ \-json ]
@@ -26,6 +26,14 @@ shardpostctl-fts \- layouts of the full-text index: the layout 3 mark, the accou
 .I account
 .br
 .B shardpostctl fts layout clear
+.RB [ \-json ]
+.I account
+.br
+.B shardpostctl fts stats
+.RB [ \-exact ]
+.RB [ \-parallel
+.IR n ]
+.RB [ \-classes ]
 .RB [ \-json ]
 .I account
 .SH DESCRIPTION
@@ -147,6 +155,46 @@ account with a stale conversion fail temporarily after
 until it is cleared; the job itself, a job or import that takes the
 account lock and the jobs scrub clear it as well. Role:
 .BR repair .
+.SS fts stats
+Prints the key counts of an account's index: its shape, the documents,
+the terms (posting keys) and dictionary keys, in total and per message,
+and the mean number of dictionary keys per dictionary object. Without
+options it reads the counters
+.B !n
+and
+.B !dn
+of the posting objects and the document count of a layout 3 index: S + 1
+reads, no lock. There are no counters per dictionary or header object,
+and a layout 2 index has none at all; use
+.BR \-exact .
+.PP
+.B \-exact
+counts the keys of every object page by page (librados has no key
+count): about one read per thousand keys, 12 000 reads for an account
+with 12 million index keys, alongside the deliveries, so the counts are
+only roughly consistent. It runs
+.B \-parallel
+objects at a time and ends with the 5 minute write timeout of the admin
+listener; raise
+.B \-timeout
+of
+.BR shardpostctl (1)
+for a large account.
+.PP
+.B \-classes
+also counts the terms by field, class (letters, digits, mixed, other)
+and length, and projects the dictionary keys for every identifier bound
+n from 13 to 40: what the dictionary would hold if every body term with
+letters and digits of at least n runes had one key instead of one per
+trigram. It reads the terms of the posting objects and is allowed only
+for the test accounts that
+.I fts.stats_test_accounts
+of the server names (for example the bench accounts and a test account
+filled with
+.BR shardpost-load );
+for any other account it is refused (exit status 77). The output never
+contains a term, on any account. Role:
+.BR diagnose .
 .SH OPTIONS
 .TP
 .BI \-pods " n"
@@ -170,6 +218,19 @@ at the end of a full page).
 .BI \-limit " n"
 .BR list :
 accounts per page, 1 to 10000 (100).
+.TP
+.B \-exact
+.BR stats :
+count the keys of every object instead of reading the counters.
+.TP
+.BI \-parallel " n"
+.BR "stats \-exact" :
+objects counted at the same time, 1 to 16 (2).
+.TP
+.B \-classes
+.BR stats :
+classify the terms and project the identifier bounds (test accounts
+only).
 .TP
 .B \-json
 Print the answer as JSON.
@@ -220,6 +281,32 @@ shardpostctl plan -all -layout 2 fts_layout
 shardpostctl fts layout3 disable
 .RE
 .fi
+.PP
+How many dictionary keys per message does an account have, and how full
+are its posting objects (counters only)?
+.PP
+.nf
+.RS
+shardpostctl fts stats user@example.org
+.RE
+.fi
+.PP
+Count every object of a large account exactly, four at a time:
+.PP
+.nf
+.RS
+shardpostctl -timeout 15m fts stats -exact -parallel 4 user@example.org
+.RE
+.fi
+.PP
+Measure a test account filled with the identifier corpus: classes and
+the projection per identifier bound:
+.PP
+.nf
+.RS
+shardpostctl fts stats -classes rbdpoc2@exampleserver.de
+.RE
+.fi
 .SH EXIT STATUS
 .TP
 .B 0
@@ -251,9 +338,12 @@ The server cannot be reached, or it has no layout administration.
 .B 77
 The caller lacks the role
 .B diagnose
-(status, list, show) or
+(status, list, show, stats) or
 .B repair
-(enable, disable, clear), or the scope of all accounts (list).
+(enable, disable, clear), or the scope of all accounts (list);
+.BR "stats \-classes" :
+the account is not a test account of
+.IR fts.stats_test_accounts .
 .SH SEE ALSO
 .BR shardpostctl (1),
 .BR shardpostctl-job (1),

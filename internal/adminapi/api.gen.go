@@ -231,6 +231,54 @@ func (e ErrorCode) Valid() bool {
 	}
 }
 
+// Defines values for FTSObjectStatsKind.
+const (
+	Dictionary FTSObjectStatsKind = "dictionary"
+	Headers    FTSObjectStatsKind = "headers"
+	Legacy     FTSObjectStatsKind = "legacy"
+	Postings   FTSObjectStatsKind = "postings"
+)
+
+// Valid indicates whether the value is a known member of the FTSObjectStatsKind enum.
+func (e FTSObjectStatsKind) Valid() bool {
+	switch e {
+	case Dictionary:
+		return true
+	case Headers:
+		return true
+	case Legacy:
+		return true
+	case Postings:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for FTSTermClassClass.
+const (
+	Digits  FTSTermClassClass = "digits"
+	Letters FTSTermClassClass = "letters"
+	Mixed   FTSTermClassClass = "mixed"
+	Other   FTSTermClassClass = "other"
+)
+
+// Valid indicates whether the value is a known member of the FTSTermClassClass enum.
+func (e FTSTermClassClass) Valid() bool {
+	switch e {
+	case Digits:
+		return true
+	case Letters:
+		return true
+	case Mixed:
+		return true
+	case Other:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for JobRequestKind.
 const (
 	IndexCheck JobRequestKind = "index_check"
@@ -642,6 +690,13 @@ type Error struct {
 // ErrorCode defines model for Error.Code.
 type ErrorCode string
 
+// FTSIdentBound defines model for FTSIdentBound.
+type FTSIdentBound struct {
+	DictKeys    int64 `json:"dict_keys"`
+	Identifiers int64 `json:"identifiers"`
+	MinRunes    int   `json:"min_runes"`
+}
+
 // FTSLayout3Disable defines model for FTSLayout3Disable.
 type FTSLayout3Disable struct {
 	// Accounts Accounts that still have a layout 3 index (at most 1000).
@@ -741,6 +796,70 @@ type FTSLayoutState struct {
 
 	// OldToks The runs that left the `old` generations, in the same order.
 	OldToks *[]string `json:"old_toks,omitempty"`
+}
+
+// FTSObjectStats defines model for FTSObjectStats.
+type FTSObjectStats struct {
+	// DictKeys The counter `!dn` of a posting object (without `exact`).
+	DictKeys *int64 `json:"dict_keys,omitempty"`
+
+	// Keys Keys without the markers; for a posting object without `exact` its counter `!n`.
+	Keys   int64              `json:"keys"`
+	Kind   FTSObjectStatsKind `json:"kind"`
+	Object string             `json:"object"`
+}
+
+// FTSObjectStatsKind defines model for FTSObjectStats.Kind.
+type FTSObjectStatsKind string
+
+// FTSStats defines model for FTSStats.
+type FTSStats struct {
+	Classes *FTSTermClasses `json:"classes,omitempty"`
+
+	// DictKeys Dictionary keys, the sum of `!dn` or counted.
+	DictKeys int64 `json:"dict_keys"`
+
+	// Docs Documents of the index: the counter `c` of layout 3; for
+	// layout 2 only with `exact` (the id map), else 0.
+	Docs int64 `json:"docs"`
+
+	// Exact The keys were counted, not the counters read.
+	Exact bool `json:"exact"`
+
+	// HeaderKeys Header texts (counted with `exact` only).
+	HeaderKeys int64            `json:"header_keys"`
+	Objects    []FTSObjectStats `json:"objects"`
+	Shape      FTSLayoutShape   `json:"shape"`
+
+	// Terms Posting keys (terms), the sum of `!n` or counted.
+	Terms int64 `json:"terms"`
+}
+
+// FTSTermClass defines model for FTSTermClass.
+type FTSTermClass struct {
+	Class    FTSTermClassClass `json:"class"`
+	DictKeys int64             `json:"dict_keys"`
+
+	// Field s, f, t, h or b.
+	Field string `json:"field"`
+
+	// Length Length range in runes (2-3, 4-8, 9-12, 13-16, 17-24, 25-32, 33-39, 40).
+	Length string `json:"length"`
+	Terms  int64  `json:"terms"`
+}
+
+// FTSTermClassClass defines model for FTSTermClass.Class.
+type FTSTermClassClass string
+
+// FTSTermClasses defines model for FTSTermClasses.
+type FTSTermClasses struct {
+	// ByIdentMinRunes For every bound n from 13 to 40: the dictionary keys if body
+	// terms with letters and digits of at least n runes had one key
+	// each, and how many terms that are.
+	ByIdentMinRunes []FTSIdentBound `json:"by_ident_min_runes"`
+	DictKeys        int64           `json:"dict_keys"`
+	Rows            []FTSTermClass  `json:"rows"`
+	Terms           int64           `json:"terms"`
 }
 
 // FlagRequest defines model for FlagRequest.
@@ -1489,6 +1608,13 @@ type ListAccountsParams struct {
 	State *string `form:"state,omitempty" json:"state,omitempty"`
 }
 
+// GetFTSStatsParams defines parameters for GetFTSStats.
+type GetFTSStatsParams struct {
+	Exact    *bool `form:"exact,omitempty" json:"exact,omitempty"`
+	Parallel *int  `form:"parallel,omitempty" json:"parallel,omitempty"`
+	Classes  *bool `form:"classes,omitempty" json:"classes,omitempty"`
+}
+
 // CloseImportParams defines parameters for CloseImport.
 type CloseImportParams struct {
 	// XImportSession The session that holds the import lock.
@@ -1941,6 +2067,28 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
 	ClearFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetFTSStats Key counts of the account's full-text index
+	//
+	// Without parameters the counters of the posting objects (`!n`,
+	// `!dn`) and the document count `c` of a layout 3 index: S + 1
+	// reads, no lock (a layout 2 index has no counters; use `exact`).
+	// There is no counter per dictionary or header object. `exact`
+	// counts the keys of every object page by page instead (librados
+	// has no key count): on a large account thousands of reads
+	// alongside the deliveries, `parallel` objects at a time (default
+	// 2, at most 16), the counts only roughly consistent; bounded by
+	// the 5 minute write timeout of the admin listener. `classes`
+	// classifies the terms by field, class and length and projects
+	// the dictionary keys of the identifier rule for every bound 13
+	// to 40 (a body term with letters and digits of at least n runes
+	// counted as one key): only for the test accounts the server's
+	// `fts.stats_test_accounts` names, otherwise refused with
+	// `forbidden` (403). The answer never contains a term. Requires
+	// the role `diagnose` (since 0.49.0).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/fts/stats (the `GetFTSStats` operationId).
+	GetFTSStats(ctx context.Context, account Account, params *GetFTSStatsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CloseImport Release the import lock
 	//
@@ -3145,6 +3293,38 @@ func (c *Client) GetFTSLayout(ctx context.Context, account Account, reqEditors .
 // Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
 func (c *Client) ClearFTSLayout(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewClearFTSLayoutRequest(c.Server, account)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetFTSStats Key counts of the account's full-text index
+//
+// Without parameters the counters of the posting objects (`!n`,
+// `!dn`) and the document count `c` of a layout 3 index: S + 1
+// reads, no lock (a layout 2 index has no counters; use `exact`).
+// There is no counter per dictionary or header object. `exact`
+// counts the keys of every object page by page instead (librados
+// has no key count): on a large account thousands of reads
+// alongside the deliveries, `parallel` objects at a time (default
+// 2, at most 16), the counts only roughly consistent; bounded by
+// the 5 minute write timeout of the admin listener. `classes`
+// classifies the terms by field, class and length and projects
+// the dictionary keys of the identifier rule for every bound 13
+// to 40 (a body term with letters and digits of at least n runes
+// counted as one key): only for the test accounts the server's
+// `fts.stats_test_accounts` names, otherwise refused with
+// `forbidden` (403). The answer never contains a term. Requires
+// the role `diagnose` (since 0.49.0).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/fts/stats (the `GetFTSStats` operationId).
+func (c *Client) GetFTSStats(ctx context.Context, account Account, params *GetFTSStatsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFTSStatsRequest(c.Server, account, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5338,6 +5518,91 @@ func NewClearFTSLayoutRequest(server string, account Account) (*http.Request, er
 	}
 
 	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetFTSStatsRequest constructs an http.Request for the GetFTSStats method
+func NewGetFTSStatsRequest(server string, account Account, params *GetFTSStatsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "account", account, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/v1/accounts/%s/fts/stats", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Exact != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "exact", *params.Exact, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Parallel != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "parallel", *params.Parallel, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Classes != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "classes", *params.Classes, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -8787,6 +9052,30 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/v1/accounts/{account}/fts/layout/clear (the `ClearFTSLayout` operationId).
 	ClearFTSLayoutWithResponse(ctx context.Context, account Account, reqEditors ...RequestEditorFn) (*ClearFTSLayoutResponse, error)
 
+	// GetFTSStatsWithResponse Key counts of the account's full-text index
+	//
+	// Without parameters the counters of the posting objects (`!n`,
+	// `!dn`) and the document count `c` of a layout 3 index: S + 1
+	// reads, no lock (a layout 2 index has no counters; use `exact`).
+	// There is no counter per dictionary or header object. `exact`
+	// counts the keys of every object page by page instead (librados
+	// has no key count): on a large account thousands of reads
+	// alongside the deliveries, `parallel` objects at a time (default
+	// 2, at most 16), the counts only roughly consistent; bounded by
+	// the 5 minute write timeout of the admin listener. `classes`
+	// classifies the terms by field, class and length and projects
+	// the dictionary keys of the identifier rule for every bound 13
+	// to 40 (a body term with letters and digits of at least n runes
+	// counted as one key): only for the test accounts the server's
+	// `fts.stats_test_accounts` names, otherwise refused with
+	// `forbidden` (403). The answer never contains a term. Requires
+	// the role `diagnose` (since 0.49.0).
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/v1/accounts/{account}/fts/stats (the `GetFTSStats` operationId).
+	GetFTSStatsWithResponse(ctx context.Context, account Account, params *GetFTSStatsParams, reqEditors ...RequestEditorFn) (*GetFTSStatsResponse, error)
+
 	// CloseImportWithResponse Release the import lock
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -10231,6 +10520,54 @@ func (r ClearFTSLayoutResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ClearFTSLayoutResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetFTSStatsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *FTSStats
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetFTSStatsResponse) GetJSON200() *FTSStats {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetFTSStatsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetFTSStatsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFTSStatsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFTSStatsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetFTSStatsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -13377,6 +13714,36 @@ func (c *ClientWithResponses) ClearFTSLayoutWithResponse(ctx context.Context, ac
 	return ParseClearFTSLayoutResponse(rsp)
 }
 
+// GetFTSStatsWithResponse Key counts of the account's full-text index
+//
+// Without parameters the counters of the posting objects (`!n`,
+// `!dn`) and the document count `c` of a layout 3 index: S + 1
+// reads, no lock (a layout 2 index has no counters; use `exact`).
+// There is no counter per dictionary or header object. `exact`
+// counts the keys of every object page by page instead (librados
+// has no key count): on a large account thousands of reads
+// alongside the deliveries, `parallel` objects at a time (default
+// 2, at most 16), the counts only roughly consistent; bounded by
+// the 5 minute write timeout of the admin listener. `classes`
+// classifies the terms by field, class and length and projects
+// the dictionary keys of the identifier rule for every bound 13
+// to 40 (a body term with letters and digits of at least n runes
+// counted as one key): only for the test accounts the server's
+// `fts.stats_test_accounts` names, otherwise refused with
+// `forbidden` (403). The answer never contains a term. Requires
+// the role `diagnose` (since 0.49.0).
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/v1/accounts/{account}/fts/stats (the `GetFTSStats` operationId).
+func (c *ClientWithResponses) GetFTSStatsWithResponse(ctx context.Context, account Account, params *GetFTSStatsParams, reqEditors ...RequestEditorFn) (*GetFTSStatsResponse, error) {
+	rsp, err := c.GetFTSStats(ctx, account, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFTSStatsResponse(rsp)
+}
+
 // CloseImportWithResponse Release the import lock
 //
 // Returns a wrapper object for the known response body format(s).
@@ -15220,6 +15587,39 @@ func ParseClearFTSLayoutResponse(rsp *http.Response) (*ClearFTSLayoutResponse, e
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest FTSLayoutClear
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetFTSStatsResponse parses an HTTP response from a GetFTSStatsWithResponse call
+func ParseGetFTSStatsResponse(rsp *http.Response) (*GetFTSStatsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFTSStatsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FTSStats
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -17380,6 +17780,9 @@ type ServerInterface interface {
 	// ClearFTSLayout Remove an unfinished conversion
 	// (POST /admin/v1/accounts/{account}/fts/layout/clear)
 	ClearFTSLayout(w http.ResponseWriter, r *http.Request, account Account)
+	// GetFTSStats Key counts of the account's full-text index
+	// (GET /admin/v1/accounts/{account}/fts/stats)
+	GetFTSStats(w http.ResponseWriter, r *http.Request, account Account, params GetFTSStatsParams)
 	// CloseImport Release the import lock
 	// (DELETE /admin/v1/accounts/{account}/import)
 	CloseImport(w http.ResponseWriter, r *http.Request, account Account, params CloseImportParams)
@@ -17783,6 +18186,74 @@ func (siw *ServerInterfaceWrapper) ClearFTSLayout(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ClearFTSLayout(w, r, account)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetFTSStats operation middleware
+func (siw *ServerInterfaceWrapper) GetFTSStats(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account" -------------
+	var account Account
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account", r.PathValue("account"), &account, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetFTSStatsParams
+
+	// ------------- Optional query parameter "exact" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "exact", r.URL.Query(), &params.Exact, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "exact"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "exact", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "parallel" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "parallel", r.URL.Query(), &params.Parallel, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "parallel"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "parallel", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "classes" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "classes", r.URL.Query(), &params.Classes, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "classes"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "classes", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetFTSStats(w, r, account, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -20639,6 +21110,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/fts/layout3/accounts", wrapper.ListFTSLayout3Accounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout", wrapper.GetFTSLayout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/layout/clear", wrapper.ClearFTSLayout)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/fts/stats", wrapper.GetFTSStats)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/fts-reshard", wrapper.GetImportReshard)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/v1/accounts/{account}/import/fts-reshard", wrapper.StartImportReshard)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/v1/accounts/{account}/trace", wrapper.ClearTrace)

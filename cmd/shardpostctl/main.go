@@ -12,7 +12,7 @@
 //	shardpostctl [connection flags] export -o file.tar <account> | archive verify <file> | restore [-account A] <file>
 //	shardpostctl [connection flags] auth flush [<account>]
 //	shardpostctl [connection flags] submission list <account> | submission list -all | submission cancel <account> <id>
-//	shardpostctl [connection flags] fts layout3 status|enable -pods n|disable|list | fts layout show|clear <account>
+//	shardpostctl [connection flags] fts layout3 status|enable -pods n|disable|list | fts layout show|clear <account> | fts stats <account>
 //
 // deliver behaves like dovecot-lda and exits with sysexits codes: 0 ok,
 // 64 usage, 65 conflict or stale version (other commands), 67 unknown recipient or mailbox, 73 over quota, 75 temporary
@@ -97,7 +97,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "request timeout")
 
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
-		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ... | auth flush [<account>] | submission list|cancel ... | fts layout3|layout ...")
+		sayln(stderr, "usage: shardpostctl [flags] version | deliver -d <recipient> [...] < message | migrate [...] <account> | trace on|off|status <account> | server|account|mailbox|acl|quota|shared ... | plan|apply|check|job ... | messages|search|message|flags|copy|move|sieve|learning ... | export|archive|restore ... | auth flush [<account>] | submission list|cancel ... | fts layout3|layout|stats ...")
 		return exUsage
 	}
 

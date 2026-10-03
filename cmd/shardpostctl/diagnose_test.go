@@ -73,7 +73,8 @@ func serveFilled(t *testing.T, roles ...string) string {
 		Log: log, Version: "test", MaxMessageBytes: 1 << 20, SocketRoles: roles, Accounts: store, Instance: "pod-1",
 		ConfigFingerprint: "abc", StorePing: func() error { return nil }, Jobs: mgr, Directory: store, KV: regs,
 		Import: store, ImportMaxBatchMessages: 500, ImportMaxBatchBytes: 64 << 20, ImportMaxInventory: 5000,
-		SharedPrefix: "Shared/", PublicPrefix: "Public/", Placement: func() (string, *model.PoolRef) { return "native", pool }})
+		SharedPrefix: "Shared/", PublicPrefix: "Public/", Placement: func() (string, *model.PoolRef) { return "native", pool },
+		FTSStatsTestAccount: func(a string) bool { return a == "alice" }})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ended := make(chan struct{})

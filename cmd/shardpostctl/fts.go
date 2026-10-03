@@ -19,6 +19,7 @@ import (
 //	fts layout3 list [-verify] [-after a] [-limit n] [-json]  role diagnose, scope of all accounts
 //	fts layout show [-json] <account>                  role diagnose
 //	fts layout clear [-json] <account>                 role repair
+//	fts stats [-exact] [-parallel n] [-classes] [-json] <account>  role diagnose (ftsstats.go)
 
 // Verbs and labels shared with other commands.
 const (
@@ -31,7 +32,7 @@ const (
 const (
 	cmdFTS   = "fts"
 	ftsUsage = "usage: shardpostctl fts layout3 status|enable -pods n [-force]|disable|list [-verify] [-after a] [-limit n] [-json] | " +
-		"fts layout show|clear [-json] <account>"
+		"fts layout show|clear [-json] <account> | fts stats [-exact] [-parallel n] [-classes] [-json] <account>"
 )
 
 // ftsArgs are the flags of the fts commands.
@@ -44,6 +45,10 @@ type ftsArgs struct {
 
 // ftsCmd dispatches the fts commands.
 func ftsCmd(client *adminapi.ClientWithResponses, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "stats" {
+		return ftsStatsCmd(client, args[1:], stdout, stderr)
+	}
+
 	if len(args) < 2 {
 		sayln(stderr, ftsUsage)
 		return exUsage

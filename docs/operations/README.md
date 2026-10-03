@@ -736,6 +736,21 @@ stopped run is seen after its 90 s heartbeat aged).
   (`osd_deep_scrub_large_omap_object_key_threshold`, 200 000 keys) only
   if a target was raised beyond about 133 000 keys.
 
+**Key counts.** `shardpostctl fts stats <account>` prints the shape of
+an account's index and its terms and dictionary keys, in total and per
+message, from the counters of the posting objects (S + 1 reads, no
+lock). Ceph's large omap threshold is per object: compare the mean
+dictionary keys per object and the largest posting object with 200 000.
+`-exact` counts every object's keys instead (thousands of reads on a
+large account, during deliveries; give `-timeout` room). On real
+accounts that is all: the terms themselves are never read for
+statistics. Only for test accounts named in `fts.stats_test_accounts`
+does `-classes` count the terms by field, class and length and project
+the dictionary for every identifier bound — the measurement of the
+bench corpus with identifiers and of a test account filled with
+`shardpost-load` ([bench](bench.md)); for any other account it is
+refused.
+
 **The registrations.** They are deleted 24 hours after their last
 heartbeat by the expiry worker of the job system; with
 `admin.kv_index: off` or `jobs.enabled: false` on every server only
