@@ -6,7 +6,9 @@ import (
 	"errors"
 	"time"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
+	"shardpost/internal/window"
 )
 
 // The fts_due worker (stage B14b, §4.6): writers queue an account in
@@ -25,8 +27,13 @@ type FTSDue struct {
 	Lock  func(ttl time.Duration) (model.Lease, error)
 }
 
-// ftsDuePrincipal is the principal of the jobs the worker plans.
-const ftsDuePrincipal = "fts_due"
+// ftsDuePrincipal is the principal of the jobs the worker plans,
+// ftsDueUrgentPrincipal of those it plans outside the reshard window
+// because the account is urgent.
+const (
+	ftsDuePrincipal       = "fts_due"
+	ftsDueUrgentPrincipal = "fts_due/urgent"
+)
 
 // runFTSDue is the worker: it takes the lease when it is free and works
 // off what is due every Config.ExpiryPoll.
@@ -111,22 +118,34 @@ func (m *Manager) ftsDueByJob(ctx context.Context, e model.DueEntry, gen string,
 
 	noops, idle := noopsOf(rec, gen)
 
+	// An online run that found the account busy (as a locked one) or
+	// outside the window: wait once, then plan anew (R2.10).
+	if deferred := ftsLayoutDeferred(j); deferred != "" && !idle {
+		return m.ftsDueAfterDeferred(ctx, e, gen, rec, deferred, noops, lost)
+	}
+
 	switch {
 	case idle:
 		return m.ftsDuePlan(ctx, e, gen, noops+1, lost) // the wait after the last no-op is over
 	case j != nil && !j.Terminal():
 		return m.ftsDueLater(e, gen, lost)
 	case j != nil && j.State == StateSucceeded && !ftsLayoutNoop(j):
-		if err := m.ftsDueMove(e, nil, lost); err != nil {
-			return err
-		}
-
-		return m.st.kv.Update(model.FTSDueRecordKey(e.ID), func([]byte) ([]byte, error) { return nil, nil })
+		return m.ftsDueSwitched(e, lost)
 	case j != nil && j.State == StateSucceeded:
 		return m.ftsDueNoop(e, rec, lost)
 	}
 
 	return m.ftsDuePlan(ctx, e, gen, noops, lost) // a failed job keeps the count
+}
+
+// ftsDueSwitched forgets the entry and the record of an account whose
+// job switched.
+func (m *Manager) ftsDueSwitched(e model.DueEntry, lost func() bool) error {
+	if err := m.ftsDueMove(e, nil, lost); err != nil {
+		return err
+	}
+
+	return m.st.kv.Update(model.FTSDueRecordKey(e.ID), func([]byte) ([]byte, error) { return nil, nil })
 }
 
 // noopsOf is the number of no-op jobs the record counts for generation
@@ -218,6 +237,198 @@ func ftsLayoutNoop(j *Job) bool {
 	var rep model.FTSLayoutReport
 
 	return json.Unmarshal(j.Result, &rep) == nil && rep.Noop
+}
+
+// ftsLayoutDeferred is why a succeeded fts_layout job ended without a
+// change other than a no-op ("" for none): busy, window,
+// window_too_small.
+func ftsLayoutDeferred(j *Job) string {
+	if j == nil || j.State != StateSucceeded {
+		return ""
+	}
+
+	var rep model.FTSLayoutReport
+	if json.Unmarshal(j.Result, &rep) != nil {
+		return ""
+	}
+
+	return rep.Deferred
+}
+
+// ftsDueAfterDeferred handles the entry of a job whose online run ended
+// without a change: the first time it waits (ftsDueDeferred), then a new
+// job is planned.
+func (m *Manager) ftsDueAfterDeferred(ctx context.Context, e model.DueEntry, gen string, rec *model.FTSDueRecord, deferred string,
+	noops int, lost func() bool,
+) error {
+	if !rec.Deferred {
+		return m.ftsDueDeferred(e, rec, deferred, lost)
+	}
+
+	return m.ftsDuePlan(ctx, e, gen, noops, lost)
+}
+
+// ftsDueDeferred handles a job whose online run ended without a change:
+// busy (and mark_off: the mark was removed after the plan) waits as for
+// a locked account (the backoff), window and window_too_small until the
+// next window starts (plus the account's spread). The record notes it,
+// so that the entry that fires next plans a new job (offline after
+// mark_off).
+func (m *Manager) ftsDueDeferred(e model.DueEntry, rec *model.FTSDueRecord, deferred string, lost func() bool) error {
+	if lost() {
+		return nil
+	}
+
+	waits := 0
+
+	err := m.st.kv.Update(model.FTSDueRecordKey(e.ID), func(cur []byte) ([]byte, error) {
+		var c model.FTSDueRecord
+		if cur == nil || json.Unmarshal(cur, &c) != nil || c.JobID != rec.JobID {
+			return cur, nil
+		}
+
+		c.Deferred = true
+		c.Waits++
+		waits = c.Waits
+
+		return json.Marshal(c)
+	})
+	if err != nil {
+		return err
+	}
+
+	now := m.now()
+	due := now.Add(model.FTSDueBackoffAfter(waits))
+
+	// window_too_small: once a day, at the next window start, as the
+	// worker's own check
+	if deferred == model.FTSDeferredWindow || deferred == model.FTSDeferredTooSmall {
+		due = m.windowStart(e.ID, now)
+	}
+
+	return m.ftsDueMove(e, &model.DueKey{Due: due, Gen: e.Gen}, lost)
+}
+
+// windowStart is when the worker looks at an account again that waits
+// for the reshard window: the next window's start plus the account's
+// spread.
+func (m *Manager) windowStart(account string, now time.Time) time.Time {
+	w := m.cfg.FTSBuild.Window
+
+	from := w.NextStart(now)
+	_, to := w.Bounds(from)
+
+	return from.Add(w.Spread(account, to.Sub(from)))
+}
+
+// ftsDueGate is the window step before the worker plans (temp/14
+// §4.12): without a window nothing. An urgent account — its largest
+// object at fts.reshard_urgent_factor times its target, near the 2·T at
+// which Ceph reports large omap objects — is planned at once, in or out
+// of the window and whatever build_max_running and the estimate say.
+// Outside the window the others wait for the next window. Inside it at
+// most fts.build_max_running jobs the worker planned run at once, and a
+// run starts only when its estimate fits into what is left of the
+// window; one longer than the whole window is not planned
+// (window_too_small: it is looked at again at the next window start
+// plus the account's spread, so once a day). It returns where to move
+// the entry instead of planning (nil: plan), and whether the account is
+// urgent.
+func (m *Manager) ftsDueGate(e model.DueEntry) (*model.DueKey, bool, error) {
+	b := m.cfg.FTSBuild
+	if !b.Window.Set() {
+		return nil, false, nil
+	}
+
+	shape, err := m.ftsDueShape(e.ID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if shape.Load >= b.UrgentFactor {
+		return nil, true, nil
+	}
+
+	now := m.now()
+
+	if !b.Window.In(now) {
+		metrics.FTSBuildWindowDeferred.Inc()
+		return &model.DueKey{Due: m.windowStart(e.ID, now), Gen: e.Gen}, false, nil
+	}
+
+	if n, err := m.ftsDueRunningCount(); err != nil || n >= b.MaxRunning {
+		return &model.DueKey{Due: now.Add(ftsDueBusyWait), Gen: e.Gen}, false, err
+	}
+
+	switch err := b.Window.Fit(now, b.estimate(model.FTSModeCopy, shape.Docs)); {
+	case errors.Is(err, window.ErrTooSmall):
+		metrics.FTSBuildWindowTooSmall.Inc()
+		m.env.Log.Warn("fts_due: window_too_small: the reshard of the account takes longer than the reshard window; "+
+			"plan it with fts_layout for the account, or widen fts.reshard_window", "account", e.ID, "docs", shape.Docs,
+			"window", b.Window.String())
+
+		return &model.DueKey{Due: m.windowStart(e.ID, now), Gen: e.Gen}, false, nil
+	case err != nil:
+		metrics.FTSBuildWindowDeferred.Inc()
+		return &model.DueKey{Due: m.windowStart(e.ID, now), Gen: e.Gen}, false, nil
+	}
+
+	return nil, false, nil
+}
+
+// ftsDueShape is what FTSLayoutDue reports of the account (documents,
+// load).
+func (m *Manager) ftsDueShape(account string) (model.FTSLayoutShape, error) {
+	u, err := m.env.Accounts.User(account)
+	if err != nil {
+		return model.FTSLayoutShape{}, err
+	}
+	defer u.Close()
+
+	lay, ok := u.(model.FTSLayouter)
+	if !ok {
+		return model.FTSLayoutShape{}, nil
+	}
+
+	shape, _, err := lay.FTSLayoutDue()
+
+	return shape, err
+}
+
+// ftsDueRunningCount is the number of jobs the worker planned that have
+// not ended (one read per remembered job).
+func (m *Manager) ftsDueRunningCount() (int, error) {
+	m.ftsDueMu.Lock()
+	defer m.ftsDueMu.Unlock()
+
+	for id := range m.ftsDueRunning {
+		j, err := m.st.getJob(id)
+
+		switch {
+		case errors.Is(err, ErrNotFound):
+			delete(m.ftsDueRunning, id)
+		case err != nil:
+			return 0, err
+		case j.Terminal():
+			delete(m.ftsDueRunning, id)
+		}
+	}
+
+	return len(m.ftsDueRunning), nil
+}
+
+// ftsDueStarted remembers a job the worker planned.
+func (m *Manager) ftsDueStarted(id string) {
+	m.ftsDueMu.Lock()
+	defer m.ftsDueMu.Unlock()
+
+	if m.ftsDueRunning == nil {
+		m.ftsDueRunning = map[string]bool{}
+	}
+
+	if len(m.ftsDueRunning) < ftsDueRunningMemoryJobs {
+		m.ftsDueRunning[id] = true
+	}
 }
 
 // ftsDueNoop handles an account whose job found nothing to do (R4.6):
@@ -326,9 +537,25 @@ func (m *Manager) ftsDuePlan(ctx context.Context, e model.DueEntry, gen string, 
 		return nil
 	}
 
+	to, urgent, err := m.ftsDueGate(e)
+	if err != nil {
+		return err
+	}
+
+	if to != nil {
+		return m.ftsDueMove(e, to, lost)
+	}
+
+	// An urgent job runs outside the window: its online run is not
+	// admitted by the window again (onlineRequest).
+	principal := ftsDuePrincipal
+	if urgent {
+		principal = ftsDueUrgentPrincipal
+	}
+
 	params := json.RawMessage(`{"due_only":true}`)
 
-	plan, err := m.CreatePlan(ctx, kind, e.ID, params, ftsDuePrincipal, nil)
+	plan, err := m.CreatePlan(ctx, kind, e.ID, params, principal, nil)
 	if err != nil {
 		return err
 	}
@@ -337,10 +564,12 @@ func (m *Manager) ftsDuePlan(ctx context.Context, e model.DueEntry, gen string, 
 		return nil
 	}
 
-	j, _, err := m.Submit(kind, e.ID, nil, plan.ID, ftsDuePrincipal, "")
+	j, _, err := m.Submit(kind, e.ID, nil, plan.ID, principal, "")
 	if err != nil || lost() {
 		return err
 	}
+
+	m.ftsDueStarted(j.ID)
 
 	b, _ := json.Marshal(model.FTSDueRecord{JobID: j.ID, Gen: gen, Noops: noops})
 

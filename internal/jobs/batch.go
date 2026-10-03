@@ -51,6 +51,9 @@ type BatchParams struct {
 	// SkipIdle (scrub only) skips the accounts nothing changed in since
 	// their last complete, clean batch scrub.
 	SkipIdle bool `json:"skip_idle,omitempty"`
+	// Anytime (fts_layout, fts_rebuild) runs the accounts whatever the
+	// reshard window says (fts.reshard_window, stage B14i).
+	Anytime bool `json:"anytime,omitempty"`
 }
 
 // Bounds of a batch's record.
@@ -122,15 +125,23 @@ func (m *Manager) ExclusiveOf(kind Kind, params json.RawMessage) bool {
 		return kind.Exclusive()
 	}
 
-	sub, _, err := m.batchOf(params)
+	sub, p, err := m.batchOf(params)
 
-	return err == nil && sub.Exclusive()
+	return err == nil && exclusive(sub, p.Params)
 }
+
+// windowKind reports whether a batch of the kind keeps the reshard
+// window.
+func windowKind(kind string) bool { return kind == KindFTSLayout || kind == KindFTSRebuild }
 
 // checkBatchParams vets the per-account parameters of the kind.
 func checkBatchParams(p BatchParams) error {
 	if p.SkipIdle && p.Kind != KindScrub {
 		return fmt.Errorf("%w: skip_idle is for scrub only", ErrInvalidParams)
+	}
+
+	if p.Anytime && !windowKind(p.Kind) {
+		return fmt.Errorf("%w: anytime is for fts_layout and fts_rebuild only", ErrInvalidParams)
 	}
 
 	switch p.Kind {
@@ -139,6 +150,9 @@ func checkBatchParams(p BatchParams) error {
 		return err
 	case KindFTSLayout:
 		_, err := parseFTSLayout(p.Params)
+		return err
+	case KindFTSRebuild:
+		_, err := parseFTSRebuild(p.Params)
 		return err
 	}
 
@@ -156,9 +170,12 @@ type batchSummary struct {
 	Role      string          `json:"role"`
 	Exclusive bool            `json:"exclusive"`
 	SkipIdle  bool            `json:"skip_idle,omitempty"`
-	Parallel  int             `json:"parallel"`
-	Shards    int             `json:"directory_shards"`
-	Backfill  string          `json:"directory_backfill"`
+	Anytime   bool            `json:"anytime,omitempty"`
+	// Window is the reshard window the batch keeps ("": none).
+	Window   string `json:"window,omitempty"`
+	Parallel int    `json:"parallel"`
+	Shards   int    `json:"directory_shards"`
+	Backfill string `json:"directory_backfill"`
 }
 
 // CreateBatchPlan plans a batch: the kind p.Kind over every account of
@@ -179,13 +196,22 @@ func (m *Manager) CreateBatchPlan(p BatchParams, principal string) (*Plan, error
 		return nil, err
 	}
 
+	// "online" is decided for the whole batch (accounts without a layout
+	// 3 index count as unsupported then).
+	if p.Params, err = m.normalize(sub, nil, p.Params); err != nil {
+		return nil, err
+	}
+
+	params, _ = json.Marshal(p)
+
 	head, err := m.directoryHead()
 	if err != nil {
 		return nil, err
 	}
 
-	b, err := json.Marshal(batchSummary{Kind: sub.Name(), Params: p.Params, Role: sub.Role(), Exclusive: sub.Exclusive(),
-		SkipIdle: p.SkipIdle, Parallel: m.batchParallel(sub.Name()), Shards: head.Shards, Backfill: head.Markers[model.AccountBackfillMarker]})
+	b, err := json.Marshal(batchSummary{Kind: sub.Name(), Params: p.Params, Role: sub.Role(), Exclusive: exclusive(sub, p.Params),
+		SkipIdle: p.SkipIdle, Anytime: p.Anytime, Window: m.batchWindow(sub.Name(), p.Anytime), Parallel: m.batchParallel(sub.Name()),
+		Shards: head.Shards, Backfill: head.Markers[model.AccountBackfillMarker]})
 	if err != nil {
 		return nil, err
 	}
@@ -311,6 +337,16 @@ func (m *Manager) directoryHead() (model.IndexHead, error) {
 	return ix.Head()
 }
 
+// batchWindow is the reshard window a batch of the kind keeps ("" for
+// none).
+func (m *Manager) batchWindow(kind string, anytime bool) string {
+	if anytime || !windowKind(kind) {
+		return ""
+	}
+
+	return m.cfg.FTSBuild.Window.String()
+}
+
 // batchParallel is how many accounts a batch of the kind works on at
 // once.
 func (m *Manager) batchParallel(kind string) int {
@@ -352,18 +388,28 @@ type batchState struct {
 	Findings        int64    `json:"findings"`
 	FindingAccounts []string `json:"finding_accounts,omitempty"`
 	// Deferred are the accounts put aside because another job or an
-	// import held them; Rounds counts the retries at the end.
+	// import held them (or, online, another run was alive); Rounds counts
+	// the retries at the end.
 	Deferred []string `json:"deferred,omitempty"`
 	Rounds   int      `json:"rounds,omitempty"`
+	// Later are the accounts put off to the next reshard window (outside
+	// it, or their run did not fit into what was left of it); they come
+	// first when the batch goes on (since 0.51.0).
+	Later []string `json:"later,omitempty"`
+	// Unsupported counts the accounts an online run cannot handle (no
+	// layout 3 index); they are not failures.
+	Unsupported int64 `json:"unsupported,omitempty"`
 }
 
 // Outcomes of one account.
 const (
-	outDone     = "done"
-	outSkipped  = "skipped"
-	outGone     = "gone"
-	outDeferred = "deferred"
-	outFailed   = "failed"
+	outDone        = "done"
+	outSkipped     = "skipped"
+	outGone        = "gone"
+	outDeferred    = "deferred"
+	outFailed      = "failed"
+	outLater       = "later"
+	outUnsupported = "unsupported"
 )
 
 // acctResult is what happened to one account.
@@ -391,6 +437,9 @@ type batch struct {
 	// records: the run writes the scrub record of the accounts it
 	// scrubbed (a repairing scrub of every class).
 	records bool
+	// window: the batch keeps the reshard window (fts_layout,
+	// fts_rebuild without anytime, with fts.reshard_window set).
+	window bool
 }
 
 func (k *batchKind) Run(ctx context.Context, run *Run) (any, error) {
@@ -415,7 +464,7 @@ func (k *batchKind) Run(ctx context.Context, run *Run) (any, error) {
 	}
 
 	b := &batch{run: run, sub: sub, p: p, dir: run.Env.Directory, ix: ix, shards: head.Shards,
-		parallel: max(run.m.batchParallel(sub.Name()), 1)}
+		parallel: max(run.m.batchParallel(sub.Name()), 1), window: run.m.batchWindow(sub.Name(), p.Anytime) != ""}
 
 	if sub.Name() == KindScrub {
 		classes, err := parseScrub(p.Params)
@@ -430,11 +479,20 @@ func (k *batchKind) Run(ctx context.Context, run *Run) (any, error) {
 
 	run.LoadCheckpoint(&st)
 
+	// the accounts put off to this window first
+	if err := b.later(ctx, &st); err != nil {
+		return st.result(), err
+	}
+
 	if err := b.walk(ctx, &st); err != nil {
 		return st.result(), err
 	}
 
 	if err := b.retryDeferred(ctx, &st); err != nil {
+		return st.result(), err
+	}
+
+	if err := b.later(ctx, &st); err != nil {
 		return st.result(), err
 	}
 
@@ -459,6 +517,10 @@ func (b *batch) walk(ctx context.Context, st *batchState) error {
 	for !st.Walked {
 		if err := b.run.Fence(); err != nil {
 			return err
+		}
+
+		if !b.inWindow() {
+			return b.postpone() // the checkpoint of the last page is stored
 		}
 
 		b.ixMu.Lock()
@@ -502,6 +564,79 @@ func (b *batch) progress(st *batchState) {
 	_ = b.run.Progress(phase, st.Accounts, 0)
 }
 
+// inWindow reports whether the batch may start an account now.
+func (b *batch) inWindow() bool {
+	return !b.window || b.run.m.cfg.FTSBuild.Window.In(b.run.m.now())
+}
+
+// postpone gives the batch back until the next reshard window.
+func (b *batch) postpone() error {
+	metrics.FTSBuildWindowDeferred.Inc()
+
+	return &PostponeError{Until: b.run.m.cfg.FTSBuild.Window.NextStart(b.run.m.now()), Reason: "waiting for the reshard window"}
+}
+
+// later runs the accounts put off to the reshard window when the batch
+// is inside it; it postpones the batch while any remain.
+func (b *batch) later(ctx context.Context, st *batchState) error {
+	if len(st.Later) == 0 {
+		return nil
+	}
+
+	if !b.inWindow() {
+		return b.postpone()
+	}
+
+	entries, err := b.entriesOf(st.Later)
+	if err != nil {
+		return err
+	}
+
+	results, fatal := b.runAccounts(ctx, entries)
+	if fatal != nil {
+		return fatal
+	}
+
+	st.Later, st.Accounts = nil, st.Accounts-int64(len(results))
+	st.add(results)
+
+	if err := b.run.Checkpoint(*st); err != nil {
+		return err
+	}
+
+	b.progress(st)
+
+	if len(st.Later) > 0 {
+		return b.postpone() // they did not fit into what is left of it
+	}
+
+	return nil
+}
+
+// entriesOf reads the directory entries of accounts (an account without
+// one is handed on as gone for account() to find out).
+func (b *batch) entriesOf(accounts []string) ([]model.IndexEntry, error) {
+	entries := make([]model.IndexEntry, 0, len(accounts))
+
+	b.ixMu.Lock()
+	defer b.ixMu.Unlock()
+
+	for _, a := range accounts {
+		v, err := b.ix.Get(a)
+
+		switch {
+		case errors.Is(err, model.ErrNotFound):
+			entries = append(entries, model.IndexEntry{ID: a})
+		case err != nil:
+			return nil, fmt.Errorf("account directory: %w", err)
+		default:
+			entries = append(entries, model.IndexEntry{ID: a, Value: v})
+		}
+	}
+
+	return entries, nil
+}
+
 // retryDeferred tries the accounts put aside for a lock again, a lease
 // period apart, and fails those still locked after the last round.
 func (b *batch) retryDeferred(ctx context.Context, st *batchState) error {
@@ -512,25 +647,10 @@ func (b *batch) retryDeferred(ctx context.Context, st *batchState) error {
 		case <-time.After(b.run.m.cfg.LeaseTTL):
 		}
 
-		entries := make([]model.IndexEntry, 0, len(st.Deferred))
-
-		b.ixMu.Lock()
-
-		for _, a := range st.Deferred {
-			v, err := b.ix.Get(a)
-
-			switch {
-			case errors.Is(err, model.ErrNotFound):
-				entries = append(entries, model.IndexEntry{ID: a}) // gone: account() finds out
-			case err != nil:
-				b.ixMu.Unlock()
-				return fmt.Errorf("account directory: %w", err)
-			default:
-				entries = append(entries, model.IndexEntry{ID: a, Value: v})
-			}
+		entries, err := b.entriesOf(st.Deferred)
+		if err != nil {
+			return err
 		}
-
-		b.ixMu.Unlock()
 
 		results, fatal := b.runAccounts(ctx, entries)
 		if fatal != nil {
@@ -576,6 +696,14 @@ func (st *batchState) add(results []acctResult) {
 			} else {
 				st.fail(r.account, "locked by an import or another job (too many accounts put aside)")
 			}
+		case outLater:
+			if len(st.Later) < maxBatchDeferred {
+				st.Later = append(st.Later, r.account)
+			} else {
+				st.fail(r.account, "outside the reshard window (too many accounts put off)")
+			}
+		case outUnsupported:
+			st.Unsupported++
 		default:
 			st.fail(r.account, r.err)
 		}
@@ -723,6 +851,11 @@ func (b *batch) account(ctx context.Context, e model.IndexEntry) acctResult {
 		return r
 	}
 
+	if !b.inWindow() {
+		r.out = outLater
+		return r
+	}
+
 	actx, unlock, err := b.lock(ctx, u)
 
 	switch {
@@ -759,11 +892,17 @@ func (b *batch) gone(e model.IndexEntry, entry model.AccountEntry) (bool, error)
 // locked) account.
 func (b *batch) runOne(ctx, actx context.Context, u model.User, r acctResult) acctResult {
 	sr := b.run.subRun(r.account, u, b.sub.Name(), b.p.Params)
+	sr.window = b.window
 	prober, pre, preErr := b.preState(u)
 
 	res, err := runKind(actx, b.sub, sr)
 	if err != nil {
+		b.clearAfterError(ctx, u, sr, err)
 		return failed(ctx, actx, err, r)
+	}
+
+	if rep, ok := res.(model.FTSLayoutReport); ok && (rep.Unsupported || rep.Deferred != "") {
+		return layoutOutcome(rep, r)
 	}
 
 	out, _ := res.(model.ScrubOutcome)
@@ -780,6 +919,42 @@ func (b *batch) runOne(ctx, actx context.Context, u model.User, r acctResult) ac
 
 	if prober != nil && out != nil {
 		b.record(r.account, prober, pre, preErr, out)
+	}
+
+	return r
+}
+
+// clearAfterError removes the unfinished conversion of a full-text run
+// of the account that failed: one that panicked cannot have cleared it
+// (its own clean-up sees a nil error then, R2.5). Not after an error
+// that stops the batch (a lost lease: the successor clears it).
+func (b *batch) clearAfterError(ctx context.Context, u model.User, sr *Run, err error) {
+	if !buildsLayout(b.sub.Name()) || isFatal(ctx, err) {
+		return
+	}
+
+	if lay, ok := u.(model.FTSLayouter); ok {
+		if _, cerr := lay.ClearFTSLayoutNext(sr.layoutToken()); cerr != nil {
+			b.run.Env.Log.Warn("batch: unfinished conversion not cleared", "account", sr.Job.Account, "err", cerr)
+		}
+	}
+}
+
+// layoutOutcome is the outcome of an online run that ended without a
+// change: unsupported (no layout 3 index), deferred (busy: tried again
+// at the end), later (outside the window), or failed (window_too_small).
+func layoutOutcome(rep model.FTSLayoutReport, r acctResult) acctResult {
+	switch {
+	case rep.Unsupported:
+		r.out = outUnsupported
+	case rep.Deferred == model.FTSDeferredBusy:
+		r.out = outDeferred
+	case rep.Deferred == model.FTSDeferredWindow:
+		r.out = outLater
+	case rep.Deferred == model.FTSDeferredMarkOff:
+		r.err = "the cluster mark fts/online was removed after the plan; plan the batch again (it runs offline then)"
+	default:
+		r.err = "window_too_small: the run's estimate is longer than the reshard window; run the account with anytime, or widen the window"
 	}
 
 	return r
@@ -875,7 +1050,7 @@ func (b *batch) idle(u model.User, entry model.AccountEntry) bool {
 // import holds is refused with model.ErrImportLocked; one an ended purge
 // left purging with ErrLeftPurging.
 func (b *batch) lock(ctx context.Context, u model.User) (context.Context, func(), error) {
-	if !b.sub.Exclusive() {
+	if !exclusive(b.sub, b.p.Params) {
 		return ctx, func() {}, nil
 	}
 

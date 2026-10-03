@@ -614,6 +614,30 @@ exceed a limit by one entry each.
 | `fts.dict_id_min_runes` | 25 | least length in characters of such an identifier (13–40, since 0.50.0); also the length `fts_layout -dict-filter ids` uses. A generation keeps the length it was built with, so a change makes every filtered generation due for `plan -all -due-only fts_layout`: a full copy of each under its account lock. Choose it once |
 | `fts.attached_headers` | `all` | which header fields of attached messages (`message/rfc822`, `message/global`, `text/rfc822-headers`) belong to the body text (since 0.50.0): `all` every field, `nosig` all but the signature and trace fields `DKIM-Signature`, `ARC-Seal`, `ARC-Message-Signature`, `ARC-Authentication-Results`, `Authentication-Results`, `Received`, `Received-SPF`, `X-Google-DKIM-Signature` and every `X-*-Signature`. IMAP `SEARCH` checks messages by it at once; new index generations are built with it while the cluster mark of the dictionary filter is set, existing ones change with `fts_rebuild`. A server with `all` does not trust an index built with `nosig` (IMAP reads the messages instead). Practically one-way at scale: back to `all` takes `fts_rebuild` of every account built with `nosig`, each reading all its messages under its account lock |
 
+**Online runs and the reshard window** (since 0.51.0). With the cluster
+mark `fts/online` (`shardpostctl fts online enable`) `fts_layout` and
+`fts_rebuild` can run without the account's lock: deliveries, logins and
+sessions go on while the target generation is built beside the current
+one (see [storage](architecture/storage.md#online-runs-of-the-full-text-index)).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `fts.online_build` | `off` | what a plan of `fts_layout` or `fts_rebuild` without `online` gets: `auto` online while the cluster mark is set (and, for one account, its index has layout 3), `off` offline under the account lock as before 0.51.0. A plan records the decision; `online: true` needs the mark either way (409 without). The `fts_due` worker plans without `online`, so with `auto` its reshards run online |
+| `fts.reshard_window` | empty | daily window `HH:MM-HH:MM` (over midnight allowed, e.g. `23:00-04:00`; empty: always) in which the `fts_due` worker plans its reshards and a batch of `fts_layout` or `fts_rebuild` starts an account (`plan -all … -anytime` ignores it). An account whose largest object holds `fts.reshard_urgent_factor` times its target is planned at once, in or out of the window and whatever `build_max_running` and the estimate say; outside the window the worker moves the others to the next window start plus a stable spread per account (within the first half of the window); a batch gives itself back until the next window starts and goes on from its checkpoint. A run starts only when its estimate (`build_ms_per_message_*` × the documents of the account) fits into what is left of the window; one longer than the whole window is not started (`window_too_small`: a log line, `imapceph_fts_build_window_too_small_total`, the worker looks again at the next window start plus the spread, so once a day until the account is planned on its own or the window widened; a batch fails the account). A run an operator plans for one account starts at once. A run that overruns its window ends normally |
+| `fts.reshard_window_tz` | `UTC` | IANA time zone of the window (e.g. `Europe/Berlin`; the binary carries the zone data). On the days the clocks change the window is an hour shorter or longer |
+| `fts.reshard_urgent_factor` | 1.8 | load at which the `fts_due` worker reshards an account at once (1.5–1.95): its largest index object holds this many times its target, near the 2·T (200000 keys at the default target) at which Ceph reports large omap objects. With a window only; without one the worker plans every due account at once anyway |
+| `fts.build_max_running` | 1 | jobs the `fts_due` worker has planned that may run at the same time (1–64), counted in the memory of the server that holds the worker's lease (after a takeover briefly up to twice as many); applies with a window |
+| `fts.build_catchup_rounds` | 5 | switch attempts of an online run (1–50): each round indexes what writers recorded since the last one; when the switch still finds new records after these rounds, the run holds new id allocations for `fts.build_hold_ms`, catches up once more and switches (at most three holds, then the run fails without a change) |
+| `fts.build_hold_ms` | 2000 | how long a hold delays new deliveries and appends of the account before the switch (0–5000; 0 never holds: a run that does not converge fails after its rounds). Writers never wait longer than 5 s, whatever the layout record says |
+| `fts.build_ms_per_message_copy` | 3 | estimate of an online `fts_layout` per document (0.1–1000), to decide whether it fits into the window |
+| `fts.build_ms_per_message_reindex` | 20 | the same for an online `fts_rebuild` (1–10000) |
+| `fts.reindex_batch_docs` | 200 | messages an online rebuild indexes in one batch (50–5000) |
+| `fts.reindex_batch_bytes` | 8388608 | bytes of messages an online rebuild indexes in one batch (1 MiB–64 MiB) |
+
+New keys go into the overlay only after the image that knows them is
+running (the configuration is read with `UnmarshalExact`); on the way
+back they leave the overlay first.
+
 YAML only. `server.fts_shards` keeps the object count of layout 2, which
 is also the target of a conversion back from layout 3.
 

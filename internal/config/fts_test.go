@@ -72,7 +72,10 @@ func TestFTSLayoutKeys(t *testing.T) {
 
 	want := FTS{Layout: 3, ShardsMin: 1, ShardsMax: 128, DictShardsMax: 512, ShardTargetKeys: 100000, DictTargetKeys: 100000,
 		ConvertBufferKeys: 262144, ConvertWriters: 8, AutoReshard: true, FrozenWaitSeconds: 10, ImportReshardSyncSeconds: 60,
-		DictFilter: "none", DictIDMinRunes: 25, AttachedHeaders: "all"}
+		DictFilter: "none", DictIDMinRunes: 25, AttachedHeaders: "all",
+		OnlineBuild: "off", ReshardWindowTZ: "UTC", BuildMaxRunning: 1, BuildCatchupRounds: 5, BuildHoldMS: 2000,
+		BuildMsPerMessageCopy: 3, BuildMsPerMessageReindex: 20, ReindexBatchDocs: 200, ReindexBatchBytes: 8 << 20,
+		ReshardUrgentFactor: 1.8}
 
 	got := c.FTS
 	got.FallbackCharset, got.HTML, got.IMAPSearch, got.VerifyParallel = "", "", "", 0
@@ -185,6 +188,45 @@ func TestFTSDictFilterKeys(t *testing.T) {
 		"fts:\n  dict_id_min_runes: 12\n",
 		"fts:\n  dict_id_min_runes: 41\n",
 		"fts:\n  attached_headers: basic\n",
+	} {
+		if _, err := Load(configFile(t, body)); err == nil {
+			t.Errorf("accepted %q", body)
+		}
+	}
+}
+
+// TestFTSOnlineKeys (B14i): the keys of the online runs and the reshard
+// window: a window over midnight in a named zone is accepted, malformed
+// windows, unknown zones and values out of range are refused.
+func TestFTSOnlineKeys(t *testing.T) {
+	c, err := Load(configFile(t, "fts:\n  online_build: auto\n  reshard_window: \"23:00-04:00\"\n  reshard_window_tz: Europe/Berlin\n"+
+		"  build_hold_ms: 0\n  build_ms_per_message_copy: 0.5\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := c.FTS.Window()
+	if err != nil || !w.Set() || c.FTS.OnlineBuild != "auto" || c.FTS.BuildHoldMS != 0 || c.FTS.BuildMsPerMessageCopy != 0.5 {
+		t.Errorf("fts %+v, window %v %v", c.FTS, w, err)
+	}
+
+	for _, body := range []string{
+		"fts:\n  online_build: on\n",
+		"fts:\n  reshard_window: \"2:00-05:00\"\n",
+		"fts:\n  reshard_window: \"02:00-02:00\"\n",
+		"fts:\n  reshard_window: \"02:00\"\n",
+		"fts:\n  reshard_window: \"24:00-05:00\"\n",
+		"fts:\n  reshard_window: \"02:00-05:00\"\n  reshard_window_tz: Mars/Olympus\n",
+		"fts:\n  build_max_running: 0\n",
+		"fts:\n  build_max_running: 65\n",
+		"fts:\n  build_catchup_rounds: 51\n",
+		"fts:\n  build_hold_ms: 5001\n",
+		"fts:\n  build_ms_per_message_copy: 0.05\n",
+		"fts:\n  build_ms_per_message_reindex: 0.5\n",
+		"fts:\n  reindex_batch_docs: 49\n",
+		"fts:\n  reindex_batch_bytes: 1000\n",
+		"fts:\n  reshard_urgent_factor: 1.4\n",
+		"fts:\n  reshard_urgent_factor: 2\n",
 	} {
 		if _, err := Load(configFile(t, body)); err == nil {
 			t.Errorf("accepted %q", body)

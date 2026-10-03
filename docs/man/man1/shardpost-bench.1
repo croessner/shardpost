@@ -1,4 +1,4 @@
-.TH SHARDPOST-BENCH 1 "2026-10-03" "ShardPost 0.49.0" "ShardPost Manual"
+.TH SHARDPOST-BENCH 1 "2026-10-03" "ShardPost 0.51.0" "ShardPost Manual"
 .SH NAME
 shardpost-bench \- fill separate bench pools with accounts and measure what an account costs in Ceph
 .SH SYNOPSIS
@@ -322,6 +322,19 @@ reshards the converted index once more. With
 the search probe runs again after the conversion and must report the
 same fingerprint; a note says when it does not.
 .PP
+With
+.B \-\-online
+as well (since 0.51.0) the bench sets the mark of online runs in its
+pools and reshards every probe account once more online, one after the
+other, while
+.B \-\-load
+.I r
+deliveries a second go into the account of the run. It reports the
+latency of the runs, their catch-up rounds, the documents caught up and
+the time new deliveries were held before the switches, and the count,
+latency and failures of the deliveries during the runs (failures should
+be 0: an online run refuses no delivery; a note names them otherwise).
+.PP
 The objecter log
 .RB ( debug_objecter
 10, one line per operation) is written to
@@ -503,6 +516,16 @@ or, without the flag,
 .I fts.layout
 3, the default).
 .TP
+.B \-\-online
+.BR "measure \-\-convert" :
+reshard the probe accounts online once more (sets the mark of online
+runs in the bench pools).
+.TP
+.BI \-\-load " r"
+.BR "measure \-\-convert \-\-online" :
+deliveries per second into the account of each online reshard (0, the
+default: none).
+.TP
 .BI \-\-extrapolate " n"
 Scale the per-account means to
 .I n
@@ -572,6 +595,10 @@ and
 .B search_after_convert
 (with
 .BR \-\-convert ),
+.B convert_online
+(accounts, load, run_latency, catchup_rounds, caught_up, hold_ms,
+deliveries, failures, delivery_latency; with
+.BR \-\-online ),
 .B user_open
 and
 .BR session_open .
@@ -667,6 +694,19 @@ shardpost bench populate \-\-index\-pool shardpost\-load\-index \e
 shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
     \-\-data\-pool shardpost\-load\-data \-\-probe\-accounts 100 \e
     \-\-probe\-messages 0 \-\-search 12 \-\-fts\-layout 3 \-\-convert
+.RE
+.fi
+.PP
+The same, then online reshards with eight deliveries a second into the
+account of each run (no delivery may fail):
+.PP
+.nf
+.RS
+shardpost bench measure \-\-index\-pool shardpost\-load\-index \e
+    \-\-data\-pool shardpost\-load\-data \-\-probe\-accounts 20 \e
+    \-\-probe\-messages 0 \-\-convert \-\-online \-\-load 8 \e
+    \-\-json /tmp/online.json
+jq '.convert_online' /tmp/online.json
 .RE
 .fi
 .PP

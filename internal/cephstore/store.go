@@ -155,6 +155,18 @@ type FTSConfig struct {
 	DictFilter      bool
 	DictIDMinRunes  int
 	AttachedHeaders string
+	// BuildCatchupRounds (fts.build_catchup_rounds) are the switch
+	// attempts of an online run before it holds new id allocations for
+	// BuildHold (fts.build_hold_ms); BuildNoHold (fts.build_hold_ms 0)
+	// never holds: the run fails after its rounds instead.
+	// ReindexBatchDocs and ReindexBatchBytes (fts.reindex_batch_docs,
+	// fts.reindex_batch_bytes) bound a batch of an online rebuild. Zero
+	// values take the defaults.
+	BuildCatchupRounds int
+	BuildHold          time.Duration
+	BuildNoHold        bool
+	ReindexBatchDocs   int
+	ReindexBatchBytes  int
 }
 
 // Store owns the librados connection and hands out per-user views. The

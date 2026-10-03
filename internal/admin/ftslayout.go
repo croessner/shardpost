@@ -343,6 +343,11 @@ func apiLayoutState(st model.FTSLayoutState) adminapi.FTSLayoutState {
 		out.NextAt = &at
 	}
 
+	if st.NextOnline {
+		on, mode := true, adminapi.FTSLayoutStateNextMode(st.NextMode)
+		out.NextOnline, out.NextMode = &on, &mode
+	}
+
 	if len(st.Old) > 0 {
 		old := make([]adminapi.FTSLayoutShape, 0, len(st.Old))
 		for _, o := range st.Old {

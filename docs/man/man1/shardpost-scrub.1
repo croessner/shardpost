@@ -1,4 +1,4 @@
-.TH SHARDPOST-SCRUB 1 "2026-10-03" "ShardPost 0.50.0" "ShardPost Manual"
+.TH SHARDPOST-SCRUB 1 "2026-10-03" "ShardPost 0.51.0" "ShardPost Manual"
 .SH NAME
 shardpost-scrub \- scrub accounts, submit the nightly batch scrub, sweep the pools for debris
 .SH SYNOPSIS
@@ -110,6 +110,20 @@ writes the record anew). It also keeps the
 .B props
 of the presence entry in step with the generations (counted in
 .BR FTSPresenceFixed ).
+It reports the records of online runs of the full-text index that the
+layout record no longer names
+.RB ( FTSBuildLeftover ,
+.BR fts_build_leftover ,
+since 0.51.0): keys
+.B w:<guid>
+and
+.B w#
+of the id map left by a run that crashed or that a version before
+0.51.0 cleared. They are harmless; with the repair class
+.B uncovered
+they are removed, each page in a compare-and-swap with the layout
+record that keeps the keys of the run it names (a run that starts
+meanwhile keeps its records).
 The scrub job of the job system
 .RB ( "shardpost scrub \-\-batch" ,
 .BR "shardpostctl plan scrub" )

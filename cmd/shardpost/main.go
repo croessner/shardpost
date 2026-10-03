@@ -19,6 +19,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	// The zone of fts.reshard_window_tz: the image need not carry the
+	// zone files.
+	_ "time/tzdata"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -318,7 +321,10 @@ func cephConfig(settings *config.Config) cephstore.Config {
 			ConvertWriters: settings.FTS.ConvertWriters, AutoReshard: settings.FTS.AutoReshard,
 			FrozenWait: time.Duration(settings.FTS.FrozenWaitSeconds) * time.Second,
 			DictFilter: settings.FTS.DictIDFilter() > 0, DictIDMinRunes: settings.FTS.DictIDMinRunes,
-			AttachedHeaders: settings.FTS.AttachedHeaders},
+			AttachedHeaders:    settings.FTS.AttachedHeaders,
+			BuildCatchupRounds: settings.FTS.BuildCatchupRounds,
+			BuildHold:          time.Duration(settings.FTS.BuildHoldMS) * time.Millisecond, BuildNoHold: settings.FTS.BuildHoldMS == 0,
+			ReindexBatchDocs: settings.FTS.ReindexBatchDocs, ReindexBatchBytes: settings.FTS.ReindexBatchBytes},
 		Quota:       cephstore.QuotaLimit{Bytes: settings.Server.QuotaBytes, Msgs: settings.Server.QuotaMsgs},
 		PublicQuota: cephstore.QuotaLimit{Bytes: settings.Server.PublicQuotaBytes, Msgs: settings.Server.PublicQuotaMsgs},
 		QuotaRules:  quota.NewPolicy(settings.Quota),

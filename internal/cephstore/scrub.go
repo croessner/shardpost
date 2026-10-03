@@ -83,6 +83,9 @@ type ScrubReport struct {
 	FTSShardsMissing int `json:",omitempty"`
 	FTSPresenceFixed int `json:",omitempty"`
 	FTSVersionDrift  int `json:",omitempty"`
+	// FTSBuildLeftover are records of online full-text runs ("w:" keys,
+	// "w#") the layout record no longer names (repair class uncovered).
+	FTSBuildLeftover int `json:",omitempty"`
 	// Shadow compares the listing with the intents (orphan source
 	// "shadow").
 	Shadow *ShadowReport `json:",omitempty"`
@@ -97,7 +100,7 @@ var _ model.ScrubOutcome = (*ScrubReport)(nil)
 func (r *ScrubReport) Findings() int {
 	n := r.OrphanBlobs + r.MissingBlobs + r.RefsFixed + r.MoveIntents + r.DeliveryIntents + r.OrphanCandidates +
 		r.UnknownShards + r.RetiredRepaired + r.UncoveredEntries + r.StaleMarkObjects + r.IntentsOpen + r.StaleMetadata +
-		r.FTSMixedLayout + r.FTSShardsMissing + r.FTSVersionDrift
+		r.FTSMixedLayout + r.FTSShardsMissing + r.FTSVersionDrift + r.FTSBuildLeftover
 	if r.QuotaFixed {
 		n++
 	}

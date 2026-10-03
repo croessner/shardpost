@@ -140,7 +140,7 @@ func TestJobRolesAndErrors(t *testing.T) {
 func TestJobErrorLayoutRefusals(t *testing.T) {
 	s := &Server{}
 
-	for _, err := range []error{model.ErrFTSLayoutMark, fmt.Errorf("plan: %w", model.ErrFTSDictLayout3)} {
+	for _, err := range []error{model.ErrFTSLayoutMark, fmt.Errorf("plan: %w", model.ErrFTSDictLayout3), model.ErrFTSOnlineMark} {
 		rec := httptest.NewRecorder()
 		s.jobError(rec, httptest.NewRequest(http.MethodPost, "/admin/v1/accounts/alice/plans", nil), err)
 

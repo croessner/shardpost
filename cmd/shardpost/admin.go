@@ -161,7 +161,14 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 
 	c := settings.Jobs
 	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
-	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store}
+	env := &jobs.Env{Accounts: importer, Log: log.With("component", "jobs"), Learning: learning, Directory: store, Layout3: store,
+		FTSOnline: store}
+
+	// validated with the configuration
+	win, err := settings.FTS.Window()
+	if err != nil {
+		return err
+	}
 
 	if sendq != nil {
 		env.Submissions = sendq
@@ -182,7 +189,10 @@ func (a *adminServers) newJobs(log *slog.Logger, settings *config.Config, store 
 	a.jobs = jobs.NewManager(kv, env, jobs.Config{Poll: sec(c.PollSeconds), LeaseTTL: sec(c.LeaseSeconds),
 		Retention: time.Duration(c.RetentionDays) * 24 * time.Hour, PlanTTL: sec(c.PlanTTLSeconds), MaxParallel: c.MaxParallel,
 		Settle: sec(c.SettleSeconds), ExpiryPoll: sec(c.ExpirySeconds), BatchParallel: c.BatchParallel,
-		ScrubParallel: settings.Scrub.Parallel, ScrubInterval: time.Duration(settings.Scrub.IntervalDays) * 24 * time.Hour},
+		ScrubParallel: settings.Scrub.Parallel, ScrubInterval: time.Duration(settings.Scrub.IntervalDays) * 24 * time.Hour,
+		FTSBuild: jobs.FTSBuild{OnlineAuto: settings.FTS.OnlineBuild == config.OnlineBuildAuto, Window: win, MaxRunning: settings.FTS.BuildMaxRunning,
+			MsPerMessageCopy: settings.FTS.BuildMsPerMessageCopy, MsPerMessageReindex: settings.FTS.BuildMsPerMessageReindex,
+			UrgentFactor: settings.FTS.ReshardUrgentFactor}},
 		instance, jobs.Kinds(time.Duration(settings.Scrub.GraceSeconds)*time.Second)...)
 
 	warnUnbackfilled(log, kv)

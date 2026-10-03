@@ -49,6 +49,24 @@ func EffectiveFTSLayout(configured int, marked bool) int {
 // once. Its value is an FTSLayoutMark.
 const FTSDictFilterMarkKey = "fts/dictfilter"
 
+// FTSOnlineMarkKey is the admin store record whose presence allows
+// online runs of fts_layout and fts_rebuild (stage B14i, "shardpostctl
+// fts online enable"): runs without the account's maintenance lock,
+// whose writers record the documents they index meanwhile in the id map.
+// It is read without a cache by every plan and run that asks for an
+// online run, so removing it makes new runs offline (or refused) at
+// once. Its value is an FTSLayoutMark.
+const FTSOnlineMarkKey = "fts/online"
+
+// ErrFTSOnlineMark refuses an online run without the cluster mark.
+var ErrFTSOnlineMark = errors.New("online runs of the full-text index are not enabled in this cluster (shardpostctl fts online enable)")
+
+// FTSOnlineMarked is implemented by stores that read the cluster mark of
+// online runs (FTSOnlineMarkKey).
+type FTSOnlineMarked interface {
+	FTSOnlineEnabled() (bool, error)
+}
+
 // Values of the dict_filter parameter of fts_layout: the identifier
 // filter of the target generation ("": as the configuration and the
 // cluster mark say).
@@ -85,6 +103,10 @@ const (
 	// writes generations with the identifier filter and the text
 	// preparation "nosig" (0.50.0).
 	CapFTSDictFilter = "fts_dict_filter"
+	// CapFTSOnlineBuild is the capability of a server whose writers
+	// record their documents for an online run of the full-text index
+	// and write through its freeze (0.51.0, stage B14i).
+	CapFTSOnlineBuild = "fts_online_build"
 	// CapSystemPool is the capability of a process that knows the system
 	// pool (ceph.system_pool, 0.47.0): it routes the store's own
 	// namespaces by it and checks the placement fence and mark.
@@ -216,6 +238,11 @@ type FTSDueRecord struct {
 	// a job again (since 0.49.0).
 	Noops int  `json:"noops,omitempty"`
 	Idle  bool `json:"idle,omitempty"`
+	// Deferred is set once the worker saw that the job ended without a
+	// change because the account was busy or the run did not fit into
+	// the reshard window (since 0.51.0): the entry waited once, the next
+	// one plans a new job.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // FTSDueNoopMax bounds the wait after a no-op job.
@@ -289,7 +316,69 @@ type FTSLayoutRequest struct {
 	Fence func() error
 	// Progress reports the phase and the progress inside it (optional).
 	Progress func(phase string, done, total int)
+
+	// Online runs the conversion without the account's maintenance lock
+	// (stage B14i): writers go on writing into the current generation
+	// and record what they index meanwhile; the run builds the target
+	// beside it, catches up and switches in one compare-and-swap. It
+	// needs the cluster mark FTSOnlineMarkKey and a layout 3 index;
+	// conversions between the layouts stay offline.
+	Online bool
+	// Rebuild (online only) builds the target from the messages instead
+	// of copying the postings: fts_rebuild -online. The target gets the
+	// identifier filter and the text preparation the configuration and
+	// the cluster mark of the filter ask for.
+	Rebuild bool
+	// SkipUnreadable (rebuild) skips a live message whose blob cannot be
+	// read instead of failing the run; DropOrphanIDs drops the ids of
+	// documents that have neither a blob nor a mailbox entry.
+	SkipUnreadable, DropOrphanIDs bool
+	// ForeignAlive reports whether the run of another token (its
+	// heartbeat at, for an import reshard) may still be working; an
+	// online run leaves an account with such a run alone (result busy).
+	// nil: every foreign run counts as ended.
+	ForeignAlive func(tok string, at time.Time) (bool, error)
+	// Admit (optional) decides whether an online run of mode (FTSModeCopy
+	// or FTSModeReindex) over docs documents may start now: nil, or
+	// ErrFTSBuildWindow (it does not fit into what is left of the window)
+	// or ErrFTSWindowTooSmall (it does not fit into any window). The run
+	// ends without a change then and says so in the report.
+	Admit func(mode string, docs int64) error
 }
+
+// Modes of an online run.
+const (
+	// FTSModeCopy copies the postings (a reshard, a change of the
+	// identifier filter).
+	FTSModeCopy = "copy"
+	// FTSModeReindex indexes the messages again (a rebuild, a change of
+	// the text preparation).
+	FTSModeReindex = "reindex"
+)
+
+// Outcomes of an online run that ended without a change and without an
+// error (FTSLayoutReport.Deferred).
+const (
+	// FTSDeferredBusy: another run of the account is alive, or the
+	// account is locked by an import or another job.
+	FTSDeferredBusy = "busy"
+	// FTSDeferredWindow: the run does not fit into what is left of the
+	// reshard window.
+	FTSDeferredWindow = "window"
+	// FTSDeferredTooSmall: the run's estimate is longer than the whole
+	// reshard window (window_too_small).
+	FTSDeferredTooSmall = "window_too_small"
+	// FTSDeferredMarkOff: the cluster mark of online runs was removed
+	// after the plan; the job ends without a change (plan it again: it
+	// runs offline then).
+	FTSDeferredMarkOff = "mark_off"
+)
+
+// Errors of FTSLayoutRequest.Admit.
+var (
+	ErrFTSBuildWindow    = errors.New("the run does not fit into what is left of the reshard window")
+	ErrFTSWindowTooSmall = errors.New("window_too_small: the run's estimate is longer than the reshard window")
+)
 
 // FTSForcedShape are forced object counts of a layout 3 target:
 // postings, dictionary, header texts.
@@ -312,6 +401,12 @@ type FTSLayoutShape struct {
 	// Capped names the kinds of objects (postings, dictionary, headers)
 	// whose count a cap cut, in the target FTSLayoutDue reports.
 	Capped []string `json:"capped,omitempty"`
+	// Docs and Load are reported in the target of FTSLayoutDue only
+	// (since 0.51.0): the documents of the index (its counter) and the
+	// largest object of the current generation relative to its target
+	// (1.5 asks for a reshard).
+	Docs int64   `json:"docs,omitempty"`
+	Load float64 `json:"load,omitempty"`
 }
 
 // FTSLayoutReport is what a conversion did.
@@ -332,6 +427,32 @@ type FTSLayoutReport struct {
 	// the most keys its write buffer held (since 0.49.0).
 	Writes     int64 `json:"writes,omitempty"`
 	BufferKeys int   `json:"buffer_keys,omitempty"`
+
+	// The fields of an online run (since 0.51.0, stage B14i).
+	//
+	// Online is set for one; Mode is FTSModeCopy or FTSModeReindex.
+	Online bool   `json:"online,omitempty"`
+	Mode   string `json:"mode,omitempty"`
+	// Deferred says why the run ended without a change and without an
+	// error (FTSDeferredBusy, FTSDeferredWindow, FTSDeferredTooSmall);
+	// Unsupported that the account has no layout 3 index to run on.
+	Deferred    string `json:"deferred,omitempty"`
+	Unsupported bool   `json:"unsupported,omitempty"`
+	// Indexed are the messages the run indexed from their blobs (reindex
+	// and catch-up), Rounds the catch-up rounds, CaughtUp the documents
+	// they indexed, HoldMS the milliseconds new writers waited before
+	// the switch.
+	Indexed  int64 `json:"indexed,omitempty"`
+	Rounds   int   `json:"rounds,omitempty"`
+	CaughtUp int64 `json:"caught_up,omitempty"`
+	HoldMS   int64 `json:"hold_ms,omitempty"`
+	// OrphanIDs are ids without a blob and without a mailbox entry,
+	// Unreadable live messages skipped with skip_unreadable, DeadIDs the
+	// documents of the snapshot removed before the switch (they stay as
+	// dead ids in the target and are filtered).
+	OrphanIDs  int64 `json:"orphan_ids,omitempty"`
+	Unreadable int64 `json:"unreadable,omitempty"`
+	DeadIDs    int64 `json:"dead_ids,omitempty"`
 }
 
 // FTSLayoutState is the layout record of an account as an operator sees
@@ -344,6 +465,10 @@ type FTSLayoutState struct {
 	// conversion of the import reshard endpoint).
 	NextTok string    `json:"next_tok,omitempty"`
 	NextAt  time.Time `json:"next_at,omitzero"`
+	// NextOnline is set for an online run, NextMode is its mode (copy,
+	// reindex) (since 0.51.0).
+	NextOnline bool   `json:"next_online,omitempty"`
+	NextMode   string `json:"next_mode,omitempty"`
 	// Old are source generations a conversion has not removed yet, OldToks
 	// the runs that left them and OldAt their last heartbeats (zero for a
 	// job), in the same order.
@@ -362,7 +487,7 @@ type FTSLayouter interface {
 	// current shape.
 	FTSLayoutDue() (target FTSLayoutShape, due bool, err error)
 	// ConvertFTSLayout converts or reshards the index; the caller holds
-	// the account's maintenance lock.
+	// the account's maintenance lock, unless the request is online.
 	ConvertFTSLayout(req FTSLayoutRequest) (FTSLayoutReport, error)
 	// ClearFTSLayoutNext removes the unfinished conversion of tok
 	// exactly: the freeze it set is lifted, its record removed, its

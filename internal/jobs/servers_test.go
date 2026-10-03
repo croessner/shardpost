@@ -180,6 +180,16 @@ func TestDictFilterReady(t *testing.T) {
 	if err := CapReady(servers, 2, model.CapFTSDictFilter); !errors.Is(err, ErrNotReady) || !strings.Contains(err.Error(), "1 with fts_dict_filter") {
 		t.Errorf("dictionary filter with a 0.49.0 server: %v", err)
 	}
+
+	// B14i: a server of this version reports the online runs, the older
+	// one does not
+	if err := CapReady(servers[:1], 1, model.CapFTSOnlineBuild); err != nil || servers[0].Instance != "pod-new" {
+		t.Errorf("online runs: %v", err)
+	}
+
+	if err := CapReady(servers, 2, model.CapFTSOnlineBuild); !errors.Is(err, ErrNotReady) {
+		t.Errorf("online runs with a 0.49.0 server: %v", err)
+	}
 }
 
 // readyLater: three minutes on, with pod-a and pod-b renewed, the

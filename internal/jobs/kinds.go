@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -434,22 +435,85 @@ func applyFix(run *Run, fix aclFix) error {
 
 // --- fts_rebuild -----------------------------------------------------------
 
-// ftsRebuild rebuilds the full-text index under the maintenance lock.
+// ftsRebuild rebuilds the full-text index under the maintenance lock, or
+// online without it (stage B14i): the target generation is built from
+// the messages beside the current one, the id map stays, and one
+// compare-and-swap switches.
 type ftsRebuild struct{ kindBase }
+
+// ftsRebuildParams are the parameters of fts_rebuild (since 0.51.0):
+// online as for fts_layout; skip_unreadable skips a live message whose
+// blob cannot be read instead of failing the online run; drop_orphan_ids
+// (default true) drops the ids that have neither a blob nor a mailbox
+// entry, false only counts them (both online only). A server before
+// 0.51.0 ignores them and rebuilds offline.
+type ftsRebuildParams struct {
+	Online         *bool `json:"online,omitempty"`
+	SkipUnreadable bool  `json:"skip_unreadable,omitempty"`
+	DropOrphanIDs  *bool `json:"drop_orphan_ids,omitempty"`
+}
+
+func parseFTSRebuild(params json.RawMessage) (ftsRebuildParams, error) {
+	var p ftsRebuildParams
+
+	if len(bytes.TrimSpace(params)) > 0 { // "null" decodes to no parameters
+		if err := json.Unmarshal(params, &p); err != nil {
+			return p, fmt.Errorf("%w: params: %v", ErrInvalidParams, err)
+		}
+	}
+
+	if (p.SkipUnreadable || p.DropOrphanIDs != nil) && p.Online != nil && !*p.Online {
+		return p, fmt.Errorf("%w: skip_unreadable and drop_orphan_ids apply to online runs only", ErrInvalidParams)
+	}
+
+	return p, nil
+}
+
+// ExclusiveFor implements exclusiveFor: an online rebuild takes no lock.
+func (k *ftsRebuild) ExclusiveFor(params json.RawMessage) bool {
+	p, err := parseFTSRebuild(params)
+
+	return err != nil || !isOnline(p.Online)
+}
+
+// normalizeParams implements paramsNormalizer (see decideOnline).
+func (k *ftsRebuild) normalizeParams(m *Manager, u model.User, params json.RawMessage) (json.RawMessage, error) {
+	p, err := parseFTSRebuild(params)
+	if err != nil {
+		return nil, err
+	}
+
+	if p.Online, err = m.decideOnline(u, p.Online); err != nil {
+		return nil, err
+	}
+
+	if !*p.Online && (p.SkipUnreadable || p.DropOrphanIDs != nil) {
+		return nil, fmt.Errorf("%w: skip_unreadable and drop_orphan_ids apply to online runs only", ErrInvalidParams)
+	}
+
+	return json.Marshal(p)
+}
 
 type ftsSummary struct {
 	Mailboxes int   `json:"mailboxes"`
 	Messages  int64 `json:"messages"`
 	Bytes     int64 `json:"bytes"`
+	// Online is set when the job runs without the lock (since 0.51.0).
+	Online bool `json:"online,omitempty"`
 }
 
-func (k *ftsRebuild) Plan(_ context.Context, _ *Env, u model.User, _ string, _ json.RawMessage) (any, string, error) {
+func (k *ftsRebuild) Plan(_ context.Context, _ *Env, u model.User, _ string, params json.RawMessage) (any, string, error) {
+	p, err := parseFTSRebuild(params)
+	if err != nil {
+		return nil, "", err
+	}
+
 	boxes, err := u.ListMailboxes()
 	if err != nil {
 		return nil, "", err
 	}
 
-	s := ftsSummary{Mailboxes: len(boxes)}
+	s := ftsSummary{Mailboxes: len(boxes), Online: isOnline(p.Online)}
 
 	for i := range boxes {
 		msgs, err := u.ListMessages(boxes[i].ID)
@@ -466,7 +530,16 @@ func (k *ftsRebuild) Plan(_ context.Context, _ *Env, u model.User, _ string, _ j
 	return s, "", nil
 }
 
-func (k *ftsRebuild) Run(_ context.Context, run *Run) (any, error) {
+func (k *ftsRebuild) Run(_ context.Context, run *Run) (res any, err error) {
+	p, err := parseFTSRebuild(run.Job.Params)
+	if err != nil {
+		return nil, err
+	}
+
+	if isOnline(p.Online) {
+		return k.runOnline(run, p)
+	}
+
 	rb, err := capability[model.FTSRebuilder](run.User, "rebuild the full-text index")
 	if err != nil {
 		return nil, err
@@ -484,6 +557,25 @@ func (k *ftsRebuild) Run(_ context.Context, run *Run) (any, error) {
 	})
 
 	return map[string]int{"indexed": indexed}, err
+}
+
+// runOnline is the online rebuild: an online run of the layout in the
+// mode reindex (model.FTSLayoutRequest.Rebuild).
+func (k *ftsRebuild) runOnline(run *Run, p ftsRebuildParams) (res any, err error) {
+	lay, err := capability[model.FTSLayouter](run.User, "change the full-text layout")
+	if err != nil {
+		return nil, err
+	}
+
+	tok := run.layoutToken()
+
+	defer run.clearOwnLayout(lay, tok, &err)
+
+	req := model.FTSLayoutRequest{Rebuild: true, SkipUnreadable: p.SkipUnreadable, DropOrphanIDs: p.DropOrphanIDs == nil || *p.DropOrphanIDs,
+		Tok: tok, Fence: run.Fence, Progress: run.throttledProgress()}
+	run.onlineRequest(&req)
+
+	return lay.ConvertFTSLayout(req)
 }
 
 // --- fts_dict_convert ------------------------------------------------------

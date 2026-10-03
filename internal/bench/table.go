@@ -76,6 +76,14 @@ func WriteMeasureTable(w io.Writer, r *MeasureReport) error {
 		p.round(r.Convert)
 	}
 
+	if o := r.ConvertOnline; o != nil {
+		p.f("\nonline reshards (%d accounts, load %d deliveries/s): catch-up rounds %d, caught up %d, hold %d ms\n",
+			o.Accounts, o.Load, o.Rounds, o.CaughtUp, o.HoldMS)
+		p.latency("  run latency ", o.Run)
+		p.f("  deliveries during the runs %d, failed %d\n", o.Deliveries, o.Failures)
+		p.latency("  delivery latency ", o.Delivery)
+	}
+
 	if r.SearchAfter != nil {
 		p.search(r.SearchAfter)
 	}

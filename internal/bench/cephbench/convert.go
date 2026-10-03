@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"shardpost/internal/bench"
@@ -19,7 +21,11 @@ import (
 
 // MarkLayout3 sets the layout 3 mark in the admin namespace of the
 // store's pools (the bench pools; the guard has checked them).
-func MarkLayout3(s *cephstore.Store) error {
+func MarkLayout3(s *cephstore.Store) error { return setMark(s, model.FTSLayoutMarkKey) }
+
+// setMark sets a cluster mark in the admin namespace of the store's
+// pools (the bench pools).
+func setMark(s *cephstore.Store, key string) error {
 	kv, err := s.AdminKV()
 	if err != nil {
 		return err
@@ -31,7 +37,7 @@ func MarkLayout3(s *cephstore.Store) error {
 		return err
 	}
 
-	return kv.Update(model.FTSLayoutMarkKey, func([]byte) ([]byte, error) { return mark, nil })
+	return kv.Update(key, func([]byte) ([]byte, error) { return mark, nil })
 }
 
 // benchPrincipal is who the bench records in what it marks: the layout 3
@@ -72,14 +78,154 @@ func convertAccount(s *cephstore.Store, account string, unit int) error {
 	return nil
 }
 
+// MarkOnline sets the mark of online runs (stage B14i) in the admin
+// namespace of the store's pools (the bench pools).
+func MarkOnline(s *cephstore.Store) error { return setMark(s, model.FTSOnlineMarkKey) }
+
+// probeOnline reshards every probe account online, one after the
+// other, while the deliverer puts m.o.Load messages a second into the
+// account (measure --convert --online --load r): the run's latency, its
+// catch-up rounds and hold, and the latency and failures of the
+// deliveries (there should be none).
+func (m *measurer) probeOnline(ctx context.Context, r *bench.MeasureReport) error {
+	if err := MarkOnline(m.o.Store); err != nil {
+		return fmt.Errorf("online mark: %w", err)
+	}
+
+	rep := &bench.OnlineReport{Accounts: len(m.accounts), Load: m.o.Load}
+	runs := &bench.Latency{}
+	l := &onlineLoad{m: m, lat: &bench.Latency{}}
+
+	for unit, account := range m.accounts {
+		next, err := messageCount(m.o.Store, account)
+		if err != nil {
+			return fmt.Errorf("online probe: account %s: %w", account, err)
+		}
+
+		stop := l.start(ctx, account, next)
+		start := time.Now()
+		run, err := onlineReshard(m.o.Store, account, unit)
+
+		stop()
+
+		if err != nil {
+			return fmt.Errorf("online probe: account %s: %w", account, err)
+		}
+
+		runs.Add(time.Since(start))
+
+		rep.Rounds += run.Rounds
+		rep.CaughtUp += run.CaughtUp
+		rep.HoldMS += run.HoldMS
+	}
+
+	rep.Run, rep.Delivery = runs.Summary(), l.lat.Summary()
+	rep.Deliveries, rep.Failures = l.delivered.Load(), l.failures.Load()
+	r.ConvertOnline = rep
+
+	if rep.Failures > 0 {
+		r.Notes = append(r.Notes, fmt.Sprintf("%d deliveries failed during the online reshards", rep.Failures))
+	}
+
+	return nil
+}
+
+// onlineLoad delivers into the account of an online run while it runs.
+type onlineLoad struct {
+	m                   *measurer
+	lat                 *bench.Latency
+	delivered, failures atomic.Int64
+}
+
+// start delivers m.o.Load messages a second into the account, numbered
+// from next on, until the returned function is called (it waits for the
+// last delivery).
+func (l *onlineLoad) start(ctx context.Context, account string, next int) func() {
+	o := l.m.o
+	if o.Load <= 0 {
+		return func() {}
+	}
+
+	stop := make(chan struct{})
+
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		tick := time.NewTicker(time.Second / time.Duration(o.Load))
+		defer tick.Stop()
+
+		for n := next; ; n++ {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+
+			raw, _ := o.Gen.Message(account, n)
+			start := time.Now()
+
+			if _, err := o.NewDeliverer(o.Store).Deliver(ctx, bench.Request(account, raw, "")); err != nil {
+				l.failures.Add(1)
+				o.Log.Warn("bench: delivery during an online run failed", "account", account, "err", err)
+
+				continue
+			}
+
+			l.lat.Add(time.Since(start))
+			l.delivered.Add(1)
+		}
+	})
+
+	return func() {
+		close(stop)
+		wg.Wait()
+	}
+}
+
+// onlineReshard reshards one account online, as an fts_layout job
+// without the lock does.
+func onlineReshard(s *cephstore.Store, account string, unit int) (model.FTSLayoutReport, error) {
+	u, err := s.User(account)
+	if err != nil {
+		return model.FTSLayoutReport{}, err
+	}
+	defer u.Close()
+
+	tok := fmt.Sprintf("%s/online-%d-%d", convertSession, time.Now().UnixNano(), unit)
+
+	rep, err := u.ConvertFTSLayout(model.FTSLayoutRequest{Layout: model.FTSLayout3, Tok: tok, Online: true})
+	if err != nil {
+		_, _ = u.ClearFTSLayoutNext(tok)
+		return rep, err
+	}
+
+	if rep.Deferred != "" || rep.Unsupported {
+		return rep, fmt.Errorf("online reshard of %s did not run: %s %s", account, rep.Deferred, rep.Reason)
+	}
+
+	return rep, nil
+}
+
 // probeConvert converts the probe accounts (first round: 2→3, its
 // latency the lock time; second, counted round: a reshard) and repeats
-// the search probe after it, comparing the fingerprints.
+// the search probe after it, comparing the fingerprints. With --online
+// the online reshards follow (probeOnline).
 func (m *measurer) probeConvert(ctx context.Context, r *bench.MeasureReport) error {
 	if !m.o.Convert {
 		return nil
 	}
 
+	if err := m.probeOffline(ctx, r); err != nil || !m.o.Online {
+		return err
+	}
+
+	return m.probeOnline(ctx, r)
+}
+
+// probeOffline is the offline part of probeConvert.
+func (m *measurer) probeOffline(ctx context.Context, r *bench.MeasureReport) error {
 	cas0 := bench.CASRetries()
 
 	lat, ops, n, _, err := m.round(ctx, 1, 1, convertAccount)

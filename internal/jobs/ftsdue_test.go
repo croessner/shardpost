@@ -165,7 +165,7 @@ func TestFTSDueLifecycle(t *testing.T) {
 	}
 
 	j, err := m.Get(rec.JobID)
-	if err != nil || j.Kind != KindFTSLayout || string(j.Params) != `{"due_only":true}` || j.Principal != ftsDuePrincipal {
+	if err != nil || j.Kind != KindFTSLayout || string(j.Params) != `{"due_only":true,"online":false}` || j.Principal != ftsDuePrincipal {
 		t.Fatalf("job %+v %v", j, err)
 	}
 

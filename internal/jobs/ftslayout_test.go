@@ -29,6 +29,8 @@ type fakeLayout struct {
 	cleared []string // tokens ClearFTSLayoutNext removed
 	foreign []string // own tokens of ClearForeignFTSLayoutNext calls
 	convert func(req model.FTSLayoutRequest) (model.FTSLayoutReport, error)
+	// due is what FTSLayoutDue reports (zero: 1/1/1, not due)
+	due model.FTSLayoutShape
 }
 
 func (f *fakeLayout) state() (next string, toks, cleared, foreign []string) {
@@ -66,6 +68,13 @@ func (u *layoutUser) FTSLayout() (model.FTSLayoutState, error) {
 }
 
 func (u *layoutUser) FTSLayoutDue() (model.FTSLayoutShape, bool, error) {
+	u.f.mu.Lock()
+	defer u.f.mu.Unlock()
+
+	if u.f.due.Layout != 0 {
+		return u.f.due, true, nil
+	}
+
 	return model.FTSLayoutShape{Layout: 3, S: 1, D: 1, H: 1}, false, nil
 }
 

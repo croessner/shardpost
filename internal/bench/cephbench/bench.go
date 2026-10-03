@@ -129,7 +129,11 @@ type MeasureOptions struct {
 	Expunge int
 	// Convert converts the full-text index of the probe accounts to
 	// layout 3 after the search probe (see bench.MeasureReport.Convert).
+	// Online then reshards them online once more, with Load deliveries a
+	// second into the account of each run (bench.OnlineReport).
 	Convert bool
+	Online  bool
+	Load    int
 	// EC are the parameters of the data pool's raw space estimate.
 	EC bench.ECEstimate
 	// Extrapolate scales the inventory to this many accounts (0: no).

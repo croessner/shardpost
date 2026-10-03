@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"shardpost/internal/model"
+	"shardpost/internal/window"
 )
 
 // Opener opens accounts (the admin view that does not refuse an account
@@ -41,6 +43,9 @@ type Env struct {
 	// FTSDue is the reshard queue of the full-text index (nil: the
 	// fts_due worker does not run, fts.auto_reshard false).
 	FTSDue *FTSDue
+	// FTSOnline reads the cluster mark of the online runs (nil: online
+	// runs are refused).
+	FTSOnline model.FTSOnlineMarked
 }
 
 // Kind is one job kind.
@@ -59,6 +64,40 @@ type Kind interface {
 	// Run executes the job. It calls run.Fence before every mutation and
 	// may checkpoint to resume after a takeover.
 	Run(ctx context.Context, run *Run) (result any, err error)
+}
+
+// exclusiveFor is implemented by kinds whose exclusivity depends on the
+// parameters of the job: fts_layout and fts_rebuild take the maintenance
+// lock unless they run online (stage B14i).
+type exclusiveFor interface {
+	ExclusiveFor(params json.RawMessage) bool
+}
+
+// exclusive reports whether a job of the kind with these parameters
+// takes the account's maintenance lock (and waits jobs.settle_seconds).
+func exclusive(k Kind, params json.RawMessage) bool {
+	if e, ok := k.(exclusiveFor); ok {
+		return e.ExclusiveFor(params)
+	}
+
+	return k.Exclusive()
+}
+
+// paramsNormalizer is implemented by kinds whose plan fixes parameters
+// the request may leave open: fts_layout and fts_rebuild decide
+// "online" when the plan is made (u is the account, nil for a batch),
+// so that the job runs as planned whatever changes before it is claimed.
+type paramsNormalizer interface {
+	normalizeParams(m *Manager, u model.User, params json.RawMessage) (json.RawMessage, error)
+}
+
+// normalize applies the kind's normalization of its parameters.
+func (m *Manager) normalize(k Kind, u model.User, params json.RawMessage) (json.RawMessage, error) {
+	if n, ok := k.(paramsNormalizer); ok {
+		return n.normalizeParams(m, u, params)
+	}
+
+	return params, nil
 }
 
 // Config tunes the job system.
@@ -84,6 +123,73 @@ type Config struct {
 	// idle account alone: after it, the account is scrubbed again in any
 	// case (7 days when 0 or less; scrub.interval_days is at least 1).
 	ScrubInterval time.Duration
+	// FTSBuild are the settings of the online runs and of the reshard
+	// window (stage B14i).
+	FTSBuild FTSBuild
+}
+
+// FTSBuild are the settings of the online runs of fts_layout and
+// fts_rebuild and of the reshard window (stage B14i).
+type FTSBuild struct {
+	// OnlineAuto (fts.online_build "auto") plans fts_layout and
+	// fts_rebuild without "online" online while the cluster mark
+	// fts/online is set; otherwise they run offline unless the plan asks.
+	OnlineAuto bool
+	// Window (fts.reshard_window, fts.reshard_window_tz) bounds the runs
+	// the fts_due worker plans and the accounts of a batch of fts_layout
+	// or fts_rebuild (without "anytime").
+	Window window.Window
+	// MaxRunning bounds the jobs the fts_due worker has planned and that
+	// have not ended (fts.build_max_running; with a window only).
+	MaxRunning int
+	// MsPerMessageCopy and MsPerMessageReindex estimate a run from the
+	// documents of the account, to tell whether it fits into the window.
+	MsPerMessageCopy, MsPerMessageReindex float64
+	// UrgentFactor (fts.reshard_urgent_factor): an account whose largest
+	// index object holds this many times its target is planned by the
+	// fts_due worker at once, whatever the window, build_max_running and
+	// the estimate say.
+	UrgentFactor float64
+}
+
+// Defaults of FTSBuild.
+const (
+	defaultBuildMaxRunning  = 1
+	defaultMsPerMsgCopy     = 3
+	defaultMsPerMsgReindex  = 20
+	defaultUrgentFactor     = 1.8
+	ftsDueBusyWait          = 5 * time.Minute
+	ftsDueRunningMemoryJobs = 4096
+)
+
+func (b FTSBuild) withDefaults() FTSBuild {
+	if b.MaxRunning <= 0 {
+		b.MaxRunning = defaultBuildMaxRunning
+	}
+
+	if b.MsPerMessageCopy <= 0 {
+		b.MsPerMessageCopy = defaultMsPerMsgCopy
+	}
+
+	if b.MsPerMessageReindex <= 0 {
+		b.MsPerMessageReindex = defaultMsPerMsgReindex
+	}
+
+	if b.UrgentFactor <= 0 {
+		b.UrgentFactor = defaultUrgentFactor
+	}
+
+	return b
+}
+
+// estimate is how long a run of mode over docs documents takes.
+func (b FTSBuild) estimate(mode string, docs int64) time.Duration {
+	ms := b.MsPerMessageCopy
+	if mode == model.FTSModeReindex {
+		ms = b.MsPerMessageReindex
+	}
+
+	return time.Duration(float64(max(docs, 0)) * ms * float64(time.Millisecond))
 }
 
 func (c Config) withDefaults() Config {
@@ -100,6 +206,7 @@ func (c Config) withDefaults() Config {
 	c.BatchParallel, c.ScrubParallel = max(c.BatchParallel, 1), max(c.ScrubParallel, 1)
 
 	c.ScrubInterval = cmpDur(c.ScrubInterval, 7*24*time.Hour)
+	c.FTSBuild = c.FTSBuild.withDefaults()
 
 	return c
 }
@@ -126,6 +233,11 @@ type Manager struct {
 	// afterBatchSubmit (tests) runs between the submit of SubmitBatchOnce
 	// and its second look.
 	afterBatchSubmit func()
+	// ftsDueRunning are the jobs the fts_due worker planned that had not
+	// ended when it last looked (fts.build_max_running): the memory of
+	// the lease holder, no listing.
+	ftsDueMu      sync.Mutex
+	ftsDueRunning map[string]bool
 }
 
 // NewManager builds the job system; instance names this server in
@@ -184,6 +296,11 @@ func (m *Manager) CreatePlan(ctx context.Context, kind Kind, account string, par
 		return nil, err
 	}
 	defer u.Close()
+
+	params, err = m.normalize(kind, u, params)
+	if err != nil {
+		return nil, err
+	}
 
 	summary, fp, err := kind.Plan(ctx, m.env, u, account, params)
 	if err != nil {
@@ -505,7 +622,7 @@ func (m *Manager) List(account, state, after string, limit int) (out []Job, next
 // running one stops at its next safe point.
 func (m *Manager) Cancel(id string) (*Job, error) {
 	j, err := m.cancel(id)
-	if err == nil && j.Terminal() && j.Kind == KindFTSLayout && j.Account != "" {
+	if err == nil && j.Terminal() && buildsLayout(j.Kind) && j.Account != "" {
 		m.clearCancelled(j)
 	}
 
