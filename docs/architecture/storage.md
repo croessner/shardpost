@@ -2,6 +2,10 @@
 
 [Architecture](../../ARCHITECTURE.md) · [Developer guide](../development/README.md)
 
+New here? Start with [Storage explained](storage-explained.md), a
+step-by-step course through the same model with pictures; this document
+is the reference.
+
 ## Physical model
 
 ![Objects and pools](../diagrams/storage.svg)

@@ -1,0 +1,24 @@
+%% "@#8288;" is an at sign and a word joiner: it keeps Mermaid
+%% from rendering the address as a link.
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart LR
+    subgraph IDX["shardpost-index, namespace alice@#8288;example.org"]
+        REG["mailboxes (the registry)<br/>m:NAME = mailbox id<br/>q:bytes, q:msgs = usage<br/>intents bi:, ci:, dm:, d:"]
+        H0["mbox/ID (shard 0)<br/>h:uidnext, h:modseq, ...<br/>entries m:UID<br/>change log c:, v:<br/>intents i:, r:"]
+        H1["mbox/ID/1, mbox/ID/2 ...<br/>entries of higher UIDs"]
+        ACC["account<br/>h:seq, a:SEQ, p:SEQ<br/>(JMAP state)"]
+        FMAP["ftsmap<br/>layout record L,<br/>GUID to document id"]
+        FTX["ftx/GEN/p0..<br/>ftx/GEN/d0..<br/>ftx/GEN/h0..<br/>(full-text layout 3)"]
+        OTHER["sieve, metadata, scrub,<br/>ix/SPACE/NN, pubseen/ID"]
+    end
+    subgraph DATA["shardpost-data, namespace alice@#8288;example.org"]
+        C0["msg/GUID/0<br/>first 4 MiB<br/>xattrs refs, len"]
+        C1["msg/GUID/1 ...<br/>further 4 MiB chunks"]
+    end
+    REG -->|"stable mailbox id"| H0
+    H0 -->|"UID above the shard size"| H1
+    H0 -->|"entry carries the GUID"| C0
+    H1 --> C0
+    C0 --- C1
+    FMAP -->|"names the generation"| FTX
+    FTX -.->|"document ids map to GUIDs"| C0

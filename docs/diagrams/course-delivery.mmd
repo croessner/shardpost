@@ -1,0 +1,28 @@
+sequenceDiagram
+    autonumber
+    participant MTA as MTA
+    participant L as LMTP session
+    participant AU as Auth cache / Nauthilus
+    participant S as Sieve
+    participant R as registry "mailboxes"
+    participant D as data pool msg/GUID/N
+    participant F as ftsmap + ftx objects
+    participant AC as account
+    participant MB as mbox/ID
+    participant W as watchers
+    MTA->>L: RCPT TO alice@example.org
+    L->>AU: who is this recipient?
+    AU-->>L: canonical account
+    MTA->>L: DATA (the message)
+    L->>S: run the active script (object "sieve")
+    S-->>L: keep in INBOX, or fileinto
+    L->>R: CAS: reserve quota, add intent bi:GUID
+    L->>D: write the chunks, refs = 1
+    L->>F: CAS id map, CAS posting objects, dictionary keys
+    L->>AC: CAS: announce p:SEQ
+    L->>MB: CAS: new UID, MODSEQ, entry m:UID
+    L->>AC: record a:SEQ, drop p:SEQ
+    L->>R: remove bi:GUID (batched)
+    L-)W: notify mbox/ID and account
+    L-->>MTA: 250 for this recipient
+    Note over AC,W: IDLE and NOTIFY sessions and JMAP push workers wake up and read

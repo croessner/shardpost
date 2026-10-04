@@ -1,0 +1,30 @@
+%% "@#8288;" is an at sign and a word joiner: it keeps Mermaid
+%% from rendering the address as a link.
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TB
+    subgraph IDX["shardpost-index"]
+        direction LR
+        IA["namespace alice@#8288;example.org<br/>registry, mailboxes, full-text index,<br/>Sieve, account change log"]
+        IB["namespace bob@#8288;example.org<br/>the same kinds of objects"]
+        IP["namespace ~public<br/>public folders"]
+        IF["namespace ~admin<br/>only the fence system.moved"]
+    end
+    subgraph DATA["shardpost-data"]
+        direction LR
+        DA["namespace alice@#8288;example.org<br/>message blobs msg/GUID/N"]
+        DB["namespace bob@#8288;example.org<br/>message blobs"]
+        DL["namespace ~learning<br/>learning copies learning/ID"]
+    end
+    subgraph SYS["shardpost-system"]
+        direction LR
+        SA["~admin<br/>jobs, plans, marks, registrations,<br/>push state, auth-flush"]
+        SC["~accounts<br/>account directory, queues"]
+        SL["~learning<br/>learning queue indexes"]
+        SS["~server<br/>server METADATA"]
+    end
+    IA -->|"entry names a GUID"| DA
+    KIND["index and system: replicated, fast disks, omap<br/>data: usually erasure coded, large disks, no omap"]
+    DATA -.- KIND
+    IB --> DB
+    NOTE["Without ceph.system_pool (before 0.47.0, or not migrated)<br/>the four system namespaces live in shardpost-index"]
+    SYS -.- NOTE

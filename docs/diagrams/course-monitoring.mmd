@@ -1,0 +1,30 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TB
+    subgraph USERS["What users feel"]
+        U1["imapceph_lmtp_deliveries_total{outcome}"]
+        U2["imapceph_command_seconds"]
+        U3["imapceph_connections{proto}"]
+    end
+    subgraph STORE["Store and RADOS"]
+        S1["imapceph_rados_op_seconds{op}"]
+        S2["imapceph_rados_cas_retries_total{kind,class}"]
+        S3["imapceph_rados_inflight_ops"]
+        S4["imapceph_rados_listings_total{site}"]
+        S5["imapceph_system_placement{state}"]
+    end
+    subgraph BG["Background work"]
+        B1["imapceph_job_claim_wait_seconds"]
+        B2["imapceph_batch_accounts_total"]
+        B3["imapceph_scrub_findings_total"]
+        B4["imapceph_fts_shards_capped_total"]
+        B5["imapceph_jmap_push_partitions_unowned"]
+    end
+    subgraph CEPH["Ceph itself"]
+        C1["ceph -s, ceph health detail"]
+        C2["ceph df, ceph osd df"]
+        C3["ceph osd pool stats, ceph osd perf"]
+        C4["LARGE_OMAP_OBJECTS, SLOW_OPS,<br/>NEARFULL, PG states"]
+    end
+    USERS --> STORE
+    STORE --> CEPH
+    BG --> STORE

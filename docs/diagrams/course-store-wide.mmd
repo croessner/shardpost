@@ -1,0 +1,27 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart LR
+    subgraph ADM["~admin"]
+        KV["kv.job/ID, kv.plan/ID, kv.idem/HASH<br/>kv.servers/INSTANCE<br/>kv.fts/layout3 and other marks<br/>kv.jmap/push/..., kv.jmap/sendq/..."]
+        HX["hint indexes and due queues<br/>ix.job, ix.plan, ix.jobs/claimable,<br/>ix.jobs/expiry, ix.submission"]
+        AF["auth-flush (flush log)"]
+    end
+    subgraph ACC["~accounts"]
+        DIR["account directory<br/>ix.accounts/head + 256 shards"]
+        Q["ix.uploads, ix.purged,<br/>ix.fts_layout, ix.fts_due"]
+    end
+    subgraph LRN["~learning"]
+        LQ["ix.learning (due queue),<br/>ix.learning/owner,<br/>lock mbox/learning-worker"]
+    end
+    subgraph SRV["~server"]
+        MD["metadata"]
+    end
+    FE["servers (front-ends)"] -->|"register, submit jobs"| KV
+    FE -.->|"watch"| AF
+    FE -->|"queue entries, notify"| HX
+    FE -->|"entry for a new account"| DIR
+    FE -->|"server METADATA"| MD
+    RUN["job runners<br/>(or servers with workers.run)"] -->|"claim, heartbeat, expire"| HX
+    RUN -->|"walk for batches"| DIR
+    RUN -->|"fts_due, uploads"| Q
+    RUN -->|"learning worker"| LQ
+    PUSH["push workers"] -->|"partitions, subscriptions"| KV

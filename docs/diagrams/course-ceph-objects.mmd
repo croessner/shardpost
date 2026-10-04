@@ -1,0 +1,19 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart LR
+    subgraph OBJ["One RADOS object"]
+        D["Data<br/>a byte stream<br/>(message chunks)"]
+        X["xattrs<br/>small named values<br/>(refs = 2, len = 5120)"]
+        M["omap<br/>sorted key-value pairs<br/>(m:0000000042 = entry)"]
+    end
+    subgraph REP["Replicated, size 3"]
+        R1["full copy on OSD A"]
+        R2["full copy on OSD B"]
+        R3["full copy on OSD C"]
+    end
+    subgraph EC["Erasure coded, 2+1"]
+        E1["data part 1 on OSD A"]
+        E2["data part 2 on OSD B"]
+        E3["parity part on OSD C"]
+    end
+    OBJ -->|"index and system pool:<br/>omap needs replication"| REP
+    OBJ -->|"data pool: write-once blobs,<br/>no omap, less raw space"| EC

@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    participant P as IMAP session
+    participant MB as mbox/ID (shard 0)
+    participant R as registry "mailboxes"
+    participant D as msg/GUID/0
+    participant F as full-text objects
+    P->>MB: CAS: remove m:UID, new MODSEQ, log it, write intent r:UID
+    P->>R: CAS: give back usage (q:bytes, q:msgs)
+    P->>MB: mark r:UID as released (f)
+    P->>D: CAS on xattr refs: refs - 1
+    alt refs is still above 0
+        Note over MB,D: another copy still needs the blob, it stays
+    else refs is now 0
+        P->>F: take the document out of the full-text index
+        P->>D: delete every chunk msg/GUID/N
+    end
+    P->>MB: remove r:UID
+    Note over P,D: A crash anywhere above leaves r:UID behind.<br/>The scrub finds it and recounts, it never releases twice.

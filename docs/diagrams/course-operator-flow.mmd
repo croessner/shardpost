@@ -1,0 +1,14 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TD
+    S(["Something looks wrong"]) --> H{"ceph health detail<br/>not HEALTH_OK?"}
+    H -->|"OSD_NEARFULL / POOL_NEARFULL"| F["Add capacity first.<br/>Writes stop at full ratio."]
+    H -->|"LARGE_OMAP_OBJECTS"| O["Find the object in the cluster log,<br/>map its name to a ShardPost class"]
+    O --> O2["ftx/GEN/dN or pN: reshard it<br/>(plan -due-only fts_layout, raise a cap)"]
+    H -->|"SLOW_OPS"| SL["Which OSD? ceph osd perf.<br/>Pause heavy jobs, check disks"]
+    H -->|"PG degraded / peering"| PG["Wait for recovery,<br/>no migrations or sweeps now"]
+    H -->|"HEALTH_OK"| M{"ShardPost metrics"}
+    M -->|"LMTP 451 rising"| LM["Logs: account locked?<br/>store errors? Ceph latency?"]
+    M -->|"cas_retries rising"| CR["Contention on one class:<br/>fts, registry or mbox"]
+    M -->|"listings_total rising"| LS["A path still lists:<br/>check modes and backfills"]
+    M -->|"shards_capped or<br/>shard_missing above 0"| FT["Raise the cap or<br/>plan fts_rebuild"]
+    M -->|"scrub findings"| SC["Read the job result,<br/>repair with scrub classes"]

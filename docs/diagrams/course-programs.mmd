@@ -1,0 +1,28 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart LR
+    subgraph CL["Clients"]
+        CTL["shardpostctl<br/>admin API, socket or mTLS"]
+        LOAD["shardpost-load<br/>LMTP and IMAP load"]
+    end
+    subgraph LONG["Long-running processes"]
+        SERVE["shardpost<br/>protocols, admin API,<br/>workers unless workers.run is false"]
+        RUNNER["shardpost runner<br/>jobs and background workers"]
+        PUSH["shardpost push<br/>JMAP push partitions"]
+    end
+    subgraph ONE["One-shot commands"]
+        SCRUB["shardpost scrub<br/>plain, --batch, --sweep"]
+        BACK["shardpost index<br/>backfill, show"]
+        SYSTOOL["shardpost system<br/>init, migrate, verify, ..."]
+        BENCH["shardpost bench<br/>populate, measure"]
+    end
+    subgraph POOLS["Production pools"]
+        IDX["shardpost-index"]
+        DATA["shardpost-data"]
+        SYS["shardpost-system"]
+    end
+    BP["bench pools<br/>of their own"]
+    CTL --> SERVE
+    LOAD --> SERVE
+    LONG ==>|"read and write<br/>all day"| POOLS
+    ONE -->|"maintenance, some list<br/>a whole pool"| POOLS
+    BENCH -->|"never the production pools"| BP

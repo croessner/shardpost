@@ -1,0 +1,23 @@
+sequenceDiagram
+    autonumber
+    participant C as IMAP client
+    participant P as IMAP session
+    participant R as registry "mailboxes"
+    participant MB as mbox/ID (+ shards)
+    participant F as ftsmap + ftx objects
+    participant D as data pool msg/GUID/N
+    C->>P: SELECT INBOX
+    P->>R: look up m:INBOX (cached 2 s)
+    P->>MB: read header: UIDNEXT, UIDVALIDITY, MODSEQ
+    P-->>C: OK, EXISTS, UIDVALIDITY
+    C->>P: FETCH 1:50 (FLAGS ENVELOPE)
+    P->>MB: read entries m:UID (one omap read per page)
+    P-->>C: flags and envelopes from the index
+    C->>P: FETCH 7 BODY[]
+    P->>D: read chunks of msg/GUID
+    P-->>C: the message bytes
+    C->>P: SEARCH BODY invoice
+    P->>F: read layout record L, look up the word
+    F-->>P: candidate documents
+    P->>D: read each candidate to check it
+    P-->>C: the matching UIDs

@@ -1,0 +1,30 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TB
+    subgraph CAS["Compare-and-swap"]
+        direction LR
+        C1["read value + object version"] --> C2["compute the new value"]
+        C2 --> C3["write, guarded by<br/>assert version"]
+        C3 -->|"version changed:<br/>somebody was faster"| C4["wait 1 to 10 ms x lost rounds,<br/>at most 16 rounds"]
+        C4 --> C1
+        C3 -->|"version unchanged"| C5["done, atomic"]
+    end
+    subgraph WN["Watch and notify"]
+        direction LR
+        W1["reader registers a watch<br/>on mbox/ID or account"] --> W2["writer sends notify<br/>after its write"]
+        W2 --> W3["every watcher wakes<br/>and re-reads the object"]
+    end
+    subgraph LK["Locks and leases"]
+        direction LR
+        L1["cls_lock with a time to live<br/>(worker locks, POP3 maildrop)"]
+        L2["lease inside a record, by CAS<br/>(jobs: Lease.Gen, Lease.Until)"]
+        L3["account lock in the registry<br/>(imports, exclusive jobs)"]
+    end
+    subgraph IN["Intents"]
+        direction LR
+        I1["write the intent first"] --> I2["do the multi-object work"]
+        I2 --> I3["remove the intent"]
+        I2 -.->|"crash"| I4["scrub settles intents older than<br/>scrub.intent_grace_seconds"]
+    end
+    CAS ~~~ WN
+    WN ~~~ LK
+    LK ~~~ IN

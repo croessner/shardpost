@@ -1,0 +1,17 @@
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart LR
+    subgraph Client["ShardPost process"]
+        L["librados<br/>(the client library)"]
+    end
+    MON["Monitors<br/>cluster map, cephx keys"]
+    L -.->|"step 1: log in with cephx,<br/>fetch the cluster map"| MON
+    L -->|"step 2: hash of the object name<br/>picks a placement group"| PG["Placement group<br/>for example PG 7.1a"]
+    PG -->|"step 3: CRUSH maps the PG<br/>to a set of OSDs"| SET
+    subgraph SET["OSD set of this PG"]
+        O1["OSD 3<br/>primary"]
+        O2["OSD 11<br/>copy"]
+        O3["OSD 20<br/>copy"]
+    end
+    L ==>|"step 4: read and write<br/>directly, no gateway"| O1
+    O1 -->|"step 5: primary forwards<br/>the write"| O2
+    O1 --> O3
