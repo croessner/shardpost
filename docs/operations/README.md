@@ -1820,6 +1820,7 @@ ceph:
   mon_host: "[v2:192.0.2.11:3300],[v2:192.0.2.12:3300],[v2:192.0.2.13:3300]"
   index_pool: shardpost-index
   data_pool: shardpost-data
+  system_pool: shardpost-system   # the same on every node and process
   # key: set through CEPH_KEY, see below
 ```
 
@@ -1882,6 +1883,77 @@ with the server's own uid.
 
 The memory values follow the pod: librados alone holds about 150 MiB,
 `server.memory_budget_bytes` comes on top.
+
+### JMAP push workers and job runners
+
+The push worker (`shardpost push`, see [JMAP](../jmap.md)) is a process
+of its own with the same configuration file and the VAPID key. Run it on
+two or more hosts: they share the 64 push partitions through RADOS
+leases, and a stopped or failed host's partitions move to the others
+(planned within 10 s, after a crash within 45 s). Its instance name is
+`<hostname>-push`, so one push worker per host.
+
+```ini
+# /etc/systemd/system/shardpost-push.service
+[Unit]
+Description=ShardPost JMAP push worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=shardpost
+Group=shardpost
+EnvironmentFile=/etc/shardpost/ceph.env
+ExecStart=/usr/local/bin/shardpost --config /etc/shardpost/shardpost.yaml push
+# The orderly end hands the partitions over in waves (up to about 40 s
+# when the membership object is slow).
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Job runners (`shardpost runner`, see [Job runners](#job-runners)) are
+optional: without them every server runs the background workers. With
+them, the servers get `WORKERS_RUN=false` (an `Environment=` line in
+`shardpost.service`), but only once the runners run, and the way back
+removes it first. One runner per host (instance `<hostname>-runner`); it
+opens no listener but `server.http_addr` for health and metrics, and
+needs no TLS, VAPID or Nauthilus secrets.
+
+```ini
+# /etc/systemd/system/shardpost-runner.service
+[Unit]
+Description=ShardPost job runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=shardpost
+Group=shardpost
+EnvironmentFile=/etc/shardpost/ceph.env
+ExecStart=/usr/local/bin/shardpost --config /etc/shardpost/shardpost.yaml runner
+# Jobs are handed over at the end; running learning jobs get
+# imapsieve.learning.shutdown_seconds.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ### Scrub
 
