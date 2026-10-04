@@ -2,8 +2,8 @@
 
 [Architecture](../../ARCHITECTURE.md) · [Developer guide](../development/README.md)
 
-New here? Start with [Storage explained](storage-explained.md), a
-step-by-step course through the same model with pictures; this document
+New here? Start with the [Storage guide](storage-guide.md), which
+builds up the same model step by step with pictures; this document
 is the reference.
 
 ## Physical model

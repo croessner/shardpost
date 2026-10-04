@@ -1,13 +1,15 @@
-# Storage explained: ShardPost on Ceph, step by step
+# Storage guide: how ShardPost uses Ceph
 
 [Architecture](../../ARCHITECTURE.md) · [RADOS storage (reference)](storage.md) ·
 [Operations](../operations/README.md) · [Observability](../observability.md)
 
-This is a course, not a reference. It explains what ShardPost stores in
-Ceph, how, and why — slowly, with pictures, in an order you can teach
-to somebody else. Every chapter starts with what you will learn and ends
-with a short recap. When you need the last detail, the chapter links to
-the reference document that has it.
+This guide is for operators who are about to run ShardPost, or have
+just started to. It explains what ShardPost stores in Ceph, how and why,
+and builds the picture up from the basics: Ceph first, then the pools,
+then one account, then what happens when mail arrives, and finally what
+an operator does, watches and decides. Each chapter ends with a short
+summary; when you need the last detail, the chapter links to the
+reference document that has it.
 
 Written for ShardPost 0.52.0 on 2026-10-04. Object names, keys,
 commands, configuration keys and defaults were checked against the code
@@ -20,8 +22,8 @@ of that version (`internal/cephstore`, `internal/config`,
 ShardPost divides it, what one account looks like. Chapter 4 follows a
 mail through the system. Chapters 5 and 6 explain how many servers work
 together. Chapters 7 to 10 are for the operator: the programs, the daily
-work, monitoring and sizing. Chapter 11 is a glossary; use it whenever
-a word is new.
+work, monitoring and sizing. Chapter 11 is a glossary for the terms used
+throughout.
 
 ## Contents
 
@@ -42,7 +44,7 @@ a word is new.
 
 ## 1. Ceph in five minutes
 
-**What you will learn:** what a Ceph cluster is made of, how an object
+This chapter covers what a Ceph cluster is made of, how an object
 finds its disk, the difference between replication and erasure coding,
 what an object holds (data, xattrs, omap), and what RADOS, librados and
 cephx are.
@@ -73,7 +75,7 @@ Think of Ceph as a large warehouse.
 
 ### 1.2 How an object finds its disk
 
-![How a client reaches an OSD](../diagrams/course-ceph-basics.svg)
+![How a client reaches an OSD](../diagrams/storage-guide-ceph-basics.svg)
 
 1. The client logs in at a monitor and fetches the cluster map.
 2. It hashes the object name and gets a PG number.
@@ -95,7 +97,7 @@ Two consequences matter for ShardPost:
 
 ### 1.3 Replication and erasure coding
 
-![What an object holds, and the two ways to keep it safe](../diagrams/course-ceph-objects.svg)
+![What an object holds, and the two ways to keep it safe](../diagrams/storage-guide-ceph-objects.svg)
 
 A pool keeps its data safe in one of two ways:
 
@@ -155,7 +157,7 @@ Three more RADOS features ShardPost relies on, explained in chapter 5:
   operation either all happen or none. There is no transaction across
   two objects.
 
-**Recap.** Ceph is a warehouse of OSDs, organized in pools; objects are
+**In short.** Ceph is a warehouse of OSDs, organized in pools; objects are
 hashed to PGs and PGs are placed on OSDs by CRUSH, so clients go straight
 to the right disk. Replicated pools can hold omap, erasure coded pools
 cannot. An object holds data, xattrs and omap; ShardPost keeps its index
@@ -166,13 +168,13 @@ never across objects. Listings are expensive.
 
 ## 2. The pools of ShardPost and why there are three
 
-**What you will learn:** which pools ShardPost uses, what goes where and
+This chapter covers which pools ShardPost uses, what goes where and
 why, which namespaces exist, and how the cluster knows whether the
 store-wide state lives in its own pool.
 
 ### 2.1 Three pools
 
-![Pools and namespaces](../diagrams/course-pools.svg)
+![Pools and namespaces](../diagrams/storage-guide-pools.svg)
 
 | Pool (default name) | Configuration key | Holds | Type |
 |---|---|---|---|
@@ -242,7 +244,7 @@ mark for a new cluster, `shardpost system migrate` moves an existing
 cluster in a maintenance window (chapter 8). Details:
 [System pool and placement](storage.md#system-pool-and-placement).
 
-**Recap.** Three pools: index (omap, replicated, fast), data (blobs,
+**In short.** Three pools: index (omap, replicated, fast), data (blobs,
 usually erasure coded, large), system (store-wide state, replicated,
 fast, optional). Each account is a namespace in index and data; the
 store's own state uses four `~` namespaces. Without a system pool those
@@ -253,11 +255,11 @@ every process checks them.
 
 ## 3. What one account looks like in RADOS
 
-**What you will learn:** every object of the account `alice@example.org`,
+This chapter covers every object of the account `alice@example.org`,
 what its keys mean, how a message is found from a mailbox name, and how
 big things can get.
 
-![The objects of one account](../diagrams/course-account-objects.svg)
+![The objects of one account](../diagrams/storage-guide-account-objects.svg)
 
 ### 3.1 The registry: `mailboxes`
 
@@ -380,7 +382,7 @@ To read message UID 42 of alice's INBOX:
 
 Four small steps, no listing, no central lookup.
 
-**Recap.** One account = one namespace in two pools. The registry
+**In short.** One account = one namespace in two pools. The registry
 `mailboxes` maps names to stable ids and holds the quota. Each mailbox
 is `mbox/<id>` plus higher shards of 100 000 entries. Each message is
 one or more 4 MiB chunks `msg/<guid>/<n>` with a reference count. The
@@ -391,7 +393,7 @@ full-text index.
 
 ## 4. Walkthroughs: what happens, step by step
 
-**What you will learn:** which objects are read and written when a mail
+This chapter covers which objects are read and written when a mail
 arrives, when a client reads and searches, when messages are copied,
 moved and expunged, when a mailbox is deleted, and when a user logs in.
 
@@ -401,7 +403,7 @@ unchanged, otherwise try again". Chapter 5 explains it.
 
 ### 4.1 A mail arrives
 
-![Delivery of one message](../diagrams/course-delivery.svg)
+![Delivery of one message](../diagrams/storage-guide-delivery.svg)
 
 The MTA (the mail transfer agent in front, for example Postfix) hands
 the message to ShardPost over **LMTP** (the local variant of SMTP).
@@ -455,7 +457,7 @@ pays more per delivery than a small one.
 
 ### 4.2 A client reads and searches
 
-![Reading and searching](../diagrams/course-read-search.svg)
+![Reading and searching](../diagrams/storage-guide-read-search.svg)
 
 - **Opening the account** costs nothing in Ceph by itself (`Store.User()`
   sends no operation); the account, its mailbox list and the INBOX state
@@ -490,7 +492,7 @@ count is unchanged. A crash leaves the intent for the scrub.
 
 **EXPUNGE** removes entries and gives the blob back:
 
-![Expunge and the reference count](../diagrams/course-expunge.svg)
+![Expunge and the reference count](../diagrams/storage-guide-expunge.svg)
 
 1. A CAS on shard 0 removes the entry, raises the MODSEQ, logs the
    change and writes the **removal intent** `r:<uid>` (with GUID, size
@@ -540,7 +542,7 @@ watches it and drops its cached entries. After a successful login the
 session opens the account (chapter 4.2). See
 [Auth cache](../operations/README.md#auth-cache).
 
-**Recap.** Delivery: reserve with an intent, write the blob, index the
+**In short.** Delivery: reserve with an intent, write the blob, index the
 text, link the entry, record the change, notify. Reading: registry →
 mailbox → entry → blob. Search: index candidates, then a check. COPY
 raises a reference count, EXPUNGE lowers it, the last reference deletes
@@ -550,11 +552,11 @@ the bytes. Every multi-step change leaves an intent behind if it dies.
 
 ## 5. Many servers, no central database
 
-**What you will learn:** how many ShardPost processes can change the
+This chapter covers how many ShardPost processes can change the
 same account at the same time without a database server, why a crash
 never leaves a broken account, and which mechanisms do it.
 
-![The four coordination tools](../diagrams/course-coordination.svg)
+![The four coordination tools](../diagrams/storage-guide-coordination.svg)
 
 ### 5.1 Compare-and-swap on one object
 
@@ -657,7 +659,7 @@ Intents use the writer's clock. **All servers need NTP**: a clock that is
 behind by more than the grace period could make the scrub take a running
 write for a crash.
 
-**Recap.** CAS on one object makes counters safe. Announce-write-record
+**In short.** CAS on one object makes counters safe. Announce-write-record
 spans two objects. Watch/notify wakes people up, nothing more. Locks
 pick a single worker, leases move jobs between runners, the account lock
 keeps protocols out during maintenance. Intents turn every crash into a
@@ -667,10 +669,10 @@ to-do list for the scrub.
 
 ## 6. The store-wide state
 
-**What you will learn:** what lives outside the accounts, why it is
+This chapter covers what lives outside the accounts, why it is
 organized as indexes and queues, and which processes use it.
 
-![The store-wide namespaces and their users](../diagrams/course-store-wide.svg)
+![The store-wide namespaces and their users](../diagrams/storage-guide-store-wide.svg)
 
 ### 6.1 Why indexes and queues
 
@@ -730,7 +732,7 @@ the due queue `ix.learning`, the owner index `ix.learning/owner` and the
 worker lock on `mbox/learning-worker`. `~server` holds one object,
 `metadata`: the server METADATA entries.
 
-**Recap.** Store-wide state lives in four namespaces: `~admin` (jobs,
+**In short.** Store-wide state lives in four namespaces: `~admin` (jobs,
 marks, registrations, push and submission state), `~accounts` (the
 directory and queues), `~learning`, `~server`. Everything that has to be
 found again sits in sorted indexes and due queues, so no running path
@@ -740,10 +742,10 @@ needs a listing.
 
 ## 7. Our programs and what they do to Ceph
 
-**What you will learn:** every program and command that touches Ceph,
+This chapter covers every program and command that touches Ceph,
 what it reads and writes, how heavy it is, and when to use it.
 
-![Programs and pools](../diagrams/course-programs.svg)
+![Programs and pools](../diagrams/storage-guide-programs.svg)
 
 ### 7.1 Long-running processes
 
@@ -822,7 +824,7 @@ Export, restore and import (`migrate`) are **not** job kinds: they are
 admin API operations that stream to or from the caller. Restore and
 import hold the account lock while they run.
 
-**Recap.** Three long-running programs (`shardpost`, `runner`, `push`)
+**In short.** Three long-running programs (`shardpost`, `runner`, `push`)
 carry the daily load. One-shot commands scrub, sweep, backfill and move
 the placement. `shardpostctl` only talks to the admin API. Jobs are the
 way to do long or dangerous work; the ones that lock an account make its
@@ -832,7 +834,7 @@ deliveries wait.
 
 ## 8. The operator's job
 
-**What you will learn:** what to look at daily and weekly, and what to
+This chapter covers what to look at daily and weekly, and what to
 do — and what it does to storage — when something specific happens.
 
 ### 8.1 Daily
@@ -863,7 +865,7 @@ do — and what it does to storage — when something specific happens.
 
 ### 8.3 When X happens
 
-![Where to look first](../diagrams/course-operator-flow.svg)
+![Where to look first](../diagrams/storage-guide-operator-flow.svg)
 
 #### 8.3.1 A rollout (new image)
 
@@ -1041,7 +1043,7 @@ store-wide state
 **Effect on storage:** an export reads every message of the account; a
 restore writes like an import, under the account lock.
 
-**Recap.** Daily: health, the night's scrub, deliveries, registrations.
+**In short.** Daily: health, the night's scrub, deliveries, registrations.
 Weekly: capacity, large omap, full-text caps, listings, a backup test.
 Everything that changes behaviour cluster-wide goes in the same order:
 image everywhere, wait, check, then switch. Heavy work (reshards,
@@ -1052,11 +1054,11 @@ is unhealthy.
 
 ## 9. Monitoring
 
-**What you will learn:** which ShardPost metrics and which Ceph signals
+This chapter covers which ShardPost metrics and which Ceph signals
 to watch, what normal looks like, which values mean trouble, and what to
 do.
 
-![Monitoring layers](../diagrams/course-monitoring.svg)
+![Monitoring layers](../diagrams/storage-guide-monitoring.svg)
 
 Read the layers from the top: what users feel, how the store talks to
 Ceph, what the background work does, and Ceph itself. A problem at the
@@ -1127,7 +1129,7 @@ These are standard Ceph commands and health codes, not ShardPost's.
 - `delivery deferred, account locked (import or maintenance)` — LMTP
   answered `451` because a job or import holds the account.
 
-**Recap.** Watch from the user down: deliveries and command latency,
+**In short.** Watch from the user down: deliveries and command latency,
 then RADOS latency, retries and listings, then the background work, then
 `ceph -s`. Most alerts that should be 0 are counters of things that must
 not happen (index errors, missing full-text objects, dead intents,
@@ -1137,7 +1139,7 @@ not happen (index errors, missing full-text objects, dead intents,
 
 ## 10. Sizing rules of thumb
 
-**What you will learn:** the numbers that help you estimate what an
+This chapter covers the numbers that help you estimate what an
 account costs and where the limits are. Each one says where it comes
 from; *estimate* means derived, not measured.
 
@@ -1176,7 +1178,7 @@ offline, [operations](../operations/README.md#full-text-layout-3)). Use
 the reshard window and online runs for them, and watch
 `imapceph_fts_shards_capped_total`.
 
-**Recap.** A small layout 3 account costs about two dozen operations per
+**In short.** A small layout 3 account costs about two dozen operations per
 delivery; the full-text index is what makes accounts expensive.
 Everything is sharded to stay below 200 000 keys per object; the
 full-text caps are where large accounts need attention.
@@ -1251,4 +1253,4 @@ full-text caps are where large accounts need attention.
 | JMAP state, push partitions, delayed sending | [JMAP](../jmap.md) |
 | Commands, options, exit codes | the manual pages under [`docs/man/man1/`](../man/man1/): [shardpostctl(1)](../man/man1/shardpostctl.1), [shardpostctl-job(1)](../man/man1/shardpostctl-job.1), [shardpostctl-fts(1)](../man/man1/shardpostctl-fts.1), [shardpostctl-account(1)](../man/man1/shardpostctl-account.1), [shardpostctl-export(1)](../man/man1/shardpostctl-export.1), [shardpost-scrub(1)](../man/man1/shardpost-scrub.1), [shardpost-system(1)](../man/man1/shardpost-system.1), [shardpost-bench(1)](../man/man1/shardpost-bench.1) |
 | Measurements behind the numbers | [R4 measurement](../reports/2026-10-02-r4-measurement.md), [0.45.0](../reports/2026-10-02-shardpost-0.45.0.md), [dictionary V0](../reports/2026-10-03-fts-dictionary-v0.md), [system pool cutover](../reports/2026-10-02-system-pool-cutover.md) |
-| The diagrams of this course | [Diagrams](../diagrams/README.md) (`course-*.mmd`) |
+| The diagrams of this guide | [Diagrams](../diagrams/README.md) (`storage-guide-*.mmd`) |

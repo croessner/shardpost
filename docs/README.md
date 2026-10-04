@@ -11,7 +11,7 @@ operational identifier.
 **New to the project:** [Overview](../README.md) → [Architecture](../ARCHITECTURE.md)
 → [Runtime and UML](architecture/runtime.md) → [Developer guide](development/README.md).
 
-**Storage change:** [Storage explained](architecture/storage-explained.md) (the course) → [Consistency and data model](architecture/storage.md)
+**Storage change:** [Storage guide](architecture/storage-guide.md) → [Consistency and data model](architecture/storage.md)
 → [Architecture decisions](decisions/architecture.md) →
 [Tests and limits](development/quality.md).
 
@@ -24,7 +24,7 @@ are documented as [manual pages](man/README.md).
 | [Architecture](../ARCHITECTURE.md) | System boundaries, components, deployment, impact of outages |
 | [Protocols, features and RFCs](protocols.md) | Per-protocol reference: capabilities, commands, methods, limits, deviations, RFC index |
 | [Runtime and UML](architecture/runtime.md) | Go interfaces, login, delivery, IMAP states |
-| [Storage explained](architecture/storage-explained.md) | A course: Ceph basics, the pools, one account's objects, walkthroughs, programs, operator playbook, monitoring, sizing |
+| [Storage guide](architecture/storage-guide.md) | How ShardPost uses Ceph, built up from the basics: Ceph, the pools, one account's objects, walkthroughs, programs, operator playbook, monitoring, sizing |
 | [RADOS storage](architecture/storage.md) | Object layout, CAS, shards, intents, references, repair |
 | [Developer guide](development/README.md) | Code map, build, tests, change paths, vendor fork |
 | [Quality](development/quality.md) | Test levels, conformance limits, current and historical evidence |
