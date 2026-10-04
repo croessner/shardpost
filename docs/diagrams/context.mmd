@@ -1,10 +1,10 @@
 flowchart LR
-    Client[Mailclient] -->|IMAP / POP3 / ManageSieve| Director[nauthilus-director]
-    MTA[SMTP-MTA] -->|LMTP| Director
-    Director -->|TLS + trusted PROXY| Server[Mailserver-Replikas]
+    Client[Mail client] -->|IMAP / POP3 / ManageSieve| Director[nauthilus-director]
+    MTA[SMTP MTA] -->|LMTP| Director
+    Director -->|TLS + trusted PROXY| Server[mail server replicas]
     Director --> Auth[Nauthilus]
-    Server -->|Authentifizierung / Lookup| Auth
+    Server -->|authentication / lookup| Auth
     Server -->|librados| Ceph[(Ceph RADOS)]
-    Server -->|Redirect / Vacation / Notify| Relay[SMTP-Relay]
-    Server -->|Allowlist-Programm| Learning[Lernziel / Rspamd]
-    Server -->|Logs / Metriken / Traces| Observability[Monitoring]
+    Server -->|redirect / vacation / notify| Relay[SMTP relay]
+    Server -->|allowlisted program| Learning[learning target / Rspamd]
+    Server -->|logs / metrics / traces| Observability[monitoring]

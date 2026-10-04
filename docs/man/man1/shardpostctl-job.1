@@ -612,11 +612,14 @@ changes are no drift online), unregisters the targets by id and frees
 the account before it releases blobs and shards. A target another job
 locks, an import or a repairing scrub on the account, or a MOVE into or
 out of a target that still stands (also an abandoned one, which the
-scrub completes after
-.I scrub.intent_grace_seconds
-or
-.B shardpostctl account scrub
-at once) ends the run
+scrub completes once it is older than
+.IR scrub.grace_seconds ;
+.B shardpostctl plan scrub
+.I account
+and
+.B shardpostctl apply
+.I plan
+run that scrub now) ends the run
 .BR busy ,
 and it is planned again.
 .TP

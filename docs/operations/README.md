@@ -508,7 +508,7 @@ older server ended are removed by the readers of this version later.
 
 ## Learning queue backfill
 
-Servers with `imapsieve.learning.index` `write` (the default) or `read`
+Servers with `imapsieve.learning.index` `write` or `read` (the default)
 keep a due queue and an owner index of the learning jobs in the
 namespace `~learning` of the index pool (see
 [storage](../architecture/storage.md#learning-queue-due-queue-and-owner-index)).
@@ -516,8 +516,10 @@ In `write` mode the worker, the admin API's learning list and the
 account purge still list the namespace `~learning` of the data pool (the
 worker every second). Rollout order:
 
-1. Deploy the version (default `write`). The learning worker lock is the
-   one older versions take, so only one worker runs during the update.
+1. Deploy the version (default `read`; without the backfill marker of
+   step 2 a server in `read` mode behaves as in `write` mode). The
+   learning worker lock is the one older versions take, so only one
+   worker runs during the update.
 2. Once no older server is left, run the backfill with the image and
    configuration of the server:
 
@@ -537,9 +539,10 @@ worker every second). Rollout order:
    interrupted run continues from there. At the end it records
    `mark:backfill.learning`. It refuses to run with
    `imapsieve.learning.index: off`.
-3. Set `imapsieve.learning.index: read` on every server. A server in
-   `read` mode without the marker logs a warning and behaves as in
-   `write` mode until it exists.
+3. Keep `imapsieve.learning.index: read` (the default) on every server.
+   A server in `read` mode without the marker logs a warning and behaves
+   as in `write` mode until it exists; it looks for the marker every 30
+   seconds, so the backfill switches running servers without a restart.
 
 The backfill is also the repair: an owner or queue entry whose write
 failed after its job was written is counted in
@@ -1327,9 +1330,10 @@ plan is `ErrDrift`, the mail stays), unregisters the targets (M5) and
 frees the account for account locks (M6, phase `destroying`) before it
 releases blobs and shards (M7). A `busy` run (an import holds the
 account, a scrub repairs it, another `mailbox_delete` locks a target, a
-MOVE into or out of a target stands — also an abandoned one, which the
-scrub completes after `scrub.intent_grace_seconds` or `shardpostctl
-account scrub` at once) is planned again. The plan's fingerprint leaves
+MOVE into or out of a target stands — also an abandoned one, which a
+scrub completes once it is older than `scrub.grace_seconds`; `shardpostctl
+plan scrub <account>` and `shardpostctl apply <plan-id>` run that scrub
+now instead of waiting for the periodic one) is planned again. The plan's fingerprint leaves
 `HIGHESTMODSEQ` out online: flag changes until the lock are no drift.
 
 Way back: `shardpostctl mailbox lock disable`, wait for the running jobs

@@ -1,16 +1,16 @@
 sequenceDiagram
     participant W as Writer
-    participant H as Mailbox-Header
-    participant E as höherer Entry-Shard
+    participant H as Mailbox header
+    participant E as Higher entry shard
     participant R as Reader
-    W->>H: CAS: UID / MODSEQ reservieren, Pending-Journal
-    H-->>W: neue Version
-    R->>H: Änderungen seit MODSEQ lesen
-    H-->>R: Pending: Wasserstand nicht überspringen
-    W->>E: Nachrichteneintrag schreiben
-    E-->>W: dauerhaft
-    W->>H: Pending-Änderung abschließen
+    W->>H: CAS: reserve UID / MODSEQ, pending journal
+    H-->>W: new version
+    R->>H: read changes since MODSEQ
+    H-->>R: pending: do not skip the watermark
+    W->>E: write message entry
+    E-->>W: durable
+    W->>H: complete pending change
     H-->>W: committed
-    R->>H: erneut synchronisieren
-    R->>E: betroffene UID lesen
-    Note over H,E: Keine atomare Transaktion<br/>über beide Objekte
+    R->>H: synchronize again
+    R->>E: read affected UID
+    Note over H,E: No atomic transaction<br/>across both objects

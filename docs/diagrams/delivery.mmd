@@ -1,29 +1,29 @@
 sequenceDiagram
     participant M as MTA
-    participant L as LMTP-Session
+    participant L as LMTP session
     participant A as Authenticator
     participant V as Sieve
-    participant U as Ceph User
+    participant U as Ceph user
     participant R as RADOS
     M->>L: RCPT TO
-    L->>A: Lookup Empfänger
-    A-->>L: kanonisches Konto
+    L->>A: look up recipient
+    A-->>L: canonical account
     M->>L: DATA
-    L->>V: Skript auswerten, Aktionen sammeln
-    V-->>L: Keep / Fileinto / weitere Aktionen
+    L->>V: evaluate script, collect actions
+    V-->>L: keep / fileinto / further actions
     L->>U: BeginDelivery
-    U->>R: Delivery-Intent speichern
-    loop pro lokalem Zustellziel
-        L->>U: RecordDelivery vor dem Schreiben
-        U->>R: Mailbox + GUID im Intent
+    U->>R: store delivery intent
+    loop per local delivery target
+        L->>U: RecordDelivery before writing
+        U->>R: mailbox + GUID in the intent
         L->>U: DeliverGUID
-        U->>R: Quota reservieren
-        U->>R: Blob-Chunks schreiben
-        U->>R: Volltextindex schreiben
-        U->>R: UID / Index verknüpfen
+        U->>R: reserve quota
+        U->>R: write blob chunks
+        U->>R: write full-text index
+        U->>R: link UID / index entry
         U-->>L: Meta
     end
     L->>U: EndDelivery
-    U->>R: Intent entfernen
-    L-->>M: Empfängerbezogenes Ergebnis
-    Note over L,R: Vereinfachter lokaler Erfolgspfad, externe Aktionen sind keine RADOS-Transaktion
+    U->>R: remove intent
+    L-->>M: result per recipient
+    Note over L,R: Simplified local success path, external actions are not part of a RADOS transaction

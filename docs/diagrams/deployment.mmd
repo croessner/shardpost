@@ -1,19 +1,19 @@
 flowchart TB
-    Director[Director-Pods] -->|Mailports / NetworkPolicy| Service[Service imap]
-    subgraph Namespace[Namespace imap]
-        Service --> A[Mailserver Pod A]
-        Service --> B[Mailserver Pod B]
-        Scrub[Scrub CronJob]
-        Config[ConfigMap + Secret-Dateien] --> A
+    Director[director pods] -->|mail ports / NetworkPolicy| Service[Service imap]
+    subgraph Namespace[namespace imap]
+        Service --> A[mail server pod A]
+        Service --> B[mail server pod B]
+        Scrub[scrub CronJob]
+        Config[ConfigMap + secret files] --> A
         Config --> B
     end
-    A --> Index[(shardpost-index: repliziert)]
+    A --> Index[(shardpost-index: replicated)]
     A --> Data[(shardpost-data: EC)]
     B --> Index
     B --> Data
     Scrub --> Index
     Scrub --> Data
-    Rook[Rook Secret + Mon-Endpunkte] -->|RBAC read| A
+    Rook[Rook secret + mon endpoints] -->|RBAC read| A
     Rook --> B
-    Prom[Prometheus] -->|Pod-Port 8080| A
+    Prom[Prometheus] -->|pod port 8080| A
     Prom --> B

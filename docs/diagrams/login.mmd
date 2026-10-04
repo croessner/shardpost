@@ -1,31 +1,31 @@
 sequenceDiagram
-    participant C as Mailclient
+    participant C as Mail client
     participant D as Director
-    participant P as IMAP-Session
+    participant P as IMAP session
     participant A as Authenticator
     participant S as Store
-    C->>D: TLS + Anmeldung
-    D->>P: Backend-Verbindung + PROXY-Client-IP
+    C->>D: TLS + login
+    D->>P: backend connection + PROXY client IP
     P->>P: session_id / connection_open
-    D->>P: Backend-Authentifizierung
-    P->>A: Request mit Mechanismus und Verbindungskontext
-    alt Backend vorübergehend nicht verfügbar
+    D->>P: backend authentication
+    P->>A: request with mechanism and connection context
+    alt backend temporarily unavailable
         A-->>P: ErrTemporary
         P-->>D: NO UNAVAILABLE
-    else Zugang abgelehnt
-        A-->>P: Fehler
+    else access denied
+        A-->>P: error
         P->>P: auth_failed
         P-->>D: NO AUTHENTICATIONFAILED
-    else Authentifizierung erfolgreich
+    else authentication succeeded
         A-->>P: Result.Account + Attributes
-        P->>P: Kontolimit prüfen
-        P->>S: User(kanonisches Konto)
+        P->>P: check account connection limit
+        P->>S: User(canonical account)
         S-->>P: model.User
-        P->>P: Provisionierung / Quota anwenden
+        P->>P: apply provisioning / quota
         P->>P: auth_success
         P-->>D: OK
-        D-->>C: angemeldet
+        D-->>C: logged in
     end
-    C->>D: Logout
-    D->>P: Logout / Verbindung schließen
-    P->>P: Ressourcen freigeben / connection_close
+    C->>D: logout
+    D->>P: logout / close connection
+    P->>P: release resources / connection_close

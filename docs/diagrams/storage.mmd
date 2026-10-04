@@ -1,22 +1,32 @@
 flowchart LR
-    subgraph Index[shardpost-index / Namespace Konto]
-        Registry[mailboxes: Namen, IDs, Quota, Delivery-Intents]
-        Header[mbox/ID: Header, Journal, Shard 0]
-        Higher[mbox/ID/N: höhere UID-Shards]
-        FTS[fts + ftsd + ftsmap]
-        Scripts[Sieve-Skripte / Metadaten]
-        Scrub[Scrub-Kandidaten]
-        Registry -->|stabile ID| Header
-        Header -->|UID zu Shard| Higher
+    subgraph Index[shardpost-index / namespace of the account]
+        Registry[mailboxes: names, IDs, quota, intents]
+        Account[account: change counter and change log]
+        Header[mbox/id: header, journal, UID shard 0]
+        Higher[mbox/id/n: higher UID shards]
+        FTS[full text: ftsmap + fts/, ftst/ in layout 2 or ftx/gen/p, d, h in layout 3]
+        Scripts[sieve scripts / metadata]
+        Scrub[scrub: candidates and repair state]
+        Registry -->|stable ID| Header
+        Header -->|UID to shard| Higher
     end
-    subgraph Data[shardpost-data / Namespace Konto]
-        First[msg/GUID/0 + refs]
-        Rest[msg/GUID/1 ... N]
+    subgraph Data[shardpost-data / namespace of the account]
+        First[msg/guid/0 + refs]
+        Rest[msg/guid/1 ... n]
         First --- Rest
     end
     Header -->|GUID| First
     Higher -->|GUID| First
-    FTS -->|Doc-ID zu GUID| First
-    subgraph Learning[shardpost-data / Namespace ~learning]
-        Jobs[learning/JobID: Nachricht + Job-xattr]
+    FTS -->|doc ID to GUID| First
+    subgraph Learning[shardpost-data: ~learning]
+        Jobs[learning/job-id: message + job xattr]
     end
+    subgraph System[system pool]
+        Admin[~admin: kv.* records, ix.* indexes and queues, auth-flush]
+        Accounts[~accounts: ix.accounts directory, ix.purged, ix.fts_layout, ix.fts_due, ix.uploads]
+        LearnIx[~learning: ix.learning due queue + owner index]
+        Server[~server: metadata]
+        Note[without ceph.system_pool all of this stays in shardpost-index]
+    end
+    LearnIx -->|job ID| Jobs
+    Accounts -->|account name| Registry

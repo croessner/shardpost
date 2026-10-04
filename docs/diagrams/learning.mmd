@@ -1,15 +1,15 @@
 stateDiagram-v2
-    [*] --> Prepared: Payload vor Zielcommit sichern
-    Prepared --> Waiting: Commit-Beleg fehlt
-    Waiting --> Prepared: später prüfen
-    Waiting --> Dead: unbestätigt nach Frist
-    Prepared --> Ready: Commit-Beleg vorhanden
-    Ready --> Running: Lease + Speicherbudget
-    Running --> Retry: temporärer Fehler
-    Retry --> Ready: Backoff abgelaufen
-    Running --> Dead: dauerhaft / Versuche erschöpft
-    Running --> Delivered: externer Erfolg gespeichert
-    Delivered --> Cleanup: Receipt + Job bereinigen
-    Cleanup --> Delivered: Bereinigung fehlgeschlagen
-    Cleanup --> [*]: abgeschlossen
-    Note right of Running: Externer Erfolg vor Update kann bei Crash wiederholt werden
+    [*] --> Prepared: store payload before the target commit
+    Prepared --> Waiting: commit proof missing
+    Waiting --> Prepared: check later
+    Waiting --> Dead: unconfirmed after the deadline
+    Prepared --> Ready: commit proof present
+    Ready --> Running: lease + memory budget
+    Running --> Retry: temporary error
+    Retry --> Ready: backoff expired
+    Running --> Dead: permanent / attempts exhausted
+    Running --> Delivered: external success stored
+    Delivered --> Cleanup: clean up receipt + job
+    Cleanup --> Delivered: cleanup failed
+    Cleanup --> [*]: done
+    Note right of Running: An external success before the update can be repeated after a crash

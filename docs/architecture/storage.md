@@ -31,7 +31,7 @@ user namespaces.
 | `pubseen/<id>` | Private `\Seen` marks of the public folder `<id>` (registry key `ps:<id>`) | [acl.go](../../internal/cephstore/acl.go) |
 | `~accounts` / `ix.uploads/…` in the index or [system](#system-pool-and-placement) pool | Due queue of the JMAP uploads, by expiry | [uploads.go](../../internal/cephstore/uploads.go) |
 | `~accounts` / `ix.purged/…` in the index or [system](#system-pool-and-placement) pool | Accounts a purge deleted, for the sweep to clean after (removed by a repairing sweep) | [purged.go](../../internal/cephstore/purged.go) |
-| `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`); always in the index pool, also with a system pool | [sweep.go](../../internal/cephstore/sweep.go) |
+| `~accounts` / `sweep/state`, `sweep/lock`, `sweep/<run>/<pool>/<nnnn>` in the index pool | Checkpoint, lock and spill objects of a sweep in progress (`shardpost scrub --sweep`); always in the index pool, also with a system pool | [sweep.go](../../internal/cephstore/sweep.go) |
 | `~learning` / `learning/<job-id>` in the data pool | The independent message plus the job xattr | [learning.go](../../internal/cephstore/learning.go) |
 | `~learning` / `ix.learning/…`, `ix.learning/owner/…` in the index or [system](#system-pool-and-placement) pool | Due queue and owner index of the learning queue | [learnindex](../../internal/learnindex/learnindex.go) |
 | `~accounts` / `ix.accounts/head`, `ix.accounts/<nn>` in the index or [system](#system-pool-and-placement) pool | The account directory: one entry per account with a registry, 256 shards | [directory.go](../../internal/cephstore/directory.go), [sortedindex](../../internal/sortedindex/sortedindex.go) |
@@ -550,7 +550,7 @@ namespaces, so it costs a walk over every placement group of each, and
 runs as a one-off, not as a routine.
 
 - **Pass 1** lists a pool and spills the object names into spill objects
-  in `~accounts` (`sweep/<run>/<pool>/<nnn>`, one omap key
+  in `~accounts` (`sweep/<run>/<pool>/<nnnn>`, one omap key
   `<namespace>␟<object>` per object, the spill object chosen by the
   namespace, `scrub.sweep_spill_shards` of them). The iterator's position
   (the PG hash position of go-ceph's `Iter.Token`) is checkpointed in
@@ -881,8 +881,8 @@ pool).
 
 | Object | Content |
 |---|---|
-| `ix.job/…` (1 shard) | hint index of `job/`: `{state, account, kind, finished}` |
-| `ix.plan/…` (1 shard) | hint index of `plan/`: `{kind, account, expires}` |
+| `ix.job/…` (16 shards; 1 in a head created before 0.47.0) | hint index of `job/`: `{state, account, kind, finished}` |
+| `ix.plan/…` (16 shards; 1 in a head created before 0.47.0) | hint index of `plan/`: `{kind, account, expires}` |
 | `ix.idem/…` (16 shards) | hint index of `idem/`: `{job_id}` |
 | `ix.jmap/push/acct/…` (64 shards) | hint index of `jmap/push/acct/`: `{verified, expires, sum}` (any subscription verified, the latest expiry, and since 0.52.0 a checksum of the record, so the push worker's scan reads only the records that changed); its shard count is the partition count of the push worker |
 | `kv.jmap/push/seen/<account>` | the state the push worker last pushed for the account: `seq`, the digest and the states of the shared accounts, since 0.52.0 an acknowledgement per subscription (`ack`: the position it was delivered up to) and an `epoch` that rises when the account counter jumped back; written with a compare-and-swap that merges by max ([JMAP: Push partitions](../jmap.md#push-partitions)) |
@@ -1232,13 +1232,13 @@ index names. In `write` mode all three list the namespace as before
 (`imapceph_rados_listings_total{site="learning_all"}`,
 `{site="learning_purge_owner"}`).
 
-**Modes** (`imapsieve.learning.index`, default `write`):
+**Modes** (`imapsieve.learning.index`, default `read` since 0.47.0, `write` before):
 
 | Mode | Writes | Reads |
 |---|---|---|
 | `off` | no index, no queue | listings (the behaviour before) |
-| `write` (default) | due queue and owner index | worker, admin list and purge list the namespace |
-| `read` | as `write` | worker from `Due`, woken by notify; admin list and purge from the owner index |
+| `write` | due queue and owner index | worker, admin list and purge list the namespace |
+| `read` (default) | as `write` | worker from `Due`, woken by notify; admin list and purge from the owner index |
 
 `read` needs the marker of a completed `shardpost index backfill
 learning` that started after the last server without the index stopped
