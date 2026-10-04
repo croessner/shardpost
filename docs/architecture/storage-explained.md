@@ -176,9 +176,9 @@ store-wide state lives in its own pool.
 
 | Pool (default name) | Configuration key | Holds | Type |
 |---|---|---|---|
-| `shardpost-index` | `ceph.index_pool` | the accounts' index objects (omap): mailboxes, entries, quota, full-text index, Sieve scripts | replicated |
+| `shardpost-index` | `ceph.index_pool` | the accounts' index objects (omap): mailboxes, entries, quota, full-text index, Sieve scripts (the users' filter rules) | replicated |
 | `shardpost-data` | `ceph.data_pool` | message blobs (`msg/<guid>/<n>`) and the learning copies | erasure coded or replicated |
-| `shardpost-system` | `ceph.system_pool` (empty by default) | the store-wide state: admin store, account directory, queues, locks, server METADATA | replicated |
+| none; `shardpost-system` in the examples | `ceph.system_pool` (empty by default: no system pool) | the store-wide state: admin store, account directory, queues, locks, server METADATA | replicated |
 
 Why split it like this?
 
@@ -233,7 +233,8 @@ the configuration:
   holds the state of that index pool and cluster".
 
 Every `shardpost` process reads both when it opens the store (two reads,
-no listing) and refuses to start when they contradict its configuration.
+no listing; the system tools and the bench check them on their own) and
+refuses to start when they contradict its configuration.
 Servers and push workers repeat the check every minute; a contradiction
 ends the process after draining (`event=system_placement_lost`), a read
 that fails only logs a warning. `shardpost system init` creates fence and
@@ -316,7 +317,8 @@ and raises `refs`; it does not copy the bytes.
 
 ### 3.4 The account change log: `account`
 
-JMAP asks "what changed anywhere in this account since state N?". The
+JMAP (the JSON mail protocol of web and mobile clients) asks "what
+changed anywhere in this account since state N?". The
 object `account` answers it:
 
 | Key | Meaning |
@@ -363,7 +365,7 @@ The full-text index does **not** count against the quota.
 |---|---|
 | `sieve` | the Sieve scripts (`s:<name>` keys) and the active one (xattr `active`) |
 | `metadata` | IMAP METADATA annotations of the account |
-| `scrub` | candidates and state of the scrubber |
+| `scrub` | candidates and state of the scrubber (ShardPost's own check-and-repair run, chapter 5.5; not Ceph's deep scrub) |
 | `ix/<space>/<nn>` | front-end indexes that can always be rebuilt, today the JMAP locator (GUID → mailbox and UID), 32 shards |
 | `pubseen/<id>` | the account's private `\Seen` marks in public folder `<id>` |
 
@@ -401,10 +403,11 @@ unchanged, otherwise try again". Chapter 5 explains it.
 
 ![Delivery of one message](../diagrams/course-delivery.svg)
 
-The MTA hands the message to ShardPost over **LMTP**.
+The MTA (the mail transfer agent in front, for example Postfix) hands
+the message to ShardPost over **LMTP** (the local variant of SMTP).
 
 1. **Who is the recipient?** The LMTP session asks the auth cache, which
-   asks Nauthilus on a miss, for the canonical account (here
+   asks Nauthilus (the authentication service) on a miss, for the canonical account (here
    `alice@example.org`). An unknown recipient is refused before the
    message is even sent.
 2. **Sieve.** The session reads the account's `sieve` object and runs the
@@ -493,7 +496,7 @@ count is unchanged. A crash leaves the intent for the scrub.
    change and writes the **removal intent** `r:<uid>` (with GUID, size
    and chunk count).
 2. A CAS on the registry gives the usage back (`q:bytes`, `q:msgs`).
-3. One write marks `r:<uid>` as released (field `f`).
+3. One write records in `r:<uid>` that the usage is released (field `f`).
 4. A CAS on the `refs` xattr lowers it by one.
 5. Only when `refs` reaches 0: the document leaves the full-text index
    and every chunk is deleted.
@@ -690,7 +693,7 @@ One object per record, `kv.<key>`:
 | Record | What |
 |---|---|
 | `kv.job/<id>`, `kv.plan/<id>`, `kv.idem/<hash>` | maintenance jobs, their plans, idempotency keys |
-| `kv.servers/<instance>` | **registrations**: every process registers with version and capabilities and renews every minute; deleted 24 hours after the last heartbeat |
+| `kv.servers/<instance>` | **registrations**: every process that writes the store-wide state (servers, job runners, push pods, scrubs, sweeps, backfills; not the `shardpost system` tools) registers with role, version and capabilities and renews every minute; deleted 24 hours after the last heartbeat |
 | `kv.fts/layout3`, `kv.fts/dictfilter`, `kv.fts/online`, `kv.quota/online`, `kv.mailbox/lock` | **cluster marks**: switches set by `shardpostctl … enable -pods n` once every running process reports the capability |
 | `kv.jmap/push/acct/<account>`, `kv.jmap/push/seen/<account>`, `kv.jmap/push/lease` | JMAP push subscriptions and the push workers' state |
 | `kv.jmap/sendq/<account>/<id>` | delayed JMAP submissions |
@@ -710,8 +713,9 @@ lists `~admin`
 - **The account directory** `ix.accounts` (256 shards): one entry per
   account that has a registry, with `state` (`active` or `purging`) and
   the record of the last batch scrub. Batches over all accounts and the
-  nightly scrub walk it instead of listing pools. It is written once per
-  account lifetime, when the registry is created.
+  nightly scrub walk it instead of listing pools. The protocols write it
+  once per account lifetime, when the registry is created; after that
+  only a purge (the state) and the batch scrub (its record) change it.
 - `ix.uploads` (expiring JMAP uploads), `ix.purged` (purged accounts for
   the sweep), `ix.fts_layout` (accounts with a layout 3 index),
   `ix.fts_due` (accounts waiting for a reshard).
@@ -778,8 +782,8 @@ The main command groups and their effect on storage:
 |---|---|---|
 | `server` | `server list` | reads registrations |
 | `account` | `account show`, `account list`, `account directory`, `account repair` | reads the directory and registry; `repair` fixes a directory entry |
-| `quota` | `quota online status\|enable\|disable` | reads registrations, sets the cluster mark `quota/online` |
-| `mailbox`, `acl`, `message`, `sieve` | list, create, rename, flag, copy, move, scripts | the same reads and writes as IMAP would do |
+| `quota` | `quota show`, `quota online status\|enable\|disable` | reads the usage; `online` reads registrations and sets the cluster mark `quota/online` |
+| `mailbox`, `acl`, `shared`, `messages`, `search`, `message`, `flags`, `copy`, `move`, `sieve` | list, create, rename, subscribe; ACLs; read, search, flag, copy and move messages; Sieve scripts | the same reads and writes as IMAP would do |
 | `plan`, `apply`, `check`, `job` | plan a job, run it, watch it | writes plan and job records; the job does the work (7.4) |
 | `learning` | inspect and retry learning jobs | the learning queue |
 | `export`, `archive verify`, `restore` | stream an account into an archive, check it, import it back | export: reads every message; restore: an import under the account lock |
@@ -881,8 +885,9 @@ The marks `fts/layout3`, `fts/dictfilter`, `fts/online`, `quota/online`
 and `mailbox/lock` switch on behaviour that older servers do not
 understand. The pattern is always the same:
 
-1. the new version on every pod; wait three minutes (a replaced pod's
-   registration stays fresh that long);
+1. the new version on every pod; wait three minutes (a pod that crashed
+   leaves a registration that counts as fresh for that long; one that
+   ended in order does not);
 2. `shardpostctl <group> status` — every fresh pod reports the
    capability;
 3. `shardpostctl <group> enable -pods <number of running pods>`; it
@@ -946,7 +951,8 @@ data pool and the index pool separately — they are on different devices.
 **Effect on storage:** a reshard writes a new generation beside the old
 one and deletes the old one after the switch; for a while the account
 has two indexes. Offline, the account is locked for the job (minutes for
-a large account); online (mark `fts/online`) it is not.
+a large account); online (mark `fts/online`, and `-online` in the plan or
+`fts.online_build: auto`) it is not.
 
 #### 8.3.6 Slow operations (`SLOW_OPS`)
 
@@ -994,22 +1000,25 @@ batches of `fts_layout`/`fts_rebuild` in a quiet time. Empty means
 always. An account whose largest object reaches 1.8 times its target is
 resharded at once, window or not.
 
-**Effect on storage:** at most `fts.build_max_running` (1) reshard at a
-time, each building a second generation of one account's index.
+**Effect on storage:** with a window, at most `fts.build_max_running` (1)
+of the worker's reshards run at a time (an urgent one does not wait for
+that), each building a second generation of one account's index.
 
 #### 8.3.10 Moving the store-wide state to a system pool
 
 For an existing cluster: `shardpost system migrate --to
-shardpost-system` in a maintenance window of about ten minutes with every
-process stopped. The tool copies every object of the four system
+shardpost-system` in a maintenance window with every process stopped
+(the cutover of the test cluster took about two minutes of downtime,
+[report](../reports/2026-10-02-system-pool-cutover.md)). The tool copies every object of the four system
 namespaces, checks digests, moves the originals into a **quarantine**
 (`<namespace>.moved/<run>` in the index pool), writes the mark and the
 fence. Then `ceph.system_pool` is set on every process and they start
 again. The exact runbook, exit codes and ways back (`abort`, `revert`):
 [Moving the store-wide state](../operations/README.md#moving-the-store-wide-state).
 
-**Effect on storage:** a few hundred to some thousands of objects
-copied; after the migration no image before 0.47.0 may run.
+**Effect on storage:** every object of the four system namespaces is
+copied (238 on the test cluster); after the migration no image before
+0.47.0 may run.
 
 #### 8.3.11 Quarantine clean-up
 
@@ -1197,13 +1206,17 @@ full-text caps are where large accounts need attention.
 | Generation | one complete layout 3 full-text index of an account, `ftx/<gen>/…`; a reshard builds a new one |
 | GUID | 16 random bytes (32 hex digits) naming one stored message |
 | Intent | a note written before a multi-object change and removed after it; a crash leaves it for the scrub |
+| JMAP | the JSON-based mail protocol (RFC 8620/8621) for web and mobile clients |
 | Layout 2 / 3 | the two object layouts of the full-text index |
 | librados | the Ceph client library linked into `shardpost` |
+| LMTP | the local mail transfer protocol: how the MTA hands messages to ShardPost |
 | Listing | enumerating the objects of a namespace; visits every PG of the pool |
 | Mailbox id | the stable id of a mailbox; names are only registry keys |
 | MODSEQ | the per-mailbox change counter (CONDSTORE) |
 | Monitor | the Ceph daemons that keep the cluster map and check cephx |
+| MTA | mail transfer agent, for example Postfix: receives mail from the Internet and delivers it over LMTP |
 | Namespace | a name prefix inside a pool; one per account |
+| Nauthilus | the authentication service ShardPost asks for logins and recipient lookups |
 | omap | the sorted key-value store attached to a RADOS object |
 | OSD | the Ceph daemon that stores data on one disk |
 | PG | placement group: objects are hashed to PGs, PGs placed on OSDs |
@@ -1215,6 +1228,7 @@ full-text caps are where large accounts need attention.
 | Reshard | building a full-text generation with more (or fewer) objects |
 | Scrub (ShardPost) | the job that checks and repairs an account's references, intents and quota |
 | Shard (mailbox) | `mbox/<id>/<n>`: the entries of 100 000 UIDs |
+| Sieve | the users' filter rules (RFC 5228), run at delivery |
 | Sweep | `shardpost scrub --sweep`: lists both pools to find what no account names |
 | System pool | the optional pool for the store-wide state |
 | UID, UIDVALIDITY | the IMAP identity of a message within a mailbox |

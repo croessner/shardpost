@@ -7,7 +7,7 @@ sequenceDiagram
     participant F as full-text objects
     P->>MB: CAS: remove m:UID, new MODSEQ, log it, write intent r:UID
     P->>R: CAS: give back usage (q:bytes, q:msgs)
-    P->>MB: mark r:UID as released (f)
+    P->>MB: record in r:UID that the usage is released (f)
     P->>D: CAS on xattr refs: refs - 1
     alt refs is still above 0
         Note over MB,D: another copy still needs the blob, it stays
