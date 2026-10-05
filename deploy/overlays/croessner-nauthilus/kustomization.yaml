@@ -63,4 +63,8 @@ patches:
                     env:
                       - name: CEPH_SYSTEM_POOL
                         value: shardpost-system
+                      # R3 (2026-10-05): a scrub without --batch reads
+                      # the orphan source from here.
+                      - name: SCRUB_ORPHAN_SOURCE
+                        value: intents
   - path: configuration-patch.json

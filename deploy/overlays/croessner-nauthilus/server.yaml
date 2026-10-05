@@ -249,3 +249,12 @@ fts:
   dict_filter: ids
   dict_id_min_runes: 25
   attached_headers: nosig
+# Scaling stage R3: the scrub finds debris from the intents instead of
+# listing the account's namespaces, and the purge deletes what the data
+# model names (switched 2026-10-05 after clean shadow scrubs and
+# hack/r3-smoke.sh). Rollback: scrub.orphan_source shadow, purge.listing
+# true.
+scrub:
+  orphan_source: intents
+purge:
+  listing: false
