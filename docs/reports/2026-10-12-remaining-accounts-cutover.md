@@ -13,7 +13,7 @@ UIDs and MODSEQ. Afterwards the Nauthilus routing default
 | Group | Accounts | Mailboxes | Messages | Cutover (UTC) |
 | --- | --- | --- | --- | --- |
 | 1 | 16 with data (`admin`, `de10002`, `de10019`, `de10024`, `de10027`, `de10029`, `de10034`, `de10035`, `de10044`, `de10045`, `de10046`, `de10049`, `de88888`, `grafana`, `help` @srvint.net, `dkim2-reflector@exampleserver.de`) | 110 | 1,872 | 09:25–09:34 |
-| 1 | 5 routed only (`de20005`, `de20006`, `de20007`, `master-01`, `support` @srvint.net) | – | – | 09:31–09:33 |
+| 1 | 5 without IMAP access (`de20005`, `de20006`, `de20007`, `master-01`, `support` @srvint.net) | 26 | 2 | routing 09:31–09:33, data 10:03–10:04 |
 | 2 | 9 (`de10008`, `de10017`, `de10021`, `de10022`, `de10023`, `de10025`, `de10026`, `de10036`, `de10037` @srvint.net) | 192 | 13,114 | 09:36–09:45 |
 | Default | every other account | – | – | 09:56 |
 
@@ -29,10 +29,15 @@ and vacation replies through `relay.roessner-net.de:25025`.
   first had gone through cleanly. `de10008` sees mailboxes of `de10017`,
   so both moved together.
 - **Accounts without IMAP access.** `de20005`, `de20006`, `de20007`,
-  `master-01` and `support` are not in the Dovecot group in LDAP, so
-  Nauthilus refuses even the master login and the import cannot read
-  them. Only their routing moved. `de20005` leaves two messages from
-  2025 on the mailstack; the other four are empty.
+  `master-01` and `support` have `rnsMSEnableDovecot: FALSE` in LDAP;
+  they are real accounts that are enabled when needed. Nauthilus refuses
+  even the master login for them, so the first pre-copy failed. Their
+  routing moved with group 1. For the data, `rnsMSEnableDovecot` was set
+  to `TRUE` on the LDAP provider from 10:03:38 to 10:04:05 UTC, the five
+  were imported (empty on ShardPost before, so nothing was overwritten)
+  and the attribute was set back to `FALSE`, with the reset guarded to
+  run on any failure. A master login right afterwards was refused again.
+  `rnsMSEnablePostfix` was not touched.
 - **Not moved.** Directories on the mailstack without an account in the
   userdb (`de10031`, `de30000`, `nextcloud`, `oidc-e2e-20260816`,
   `pilot-mail-migration@exampleserver.de`) stay where they are. The
@@ -50,7 +55,7 @@ and vacation replies through `relay.roessner-net.de:25025`.
 
 ## How
 
-1. Pre-copy of all 25 readable accounts with the routing unchanged
+1. Pre-copy of the 25 accounts with IMAP access with the routing unchanged
    (about 22 minutes in total, `de10026` with 1,257 messages and 1 GB
    the longest), then a comparison against `doveadm mailbox status`:
    every mailbox present, messages, UIDVALIDITY and UIDNEXT equal,
