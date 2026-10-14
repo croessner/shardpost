@@ -14,7 +14,9 @@ RUN test -n "$GOLANGCI_LINT_VERSION" \
  && install -m 0755 "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint" /usr/local/bin/golangci-lint \
  && rm -rf /tmp/lint.tgz /tmp/golangci-lint-* \
  && mkdir -p /cache/go /cache/lint && chmod -R 1777 /cache
-COPY --from=golang:1.27 /usr/local/go /usr/local/go
+# Pinned to the go.mod version: golangci-lint reads the export data of this
+# toolchain, and a newer patch release can change its format (1.27.2 did).
+COPY --from=golang:1.27.1 /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH CGO_ENABLED=1 GOFLAGS=-mod=vendor \
     GOCACHE=/cache/go GOLANGCI_LINT_CACHE=/cache/lint HOME=/tmp
 WORKDIR /src
