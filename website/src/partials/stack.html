@@ -1,0 +1,232 @@
+<figure class="stack-figure">
+  <div class="stack-scroll">
+    <svg class="stack-svg" viewBox="0 0 1200 630" role="group" aria-label="The ShardPost stack: clients, Nauthilus, nauthilus-director, ShardPost and Ceph RADOS. Select a part to read what it does.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="arrow" d="M0 0L10 5L0 10z"/>
+        </marker>
+      </defs>
+
+      <!-- static wires under the animated flows -->
+      <path class="wire" d="M240 75C295 75 295 80 350 80" marker-end="url(#arr)"/>
+      <path class="wire" d="M240 135C300 135 290 275 350 275" marker-end="url(#arr)"/>
+      <path class="wire" d="M240 237C295 237 295 320 350 320" marker-end="url(#arr)"/>
+      <path class="wire" d="M240 367C295 367 295 370 350 370" marker-end="url(#arr)"/>
+      <path class="wire" d="M470 245V195" marker-end="url(#arr)"/>
+      <path class="wire" d="M590 330H680" marker-end="url(#arr)"/>
+      <path class="wire" d="M680 90H590" marker-end="url(#arr)"/>
+      <path class="wire" d="M950 225H1010" marker-end="url(#arr)"/>
+      <path class="wire" d="M745 420V480" marker-end="url(#arr)"/>
+      <path class="wire" d="M885 420V480" marker-end="url(#arr)"/>
+      <path class="wire" d="M1010 540H980V400H950" marker-end="url(#arr)"/>
+      <path class="wire" d="M680 400C560 400 420 540 240 540" marker-end="url(#arr)"/>
+      <path class="wire" d="M20 540H8V95H20" marker-end="url(#arr)"/>
+
+      <path class="flow flow-teal" d="M240 75C295 75 295 80 350 80"/>
+      <path class="flow flow-teal" d="M240 135C300 135 290 275 350 275"/>
+      <path class="flow flow-lime" d="M240 237C295 237 295 320 350 320"/>
+      <path class="flow flow-lime" d="M240 367C295 367 295 370 350 370"/>
+      <path class="flow flow-cyan flow-slow" d="M470 245V195"/>
+      <path class="flow flow-lime" d="M590 330H680"/>
+      <path class="flow flow-cyan flow-slow" d="M680 90H590"/>
+      <path class="flow flow-amber" d="M950 225H1010"/>
+      <path class="flow flow-rose flow-slow" d="M745 420V480"/>
+      <path class="flow flow-rose flow-slow" d="M680 400C560 400 420 540 240 540"/>
+      <path class="flow flow-rose flow-slow" d="M20 540H8V95H20"/>
+
+      <text class="t-edge" x="295" y="66" text-anchor="middle">OIDC sign-in</text>
+      <text class="t-edge" x="252" y="166">JMAP</text>
+      <text class="t-edge" x="295" y="358" text-anchor="middle">LMTP</text>
+      <text class="t-edge" x="480" y="224">auth · routing</text>
+      <text class="t-edge" x="635" y="320" text-anchor="middle">TLS+PROXY</text>
+      <text class="t-edge" x="635" y="80" text-anchor="middle">gRPC</text>
+      <text class="t-edge" x="980" y="214" text-anchor="middle">librados</text>
+      <text class="t-edge" x="470" y="500" text-anchor="middle">Web Push</text>
+
+      <!-- clients -->
+      <g class="node" data-node="jmapper" tabindex="0" role="button" aria-pressed="false" aria-label="JMapper Mail">
+        <rect class="box accent-jm" x="20" y="30" width="220" height="130" rx="14"/>
+        <image href="/img/app-icon-light.webp" x="186" y="42" width="40" height="40"/>
+        <text class="t-kicker" x="38" y="58">CLIENT APP</text>
+        <text class="t-title" x="38" y="86">JMapper Mail</text>
+        <text class="t-small" x="38" y="110">iPhone · iPad · Mac</text>
+        <text class="t-line" x="38" y="138">JMAP + OIDC</text>
+      </g>
+      <g class="node" data-node="clients" tabindex="0" role="button" aria-pressed="false" aria-label="IMAP, POP3 and ManageSieve clients">
+        <rect class="box" x="20" y="185" width="220" height="105" rx="14"/>
+        <text class="t-kicker" x="38" y="212">MAIL CLIENTS</text>
+        <text class="t-title" x="38" y="240">IMAP · POP3</text>
+        <text class="t-line" x="38" y="266">ManageSieve</text>
+      </g>
+      <g class="node" data-node="mta" tabindex="0" role="button" aria-pressed="false" aria-label="Inbound mail from an MTA">
+        <rect class="box" x="20" y="315" width="220" height="105" rx="14"/>
+        <text class="t-kicker" x="38" y="342">INBOUND MAIL</text>
+        <text class="t-title" x="38" y="370">MTA</text>
+        <text class="t-small" x="38" y="396">e.g. Postfix, queues SMTP</text>
+      </g>
+      <g class="node" data-node="push" tabindex="0" role="button" aria-pressed="false" aria-label="Web Push">
+        <rect class="box" x="20" y="480" width="220" height="120" rx="14"/>
+        <text class="t-kicker" x="38" y="507">NOTIFICATIONS</text>
+        <text class="t-title" x="38" y="535">Web Push</text>
+        <text class="t-small" x="38" y="560">the client's push service,</text>
+        <text class="t-small" x="38" y="580">e.g. JMapper's gateway</text>
+      </g>
+
+      <!-- Nauthilus -->
+      <g class="node" data-node="nauthilus" tabindex="0" role="button" aria-pressed="false" aria-label="Nauthilus">
+        <rect class="box accent-na" x="350" y="30" width="240" height="165" rx="14"/>
+        <image href="/img/nauthilus-mark.webp" x="520" y="42" width="56" height="36"/>
+        <text class="t-kicker" x="368" y="58">IDENTITY &amp; POLICY</text>
+        <text class="t-title" x="368" y="86">Nauthilus</text>
+        <text class="t-line" x="368" y="114">gRPC AuthService</text>
+        <text class="t-line" x="368" y="136">OIDC provider · MFA</text>
+        <text class="t-line" x="368" y="158">token introspection</text>
+        <text class="t-line" x="368" y="180">LDAP · Lua policies</text>
+      </g>
+      <g class="node" data-node="director" tabindex="0" role="button" aria-pressed="false" aria-label="nauthilus-director">
+        <rect class="box accent-na" x="350" y="245" width="240" height="175" rx="14"/>
+        <text class="t-kicker" x="368" y="273">PROTOCOL DIRECTOR</text>
+        <text class="t-title" x="368" y="301">nauthilus-director</text>
+        <text class="t-line" x="368" y="331">authenticates sessions</text>
+        <text class="t-line" x="368" y="353">routes by mail shard</text>
+        <text class="t-line" x="368" y="375">proxies to a backend</text>
+        <text class="t-small" x="368" y="403">IMAP · POP3 · Sieve · LMTP · JMAP</text>
+      </g>
+
+      <!-- ShardPost -->
+      <g class="node" data-node="shardpost" tabindex="0" role="button" aria-pressed="false" aria-label="ShardPost">
+        <rect class="box accent-sp" x="680" y="30" width="270" height="390" rx="16"/>
+        <image href="/img/shardpost-mark.svg" x="900" y="42" width="36" height="36"/>
+        <text class="t-kicker" x="700" y="58">MAIL SERVER</text>
+        <text class="t-title" x="700" y="86">ShardPost</text>
+        <rect class="chip" x="700" y="102" width="74" height="26" rx="13"/><text class="chip-text" x="737" y="119" text-anchor="middle">IMAP</text>
+        <rect class="chip" x="779" y="102" width="74" height="26" rx="13"/><text class="chip-text" x="816" y="119" text-anchor="middle">POP3</text>
+        <rect class="chip" x="858" y="102" width="74" height="26" rx="13"/><text class="chip-text" x="895" y="119" text-anchor="middle">JMAP</text>
+        <rect class="chip" x="700" y="134" width="74" height="26" rx="13"/><text class="chip-text" x="737" y="151" text-anchor="middle">LMTP</text>
+        <rect class="chip" x="779" y="134" width="74" height="26" rx="13"/><text class="chip-text" x="816" y="151" text-anchor="middle">Sieve</text>
+        <rect class="chip" x="858" y="134" width="74" height="26" rx="13"/><text class="chip-text" x="895" y="151" text-anchor="middle">IMAPSieve</text>
+        <rect class="box-inner" x="700" y="178" width="232" height="38" rx="9"/>
+        <text class="t-line" x="714" y="202">replica 1</text><text class="t-small" x="918" y="202" text-anchor="end">same pools</text>
+        <rect class="box-inner" x="700" y="224" width="232" height="38" rx="9"/>
+        <text class="t-line" x="714" y="248">replica 2</text><text class="t-small" x="918" y="248" text-anchor="end">same pools</text>
+        <rect class="box-inner" x="700" y="270" width="232" height="38" rx="9"/>
+        <text class="t-line" x="714" y="294">replica n</text><text class="t-small" x="918" y="294" text-anchor="end">same pools</text>
+        <rect class="box-inner" x="700" y="330" width="113" height="70" rx="9"/>
+        <text class="t-line" x="712" y="358">push</text><text class="t-small" x="712" y="382">64 partitions</text>
+        <rect class="box-inner" x="819" y="330" width="113" height="70" rx="9"/>
+        <text class="t-line" x="831" y="358">runners</text><text class="t-small" x="831" y="382">jobs, learning</text>
+      </g>
+
+      <!-- Ceph -->
+      <g class="node" data-node="ceph" tabindex="0" role="button" aria-pressed="false" aria-label="Ceph RADOS">
+        <rect class="box accent-ce" x="1010" y="30" width="170" height="390" rx="16"/>
+        <text class="t-kicker" x="1026" y="58">STORAGE</text>
+        <text class="t-title" x="1026" y="86">Ceph RADOS</text>
+        <rect class="pool pool-index" x="1024" y="102" width="142" height="88" rx="10"/>
+        <text class="t-line" x="1034" y="128">index pool</text>
+        <text class="t-small" x="1034" y="152">replicated · omap</text>
+        <text class="t-small" x="1034" y="172">mailboxes, entries</text>
+        <rect class="pool pool-data" x="1024" y="198" width="142" height="88" rx="10"/>
+        <text class="t-line" x="1034" y="224">data pool</text>
+        <text class="t-small" x="1034" y="248">erasure coded</text>
+        <text class="t-small" x="1034" y="268">message blobs</text>
+        <rect class="pool pool-system" x="1024" y="294" width="142" height="88" rx="10"/>
+        <text class="t-line" x="1034" y="320">system pool</text>
+        <text class="t-small" x="1034" y="344">optional</text>
+        <text class="t-small" x="1034" y="364">store-wide state</text>
+        <text class="t-small" x="1095" y="405" text-anchor="middle">a namespace per account</text>
+      </g>
+
+      <!-- around ShardPost -->
+      <g class="node" data-node="relay" tabindex="0" role="button" aria-pressed="false" aria-label="SMTP relay">
+        <rect class="box" x="680" y="480" width="130" height="120" rx="14"/>
+        <text class="t-kicker" x="694" y="507">OUTBOUND</text>
+        <text class="t-title" x="694" y="535">SMTP relay</text>
+        <text class="t-small" x="694" y="560">Sieve actions,</text>
+        <text class="t-small" x="694" y="580">JMAP sending</text>
+      </g>
+      <g class="node" data-node="monitoring" tabindex="0" role="button" aria-pressed="false" aria-label="Observability">
+        <rect class="box" x="820" y="480" width="130" height="120" rx="14"/>
+        <text class="t-kicker" x="834" y="507">TELEMETRY</text>
+        <text class="t-title" x="834" y="535">Monitoring</text>
+        <text class="t-small" x="834" y="560">Prometheus,</text>
+        <text class="t-small" x="834" y="580">OTLP traces, logs</text>
+      </g>
+      <g class="node" data-node="admin" tabindex="0" role="button" aria-pressed="false" aria-label="Administration with shardpostctl">
+        <rect class="box" x="1010" y="480" width="170" height="120" rx="14"/>
+        <text class="t-kicker" x="1026" y="507">ADMINISTRATION</text>
+        <text class="t-title" x="1026" y="535">shardpostctl</text>
+        <text class="t-small" x="1026" y="560">admin API (OpenAPI)</text>
+        <text class="t-small" x="1026" y="580">Unix socket or mTLS</text>
+      </g>
+    </svg>
+  </div>
+  <figcaption>
+    <div class="stack-legend">
+      <span class="legend-teal"><i></i>JMAP and sign-in</span>
+      <span class="legend-lime"><i></i>mail protocols</span>
+      <span class="legend-cyan"><i></i>authentication</span>
+      <span class="legend-amber"><i></i>storage</span>
+      <span class="legend-rose"><i></i>outbound and push</span>
+    </div>
+    <p class="stack-hint">Select a part of the diagram to read what it does. The layout follows the reference deployment; Nauthilus is the authentication backend, nauthilus-director the optional front door.</p>
+  </figcaption>
+  <div class="stack-detail" aria-live="polite">
+    <h3>ShardPost</h3>
+    <p>Select a part of the diagram to read what it does.</p>
+  </div>
+</figure>
+
+<div class="stack-details-src" hidden>
+  <div data-node="shardpost">
+    <h3>ShardPost</h3>
+    <p>The mailbox and processing layer: IMAP, POP3, JMAP, LMTP and ManageSieve on one store, with Sieve during delivery and IMAPSieve on mailbox events. Several identical replicas share the same pools. Connections, parsers and caches live in the process; the durable mail state lives in RADOS, so a client that lands on another replica needs nothing but a new connection.</p>
+    <p>Background work (maintenance jobs, learning, delayed sending, expiries) runs in the servers or in job runner pods of their own. JMAP push workers share 64 partitions through RADOS leases.</p>
+  </div>
+  <div data-node="ceph">
+    <h3>Ceph RADOS</h3>
+    <p>ShardPost writes through librados straight into RADOS objects, with no file system and no database in between. The <code>index</code> pool holds each account's mailboxes, message entries, quota and full-text index as omap and must be replicated. The <code>data</code> pool holds the message blobs, which are written once and never changed, so it may be erasure coded. An optional <code>system</code> pool keeps the small, hot store-wide state (admin store, account directory, queues and locks) on fast OSDs.</p>
+    <p>Every account is one RADOS namespace in the shared pools; there is no pool per user. <a href="/docs/storage-guide/">Read the storage guide →</a></p>
+  </div>
+  <div data-node="nauthilus">
+    <h3>Nauthilus</h3>
+    <p>Nauthilus decides every login and resolves an address to the canonical account whose namespace holds the mail. ShardPost reaches it over gRPC <code>AuthService</code> (or its HTTP JSON API) and passes the client address, protocol and TLS state along for Nauthilus' brute-force and policy checks. Bearer tokens are checked by OAuth 2.0 token introspection (RFC 7662).</p>
+    <p>A short-lived auth cache in front of Nauthilus answers repeated logins, and <code>shardpostctl auth flush</code> empties it on every server at once. For JMapper, Nauthilus is also the OpenID Connect provider. <a href="https://nauthilus.org/">nauthilus.org →</a></p>
+  </div>
+  <div data-node="director">
+    <h3>nauthilus-director</h3>
+    <p>In the reference deployment the protocol traffic enters through nauthilus-director, a mail protocol director and transparent proxy. It authenticates each session through Nauthilus, picks a healthy backend by routing facts such as the mail shard, and forwards the connection to ShardPost with the PROXY protocol, so ShardPost sees the real client address. JMAP requests take the same path.</p>
+    <p>ShardPost accepts PROXY headers only from trusted networks. <a href="https://github.com/croessner/nauthilus-director">nauthilus-director on GitHub →</a></p>
+  </div>
+  <div data-node="jmapper">
+    <h3>JMapper Mail</h3>
+    <p>A native mail app for iPhone, iPad and Mac from the same author, built for JMAP and OpenID Connect. It registers itself with the identity provider, signs in through the system browser with PKCE and keeps only the issued tokens.</p>
+    <p>ShardPost serves it over JMAP (RFC 8620, RFC 8621) with a bearer token that Nauthilus verifies, including shared folders, Sieve scripts, quotas and delayed sending, and, on iPhone and iPad, wakes it with Web Push when new mail arrives. <a href="https://jmapper.de/">jmapper.de →</a></p>
+  </div>
+  <div data-node="clients">
+    <h3>IMAP, POP3 and ManageSieve clients</h3>
+    <p>Any standards client works: IMAP4rev2 and IMAP4rev1 with CONDSTORE, QRESYNC, IDLE, NOTIFY, COMPRESS=DEFLATE, METADATA, ACL, SORT and THREAD; POP3 for the INBOX; ManageSieve for filter scripts. Logins use a password, PLAIN, XOAUTH2 or OAUTHBEARER, over STARTTLS or implicit TLS.</p>
+    <p>The <a href="/docs/protocols/">protocol reference</a> lists every capability, command and deviation.</p>
+  </div>
+  <div data-node="mta">
+    <h3>Inbound mail</h3>
+    <p>ShardPost does not accept internet SMTP and has no submission listener. An MTA such as Postfix receives and queues the mail and hands it over with LMTP (RFC 2033). ShardPost asks for the canonical recipient, runs the user's Sieve script and stores the message; a storage error is answered with a temporary failure, so the MTA tries again.</p>
+    <p>For local delivery there is also <code>shardpostctl deliver</code>, with sysexits exit codes.</p>
+  </div>
+  <div data-node="push">
+    <h3>Web Push</h3>
+    <p>When a JMAP client registers a push subscription, the separate <code>shardpost push</code> worker sends its notifications to the client's push service, encrypted with RFC 8291 and signed with VAPID (RFC 8292). JMapper's push service is a gateway that forwards them to Apple's push notification service. Clients that keep a connection open can use the JMAP EventSource stream instead.</p>
+  </div>
+  <div data-node="relay">
+    <h3>Outbound mail</h3>
+    <p>Mail the server creates (Sieve <code>redirect</code>, <code>vacation</code> and notifications, and JMAP <code>EmailSubmission</code>) goes to a configured SMTP relay, never directly to the internet. JMAP submissions can name the user with Postfix <code>XCLIENT</code>, and can be held back with FUTURERELEASE (RFC 4865) for delayed sending that the client can still cancel.</p>
+  </div>
+  <div data-node="monitoring">
+    <h3>Observability</h3>
+    <p>Prometheus metrics on <code>/metrics</code>, <code>/healthz</code> and <code>/readyz</code> (which checks the store and the drain state), OpenTelemetry traces over OTLP and structured JSON logs with a session ID and the real client address. An IMAP protocol trace can be switched on for a single account.</p>
+  </div>
+  <div data-node="admin">
+    <h3>Administration</h3>
+    <p><code>shardpostctl</code> talks to the admin API, an OpenAPI contract, over a Unix socket in the pod or over mutual TLS. Roles such as <code>diagnose</code>, <code>provision</code>, <code>repair</code>, <code>content</code> and <code>export</code> keep metadata apart from message content. It shows accounts and quotas, runs maintenance jobs, traces the IMAP protocol of an account, exports and restores accounts, and imports them from another IMAP server with their UIDs and MODSEQ kept.</p>
+  </div>
+</div>

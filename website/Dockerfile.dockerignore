@@ -1,0 +1,10 @@
+# Context of website/Dockerfile (BuildKit reads this file instead of the root .dockerignore).
+.git
+temp
+vendor
+website/dist
+website/.venv
+**/__pycache__
+/shardpost
+/shardpostctl
+/shardpost-load

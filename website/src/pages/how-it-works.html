@@ -1,0 +1,131 @@
+<!--meta {"title": "How ShardPost works – Nauthilus, ShardPost, Ceph and JMapper", "description": "How a ShardPost mail system fits together: Nauthilus and nauthilus-director in front, ShardPost replicas in the middle, Ceph RADOS underneath, and the JMapper app on top. Login, delivery and coordination step by step.", "path": "/how-it-works/", "nav": "how", "layout": "home"} -->
+<header class="hero">
+  <span class="pill"><span class="dot" aria-hidden="true"></span>How it works</span>
+  <h1>From the app on the phone<br><span class="accent">to the object on the disk.</span></h1>
+  <p class="lede">A ShardPost mail system has four layers: clients, the authentication and routing in front, the ShardPost replicas, and Ceph underneath. Select any part of the diagram to see what it does.</p>
+  {{stack_diagram}}
+</header>
+
+<section class="section flow-section" id="walkthroughs" aria-labelledby="walk-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Step by step</p>
+      <h2 id="walk-title">What happens when …</h2>
+      <p class="lede">Three everyday paths through the stack, written down from the storage guide and the protocol reference.</p>
+    </div>
+
+    <div class="walk">
+      <div>
+        <h3>… a JMapper user opens the inbox</h3>
+        <p>JMapper on an iPhone, Nauthilus as the OpenID Connect provider, ShardPost serving JMAP.</p>
+        <ol class="steps">
+          <li><strong>Discovery.</strong> JMapper discovers the JMAP endpoint and the OpenID Connect issuer of the mail domain.</li>
+          <li><strong>Sign-in.</strong> It registers itself with Nauthilus and signs the user in through the system browser with PKCE, including any second factor. It keeps only the issued tokens.</li>
+          <li><strong>Request.</strong> Every JMAP request carries the bearer token. nauthilus-director checks it by introspection, finds the account's mail shard and forwards the request with the PROXY protocol.</li>
+          <li><strong>Authentication.</strong> ShardPost checks the token through Nauthilus (RFC 7662) and its auth cache and gets the canonical account.</li>
+          <li><strong>Reading.</strong> The account, its mailbox list and the INBOX state cost four RADOS reads. Envelopes and previews come from the index entries; the message bytes are read only when the body is opened.</li>
+          <li><strong>Staying current.</strong> <code>Email/changes</code> answers from the account change log. When new mail arrives, a push worker sends an encrypted Web Push notification to iPhone and iPad.</li>
+        </ol>
+      </div>
+      <div>
+        <h3>… a mail arrives</h3>
+        <p>The MTA in front hands the message over with LMTP.</p>
+        <ol class="steps">
+          <li><strong>Recipient.</strong> The LMTP session asks the auth cache, and on a miss Nauthilus, for the canonical account. An unknown recipient is refused before the message is sent.</li>
+          <li><strong>Sieve.</strong> The account's active script and the global scripts decide: keep, <code>fileinto</code>, redirect, vacation.</li>
+          <li><strong>Reserve.</strong> One compare-and-swap checks the quota, adds the size and records an intent that a blob is about to be written. Over quota, LMTP answers <code>552 5.2.2</code>.</li>
+          <li><strong>Write and index.</strong> The blob goes into the data pool, then its text into the full-text index.</li>
+          <li><strong>Link.</strong> A compare-and-swap on the mailbox allocates the next UID and MODSEQ and writes the entry; the account log records the change.</li>
+          <li><strong>Wake up.</strong> A notify on the mailbox and the account wakes IDLE and NOTIFY sessions and JMAP push workers on every server. LMTP answers <code>250</code>.</li>
+        </ol>
+        <p class="walk-more"><a href="/docs/storage-guide/#41-a-mail-arrives">The full walkthrough in the storage guide →</a></p>
+      </div>
+    </div>
+
+    <div class="walk">
+      <div>
+        <h3>… someone logs in with IMAP</h3>
+        <p>A login is mostly not a Ceph event.</p>
+        <ol class="steps">
+          <li><strong>Front door.</strong> nauthilus-director takes the connection, authenticates the session through Nauthilus and picks a healthy ShardPost backend.</li>
+          <li><strong>Handover.</strong> It connects to ShardPost with TLS and a PROXY header, so ShardPost sees the client's real address. In the reference deployment the Director logs in on the user's behalf as a master user (<code>&lt;account&gt;*nauthilus-director</code>; name and separator are configurable).</li>
+          <li><strong>Check.</strong> ShardPost asks its auth cache, which keeps a successful login for 30 seconds by default, and on a miss Nauthilus, with client address, protocol and TLS state.</li>
+          <li><strong>Session.</strong> The session opens the account's RADOS namespace. Everything it reads afterwards comes from the index and data pools.</li>
+        </ol>
+        <p class="walk-more"><a href="/docs/protocols/#authentication-and-sasl">Authentication in the protocol reference →</a></p>
+      </div>
+      <div>
+        <h3>… two servers write the same mailbox</h3>
+        <p>Two deliveries to the same INBOX, on two replicas, at the same moment.</p>
+        <ol class="steps">
+          <li><strong>Read.</strong> Both read UIDNEXT 43 together with the object version.</li>
+          <li><strong>Write with a condition.</strong> Both write “only if the object is still at that version”. RADOS lets exactly one of them win.</li>
+          <li><strong>Retry.</strong> The other write fails; that server reads again, gets 44 and writes 44. No UID is ever given twice.</li>
+          <li><strong>Notify.</strong> Each successful write rings the mailbox's watch, so the IDLE sessions on both servers see both messages.</li>
+        </ol>
+        <p class="walk-more"><a href="/docs/storage-guide/#5-many-servers-no-central-database">Many servers, no central database →</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section cards-section" id="coordination" aria-labelledby="coord-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Coordination</p>
+      <h2 id="coord-title">Coordination without <span class="accent">a database server.</span></h2>
+      <p class="lede">RADOS makes the change of one object atomic. Everything else ShardPost needs to run many replicas against the same accounts is built on that.</p>
+    </div>
+    <div class="cards">
+      <div class="card"><h3>Compare-and-swap</h3><p>Read the keys and the object version, compute, write only if the version is unchanged, otherwise try again. Every shared counter (UIDs, MODSEQ, quota) works this way.</p></div>
+      <div class="card"><h3>Announce, write, record</h3><p>A change across two objects is announced first and recorded last. Readers never move past an announcement without a record, so a JMAP state or an IMAP MODSEQ never skips a change.</p></div>
+      <div class="card"><h3>Watch and notify</h3><p>A doorbell, not a letter: the writer rings, the watcher looks for itself. A lost notification loses nothing, because the change log stays the source of truth.</p></div>
+      <div class="card"><h3>Locks and leases</h3><p>Locks in the OSD pick a single worker; leases in job records let another runner take over a job from its last checkpoint. The compare-and-swap on the data stays the final fence.</p></div>
+      <div class="card"><h3>Intents</h3><p>Before a write that could leave debris, ShardPost records an intent and removes it afterwards. A crash turns into a to-do list for the scrub, which needs no pool listing to find it.</p></div>
+      <div class="card"><h3>Process-local sessions</h3><p>Connections, parsers and caches belong to one process; durable state belongs to RADOS. A client that moves to another replica needs only a new connection.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="section features" id="boundaries" aria-labelledby="bound-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Boundaries</p>
+      <h2 id="bound-title">Who does what, <span class="accent">and what happens when it fails.</span></h2>
+    </div>
+    <div class="req-grid">
+      <div class="panel">
+        <h3>Responsibilities</h3>
+        <ul class="checks">
+          <li><strong>ShardPost:</strong> IMAP, POP3, JMAP, LMTP, ManageSieve, Sieve and the mail store; no public SMTP and no user management.</li>
+          <li><strong>Nauthilus:</strong> login and the resolution of an address to the canonical account; no mail content.</li>
+          <li><strong>nauthilus-director:</strong> public protocol access and backend routing, client address via PROXY.</li>
+          <li><strong>Ceph:</strong> persistence, replication and erasure coding; no transaction across mail objects.</li>
+          <li><strong>SMTP relay:</strong> redirect, vacation, notifications and JMAP sending.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Failures and their visible effect</h3>
+        <ul class="checks">
+          <li><strong>Nauthilus unreachable:</strong> new logins fail temporarily and are reported as unavailable, never as a wrong password.</li>
+          <li><strong>Ceph unreachable:</strong> store operations fail and readiness turns red; LMTP answers with a temporary error, so the MTA retries.</li>
+          <li><strong>A replica stops:</strong> its sessions end after a drain; clients reconnect to another one.</li>
+          <li><strong>A notification is lost:</strong> updates arrive later; the change log remains authoritative.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="family-note">From the <a href="/docs/architecture/">architecture overview</a>. The <a href="/docs/decisions/">architecture decisions</a> explain why it is built this way, and what each decision costs.</p>
+  </div>
+</section>
+
+<section class="section cta-section" aria-labelledby="cta-title">
+  <div class="section-inner">
+    <p class="eyebrow">Go deeper</p>
+    <h2 id="cta-title">The storage guide starts <span class="accent">with Ceph in five minutes.</span></h2>
+    <p class="lede">It builds the picture from the basics: Ceph, the pools, one account's objects, walkthroughs, the programs, the operator's job, monitoring and sizing.</p>
+    <div class="hero-actions">
+      <a class="button" href="/docs/storage-guide/">Read the storage guide</a>
+      <a class="button button-outline" href="/docs/">All documentation</a>
+    </div>
+  </div>
+</section>

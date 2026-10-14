@@ -1,0 +1,300 @@
+<!--meta {"title": "ShardPost – a mail server that stores mail directly in Ceph RADOS", "description": "ShardPost is a free mail server written in Go. It keeps mailboxes and messages directly in Ceph RADOS and serves them over IMAP, JMAP, POP3, LMTP and ManageSieve, with Sieve, quotas, sharing and Nauthilus authentication.", "path": "/", "nav": "home", "layout": "home"} -->
+<header class="hero">
+  <span class="pill"><span class="dot" aria-hidden="true"></span>Version {{version}} · Free software under the GPL</span>
+  <div class="hero-mark"><img src="/img/shardpost-mark.svg" width="132" height="132" alt="ShardPost logo"></div>
+  <h1>Mail that lives in Ceph.<br><span class="accent">No file system. No database.</span></h1>
+  <p class="lede">ShardPost is a mail server written in Go. It keeps mailboxes, messages and its own coordination state directly in Ceph RADOS and serves them over IMAP, JMAP, POP3, LMTP and ManageSieve. Several replicas share one store, and Nauthilus decides who gets in.</p>
+  <div class="hero-actions">
+    <a class="button" href="/docs/">Read the documentation</a>
+    <a class="button button-outline" href="/how-it-works/">How it works</a>
+    <a class="button button-outline" href="{{github}}">Source on GitHub</a>
+  </div>
+  <p class="hero-note">GPL-3.0-or-later · Linux, with or without Kubernetes · needs a Ceph cluster · <a href="#requirements">Requirements</a></p>
+  <a class="by-line" href="https://roessner-network-solutions.com/"><img src="/img/rns-logo.svg" width="38" height="28" alt="">by Rößner Network Solutions</a>
+</header>
+
+<div class="strip">
+  <ul>
+    <li>Written in Go</li>
+    <li>Ceph RADOS via librados</li>
+    <li>IMAP4rev2 · JMAP · POP3</li>
+    <li>LMTP · ManageSieve · Sieve</li>
+    <li>Nauthilus authentication</li>
+    <li>OpenAPI admin interface</li>
+  </ul>
+</div>
+
+<section class="section flow-section" id="stack" aria-labelledby="stack-title">
+  <div class="section-inner center">
+    <p class="eyebrow">The stack</p>
+    <h2 id="stack-title">Nauthilus lets them in. ShardPost serves them. <span class="accent">Ceph keeps it.</span></h2>
+    <p class="lede">ShardPost is the mailbox and processing layer of a mail system. Internet SMTP, authentication and storage are separate components with their own contracts. This is how they work together, from the app on a phone to the object on a disk.</p>
+    {{stack_diagram}}
+  </div>
+</section>
+
+<section class="section features" id="storage" aria-labelledby="storage-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Storage</p>
+      <h2 id="storage-title">Three pools. <span class="accent">One namespace per account.</span></h2>
+      <p class="lede">Messages and ordered mailbox metadata map well onto Ceph's object and omap operations, so ShardPost talks to RADOS directly. Index and payload have different needs and get different pools.</p>
+    </div>
+    <div class="pool-grid">
+      <div class="pool-card">
+        <p class="node-kicker">ceph.index_pool · replicated</p>
+        <h3>Index</h3>
+        <p>Each account's mailboxes, message entries with envelope and preview, quota, change log, Sieve scripts and full-text index, as omap keys. Many small keys, read and rewritten all the time: replicated, ideally on fast disks.</p>
+      </div>
+      <div class="pool-card data">
+        <p class="node-kicker">ceph.data_pool · erasure coded</p>
+        <h3>Data</h3>
+        <p>The message bytes, in chunks of 4 MiB by default. A blob is written once and never changed, so the pool can be erasure coded without overwrites. <code>COPY</code> adds a reference instead of copying bytes.</p>
+      </div>
+      <div class="pool-card system">
+        <p class="node-kicker">ceph.system_pool · optional</p>
+        <h3>System</h3>
+        <p>The small, hot store-wide state: admin store, account directory, queues and locks. With its own pool it sits on fast OSDs, apart from the accounts' objects.</p>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-copy">
+        <h3>Many servers, no central database</h3>
+        <p>Every replica can change every account. Instead of a database server, ShardPost coordinates through RADOS itself, and the order of writes is chosen so that a crash never leaves a broken account.</p>
+        <ul class="checks">
+          <li>Compare-and-swap on object versions for every change of one object</li>
+          <li>Intents for changes across objects, which the scrub finds without listing the pools</li>
+          <li>Watch and notify to wake IDLE, NOTIFY and push sessions on any server</li>
+          <li>Locks with a time to live for POP3 maildrops, the learning worker and push partitions; leases on job records</li>
+        </ul>
+        <p class="walk-more"><a href="/docs/storage-guide/">The storage guide explains it from the basics →</a></p>
+      </div>
+      <figure class="terminal">
+        <div class="terminal-bar"><i></i><i></i><i></i><span>a mail arrives</span></div>
+<pre><span class="c"># What one LMTP delivery does, in order</span>
+<span class="p">1</span>  resolve the recipient through Nauthilus
+<span class="p">2</span>  run the Sieve script
+<span class="p">3</span>  reserve quota and record a blob intent  <span class="c">(CAS)</span>
+<span class="p">4</span>  write the blob into the data pool
+<span class="p">5</span>  index the text
+<span class="p">6</span>  announce the change in the account log
+<span class="p">7</span>  link the entry, next UID and MODSEQ  <span class="c">(CAS)</span>
+<span class="p">8</span>  record the change, drop the intent
+<span class="p">9</span>  notify the watchers, answer 250</pre>
+        <figcaption>The blob is written before the entry that points at it, so no client ever sees an entry without data.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="section cards-section" id="protocols" aria-labelledby="protocols-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Protocols</p>
+      <h2 id="protocols-title">Every client, <span class="accent">one store.</span></h2>
+      <p class="lede">IMAP, POP3 and JMAP read the same index, the same blobs and the same account change log. A message flagged on the phone over JMAP is flagged in the desktop client over IMAP.</p>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-copy">
+        <h3>IMAP with its modern extensions</h3>
+        <p>ShardPost's own IMAP parser and dispatcher advertise IMAP4rev2 next to IMAP4rev1, with the extensions clients rely on for fast synchronisation, search and sharing.</p>
+        <ul class="checks">
+          <li>CONDSTORE and QRESYNC, IDLE and NOTIFY, COMPRESS=DEFLATE</li>
+          <li>SORT, THREAD, ESEARCH, full-text search with English and German stemming</li>
+          <li>ACL with shared folders under <code>Shared/</code> and public folders under <code>Public/</code></li>
+          <li>QUOTA, METADATA, SPECIAL-USE, OBJECTID, PREVIEW, IMAPSIEVE</li>
+        </ul>
+      </div>
+      <div class="feature-media">
+        <ul class="rfc-cloud" aria-label="IMAP standards">
+          <li class="k">RFC 9051 IMAP4rev2</li><li class="k">RFC 3501 IMAP4rev1</li><li>RFC 7162 CONDSTORE/QRESYNC</li>
+          <li>RFC 2177 IDLE</li><li>RFC 5465 NOTIFY</li><li>RFC 4978 COMPRESS</li><li>RFC 4314 ACL</li>
+          <li>RFC 9208 QUOTA</li><li>RFC 5464 METADATA</li><li>RFC 5256 SORT/THREAD</li><li>RFC 4731 ESEARCH</li>
+          <li>RFC 6851 MOVE</li><li>RFC 4315 UIDPLUS</li><li>RFC 6154 SPECIAL-USE</li><li>RFC 8474 OBJECTID</li>
+          <li>RFC 8970 PREVIEW</li><li>RFC 6785 IMAPSIEVE</li><li>RFC 7628 OAUTHBEARER</li>
+          <li class="k">RFC 1939 POP3</li><li class="k">RFC 2033 LMTP</li><li class="k">RFC 5804 ManageSieve</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="feature-row flip">
+      <div class="feature-copy">
+        <h3>JMAP, built in</h3>
+        <p>JMAP is a third front-end on the same store, not a second data store. It covers the RFC 8621 mail model with push, sharing and Sieve, and it is what the native app <a href="https://jmapper.de/">JMapper Mail</a> is built on.</p>
+        <ul class="checks">
+          <li>Push over EventSource and Web Push with VAPID, from workers that share 64 partitions</li>
+          <li>Sending through your relay, with delayed sending (FUTURERELEASE) that can be cancelled</li>
+          <li>Shared and public folders as accounts, principals and share notifications (RFC 9670)</li>
+          <li>Quotas, vacation response, blobs and Sieve scripts over JMAP</li>
+        </ul>
+      </div>
+      <div class="feature-media">
+        <ul class="rfc-cloud" aria-label="JMAP capabilities">
+          <li class="k">jmap:core</li><li class="k">jmap:mail</li><li>jmap:submission</li><li>jmap:vacationresponse</li>
+          <li>jmap:quota</li><li>jmap:blob</li><li>jmap:sieve</li><li>jmap:principals</li><li>jmap:mail:share</li>
+          <li>jmap:webpush-vapid</li><li>RFC 8620</li><li>RFC 8621</li><li>RFC 9425</li><li>RFC 9404</li><li>RFC 9661</li>
+          <li>RFC 9670</li><li>RFC 9749</li><li>RFC 8030</li><li>RFC 8291</li><li>RFC 8292</li><li>RFC 7662</li>
+        </ul>
+      </div>
+    </div>
+    <p class="family-note">The <a href="/docs/protocols/">protocol reference</a> lists every capability, command and method, and every place where ShardPost deliberately or knowingly deviates.</p>
+  </div>
+</section>
+
+<section class="section features" id="operations" aria-labelledby="ops-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Operations</p>
+      <h2 id="ops-title">Built to be run, <span class="accent">not just started.</span></h2>
+      <p class="lede">An admin API with an OpenAPI contract, a command-line client with roles, a manual page for every command group, metrics, traces and structured logs.</p>
+    </div>
+
+    <div class="feature-row">
+      <div class="feature-copy">
+        <h3>Diagnose without guessing</h3>
+        <p><code>shardpostctl</code> talks to the admin API over a Unix socket inside the server or over mutual TLS. Diagnosis sees metadata only; reading message content is a role of its own.</p>
+        <ul class="checks">
+          <li>Accounts, aliases, quotas, mailboxes and their consistency</li>
+          <li>Maintenance jobs for repairs, recounts and deletions, also over all accounts</li>
+          <li>An IMAP protocol trace for one account, switched on for a limited time</li>
+          <li>One auth cache flush for every server at once</li>
+        </ul>
+      </div>
+      <figure class="terminal">
+        <div class="terminal-bar"><i></i><i></i><i></i><span>shardpostctl</span></div>
+<pre><span class="c"># Is an account healthy, and what does it hold?</span>
+<span class="p">$</span> shardpostctl account show user@example.org
+<span class="p">$</span> shardpostctl mailbox list -all user@example.org
+<span class="p">$</span> shardpostctl check -wait user@example.org
+
+<span class="c"># "Is my mailbox full?"</span>
+<span class="p">$</span> shardpostctl quota show user@example.org
+
+<span class="c"># A phone does not show new mail: trace it for half an hour</span>
+<span class="p">$</span> shardpostctl trace on -for 30m user@example.org</pre>
+        <figcaption>Examples from the manual pages <a href="/docs/man/shardpostctl/">shardpostctl(1)</a>, <a href="/docs/man/shardpostctl-account/">shardpostctl-account(1)</a>, <a href="/docs/man/shardpostctl-mailbox/">shardpostctl-mailbox(1)</a> and <a href="/docs/man/shardpostctl-trace/">shardpostctl-trace(1)</a>.</figcaption>
+      </figure>
+    </div>
+
+    <div class="feature-row flip">
+      <div class="feature-copy">
+        <h3>Move in without your users noticing</h3>
+        <p><code>shardpostctl migrate</code> imports an account from another IMAP server through a master-user login. UIDs, UIDVALIDITY and MODSEQ stay the same, so clients keep their caches and do not download everything again.</p>
+        <ul class="checks">
+          <li>Uses CONDSTORE, X-GUID and SAVEDATE when the source offers them</li>
+          <li>Copies Sieve scripts over ManageSieve and keeps Dovecot POP3 UIDLs</li>
+          <li>Runs repeatedly until a run reports few changes</li>
+          <li>Export to a tar archive with a SHA-256 manifest, verify, restore</li>
+        </ul>
+      </div>
+      <figure class="terminal">
+        <div class="terminal-bar"><i></i><i></i><i></i><span>account import</span></div>
+<pre><span class="c"># A first copy while the account still lives on the old server.</span>
+<span class="c"># Repeat it until a run reports few changes:</span>
+<span class="p">$</span> shardpostctl -timeout 10m migrate \
+    -source-addr mail.example.org:993 \
+    -master-user admin -password-file /run/secrets/master \
+    -sieve-addr mail.example.org:4190 \
+    user@example.org</pre>
+        <figcaption>From <a href="/docs/man/shardpostctl-migrate/">shardpostctl-migrate(1)</a>.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="section cards-section" aria-labelledby="more-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">And more</p>
+      <h2 id="more-title">The parts a real mail system needs.</h2>
+    </div>
+    <div class="cards">
+      <div class="card"><h3>Sieve and IMAPSieve</h3><p>A Sieve interpreter with vacation, editheader, duplicate, date, body, imap4flags and more at delivery, ManageSieve to manage scripts, and IMAPSieve on mailbox events.</p></div>
+      <div class="card"><h3>Learning for spam filters</h3><p>Moving mail into or out of Junk can feed a classifier such as Rspamd through an allowlisted external program, from a durable queue that survives EXPUNGE and restarts.</p></div>
+      <div class="card"><h3>Full-text search</h3><p>Headers, text and HTML parts, file names and attached messages, with English and German stemming and substring search, for IMAP and JMAP.</p></div>
+      <div class="card"><h3>Quota with rules</h3><p>Storage and message limits with grace, per-mailbox rules, warning programs at thresholds and an over-quota flag in the user database.</p></div>
+      <div class="card"><h3>Shared and public folders</h3><p>Folders shared by ACL, public folders with their own quota and a private <code>\Seen</code> flag per user, in IMAP and JMAP.</p></div>
+      <div class="card"><h3>Limits per account</h3><p>Configurable upper bounds for mailboxes, keywords, metadata and shares, so one account cannot grow without end.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="section req-section" id="requirements" aria-labelledby="req-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Before you start</p>
+      <h2 id="req-title">What ShardPost needs, <span class="accent">and what it does not do.</span></h2>
+      <p class="lede">ShardPost is one layer of a mail system. It expects the others to be there, and it says plainly where it stops.</p>
+    </div>
+    <div class="req-grid">
+      <div class="panel">
+        <h3>What you need</h3>
+        <ul class="checks">
+          <li>A Ceph cluster, and <code>librados2</code> of the cluster's version on each server host</li>
+          <li>Linux, in containers or natively with systemd; Kubernetes and Rook are optional</li>
+          <li>Nauthilus for authentication and the canonical account (a static backend exists for tests)</li>
+          <li>An MTA in front that delivers over LMTP, and an SMTP relay for outgoing mail</li>
+        </ul>
+        <p class="spaced"><a href="/get-started/">Get started →</a></p>
+      </div>
+      <div class="panel">
+        <h3>What it does not do</h3>
+        <ul class="not-list">
+          <li>Accept internet SMTP or offer a submission port (587/465)</li>
+          <li>Encrypt or compress messages at rest</li>
+          <li>Contacts and calendars, JMAP over WebSocket</li>
+          <li>Search attachment content or CJK text</li>
+        </ul>
+        <p class="spaced"><a href="/docs/protocols/#not-supported-at-a-glance">Everything that is not supported →</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section family-section" id="projects" aria-labelledby="family-title">
+  <div class="section-inner">
+    <div class="center">
+      <p class="eyebrow">Sister projects</p>
+      <h2 id="family-title">Identity, server and client. <span class="accent">One open stack.</span></h2>
+      <p class="lede">ShardPost works with standard mail clients and an MTA of your choice. Its sister projects provide the sign-in and the app it was built with.</p>
+    </div>
+    <div class="family">
+      <a class="project" href="https://nauthilus.org/">
+        <div class="project-logo"><img src="/img/nauthilus-mark.webp" width="87" height="56" alt=""></div>
+        <p class="node-kicker">Identity &amp; policy</p>
+        <h3>Nauthilus</h3>
+        <p>The authentication and policy engine with a built-in OpenID Connect provider, MFA and WebAuthn. It decides every ShardPost login and resolves addresses to accounts; nauthilus-director routes the protocol traffic.</p>
+        <span class="more">nauthilus.org →</span>
+      </a>
+      <div class="project current">
+        <div class="project-logo"><img src="/img/shardpost-mark.svg" width="56" height="56" alt=""></div>
+        <p class="node-kicker">Mail server</p>
+        <h3>ShardPost</h3>
+        <p>The mail server that stores mail directly in Ceph RADOS: IMAP, JMAP, POP3, LMTP and ManageSieve on one shared store. Free software under the GPL.</p>
+        <span class="more">You are here</span>
+      </div>
+      <a class="project" href="https://jmapper.de/">
+        <div class="project-logo"><img src="/img/app-icon-light.webp" width="56" height="56" alt=""></div>
+        <p class="node-kicker">Client</p>
+        <h3>JMapper Mail</h3>
+        <p>The native mail app for iPhone, iPad and Mac. It speaks JMAP, signs in with OpenID Connect and, on iPhone and iPad, receives new-mail notifications through Web Push.</p>
+        <span class="more">jmapper.de →</span>
+      </a>
+    </div>
+    <p class="family-note">All three come from Rößner Network Solutions. Using them together is optional.</p>
+  </div>
+</section>
+
+<section class="section cta-section" aria-labelledby="cta-title">
+  <div class="section-inner">
+    <p class="eyebrow">Free software</p>
+    <h2 id="cta-title">Read it, run it, <span class="accent">change it.</span></h2>
+    <p class="lede">ShardPost is licensed under the GNU General Public License, version 3 or later. The code, the deployment files and the full documentation are in one repository.</p>
+    <div class="hero-actions">
+      <a class="button" href="/get-started/">Get started</a>
+      <a class="button button-outline" href="{{github}}">View on GitHub</a>
+    </div>
+  </div>
+</section>

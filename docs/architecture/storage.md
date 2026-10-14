@@ -1473,7 +1473,6 @@ index answers `SUBJECT`, `BODY`, `TEXT` and `HEADER Subject` alone, as
 earlier versions did. JMAP and the admin `text` search always use the
 index alone.
 
-<a id="full-text-index-layout-3"></a>
 ## Full-text index layout 3
 
 Layout 2 — the objects described in the previous section, the only

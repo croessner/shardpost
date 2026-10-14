@@ -1,0 +1,74 @@
+<!--meta {"title": "Get started – ShardPost", "description": "What you need to run ShardPost, where to get the source and the release image, how to prepare the Ceph pools and how to deploy it with Kubernetes or natively with systemd.", "path": "/get-started/", "nav": "start", "toc": true, "eyebrow": "Get started", "heading": "Get started with ShardPost", "lede": "From the source and the release image to the Ceph pools and a first configuration check."} -->
+<p class="intro">ShardPost is one layer of a mail system: it needs Ceph underneath, an authentication backend and an MTA in front. This page puts the first steps in order and links to the manual for each of them. It describes ShardPost {{version}}.</p>
+
+<h2 id="requirements">What you need</h2>
+<ul>
+  <li><strong>A Ceph cluster.</strong> ShardPost talks to RADOS through librados; each server host needs <code>librados2</code> in the version of the cluster and network access to the monitors and every OSD. The image builds against Ceph 20 (Tentacle).</li>
+  <li><strong>Linux.</strong> In containers or natively. ShardPost needs a Ceph cluster, not Kubernetes and not Rook; the Kubernetes API is used only to read the cephx key and the monitor list from Rook when no key is configured.</li>
+  <li><strong>Authentication.</strong> In the operational profile Nauthilus handles logins and resolves addresses to the canonical account, over gRPC or its HTTP JSON API. A static backend with a user list exists for tests.</li>
+  <li><strong>An MTA in front.</strong> ShardPost accepts no internet SMTP. An MTA such as Postfix delivers to it over LMTP, and a configured SMTP relay sends what ShardPost generates (Sieve redirect and vacation, JMAP submission).</li>
+  <li><strong>Optional:</strong> nauthilus-director as the public front door, a classifier such as Rspamd for learning, an OpenTelemetry collector and Prometheus.</li>
+</ul>
+<div class="note"><strong>Good to know.</strong> The <a href="/docs/architecture/">architecture overview</a> shows these boundaries and what happens when one of the components fails.</div>
+
+<h2 id="source">Source and release image</h2>
+<p>The source, the deployment files and the documentation are in one repository:</p>
+<pre><code>git clone https://github.com/croessner/shardpost.git</code></pre>
+<p>Release images are published as <code>docker.io/chrroessner/shardpost</code> for <code>linux/amd64</code>, tagged with the version (for example <code>{{version}}</code>). The image contains the server <code>shardpost</code>, the admin client <code>shardpostctl</code> and the external programs.</p>
+<p>To build an image yourself and check only its configuration:</p>
+<pre><code>docker build --platform linux/amd64 -t shardpost:dev .
+docker run --rm -e LOG_LEVEL=info shardpost:dev config check</code></pre>
+<p><code>config check</code> validates the configuration and the secret files, but connects neither to Ceph nor to Nauthilus. Building the server natively needs Go as named in <code>go.mod</code>, gcc and the librados development files; <code>shardpostctl</code> and <code>shardpost-load</code> build without cgo. The <a href="/docs/development/">developer guide</a> has the details.</p>
+
+<h2 id="pools">Prepare the Ceph pools</h2>
+<p>The index pool must be replicated, because the mailbox state lives in omap. The data pool holds write-once blobs and can be erasure coded. The system pool is optional and replicated. The example from the operations guide:</p>
+<pre><code>ceph osd pool create shardpost-index replicated
+ceph osd pool set shardpost-index size 3
+ceph osd erasure-code-profile set shardpost-ec21 k=2 m=1 crush-failure-domain=host
+ceph osd pool create shardpost-data erasure shardpost-ec21
+ceph osd pool create shardpost-system replicated
+ceph osd pool set shardpost-system size 3
+for p in shardpost-index shardpost-data shardpost-system; do
+  ceph osd pool application enable "$p" shardpost
+  ceph osd pool set "$p" nodelete true
+done</code></pre>
+<p>The cephx identity needs read access to the monitors and <code>rwx</code> on the pools; <code>x</code> is required for object classes:</p>
+<pre><code>ceph auth get-or-create client.shardpost \
+  mon 'allow r' \
+  osd 'allow rwx pool=shardpost-index, allow rwx pool=shardpost-data, allow rwx pool=shardpost-system'</code></pre>
+<p>A new cluster with a system pool is prepared with <code>shardpost system init</code>; see <a href="/docs/man/shardpost-system/">shardpost-system(1)</a>. The <a href="/docs/storage-guide/#2-the-pools-of-shardpost-and-why-there-are-three">storage guide</a> explains why there are three pools, and <a href="/docs/operations/#pools">Pools</a> how to size them.</p>
+
+<h2 id="kubernetes">Kubernetes with Rook</h2>
+<p>The repository carries Kustomize manifests under <code>deploy/</code>, among them a base with the server deployment, service, PodDisruptionBudget, scrub CronJob and the Rook pools and cephx client, components for Nauthilus, admin mTLS, the import sidecar, JMAP push workers and job runners, and the overlays of the reference installation.</p>
+<div class="note warn"><strong>Not a template as it is.</strong> The base and the <code>croessner</code> overlay contain static test credentials; they are not meant for a publicly reachable service. The overlay <code>croessner-nauthilus</code> is the operational profile of the reference installation and names its own secrets, certificates and services. Write an overlay of your own for your cluster.</div>
+<p>Read <a href="/docs/operations/">Operations and releases</a> before the first rollout: dependencies, a read-only first diagnosis, the release procedure and rollback.</p>
+
+<h2 id="native">Natively with systemd</h2>
+<p>Without Kubernetes, the cephx key goes into the configuration (as <code>CEPH_KEY</code> from an environment file readable only by root), and the pools are named in the <code>ceph</code> section:</p>
+<pre><code>ceph:
+  user: shardpost
+  mon_host: "[v2:192.0.2.11:3300],[v2:192.0.2.12:3300],[v2:192.0.2.13:3300]"
+  index_pool: shardpost-index
+  data_pool: shardpost-data
+  system_pool: shardpost-system   # the same on every node and process</code></pre>
+<p>Check it before the first start:</p>
+<pre><code>sudo -u shardpost shardpost --config /etc/shardpost/shardpost.yaml config check</code></pre>
+<p>Several native servers coordinate through RADOS alone and can share one pool set like pods do. <a href="/docs/operations/#running-without-kubernetes">Running without Kubernetes</a> has the host requirements, a complete systemd unit and the push workers and job runners.</p>
+
+<h2 id="configure">Configure</h2>
+<p>ShardPost reads a YAML file (<code>--config</code> or <code>SHARDPOST_CONFIG</code>), environment variables and secret files. The <a href="/docs/configuration/">configuration reference</a> covers every section; the most important ones for a first installation:</p>
+<ul>
+  <li><code>ceph</code>: pools, user, monitors and chunk size.</li>
+  <li><code>server</code>: listeners, TLS, the auth backend, trusted PROXY networks, quota defaults.</li>
+  <li><code>nauthilus</code> and <code>auth</code>: the backchannel to Nauthilus and the auth cache.</li>
+  <li><code>jmap</code>: the JMAP listener, its public base URL, submission, push and limits.</li>
+  <li><code>sieve</code>, <code>imapsieve</code> and <code>extprograms</code>: scripts, learning and the allowlisted programs.</li>
+</ul>
+
+<h2 id="next">Next steps</h2>
+<ul>
+  <li><strong>Administer:</strong> the <a href="/docs/admin-api/">admin API</a> and <a href="/docs/man/shardpostctl/">shardpostctl(1)</a> with its roles.</li>
+  <li><strong>Move accounts in:</strong> <a href="/docs/man/shardpostctl-migrate/">shardpostctl-migrate(1)</a> keeps UIDs, UIDVALIDITY and MODSEQ.</li>
+  <li><strong>Watch it:</strong> <a href="/docs/observability/">metrics, traces and logs</a>, and the monitoring chapter of the <a href="/docs/storage-guide/#9-monitoring">storage guide</a>.</li>
+  <li><strong>Turn on JMAP:</strong> <a href="/docs/jmap/">JMAP</a> and <a href="/docs/jmap-examples/">JMAP by example</a>; <a href="https://jmapper.de/">JMapper Mail</a> is a client built for it.</li>
+</ul>

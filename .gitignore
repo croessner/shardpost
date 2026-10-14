@@ -16,3 +16,8 @@ __pycache__/
 /third_party/go-sieve/cmd/sieve-run/sieve-run
 *.test
 *.out
+
+# Website build output (website/)
+/website/dist/
+/website/.venv/
+/website/deploy/.env

@@ -1,10 +1,14 @@
 # ShardPost — Mail Server with Direct RADOS Storage
 
 This project implements a mail server in Go that can be run in a distributed
-fashion: IMAP and POP3 for access, LMTP for delivery, ManageSieve for script
-management, plus Sieve and IMAPSieve for processing. Metadata, messages and
+fashion: IMAP, POP3 and JMAP for access, LMTP for delivery, ManageSieve for
+script management, plus Sieve and IMAPSieve for processing. Metadata, messages and
 durable learning jobs live directly in Ceph RADOS. In the operational profile,
 Nauthilus handles authentication and identity resolution.
+
+The website [shardpost.de](https://shardpost.de/) introduces the project and
+carries the [manual](https://shardpost.de/docs/), rendered from `docs/` by
+[`website/`](website/README.md).
 
 **ShardPost** has been the project and product name since version 0.12.0; since
 0.13.0 the namespace, deployment, RADOS pools, Director shard and external

@@ -1,0 +1,33 @@
+<!--meta {"title": "Support – ShardPost", "description": "Where to get help with ShardPost: the manual, GitHub issues, contact and how to report security issues.", "path": "/support/", "nav": "support", "eyebrow": "Help", "heading": "Support", "lede": "Questions, bug reports and contributions are welcome."} -->
+<div class="support-grid">
+  <a class="support-card" href="/docs/"><strong>Documentation</strong><span>Architecture, operations, every command.</span></a>
+  <a class="support-card" href="{{github}}/issues"><strong>GitHub issues</strong><span>Bugs and feature requests.</span></a>
+  <a class="support-card" href="mailto:{{support_email}}?subject=ShardPost"><strong>Write to us</strong><span>{{support_email}}</span></a>
+</div>
+
+<h2 id="first">Before you ask</h2>
+<p>Many questions are answered in the manual. Good places to start:</p>
+<ul>
+  <li><a href="/docs/operations/#read-only-first-diagnosis">Read-only first diagnosis</a> in the operations guide.</li>
+  <li>The <a href="/docs/protocols/">protocol reference</a>, including what is <a href="/docs/protocols/#not-supported-at-a-glance">not supported</a>.</li>
+  <li>The <a href="/docs/man/">manual pages</a> for every <code>shardpostctl</code> command, with examples and exit codes.</li>
+  <li>The <a href="/docs/observability/">observability guide</a> for what the metrics and logs mean.</li>
+</ul>
+
+<h2 id="report">A good bug report</h2>
+<ol>
+  <li>The ShardPost version (<code>shardpostctl version</code>) and the Ceph version.</li>
+  <li>How it runs: Kubernetes with Rook or native, number of replicas, the authentication backend.</li>
+  <li>What you did, what you expected and what happened instead, with the protocol commands if a client is involved.</li>
+  <li>The relevant log lines. An IMAP protocol trace of one account (<a href="/docs/man/shardpostctl-trace/">shardpostctl-trace(1)</a>) often shows the problem directly.</li>
+</ol>
+<div class="note"><strong>Mind what you share.</strong> Operational logs contain client addresses and account names, and a protocol trace contains what the client sent. Remove passwords, tokens and private data before you post anything in a public issue.</div>
+
+<h2 id="contribute">Contributing</h2>
+<p>ShardPost is free software under the GNU General Public License, version 3 or later; see <a href="{{github}}/blob/main/COPYRIGHT.md">COPYRIGHT.md</a>. The <a href="/docs/development/">developer guide</a> describes the code map, the build, the tests and how a change is made. Documentation is written in English, and a change of behaviour updates its documentation and manual page in the same commit.</p>
+
+<h2 id="contact">Contact</h2>
+<p>ShardPost is developed by Christian Rößner, Rößner Network Solutions. Write to <a href="mailto:{{support_email}}?subject=ShardPost">{{support_email}}</a> in English or German.</p>
+
+<h2 id="security">Security issues</h2>
+<p>Please report suspected vulnerabilities privately to <a href="mailto:{{support_email}}?subject=ShardPost%20security">{{support_email}}</a> with “ShardPost security” in the subject, not in a public issue. We will confirm receipt and keep you informed.</p>

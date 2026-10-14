@@ -1,0 +1,36 @@
+# Deployed to node1.roessner-net.de:/srv/docker/shardpost-website (see Makefile: deploy).
+services:
+  website:
+    image: docker.roessner-net.de/web/shardpost-website:${SHARDPOST_WEBSITE_TAG:-latest}
+    container_name: shardpost-website
+    restart: unless-stopped
+    read_only: true
+    user: "101:101"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    networks:
+      - rnsweb
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+      traefik.enable: "true"
+      traefik.docker.network: rnsweb
+      traefik.http.middlewares.shardpost-www.redirectregex.regex: ^https://www\.shardpost\.de/(.*)
+      traefik.http.middlewares.shardpost-www.redirectregex.replacement: https://shardpost.de/$${1}
+      traefik.http.middlewares.shardpost-www.redirectregex.permanent: "true"
+      traefik.http.routers.shardpost-website.rule: Host(`shardpost.de`) || Host(`www.shardpost.de`)
+      traefik.http.routers.shardpost-website.entrypoints: websecure
+      traefik.http.routers.shardpost-website.tls.certresolver: myresolver
+      traefik.http.routers.shardpost-website.tls.domains[0].main: shardpost.de
+      traefik.http.routers.shardpost-website.tls.domains[0].sans: www.shardpost.de
+      traefik.http.routers.shardpost-website.middlewares: chain-public@file,shardpost-www
+      traefik.http.routers.shardpost-website.service: shardpost-website
+      traefik.http.services.shardpost-website.loadbalancer.server.port: "8080"
+
+networks:
+  rnsweb:
+    external: true

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ShardPost">
+  <rect width="64" height="64" rx="14" fill="#132034"/>
+  <path d="M10 17.5h44L32 34.5z" fill="#6fd0c3"/>
+  <path d="M8.5 20.5l19 14.8L8.5 47z" fill="#8cc63e"/>
+  <path d="M55.5 20.5l-19 14.8L55.5 47z" fill="#1cbadf"/>
+  <path d="M11.5 49.5L32 37.6l20.5 11.9z" fill="#7d8fc0"/>
+</svg>
