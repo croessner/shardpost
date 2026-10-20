@@ -46,6 +46,7 @@ are documented as [manual pages](man/README.md).
 ## Evidence and history
 
 - [ShardPost 0.51.0](reports/2026-10-03-shardpost-0.51.0.md): online reshard and rebuild of the full-text index without account lock, night window (stage B14i).
+- [ShardPost 0.52.1](reports/2026-10-20-shardpost-0.52.1.md): `Email/set` refuses a body part `type` with parameters instead of writing an empty `Content-Type`.
 - [ShardPost 0.52.0](reports/2026-10-03-shardpost-0.52.0.md): JMAP push partitions, job runner pods, online quota recount, mailbox lock (stages B16, B17, B18).
 - [Stage B18 implementation](reports/2026-10-03-b18-push-partitions-runner.md): push partitions and job runner pods as built, deviations from the plan.
 - [ShardPost 0.50.0](reports/2026-10-03-shardpost-0.50.0.md): identifier dictionary filter and attached-header text preparation, off by default (stage B14h).
