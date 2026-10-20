@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"mime"
 	"mime/quotedprintable"
 	"strings"
@@ -37,8 +38,9 @@ const (
 )
 
 // writeMessage writes a message: its top-level header fields, then the
-// root part's own fields, then the content.
-func writeMessage(top []hfield, root *outPart) []byte {
+// root part's own fields, then the content. It fails rather than write a
+// part whose Content-Type cannot be formatted.
+func writeMessage(top []hfield, root *outPart) ([]byte, error) {
 	var b bytes.Buffer
 
 	for _, f := range top {
@@ -46,13 +48,16 @@ func writeMessage(top []hfield, root *outPart) []byte {
 	}
 
 	writeField(&b, hfield{"MIME-Version", "1.0"})
-	writePart(&b, root)
 
-	return b.Bytes()
+	if err := writePart(&b, root); err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
 }
 
 // writePart writes a part's MIME fields, the empty line and its content.
-func writePart(b *bytes.Buffer, p *outPart) {
+func writePart(b *bytes.Buffer, p *outPart) error {
 	params := map[string]string{}
 	for k, v := range p.params {
 		params[k] = v
@@ -64,7 +69,12 @@ func writePart(b *bytes.Buffer, p *outPart) {
 		params["boundary"] = boundary
 	}
 
-	writeField(b, hfield{fieldContentType, mime.FormatMediaType(p.mediaType, params)})
+	ct := mime.FormatMediaType(p.mediaType, params)
+	if ct == "" {
+		return fmt.Errorf("jmap: cannot write Content-Type %q", p.mediaType)
+	}
+
+	writeField(b, hfield{fieldContentType, ct})
 
 	enc := ""
 	if boundary == "" {
@@ -81,16 +91,22 @@ func writePart(b *bytes.Buffer, p *outPart) {
 	if boundary == "" {
 		writeContent(b, p.content, enc)
 
-		return
+		return nil
 	}
 
 	for _, c := range p.children {
 		b.WriteString("--" + boundary + "\r\n")
-		writePart(b, c)
+
+		if err := writePart(b, c); err != nil {
+			return err
+		}
+
 		b.WriteString("\r\n")
 	}
 
 	b.WriteString("--" + boundary + "--\r\n")
+
+	return nil
 }
 
 // newBoundary is a boundary no content will contain: random, and with

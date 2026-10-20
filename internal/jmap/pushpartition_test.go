@@ -2,8 +2,8 @@ package jmap
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"

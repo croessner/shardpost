@@ -87,7 +87,10 @@ func createEmail(sess *session, raw json.RawMessage) (map[string]any, expectatio
 		return nil, expectation{}, serr
 	}
 
-	msg := writeMessage(d.top, d.root)
+	msg, err := writeMessage(d.top, d.root)
+	if err != nil {
+		return nil, expectation{}, &setError{Type: setServerFail, Description: err.Error()}
+	}
 
 	if int64(len(msg)) > sess.limits.MaxSizeUpload {
 		return nil, expectation{}, &setError{Type: setTooLarge, Description: descTooLarge}

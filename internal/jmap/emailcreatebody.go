@@ -242,8 +242,8 @@ func (br *bodyReader) part(raw json.RawMessage, defaultDisposition string, depth
 		p.mediaType = mediaMixed
 	}
 
-	if !validMediaType(p.mediaType) {
-		return nil, invalidProperty("type", "not a media type: "+p.mediaType)
+	if !validPartType(p.mediaType) {
+		return nil, invalidProperty("type", "not a media type without parameters: "+p.mediaType)
 	}
 
 	if serr := br.content(p, spec, depth); serr != nil {
@@ -257,6 +257,20 @@ func (br *bodyReader) part(raw json.RawMessage, defaultDisposition string, depth
 	p.header, serr = partFields(fields, spec, defaultDisposition)
 
 	return p, serr
+}
+
+// validPartType accepts a body part's type: RFC 8621 4.1.4 defines it as
+// the media type alone, so "type/subtype" and nothing else. Parameters
+// belong to their own properties (charset, name); one given here would
+// otherwise leave a type mime.FormatMediaType cannot write.
+func validPartType(s string) bool {
+	if !validMediaType(s) {
+		return false
+	}
+
+	mt, params, err := mime.ParseMediaType(s)
+
+	return err == nil && len(params) == 0 && mt == s
 }
 
 // decodePart decodes a body part of a creation and refuses the

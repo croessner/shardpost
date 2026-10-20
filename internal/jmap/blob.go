@@ -254,7 +254,8 @@ func (s *Server) blobsOf(w http.ResponseWriter, r *http.Request, shared bool) (*
 // blobType is the media type of a blob: what the client asked for, or
 // the neutral default. A type the client made up is its own problem, but
 // it must not become a header this server injects into a browser, so
-// anything that is not a plain token/token is refused.
+// anything that is not a type/subtype with harmless parameters is
+// refused.
 func blobType(want string) string {
 	if !validMediaType(want) {
 		return defaultBlobType

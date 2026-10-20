@@ -566,3 +566,57 @@ func TestEmailSetPatchErrors(t *testing.T) {
 		t.Errorf("sending back id and size unchanged failed: %#v", res["notUpdated"])
 	}
 }
+
+// TestEmailSetCreateRefusesTypeParameters: a body part's type is the
+// media type alone (RFC 8621 4.1.4). One with parameters is refused on
+// that property instead of becoming an empty Content-Type field.
+func TestEmailSetCreateRefusesTypeParameters(t *testing.T) {
+	s, u := emailServer(t)
+	box := `"mailboxIds":{"` + boxIDs(t, u)[inboxName] + `":true}`
+	blob := upload(t, s, "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "text/calendar")
+
+	creates := []string{
+		`{` + box + `,"attachments":[{"blobId":"` + blob + `","type":"text/calendar; method=REPLY"}]}`,
+		`{` + box + `,"attachments":[{"blobId":"` + blob + `","type":"text/calendar;"}]}`,
+		`{` + box + `,"attachments":[{"blobId":"` + blob + `","type":"text/calendar "}]}`,
+		`{` + box + `,"bodyStructure":{"type":"text/plain; charset=utf-8","partId":"t"},"bodyValues":{"t":{"value":"x"}}}`,
+	}
+
+	for i, create := range creates {
+		res := mailCall(t, s, "Email/set", `{"accountId":"test","create":{"c":`+create+`}}`)
+
+		e, _ := res["notCreated"].(map[string]any)["c"].(map[string]any)
+		props, _ := e["properties"].([]any)
+
+		if e["type"] != setInvalidProperties || len(props) != 1 || props[0] != "type" {
+			t.Errorf("case %d (%s) gave %#v", i, create, e)
+		}
+	}
+
+	res := mailCall(t, s, "Email/set", `{"accountId":"test","create":{"c":{`+box+
+		`,"attachments":[{"blobId":"`+blob+`","type":"Text/Calendar"}]}}}`)
+	if c, _ := res["created"].(map[string]any)["c"].(map[string]any); c == nil {
+		t.Errorf("a type without parameters was refused: %#v", res["notCreated"])
+	}
+}
+
+// TestWriteMessageRefusesUnwritableType: a part whose Content-Type
+// cannot be formatted fails the write instead of producing an empty
+// field.
+func TestWriteMessageRefusesUnwritableType(t *testing.T) {
+	root := &outPart{mediaType: "multipart/mixed", params: map[string]string{}, children: []*outPart{
+		{mediaType: mediaTextPlain, params: map[string]string{}, content: []byte("x")},
+		{mediaType: "text/calendar; method=reply", params: map[string]string{}, content: []byte("y")},
+	}}
+
+	if msg, err := writeMessage(nil, root); err == nil {
+		t.Errorf("writeMessage wrote %q", msg)
+	}
+
+	root.children = root.children[:1]
+
+	msg, err := writeMessage(nil, root)
+	if err != nil || !strings.Contains(string(msg), "Content-Type: text/plain") {
+		t.Errorf("writeMessage gave %q, %v", msg, err)
+	}
+}

@@ -471,7 +471,9 @@ a creation is all or nothing. The constraints of RFC 8621 4.6 are
 enforced rather than repaired — a field given twice (also once on the
 Email and once on the root body part), a `Content-*` field on the Email,
 a `Content-Transfer-Encoding` or `MIME-Version` anywhere, a `charset`
-next to a `partId`, a `header:*` name that is not a field name, a word
+next to a `partId`, a part `type` with parameters
+(`text/calendar; method=REPLY`; the type is the media type alone, its
+parameters have their own properties), a `header:*` name that is not a field name, a word
 too long to fold — and a missing blob is `blobNotFound` with every
 missing id. Content is counted as the parts are read: a creation whose
 bodies add up to more than `maxSizeAttachmentsPerEmail` (which is
