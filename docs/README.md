@@ -45,6 +45,7 @@ are documented as [manual pages](man/README.md).
 
 ## Evidence and history
 
+- [Final status of the finish line of 2026-10-03](reports/2026-10-22-finish-line-status.md): every item of the list done, state of croessner, what was left out on purpose.
 - [System pool quarantine cleanup](reports/2026-10-22-system-pool-quarantine-cleanup.md): the quarantine of run 00720635caff (238 objects) deleted on croessner; fence and poisoned heads stay.
 - [ShardPost 0.51.0](reports/2026-10-03-shardpost-0.51.0.md): online reshard and rebuild of the full-text index without account lock, night window (stage B14i).
 - [ShardPost 0.52.1](reports/2026-10-20-shardpost-0.52.1.md): `Email/set` refuses a body part `type` with parameters instead of writing an empty `Content-Type`.
