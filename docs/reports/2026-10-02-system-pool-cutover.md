@@ -54,7 +54,8 @@ MTA queue.
 
 The quarantine stays until `system cleanup --run 00720635caff --confirm
 00720635caff`, at the earliest seven days after the migration and after
-the owner's confirmation.
+the owner's confirmation. It was deleted on 2026-10-22
+([quarantine cleanup](2026-10-22-system-pool-quarantine-cleanup.md)).
 
 ## Findings
 
