@@ -37,10 +37,10 @@ were not on it:
   registrations name the system pool `shardpost-system (id 23)`.
 - `system verify --source-only` passes. The fence has `cleaned_at` set,
   and no quarantine is left.
-- The nightly scrub CronJob (03:17) submitted its batch with skip-if-idle
-  on 2026-10-20, 2026-10-21 and 2026-10-22. The CronJob's last success
-  was at 2026-10-22T03:17:04Z. This report does not check the batch
-  results, which are in the job records (`shardpostctl job list`).
+- The nightly scrub CronJob (03:17) runs its batch with skip-if-idle
+  over all accounts. `shardpostctl job list` shows every batch from
+  2026-10-09 to 2026-10-22 as `succeeded`, which is 14 nights in a row
+  (the last one is `20261022T031701Z-57f61be25de5`).
 - `hack/kvqueue-smoke.sh` and `hack/auth-smoke.sh` passed. The logs of
   the server and push pods show no warning or error.
 - Ceph reports `HEALTH_WARN` with `BLUESTORE_SLOW_OP_ALERT` on 6 OSDs.
