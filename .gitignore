@@ -21,3 +21,9 @@ __pycache__/
 /website/dist/
 /website/.venv/
 /website/deploy/.env
+
+# graphify knowledge graph (local build output, rebuilt by the git hooks)
+/graphify-out/
+
+# Claude Code worktrees (only .claude/settings.json is shared)
+/.claude/worktrees/

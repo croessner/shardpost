@@ -1,0 +1,19 @@
+# Paths graphify leaves out of the knowledge graph (gitignore syntax).
+# .gitignore applies as well, so temp/, build output and caches are skipped.
+
+# Third-party code: vendored modules and copied upstream projects
+vendor/
+third_party/
+
+# Binary and generated assets that add no structure to the graph
+website/static/
+*.png
+*.webp
+*.jpg
+*.mbox
+
+# graphify's own output
+graphify-out/
+
+# Rendered Mermaid diagrams (sources live beside them as .mmd)
+docs/diagrams/*.svg
