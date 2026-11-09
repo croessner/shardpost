@@ -1,7 +1,7 @@
 # Deployed to node1.roessner-net.de:/srv/docker/shardpost-website (see Makefile: deploy).
 services:
   website:
-    image: docker.roessner-net.de/web/shardpost-website:${SHARDPOST_WEBSITE_TAG:-latest}
+    image: docker.roessner-net.de/web/shardpost-website:${SHARDPOST_WEBSITE_TAG:-security-20261022@sha256:285b64d2d29dc0c74996cba3afa6b658abefd0bd3dfeb3f1726e62c63fae53b9}
     container_name: shardpost-website
     restart: unless-stopped
     read_only: true

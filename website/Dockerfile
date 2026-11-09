@@ -13,7 +13,10 @@ COPY . .
 ENV SHARDPOST_REPO=/repo
 RUN python3 website/build.py
 
-FROM nginxinc/nginx-unprivileged:1.31.6-alpine
+FROM nginxinc/nginx-unprivileged:1.31.6-alpine@sha256:884e0b7f42f303641b0f4e78755aea647521dca0b89ca3be7992ad78b5c07434
+USER root
+RUN apk upgrade --no-cache
+USER 101
 LABEL org.opencontainers.image.title="shardpost-website" \
       org.opencontainers.image.description="Static website and manual for ShardPost (shardpost.de)" \
       org.opencontainers.image.vendor="Rößner Network Solutions" \
