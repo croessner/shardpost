@@ -70,7 +70,13 @@ level, so those levels stay in the name: `Work/Bills` without a `Work`
 is a mailbox named `Work/Bills` at the top level. The invariant either
 way is that the path is the parent's path, the delimiter and the name. A
 `Mailbox/set` refuses a name that carries the delimiter, so a client
-cannot create that shape itself.
+cannot create that shape itself. A new name otherwise follows the same
+[mailbox name rules](protocols.md#mailbox-names) as IMAP `CREATE`, the
+refusal is `invalidProperties` on `name`, and the full name with its
+parents is at most 1024 bytes, for the mailbox itself and for every
+mailbox a move takes along. Sending back the current name of a mailbox
+that breaks those rules (one IMAP or an import made) is not refused, and
+neither is a new mailbox below one.
 
 **Counts.** `totalEmails`, `unreadEmails`, `totalThreads` and
 `unreadThreads` cost a scan of the mailbox index — the same scan an IMAP

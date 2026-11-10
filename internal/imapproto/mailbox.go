@@ -1043,8 +1043,8 @@ func (c *conn) cmdCreate(tag string) error {
 		return nil
 	}
 
-	if checkNewName(t.name) != nil {
-		c.no(tag, "CANNOT", "Mailbox name has control characters")
+	if err := checkNewName(t.u, t.name); err != nil {
+		c.newNameRefused(tag, err)
 		return nil
 	}
 
@@ -1189,8 +1189,8 @@ func (c *conn) cmdRename(tag string) error {
 		return nil
 	}
 
-	if checkNewName(nt.name) != nil {
-		c.no(tag, "CANNOT", "Mailbox name has control characters")
+	if err := checkRename(nt.u, ot.name, nt.name); err != nil {
+		c.newNameRefused(tag, err)
 		return nil
 	}
 

@@ -344,6 +344,10 @@ func placeOf(t *tree, spec *mailboxCreate, parent *string) (string, []string, *s
 		return "", nil, serr
 	}
 
+	if serr := checkPathLength(path); serr != nil {
+		return "", nil, serr
+	}
+
 	use, serr := useOf(t, spec.Role)
 	if serr != nil {
 		return "", nil, serr
@@ -480,15 +484,16 @@ func checkProperties(sess *session, given map[string]json.RawMessage) *setError 
 	return nil
 }
 
-// maxMailboxNameBytes is the longest mailbox name this server accepts,
-// and what the mail capability advertises as maxSizeMailboxName.
-const maxMailboxNameBytes = 255
+// maxMailboxNameBytes is the longest name of one level of the tree, and
+// what the mail capability advertises as maxSizeMailboxName.
+const maxMailboxNameBytes = model.MaxMailboxLevelBytes
 
 // checkName refuses a name that is not one level of the hierarchy. JMAP
 // names a mailbox by its leaf and points at a parent, so a name that
 // carries the delimiter would claim a place the parent does not have.
 // RFC 8621 2 asks for Net-Unicode, so a control character or a byte
-// sequence that is not UTF-8 is refused as well.
+// sequence that is not UTF-8 is refused as well, and so is everything
+// else IMAP CREATE refuses (model.CheckNewMailboxName).
 func checkName(name string) *setError {
 	switch {
 	case strings.TrimSpace(name) == "":
@@ -501,6 +506,20 @@ func checkName(name string) *setError {
 		return invalidProperty(propName, "a mailbox name is UTF-8")
 	case strings.IndexFunc(name, unicode.IsControl) >= 0:
 		return invalidProperty(propName, "a mailbox name has no control characters")
+	}
+
+	if err := model.CheckNewMailboxName(name); err != nil {
+		return invalidProperty(propName, err.Error())
+	}
+
+	return nil
+}
+
+// checkPathLength refuses a place in the tree whose full name would be
+// longer than a mailbox name may be.
+func checkPathLength(path string) *setError {
+	if len(path) > model.MaxMailboxNameBytes {
+		return invalidProperty(propName, "the full mailbox name (parents included) is longer than 1024 bytes")
 	}
 
 	return nil
@@ -546,6 +565,27 @@ func mailboxUpdates(ctx context.Context, sess *session, req *mailboxSetRequest, 
 	}
 }
 
+// moveMailbox renames mb to path with the mailboxes below it. Those are
+// all of the store's below mb, not only those the tree shows (a shared
+// account sees part of it), and none may end up longer than a mailbox
+// name may be.
+func moveMailbox(sess *session, mb *model.Mailbox, path string) *setError {
+	all, err := sess.user.ListMailboxes()
+	if err != nil {
+		return &setError{Type: setServerFail, Description: err.Error()}
+	}
+
+	if err := model.CheckSubtreeLength(all, mb.Name, path); err != nil {
+		return invalidProperty(propName, err.Error())
+	}
+
+	if err := sess.user.RenameMailbox(mb.Name, path); err != nil {
+		return renameFailed(err)
+	}
+
+	return nil
+}
+
 // updateMailbox applies one patch. Everything is decoded and checked
 // first and written afterwards: RFC 8620 5.3 forbids committing half of
 // an update to one record, and a rename that failed after a sort order
@@ -573,8 +613,8 @@ func updateMailbox(ctx context.Context, sess *session, t *tree, mb *model.Mailbo
 	}
 
 	if patch.moves {
-		if err := sess.user.RenameMailbox(mb.Name, patch.path); err != nil {
-			return nil, renameFailed(err)
+		if serr := moveMailbox(sess, mb, patch.path); serr != nil {
+			return nil, serr
 		}
 	}
 
@@ -827,6 +867,10 @@ func checkMove(t *tree, mb *model.Mailbox, name string, parent *string, patch *m
 		return nil, invalidProperty(propParentID, "a mailbox cannot be its own parent")
 	case strings.HasPrefix(path, mb.Name+model.Delim):
 		return nil, invalidProperty(propParentID, "a mailbox cannot be moved below itself")
+	}
+
+	if serr := checkPathLength(path); serr != nil {
+		return nil, serr
 	}
 
 	patch.path, patch.moves = path, true

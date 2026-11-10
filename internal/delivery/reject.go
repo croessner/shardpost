@@ -131,7 +131,8 @@ func (r *run) fcc(f *sieve.Fcc, raw []byte) {
 }
 
 // ensureFccMailbox makes sure an own :fcc mailbox exists: it is created
-// with :create, otherwise a missing one is an error.
+// with :create, under a name a new mailbox may get, otherwise a missing
+// one is an error.
 func ensureFccMailbox(t target, create bool) error {
 	_, err := t.u.Lookup(t.mailbox)
 	if !errors.Is(err, model.ErrNoMailbox) {
@@ -140,6 +141,10 @@ func ensureFccMailbox(t target, create bool) error {
 
 	if !create {
 		return ErrNoMailbox
+	}
+
+	if refused, err := checkNewTarget(t); refused != nil || err != nil {
+		return errors.Join(refused, err)
 	}
 
 	return t.u.EnsureMailbox(t.mailbox, nil)

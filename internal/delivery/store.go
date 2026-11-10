@@ -332,6 +332,20 @@ func (r *run) target(name string) (target, error) {
 	return target{u: r.u, mailbox: inboxName, where: inboxName}, nil
 }
 
+// checkNewTarget checks the name of an own mailbox a delivery would
+// create (model.CheckNewMailbox: existing levels, and an existing
+// mailbox of that name, are not checked). refused is the rule it breaks.
+func checkNewTarget(t target) (refused, err error) {
+	err = model.CheckNewMailbox(t.u, strings.Trim(t.mailbox, model.Delim))
+
+	var bad *model.MailboxNameError
+	if errors.As(err, &bad) {
+		return err, nil
+	}
+
+	return nil, err
+}
+
 // creatable creates the own mailbox a Sieve fileinto names when it is
 // missing, which it is refused when the account is at one of its mailbox
 // limits (limits.mailboxes, limits.mailbox_names): refused is then that
@@ -347,6 +361,12 @@ func (r *run) creatable(t target) (ensured bool, refused, err error) {
 
 	if r.explicit {
 		return false, nil, nil
+	}
+
+	// A name a new mailbox must not get is refused like a limit; an
+	// existing mailbox of that name still takes the message.
+	if refused, err := checkNewTarget(t); refused != nil || err != nil {
+		return false, refused, err
 	}
 
 	err = t.u.EnsureMailbox(t.mailbox, nil)

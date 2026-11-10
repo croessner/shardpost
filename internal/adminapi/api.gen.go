@@ -1175,6 +1175,7 @@ type MailboxACL struct {
 
 // MailboxCreate defines model for MailboxCreate.
 type MailboxCreate struct {
+	// Name A new name follows the mailbox name rules (docs/protocols.md, "Mailbox names"): valid UTF-8 without control characters, "*", "%", backslash, bidirectional controls, byte order mark or noncharacters, zero width space or word joiner; no empty level, no level "." or "..", no white space at either end of a level, a visible character in every level, at most 255 bytes per level. Levels that already exist are not checked. A name that breaks the rules is 400 bad_request with the reason.
 	Name       string    `json:"name"`
 	SpecialUse *[]string `json:"special_use,omitempty"`
 }
@@ -1219,6 +1220,7 @@ type MailboxSummary struct {
 
 // MailboxUpdate defines model for MailboxUpdate.
 type MailboxUpdate struct {
+	// Name A new name follows the mailbox name rules (docs/protocols.md, "Mailbox names"): valid UTF-8 without control characters, "*", "%", backslash, bidirectional controls, byte order mark or noncharacters, zero width space or word joiner; no empty level, no level "." or "..", no white space at either end of a level, a visible character in every level, at most 255 bytes per level. Levels that already exist are not checked, and no mailbox moved along may end up longer than 1024 bytes. A name that breaks the rules is 400 bad_request with the reason.
 	Name       *string `json:"name,omitempty"`
 	Subscribed *bool   `json:"subscribed,omitempty"`
 }

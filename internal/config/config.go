@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"shardpost/internal/charset"
+	"shardpost/internal/model"
 )
 
 // Config is the complete server configuration, read from YAML and the
@@ -859,18 +860,18 @@ func (c *Config) checkNamespaces() error {
 	return nil
 }
 
-// checkAutocreate validates the mailboxes every account gets: a usable
-// name, a well-formed special-use attribute, no duplicates, and nothing
+// checkAutocreate validates the mailboxes every account gets: a name a
+// new mailbox may get (model.CheckNewMailboxName), a well-formed special-use attribute, no duplicates, and nothing
 // below a namespace prefix, where no client could open it.
 func (c *Config) checkAutocreate() error {
 	seen := map[string]bool{}
 
 	for _, f := range c.Server.Autocreate {
-		name := strings.Trim(f.Name, " ")
+		name := f.Name
 
-		switch {
-		case name == "" || strings.HasSuffix(name, "/") || strings.Contains(name, "//") || hasControl(name):
-			return fmt.Errorf("server.autocreate: unusable mailbox name %q", f.Name)
+		switch bad := model.CheckNewMailboxName(name); {
+		case bad != nil:
+			return fmt.Errorf("server.autocreate: unusable mailbox name %q: %w", f.Name, bad)
 		case seen[name]:
 			return fmt.Errorf("server.autocreate: %q is listed twice", f.Name)
 		case shadowsPrefix(name, c.Server.SharedPrefix, c.Server.PublicPrefix):
@@ -911,17 +912,6 @@ func validSpecialUse(s string) bool {
 	}
 
 	return true
-}
-
-// hasControl reports whether s contains a control character.
-func hasControl(s string) bool {
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-
-	return false
 }
 
 // checkPrefixChars rejects a namespace prefix a client could not read

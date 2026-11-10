@@ -412,7 +412,10 @@ Each entry has a `name`, an optional `special_use` attribute (RFC 6154,
 so a client finds the mailbox whatever it is called) and `subscribe`,
 which defaults to true. This is Dovecot's `auto = create` versus
 `auto = subscribe`, in one place instead of one block per mailbox. An
-empty list (`autocreate: []`) leaves an account with its INBOX.
+empty list (`autocreate: []`) leaves an account with its INBOX. A name
+has to follow the [mailbox name rules](protocols.md#mailbox-names) and
+is taken as written (white space at either end is an error, not
+trimmed); otherwise the server does not start.
 
 Two rules decide when this happens:
 

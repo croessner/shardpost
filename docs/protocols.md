@@ -83,7 +83,7 @@ the tagged OK of LOGIN/AUTHENTICATE.
 | `SASL-IR` | RFC 4959 | ✅ | Initial response on `AUTHENTICATE`; `=` is an empty response. |
 | `ID` | RFC 2971 | ◐ | Returns `name`, `vendor` and `support-url`. The client's ID is ignored and not passed to the authentication backend. |
 | `ENABLE` | RFC 5161 | ✅ | `CONDSTORE`, `QRESYNC`, `UTF8=ACCEPT`, `IMAP4rev2`; unknown names are ignored. |
-| `UTF8=ACCEPT` | RFC 6855 | ◐ | After `ENABLE UTF8=ACCEPT`: mailbox names in UTF-8 both ways; `APPEND`, `CATENATE` and `REPLACE` take `UTF8 (~{n})` message data; `SEARCH CHARSET` other than UTF-8 or US-ASCII is `BAD`. New names are put into Normalization Form C (announced with `LIST … OLDNAME`); names with control characters are refused. Not done: `APPEND` of a message with 8-bit header text from a session that did not enable UTF-8 is accepted (RFC 6855 §4 asks for `NO`); no downgrade (RFC 6857, RFC 6858); no `UTF8=ONLY`. |
+| `UTF8=ACCEPT` | RFC 6855 | ◐ | After `ENABLE UTF8=ACCEPT`: mailbox names in UTF-8 both ways; `APPEND`, `CATENATE` and `REPLACE` take `UTF8 (~{n})` message data; `SEARCH CHARSET` other than UTF-8 or US-ASCII is `BAD`. New names are put into Normalization Form C (announced with `LIST … OLDNAME`); a new name must follow the [mailbox name rules](#mailbox-names). Not done: `APPEND` of a message with 8-bit header text from a session that did not enable UTF-8 is accepted (RFC 6855 §4 asks for `NO`); no downgrade (RFC 6857, RFC 6858); no `UTF8=ONLY`. |
 | `COMPRESS=DEFLATE` | RFC 4978 | ✅ | Any state; a second `COMPRESS` gets `[COMPRESSIONACTIVE]`. A patched inflater (`internal/inflate`) handles `Z_PARTIAL_FLUSH` clients such as iOS Mail. No longer advertised once active. |
 | `STARTTLS` | RFC 9051 §6.2.1 | ⚙ | Only on a plain connection with a TLS certificate configured. |
 | `AUTH=PLAIN` | RFC 4616 | ✅ | authzid different from authcid is refused (no proxy authorisation). |
@@ -270,7 +270,7 @@ Not supported: `FUZZY` (RFC 6203), `CONTEXT=SEARCH`/`CONTEXT=SORT` (RFC 5267),
 |---|---|---|
 | Hierarchy delimiter | ✅ | `/` |
 | `INBOX` | ✅ | Case-insensitive, also as `INBOX/…` prefix; cannot be deleted. `RENAME INBOX` moves its messages into the new mailbox (RFC 9051). |
-| Mailbox names | ✅ | Stored in UTF-8. Sessions that enabled `UTF8=ACCEPT` or `IMAP4rev2` use UTF-8 both ways; all others use modified UTF-7 (RFC 3501 §5.1.3) both ways, in its canonical form only (anything else is `NO [CANNOT]`, except in a `LIST`/`LSUB` reference or pattern, which is then taken as it stands and lists nothing); raw UTF-8 from such a session is understood, octets that are not UTF-8 are `BAD`. CATENATE URLs carry UTF-8 names. New names are put into Normalization Form C: `CREATE` and `RENAME` answer with `LIST … ("OLDNAME" …)`, to IMAP4rev1 sessions as LIST-EXTENDED data as well. `LIST`/`LSUB` references and patterns and NOTIFY mailbox names in another normalization form also match. |
+| Mailbox names | ✅ | Stored in UTF-8. Sessions that enabled `UTF8=ACCEPT` or `IMAP4rev2` use UTF-8 both ways; all others use modified UTF-7 (RFC 3501 §5.1.3) both ways, in its canonical form only (anything else is `NO [CANNOT]`, except in a `LIST`/`LSUB` reference or pattern, which is then taken as it stands and lists nothing); raw UTF-8 from such a session is understood, octets that are not UTF-8 are `BAD`. CATENATE URLs carry UTF-8 names. New names are put into Normalization Form C: `CREATE` and `RENAME` answer with `LIST … ("OLDNAME" …)`, to IMAP4rev1 sessions as LIST-EXTENDED data as well. `LIST`/`LSUB` references and patterns and NOTIFY mailbox names in another normalization form also match. `CREATE` and `RENAME` refuse a name that breaks the [mailbox name rules](#mailbox-names) with `NO [CANNOT]` and the reason. |
 | `LIST` attributes | ◐ | `\HasChildren`, `\HasNoChildren`, `\Noselect`, `\NonExistent`, `\Subscribed`, `CHILDINFO`, and the special-use attributes when asked for. Not `\Marked`, `\Unmarked`, `\NoInferiors`, `\Remote`. |
 | `LSUB` | ✅ | Still served. |
 | `STATUS` items | ✅ | `MESSAGES RECENT UIDNEXT UIDVALIDITY UNSEEN DELETED DELETED-STORAGE SIZE HIGHESTMODSEQ MAILBOXID APPENDLIMIT`; no `RECENT` after `ENABLE IMAP4rev2`. |
@@ -788,6 +788,47 @@ See [Quota](quota.md).
 | Other users' folders | `Shared/<account>/…` by ACL (IMAP), separate accounts (JMAP). |
 | Public folders | `Public/…` / `~public`, own quota, private `\Seen`. |
 | Share notifications | RFC 9670 §3 records on ACL changes; at most 50 per user by default (`server.share_notifications_max`, at most 200), kept 30 days (`server.share_notifications_retention_seconds`). |
+
+### Mailbox names
+
+A new mailbox name — from IMAP `CREATE` and `RENAME`, JMAP `Mailbox/set`,
+the admin API (`POST …/mailboxes`, `PATCH …/mailboxes/{id}`), a Sieve
+`fileinto` or `:fcc … :create` that creates its target, or
+`server.autocreate` — has to keep working in the common mail clients and
+in any server the mailbox may move to later. The rules apply only to the
+new levels of a name: a mailbox that already has a name they would
+refuse (from an import or an older version) stays reachable under it,
+takes deliveries, can get new mailboxes below it (`50% off/2026`) and can
+be renamed to a valid name. An account import and the
+`mailbox_name_convert` job are not held to these rules.
+
+| Rule | Why |
+|---|---|
+| Valid UTF-8, no control characters (U+0000–U+001F, U+007F–U+009F), no LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029) | Net-Unicode (RFC 5198, RFC 6855 §3, RFC 9051 §5.1). |
+| No `*` and no `%` | They are the `LIST` wildcards. A client that lists the children of `a*` with `LIST "" "a*/%"` gets those of every mailbox starting with `a`. |
+| No `\` | Outlook does not allow it in folder names, and it is the escape character of IMAP quoted strings. |
+| No bidirectional embedding, override or isolate controls (U+202A–U+202E, U+2066–U+2069) | They let a name display as another one. LRM and RLM (U+200E, U+200F) stay allowed: right-to-left text needs them. |
+| No byte order mark (U+FEFF), ZERO WIDTH SPACE (U+200B), WORD JOINER or invisible operators (U+2060–U+2064), and no Unicode noncharacters (U+FDD0–U+FDEF, U+xFFFE, U+xFFFF) | Invisible and of no use in a name; `Sent` with a zero width space would look like `Sent`. Joiners (U+200C, U+200D), combining marks and variation selectors stay allowed: emoji sequences and several scripts need them. |
+| Every level has a visible character (a letter, digit, punctuation mark or symbol) | A level of joiners, direction marks or combining marks alone shows as nothing. |
+| No empty level (`a//b`, a leading or trailing `/`), no level `.` or `..` | Clients build their folder tree from the levels and keep many of them as directories of a local cache. IMAP `CREATE` and `RENAME` still accept a `/` at either end (RFC 3501 §6.3.3 makes a trailing one a hint) and store the name without it. |
+| No white space at the start or end of a level (`unicode.IsSpace`, so NO-BREAK SPACE too) | Clients and file systems trim it, and the name the client shows is then not the stored one. |
+| A level is at most 255 bytes, the whole name at most 1024 bytes (UTF-8); a rename may not push a mailbox it moves along past 1024 bytes either | 255 bytes is the file-name limit of the local caches; JMAP announces it as `maxSizeMailboxName`. |
+
+Everything else is allowed, including `.`, `"`, `#`, `&`, `:`, `?`, `<`,
+`>`, `|` and `~` inside a level, emoji and every script. The characters a
+Windows file name cannot hold are handled by the clients themselves
+(Thunderbird hashes such names for its cache, Outlook keeps folders in
+its OST/PST file), so refusing them would only get in the way of names
+like `Invoices: 2026`.
+
+What each entry point answers: IMAP `NO [CANNOT] Mailbox name …` (an
+existing name is `NO [ALREADYEXISTS]` as before), JMAP
+`invalidProperties` on `name`, the admin API 400 `bad_request` with
+`invalid mailbox name: ` and the reason. A Sieve `fileinto` that would
+create such a mailbox goes to INBOX like any other failed `fileinto`,
+and an `:fcc … :create` copy is not stored (the reply still goes out); a
+mailbox of that name that already exists takes the message. A
+`server.autocreate` entry with such a name stops the server at start-up.
 
 ### Account limits
 

@@ -346,6 +346,10 @@ func TestAutocreateDefaultsAndChecks(t *testing.T) {
 		{"twice", []AutocreateFolder{{Name: "Ablage"}, {Name: "Ablage"}}, true},
 		{"below a namespace", []AutocreateFolder{{Name: "Shared/alice/Box"}}, true},
 		{"a trailing separator", []AutocreateFolder{{Name: "Ablage/"}}, true},
+		{"a leading space", []AutocreateFolder{{Name: " Ablage"}}, true},
+		{"a wildcard", []AutocreateFolder{{Name: "Ablage*"}}, true},
+		{"a backslash", []AutocreateFolder{{Name: `Ab\lage`}}, true},
+		{"a control character", []AutocreateFolder{{Name: "Ab\x01lage"}}, true},
 		{"no special-use attribute", []AutocreateFolder{{Name: "Ablage", SpecialUse: "Archive"}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

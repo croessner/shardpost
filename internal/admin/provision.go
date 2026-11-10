@@ -85,18 +85,37 @@ func (s *Server) provisionError(w http.ResponseWriter, r *http.Request, err erro
 	}
 }
 
-// checkNewName validates a mailbox name to create or rename to; it
-// returns the problem or "".
+// checkNewName validates a mailbox name to create (old is "") or to
+// rename old to; it returns the problem, or an error when the account
+// could not be read.
 //
 // A name below one of the client-visible namespace prefixes is refused:
 // the mailbox would exist in the store but no client could address it,
-// because that name resolves to another namespace.
-func (s *Server) checkNewName(name string) string {
-	if strings.HasSuffix(name, "/") || shadowsNamespace(name, s.o.SharedPrefix, s.o.PublicPrefix) {
-		return msgInvalidMailbox
+// because that name resolves to another namespace. Beyond that a name
+// follows the rules IMAP CREATE and RENAME apply (model.CheckNewMailbox,
+// model.CheckMailboxRename), which leave existing levels alone.
+func (s *Server) checkNewName(u model.User, old, name string) (string, error) {
+	if shadowsNamespace(name, s.o.SharedPrefix, s.o.PublicPrefix) {
+		return msgInvalidMailbox + ": it lies below a namespace prefix", nil
 	}
 
-	return checkMailboxSpec(name, 1, nil)
+	var err error
+	if old == "" {
+		err = model.CheckNewMailbox(u, name)
+	} else {
+		err = model.CheckMailboxRename(u, old, name)
+	}
+
+	var bad *model.MailboxNameError
+
+	switch {
+	case errors.As(err, &bad):
+		return msgInvalidMailbox + ": " + bad.Reason, nil
+	case err != nil:
+		return "", err
+	}
+
+	return "", nil
 }
 
 // shadowsNamespace reports whether name lies below one of the given
@@ -136,7 +155,13 @@ func (s *Server) CreateMailbox(w http.ResponseWriter, r *http.Request, account a
 
 	auditf(r, "mailbox", req.Name)
 
-	if msg := s.checkNewName(req.Name); msg != "" {
+	// A repeated create of a mailbox that exists is answered as before,
+	// even when its name predates the rules for new names: the levels
+	// that exist are not checked.
+	if msg, err := s.checkNewName(u, "", req.Name); err != nil {
+		s.provisionError(w, r, err)
+		return
+	} else if msg != "" {
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, msg)
 		return
 	}
@@ -231,9 +256,17 @@ func (s *Server) checkMailboxVersion(w http.ResponseWriter, r *http.Request, ifM
 func (s *Server) renameMailbox(w http.ResponseWriter, r *http.Request, u model.User, old, name string) bool {
 	auditf(r, "mailbox", old, "new_name", name)
 
-	switch msg := s.checkNewName(name); {
-	case strings.EqualFold(old, inboxName):
+	if strings.EqualFold(old, inboxName) {
 		writeError(w, http.StatusConflict, adminapi.Conflict, "INBOX cannot be renamed")
+		return false
+	}
+
+	msg, err := s.checkNewName(u, old, name)
+
+	switch {
+	case err != nil:
+		s.provisionError(w, r, err)
+		return false
 	case msg != "":
 		writeError(w, http.StatusBadRequest, adminapi.BadRequest, msg)
 	default:

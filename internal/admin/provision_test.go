@@ -57,7 +57,11 @@ func TestCreateMailbox(t *testing.T) {
 		t.Errorf("unknown special-use: %d", resp.StatusCode())
 	}
 
-	for _, name := range []string{"", "Shared/bob/X", "Public/Team", "a//b", "trailing/", "bad\x01name"} {
+	for _, name := range []string{
+		"", "Shared/bob/X", "Public/Team", "a//b", "trailing/", "/leading", "bad\x01name", "c1\u0085",
+		"a*b", "a%b", `a\b`, "a/../b", " lead", "trail ", "line\u2028sep", "a\u202eb", "a\ufeffb",
+		strings.Repeat("x", 256),
+	} {
 		if resp, _ := c.CreateMailboxWithResponse(ctx, "alice", adminapi.MailboxCreate{Name: name}); resp.StatusCode() != http.StatusBadRequest {
 			t.Errorf("%q: %d", name, resp.StatusCode())
 		}
@@ -65,6 +69,49 @@ func TestCreateMailbox(t *testing.T) {
 
 	if resp, _ := c.CreateMailboxWithResponse(ctx, "ALICE@example.org", adminapi.MailboxCreate{Name: "X"}); resp.StatusCode() != http.StatusBadRequest {
 		t.Errorf("alias: %d", resp.StatusCode())
+	}
+}
+
+// TestCreateMailboxKeepsOldNames: a name from before the rules for new
+// names is still answered as an existing mailbox, and a refused name
+// says why.
+func TestCreateMailboxKeepsOldNames(t *testing.T) {
+	store, c := serveDiag(t, nil, RoleDiagnose, RoleProvision)
+	ctx := context.Background()
+
+	u, _ := store.User("alice")
+	if err := u.EnsureMailbox("Alt*", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp, _ := c.CreateMailboxWithResponse(ctx, "alice", adminapi.MailboxCreate{Name: "Alt*"}); resp.StatusCode() != http.StatusOK {
+		t.Errorf("existing old name: %d %v", resp.StatusCode(), resp.JSONDefault)
+	}
+
+	if resp, _ := c.CreateMailboxWithResponse(ctx, "alice", adminapi.MailboxCreate{Name: "Alt*/2026"}); resp.StatusCode() != http.StatusCreated {
+		t.Errorf("below an old name: %d %v", resp.StatusCode(), resp.JSONDefault)
+	}
+
+	for name, reason := range map[string]string{
+		"Neu*": "wildcard", "a//b": "empty level", "trailing/": "empty level", "bad\x01": "control",
+		"Shared/bob/X": "namespace prefix", strings.Repeat("x/", 600): "1024",
+	} {
+		resp, _ := c.CreateMailboxWithResponse(ctx, "alice", adminapi.MailboxCreate{Name: name})
+		if resp.StatusCode() != http.StatusBadRequest || resp.JSONDefault == nil ||
+			!strings.Contains(resp.JSONDefault.Message, reason) {
+			t.Errorf("%.20q: %d %+v, want the reason %q", name, resp.StatusCode(), resp.JSONDefault, reason)
+		}
+	}
+
+	// A rename may not push a mailbox below it past 1024 bytes.
+	level := strings.Repeat("x", 255)
+	if err := u.EnsureMailbox("A/"+level+"/"+level+"/"+level, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	two := strings.Repeat("y", 255) + "/" + strings.Repeat("y", 255)
+	if resp, _ := c.UpdateMailboxWithResponse(ctx, "alice", mailboxID(t, c, "A"), nil, adminapi.MailboxUpdate{Name: &two}); resp.StatusCode() != http.StatusBadRequest {
+		t.Errorf("rename past 1024 bytes: %d", resp.StatusCode())
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
@@ -164,21 +163,38 @@ func quoteUTF8(s string) string {
 	return b.String()
 }
 
-// errNewName is a name CREATE and RENAME refuse to give a mailbox.
-var errNewName = errors.New("mailbox name is not Net-Unicode")
+// checkNewName refuses a name a new mailbox of u must not get (see
+// model.CheckNewMailbox); a delimiter at either end, which the store
+// drops, is not part of the name. Existing names, and the existing
+// levels above a new one, are not checked: whatever the store holds
+// stays reachable.
+func checkNewName(u model.User, name string) error {
+	return model.CheckNewMailbox(u, strings.Trim(name, model.Delim))
+}
 
-// checkNewName refuses a name a new mailbox must not get: RFC 6855 3 and
-// RFC 9051 5.1 want Net-Unicode (RFC 5198) without control characters,
-// line or paragraph separators. Existing names are not checked: whatever
-// the store holds stays reachable.
-func checkNewName(name string) error {
-	for _, r := range name {
-		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
-			return errNewName
-		}
+// checkRename is checkNewName for the new name of a rename of old,
+// which also bounds the names of the mailboxes moved along with it.
+func checkRename(u model.User, old, name string) error {
+	return model.CheckMailboxRename(u, strings.Trim(old, model.Delim), strings.Trim(name, model.Delim))
+}
+
+// newNameText is the text of a NO [CANNOT] for a name checkNewName
+// refused.
+func newNameText(err error) string {
+	return "Mailbox " + strings.TrimPrefix(err.Error(), "mailbox ")
+}
+
+// newNameRefused answers a CREATE or RENAME whose name check failed: a
+// refused name with NO [CANNOT] and the reason, any other failure (the
+// account could not be read) like a store error.
+func (c *conn) newNameRefused(tag string, err error) {
+	var bad *model.MailboxNameError
+	if errors.As(err, &bad) {
+		c.no(tag, "CANNOT", newNameText(err))
+		return
 	}
 
-	return nil
+	c.storeErr(tag, err)
 }
 
 // nfcListArgs lets LIST find NFC names with a reference or patterns in

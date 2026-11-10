@@ -94,12 +94,30 @@ the same special-use, the command succeeds and changes nothing, so a
 repeated run after a lost answer is safe. With a different special-use it
 is a conflict.
 .PP
+A new name must be valid UTF-8 without control characters, without
+.BR * ", " % " and " \e ,
+without bidirectional controls, invisible characters such as a zero
+width space or a byte order mark, or Unicode noncharacters; no level may
+be empty,
+.BR . " or " .. ,
+start or end with white space, or lack a visible character; a level is
+at most 255 bytes and the name at most 1024. A name below the shared or
+public namespace prefix is refused as well. Levels that already exist
+are not checked, so an existing mailbox is answered as such and a
+mailbox can be created below an old name the rules would refuse. The
+rules and their reasons are in the section \(lqMailbox names\(rq of
+.IR docs/protocols.md .
+A name that breaks them is refused with exit status 64 and the reason.
+.PP
 Role:
 .BR provision .
 .SS mailbox rename
 Renames a mailbox together with its children. INBOX cannot be renamed,
 and an existing target is a conflict. Renaming to the current name does
-nothing.
+nothing. The new name follows the rules of
+.BR "mailbox create" ,
+and no mailbox moved along may end up longer than 1024 bytes; a mailbox
+whose old name breaks the rules can still be renamed to a valid one.
 .PP
 Role:
 .BR provision .
@@ -253,6 +271,9 @@ shardpostctl plan -mailbox 'Archive/2019' mailbox_delete user@example.org
 .TP
 .B 0
 Done.
+.TP
+.B 64
+Wrong usage, or a mailbox name a new mailbox must not get.
 .TP
 .B 65
 Conflict, or the ETag no longer matches.

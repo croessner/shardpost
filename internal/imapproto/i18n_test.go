@@ -204,7 +204,7 @@ func TestNewNameIsNetUnicode(t *testing.T) {
 
 	mustHave(t, c.ok(`STATUS "Alt/Süd" (MESSAGES)`), `* STATUS "Alt/Su`+"̈"+`d" (MESSAGES 0)`)
 
-	mustHave(t, c.cmd("CREATE \"a b\""), "NO [CANNOT]")
+	mustHave(t, c.cmd("CREATE \"a\u2028b\""), "NO [CANNOT]")
 	mustHave(t, c.cmd("CREATE \"a\u0085b\""), "NO [CANNOT]")
 	mustHave(t, c.cmd("RENAME Trash \"a\u0001b\""), "NO [CANNOT]")
 
@@ -212,6 +212,54 @@ func TestNewNameIsNetUnicode(t *testing.T) {
 	c2, _ := newTestServer(t)
 	c2.ok("LOGIN test test")
 	mustHave(t, c2.cmd("CREATE tab&AAk-here"), "NO [CANNOT]")
+}
+
+// TestNewNameRules: CREATE and RENAME refuse what model.CheckNewMailboxName
+// refuses, with its reason; a trailing delimiter is still a hint, and an
+// existing name the rules would refuse stays reachable.
+func TestNewNameRules(t *testing.T) {
+	c, store := newTestServer(t)
+	c.ok("LOGIN test test")
+	c.ok("ENABLE UTF8=ACCEPT")
+
+	for _, name := range []string{
+		`a*b`, `a%%b`, `"a\\b"`, `a//b`, "\"a/\u200d\"", "\"Sent\u200b\"", `a/./b`, `..`, `" lead"`, `"trail "`, `"Work/ x"`,
+		"\"a\u202eb\"", "\"a\ufeffb\"", "\"a\uffffb\"", strings.Repeat("x", 256),
+	} {
+		mustHave(t, c.cmd("CREATE "+name), "NO [CANNOT] Mailbox name")
+	}
+
+	mustHave(t, c.cmd(`RENAME Trash "x*"`), "NO [CANNOT] Mailbox name has a wildcard character")
+
+	c.ok("CREATE Work/")
+	c.ok("CREATE \"Familie 👨\u200d👩\u200d👧\"")
+	c.ok(`CREATE "Rechnungen: 2026"`)
+
+	u, _ := store.User("test")
+	if err := u.EnsureMailbox("Alt*", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mustHave(t, c.ok(`SELECT "Alt*"`), "OK [READ-WRITE]")
+	c.ok("UNSELECT")
+
+	if _, err := u.Lookup("Familie \U0001F468\u200d\U0001F469\u200d\U0001F467"); err != nil {
+		t.Fatalf("the joiners did not reach the store: %v", err)
+	}
+
+	// Below an old name the levels that exist are not checked again, and
+	// an old name itself is answered as existing.
+	c.ok(`CREATE "Alt*/2026"`)
+	c.ok(`RENAME "Alt*/2026" "Alt*/2027"`)
+	mustHave(t, c.cmd(`CREATE "Alt*/x*"`), "NO [CANNOT] Mailbox name has a wildcard character")
+	mustHave(t, c.cmd(`CREATE "Alt*"`), "NO [ALREADYEXISTS]")
+
+	// A rename may not push a mailbox below it past 1024 bytes.
+	level := strings.Repeat("x", 255)
+	c.ok(`CREATE "A/%s/%s/%s"`, level, level, level)
+	mustHave(t, c.cmd(`RENAME A "%s/%s"`, strings.Repeat("y", 255), strings.Repeat("y", 255)),
+		"NO [CANNOT] Mailbox name would make the name of a mailbox below it longer than 1024 bytes")
+	c.ok(`RENAME A B`)
 }
 
 // TestMUTF7Namespaces: the shared and public namespaces, and the owner

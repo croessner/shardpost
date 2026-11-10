@@ -2,6 +2,7 @@ package jmap
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -1001,6 +1002,14 @@ func TestMailboxSetRefusesABadName(t *testing.T) {
 		`{"name":"` + strings.Repeat("x", 256) + `"}`,
 		`{"name":"X","sortOrder":2147483648}`,
 		`{"name":"X","parentId":""}`,
+		`{"name":"a*b"}`,
+		`{"name":"a%b"}`,
+		`{"name":"a\\b"}`,
+		`{"name":".."}`,
+		`{"name":" lead"}`,
+		`{"name":"trail\u00a0"}`,
+		`{"name":"a\u202eb"}`,
+		`{"name":"a\ufeffb"}`,
 	}
 
 	for _, create := range cases {
@@ -1008,6 +1017,63 @@ func TestMailboxSetRefusesABadName(t *testing.T) {
 		if fail, _ := res["notCreated"].(map[string]any)["a"].(map[string]any); fail["type"] != setInvalidProperties {
 			t.Errorf("%.40s gave %#v, want invalidProperties", create, res["notCreated"])
 		}
+	}
+}
+
+// TestMailboxSetRefusesALongPath: every level may be at most 255 bytes,
+// and the full name, parents included, at most 1024.
+func TestMailboxSetRefusesALongPath(t *testing.T) {
+	s := mailServer(t, withMailboxes)
+	level := strings.Repeat("x", 255)
+
+	create := `{"l1":{"name":"` + level + `"}`
+	for i := 2; i <= 5; i++ {
+		create += fmt.Sprintf(`,"l%d":{"name":"%s","parentId":"#l%d"}`, i, level, i-1)
+	}
+
+	res := mailCall(t, s, "Mailbox/set", `{"accountId":"test","create":`+create+`}}`)
+
+	created, _ := res["created"].(map[string]any)
+	if len(created) != 4 {
+		t.Fatalf("created %d levels, want 4 (1023 bytes): %#v", len(created), res["notCreated"])
+	}
+
+	if fail, _ := res["notCreated"].(map[string]any)["l5"].(map[string]any); fail["type"] != setInvalidProperties {
+		t.Errorf("the fifth level gave %#v, want invalidProperties", res["notCreated"])
+	}
+}
+
+// TestMailboxSetRefusesALongSubtree: a move may not push a mailbox below
+// the moved one past 1024 bytes, and a mailbox below an old name the
+// rules would refuse can still be created.
+func TestMailboxSetRefusesALongSubtree(t *testing.T) {
+	level := strings.Repeat("x", 255)
+	s := mailServer(t, func(u model.User) {
+		withMailboxes(u)
+
+		for _, n := range []string{"A", "A/" + level, "A/" + level + "/" + level, "A/" + level + "/" + level + "/" + level, "Alt*"} {
+			if err := u.CreateMailbox(n, nil); err != nil {
+				panic(err)
+			}
+		}
+	})
+
+	byName := objects(t, mailCall(t, s, "Mailbox/get", `{"accountId":"test","properties":["name"]}`))
+	a, old := byName["A"][propID].(string), byName["Alt*"][propID].(string)
+
+	res := mailCall(t, s, "Mailbox/set", `{"accountId":"test","update":{"`+a+`":{"name":"`+strings.Repeat("y", 255)+`"}}}`)
+	if _, ok := res["updated"].(map[string]any)[a]; !ok {
+		t.Fatalf("a rename to 1023 bytes below failed: %#v", res["notUpdated"])
+	}
+
+	res = mailCall(t, s, "Mailbox/set", `{"accountId":"test","update":{"`+a+`":{"parentId":"`+old+`"}}}`)
+	if fail, _ := res["notUpdated"].(map[string]any)[a].(map[string]any); fail["type"] != setInvalidProperties {
+		t.Errorf("a move past 1024 bytes gave %#v, want invalidProperties", res["notUpdated"])
+	}
+
+	res = mailCall(t, s, "Mailbox/set", `{"accountId":"test","create":{"n":{"name":"2026","parentId":"`+old+`"}}}`)
+	if _, ok := res["created"].(map[string]any)["n"]; !ok {
+		t.Errorf("below an old name: %#v", res["notCreated"])
 	}
 }
 

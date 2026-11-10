@@ -239,8 +239,8 @@ shardpostctl acl delete user@example.org Shared kollege@example.org
 
 | API | Semantics |
 | --- | --- |
-| `POST …/mailboxes` `{name, special_use}` | 201 created. If the mailbox already exists with the same special-use: 200 (a retry after a lost response), otherwise 409. Beyond `limits.mailboxes` or `limits.mailbox_names`: 409 `limit_exceeded`. Special-use is stored in the standard spelling, as with IMAP CREATE (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`); other attributes are rejected by the API. |
-| `PATCH …/mailboxes/{id}` `{name?, subscribed?}` | Rename including child mailboxes (not INBOX; an occupied target gives 409), set the subscription; the same name is a no-op. |
+| `POST …/mailboxes` `{name, special_use}` | 201 created. If the mailbox already exists with the same special-use: 200 (a retry after a lost response), otherwise 409. Beyond `limits.mailboxes` or `limits.mailbox_names`: 409 `limit_exceeded`. A new name follows the [mailbox name rules](protocols.md#mailbox-names); one that breaks them is 400 `bad_request` with the reason. Levels that exist already are not checked, so an existing mailbox is answered as such and a mailbox below an old name can be created. Special-use is stored in the standard spelling, as with IMAP CREATE (`\All`, `\Archive`, `\Drafts`, `\Flagged`, `\Important`, `\Junk`, `\Sent`, `\Trash`); other attributes are rejected by the API. |
+| `PATCH …/mailboxes/{id}` `{name?, subscribed?}` | Rename including child mailboxes (not INBOX; an occupied target gives 409; a target name that breaks the [mailbox name rules](protocols.md#mailbox-names), or would push a mailbox moved along past 1024 bytes, gives 400), set the subscription; the same name is a no-op. |
 | `PUT …/mailboxes/{id}/acl/{identifier}` `{rights, mode}` | `replace` sets the rights, `add`/`remove` change them relative to the current ones; the server computes and writes in one versioned step, so concurrent changes are not lost. |
 | `DELETE …/mailboxes/{id}/acl/{identifier}` | Remove the entry. |
 
