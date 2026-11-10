@@ -49,7 +49,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: runner
-          image: docker.io/chrroessner/shardpost:0.52.1@sha256:7e83ca358cfcef0be8710af05402c31817ac09855350bc9a3e6fae2ce21e2902
+          image: docker.io/chrroessner/shardpost:0.52.2@sha256:7d2b50b8710d7278adfa06e6de288ade8cd9268875fd8e33634de107902e153a
           imagePullPolicy: IfNotPresent
           args: ["runner"]
           env:
