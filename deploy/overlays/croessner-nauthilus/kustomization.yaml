@@ -17,8 +17,8 @@ components:
 # after ../croessner has pinned its images.
 images:
   - name: docker.io/chrroessner/shardpost
-    newTag: 0.52.2
-    digest: sha256:7d2b50b8710d7278adfa06e6de288ade8cd9268875fd8e33634de107902e153a
+    newTag: 0.53.0
+    digest: sha256:d61c4becca1acf14d2430cd5faf22f102f166f198be3b46194f485280651c5c7
 configMapGenerator:
   - name: shardpost-server-config
     namespace: shardpost
