@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 )
 
@@ -172,6 +173,9 @@ func (k *quotaRecalc) Run(_ context.Context, run *Run) (any, error) {
 		rep.Result = resultError
 	}
 
+	// The online run is counted by the store, which knows why one was
+	// busy; the run under the account lock is counted here.
+	metrics.QuotaRecountRuns.WithLabelValues(rep.Mode, rep.Result, "").Inc()
 	run.m.recountRun(rep)
 
 	return rep, err

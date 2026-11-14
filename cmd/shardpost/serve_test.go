@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
@@ -273,4 +275,81 @@ func waitRegistered(t *testing.T, store *cephstore.Store, served <-chan error) {
 	}
 
 	t.Fatal("the server did not register with jobs.enabled false")
+}
+
+// scrape returns what /metrics of the process answers.
+func scrape(t *testing.T, addr string) string {
+	t.Helper()
+
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("/metrics answered %d: %v", resp.StatusCode, err)
+	}
+
+	return string(body)
+}
+
+// TestServeExportsItsSeries: a server that has served nothing yet
+// exports the event series of the parts it runs at zero and says which
+// parts its configuration switches off. (That those export nothing is
+// TestInit's: the registry here is shared with the other tests.)
+func TestServeExportsItsSeries(t *testing.T) {
+	if os.Getenv("SHARDPOST_TEST_CEPH_MON") == "" {
+		t.Skip("no test cluster (run through hack/ceph-test-cluster.sh, as make test-docker does)")
+	}
+
+	dir, err := os.MkdirTemp("", "sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	settings := serveConfig(t, dir)
+	store := serveStore(t, settings)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	served := make(chan error, 1)
+
+	go func() { served <- serve(ctx, quietLog(), settings, store, extprograms.New(settings.ExtPrograms), nil) }()
+
+	waitRegistered(t, store, served)
+
+	exported := scrape(t, settings.Server.HTTPAddr)
+
+	for _, line := range []string{
+		`imapceph_connections{proto="imap"} 0`,
+		`imapceph_lmtp_deliveries_total{outcome="failed"} 0`,
+		`imapceph_commands_total{command="LOGIN",outcome="failed",proto="imap"} 0`,
+		`imapceph_queue_ops_total{op="due",outcome="error",queue="uploads"} 0`,
+		`imapceph_rados_notify_seconds_count{object="mailbox"} 0`,
+		`imapceph_feature_enabled{feature="lmtp"} 1`,
+		`imapceph_feature_enabled{feature="jobs"} 0`,
+		`imapceph_feature_enabled{feature="jmap"} 0`,
+		`imapceph_feature_enabled{feature="auth_cache"} 0`,
+	} {
+		if !strings.Contains(exported, line+"\n") {
+			t.Errorf("/metrics lacks %s", line)
+		}
+	}
+
+	cancel()
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("serve did not return after the signal")
+	}
 }

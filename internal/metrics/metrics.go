@@ -63,12 +63,18 @@ var (
 		Namespace: namespace, Subsystem: subsystemRados, Name: "listings_total",
 		Help: "RADOS object listings (each visits every placement group of the pool), by call site.",
 	}, []string{labelSite})
-	// NotifyLatency is the time until all watchers acknowledged a notify.
-	NotifyLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+	// NotifyLatency is the time a RADOS notify took until every watcher
+	// acknowledged it or its timeout (one second) passed, by the object
+	// notified: mailbox (an index write, for IDLE), account (the account
+	// change log, for NOTIFY, JMAP and push) and queue (a due queue or a
+	// control object of the store's own namespaces). A notify is sent in
+	// the background, so the time delays no command; a tail at the
+	// timeout shows a watcher that does not answer.
+	NotifyLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: subsystemRados, Name: "notify_seconds",
-		Help:    "Time a mailbox notify took until all watchers acknowledged.",
+		Help:    "Time a RADOS notify took until all watchers acknowledged or the timeout passed, by object.",
 		Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1},
-	})
+	}, []string{labelObject})
 	// Commands counts protocol commands by protocol, command and outcome.
 	Commands = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Name: "commands_total",
@@ -147,7 +153,7 @@ var (
 	// a bound), by state: all entries and the ones due.
 	SubmissionQueue = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace, Subsystem: subsystemJMAP, Name: "submission_queue_entries",
-		Help: "Entries of the delayed submission queue (all, due).",
+		Help: "Entries of the delayed submission queue: all and due (counted by the holder of worker partition 0 only), unowned (overdue in partitions this server does not hold).",
 	}, []string{labelState})
 	// KVIndexErrors counts failed writes of an admin store hint index
 	// (the record was written; the backfill repairs the entry).
@@ -180,7 +186,7 @@ var (
 	// tried again at the end) and failed.
 	BatchAccounts = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Name: "batch_accounts_total",
-		Help: "Accounts handled by batch jobs, by kind and outcome.",
+		Help: "Accounts handled by batch jobs, by kind and outcome (done, skipped, gone, deferred, failed, later, unsupported).",
 	}, []string{labelKind, labelOutcome})
 	// IMAPWatches is the number of RADOS watches the IMAP watch hub of
 	// this process holds, by object (mailbox, account): one per object

@@ -630,6 +630,7 @@ func serve(ctx context.Context, log *slog.Logger, settings *config.Config, store
 	srv.sendq, srv.kv, srv.jobs, srv.learning = bg.sendq, bg.kv, bg.jobs, bg.learning
 
 	logRelay(log, settings)
+	serveMetrics(settings, bg, programs, cache != nil, quotaSvc != nil)
 
 	defer srv.closeJMAP() // before the caller closes the store, which the fills read
 

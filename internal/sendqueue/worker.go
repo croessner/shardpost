@@ -60,6 +60,8 @@ func (s *Service) Run(ctx context.Context) {
 		wait := s.o.Poll
 		if len(w.held) > 0 {
 			wait = w.round(ctx)
+		} else {
+			w.withdrawGauge()
 		}
 
 		timer.Reset(wait)
@@ -393,10 +395,41 @@ func (w *worker) nextWait(now time.Time) time.Duration {
 // dueDigits is the width of the due time in a queue key.
 const dueDigits = 20
 
+// withdrawCount takes back the queue count of a worker that no longer
+// holds partition 0: another server counts the queue now, and a value
+// left here would go stale and stand beside the holder's.
+func (w *worker) withdrawCount() {
+	if w.counted.IsZero() {
+		return
+	}
+
+	metrics.SubmissionQueue.DeleteLabelValues("all")
+	metrics.SubmissionQueue.DeleteLabelValues("due")
+
+	w.counted = time.Time{}
+}
+
+// withdrawGauge is what a worker without any partition reports: no
+// queue count, and no overdue entries of other partitions, since it
+// reads no entries at all.
+func (w *worker) withdrawGauge() {
+	w.withdrawCount()
+
+	w.unowned = 0
+
+	metrics.SubmissionQueue.WithLabelValues("unowned").Set(0)
+}
+
 // gauge counts the queue for the metric, by the holder of partition 0,
 // at most once per poll.
 func (w *worker) gauge(now time.Time) {
-	if _, ok := w.held[0]; !ok || now.Sub(w.counted) < w.s.o.Poll {
+	if _, ok := w.held[0]; !ok {
+		w.withdrawCount()
+
+		return
+	}
+
+	if now.Sub(w.counted) < w.s.o.Poll {
 		return
 	}
 

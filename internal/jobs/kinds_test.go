@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"shardpost/internal/memstore"
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 )
 
@@ -338,10 +341,31 @@ func TestAttachmentBackfillFills(t *testing.T) {
 	}
 }
 
+// offlineRecounts reads imapceph_quota_recount_runs_total for the
+// successful runs under the account lock.
+func offlineRecounts(t *testing.T) float64 {
+	t.Helper()
+
+	var m dto.Metric
+	if err := metrics.QuotaRecountRuns.WithLabelValues(model.QuotaRecountOffline, model.QuotaRecountOK, "").Write(&m); err != nil {
+		t.Fatal(err)
+	}
+
+	return m.GetCounter().GetValue()
+}
+
 func TestQuotaRecalcFTSScrubAndCheck(t *testing.T) {
 	m, _ := kindsSetup(t)
 
+	// A recount under the account lock is counted as an offline run.
+	runs := offlineRecounts(t)
+
 	p, j := planAndApply(t, m, KindQuotaRecalc, "alice", nil)
+
+	if got := offlineRecounts(t) - runs; got != 1 {
+		t.Errorf("offline recount runs moved by %v, want 1", got)
+	}
+
 	if !strings.Contains(string(p.Summary), `"differs":false`) || !strings.Contains(string(j.Result), `"Msgs":3`) {
 		t.Fatalf("quota: %s %s", p.Summary, j.Result)
 	}

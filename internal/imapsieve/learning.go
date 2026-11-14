@@ -22,7 +22,48 @@ import (
 const labelResult = "result"
 
 var learningResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_learning_total", Help: "Learning queue and delivery outcomes."}, []string{labelResult})
-var scriptResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_events_total", Help: "IMAPSieve outcomes by bounded phase."}, []string{phaseName})
+var scriptResults = promauto.NewCounterVec(prometheus.CounterOpts{Name: "imap_imapsieve_events_total", Help: "IMAPSieve failures by the phase that failed."}, []string{phaseName})
+
+// InitMetrics creates the series of the IMAPSieve event metrics, so
+// that a process that has seen no event shows zero rather than nothing
+// (see metrics.Init). engine: the process runs the IMAPSieve engine (a
+// server), which counts the failures by phase and, with learning, what
+// it puts into the learning queue. worker: the process runs the
+// learning worker, which counts what became of the jobs.
+func InitMetrics(engine, learning, worker bool) {
+	if engine {
+		for _, phase := range []string{"apply", "learning_enqueue", "learning_read", "memory", "open", "read", "rollback",
+			"rollback_intent", "script", "script_lookup", "timeout"} {
+			scriptResults.WithLabelValues(phase)
+		}
+	}
+
+	if !learning {
+		return
+	}
+
+	if engine {
+		for _, r := range []string{"queued", "prepared", "oversize", "enqueue_error"} {
+			learningResults.WithLabelValues(r)
+		}
+	}
+
+	if !worker {
+		return
+	}
+
+	for _, r := range []string{resultDelivered, resultRetry, resultDead, "unconfirmed", "queue_error"} {
+		learningResults.WithLabelValues(r)
+	}
+
+	for _, r := range []string{"taken", "busy"} {
+		learningLockAttempts.WithLabelValues(r)
+	}
+
+	for _, r := range []string{resultDelivered, resultRetry, resultDead, resultLost, resultCanceled, resultDeferred} {
+		learningJobSeconds.WithLabelValues(r)
+	}
+}
 
 // learningLockAttempts counts the attempts to take the worker lease by
 // result (taken, busy): a server without the lease tries every

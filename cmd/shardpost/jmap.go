@@ -16,6 +16,7 @@ import (
 	"shardpost/internal/cephstore"
 	"shardpost/internal/config"
 	"shardpost/internal/jmap"
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 	"shardpost/internal/sharenotice"
 	"shardpost/internal/version"
@@ -269,6 +270,8 @@ func runPush(ctx context.Context, log *slog.Logger, settings *config.Config, sto
 		return err
 	}
 	defer stopAuth()
+
+	metrics.Init(metrics.Features{Push: true})
 
 	health := newHTTPServer(settings, store)
 

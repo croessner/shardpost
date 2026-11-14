@@ -43,7 +43,7 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_job_claim_wait_seconds` | Histogram of the time a job waited from the moment it became claimable to its claim (0.52.0): whether the runners' slots (`jobs.max_parallel` × runners) suffice. |
 | `imapceph_job_running{kind}` | Jobs this process runs, by kind. |
 | `imapceph_job_wakeups_total{cause}` | Looks of a job runner for claimable jobs: `poll` (`jobs.poll_seconds`) or `notify` (a submit or a release at shutdown woke it through the claimable queue; only with `admin.kv_index: read`). |
-| `imapceph_rados_notify_seconds` | Registered, but currently without a measuring call. Do not interpret it as a confirmed notify latency. |
+| `imapceph_rados_notify_seconds{object}` | Histogram of the time a RADOS notify took until every watcher acknowledged it or its timeout (one second) passed, by the object notified: `mailbox` (an index write, for IDLE), `account` (the account change log, for NOTIFY, JMAP and push) and `queue` (a due queue or a control object of the store's own namespaces). A notify is sent in the background, so the time delays no command; a tail at one second shows a watcher that does not answer. Measured since 0.53.0; before, the family was registered without a measuring call. |
 | `imapceph_scrub_findings_total{kind}` | Findings in the respective scrubber process. A server scrape is no proof of a successful external scrub run. The batch scrub runs in the servers, so its findings show in their scrapes. |
 | `imapceph_scrub_shadow_differences_total{kind}` | Differences between the listing and the intents in scrubs with `scrub.orphan_source: shadow`: `orphan_missed`, `unknown_missed`, `marks_missed` (debris the listing found that no intent names: from before 0.42.0, from an older server during a rolling update, or a write path without an intent), `orphan_extra` (blobs the intents take for orphans that the listing does not; must stay 0). See [operations](operations/README.md#scrub-without-listings). |
 | `imapceph_scrub_purge_unnamed_objects_total` | Objects a purge with `purge.listing: true` found by listing that the account's data model does not name: debris from before 0.42.0 that a purge without listing would leave for the sweep. |
@@ -69,7 +69,7 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_fts_soft_freeze_pass_total{op}` | Operations (`index`, `remove`) that wrote through the freeze of an online run: one per operation that met it. |
 | `imapceph_fts_build_window_deferred_total` | Runs the `fts_due` worker, a batch or the run itself put off to the next reshard window. |
 | `imapceph_fts_build_window_too_small_total` | Runs not started because their estimate is longer than the whole reshard window (`window_too_small`): plan the account on its own or widen `fts.reshard_window`. |
-| `imapceph_quota_recount_runs_total{mode,result,reason}` | `quota_recalc` runs (since 0.52.0, [quota](quota.md#recounting-the-usage)) by `mode` (`offline`, `online`), `result` (`ok`, `busy`, `lost`, `error`) and, for `busy`, the `reason` (`intent`, `move_intent`: an operation of before the run did not end within `quota.recount_barrier_seconds`; `import_lock`, `mailbox_lock`, `scrub`, `foreign_run`: the account is held; `switch`: the switch did not go through within `quota.recount_switch_attempts` and the hold). A busy run is planned again; on a distribution account with dozens of registry writes a second it is expected, not an alarm. Alert on `error`. |
+| `imapceph_quota_recount_runs_total{mode,result,reason}` | `quota_recalc` runs (since 0.52.0, [quota](quota.md#recounting-the-usage)) by `mode` (`offline`, `online`), `result` (`ok`, `busy`, `lost`, `error`) and, for `busy`, the `reason` (`intent`, `move_intent`: an operation of before the run did not end within `quota.recount_barrier_seconds`; `import_lock`, `mailbox_lock`, `scrub`, `foreign_run`: the account is held; `switch`: the switch did not go through within `quota.recount_switch_attempts` and the hold). A busy run is planned again; on a distribution account with dozens of registry writes a second it is expected, not an alarm. Alert on `error`. Up to 0.52.x only online runs were counted; since 0.53.0 the runs under the account lock count as `offline` with `ok` or `error`. |
 | `imapceph_quota_recount_phase_seconds{phase}` | Duration of the phases of an online recount: `barrier`, `list`, `fold`, `switch`. |
 | `imapceph_quota_recount_captures_total{kind}` | Usage changes writers captured for online recounts: `reserve`, `rollback`, `release`, `mailbox` (a deletion), `move` (the gate of a MOVE between counted mailboxes), `abort` (a writer that took the captures beyond `quota.recount_max_capture_keys` or `_entries` and ended the run). |
 | `imapceph_quota_recount_drift{resource}` | Absolute difference between the counted and the stored usage a recount found (histogram, `bytes` and `messages`). |
@@ -80,7 +80,7 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_mailbox_lock_refusals_total{protocol,op}` | Operations refused because a `mailbox_delete` locks the mailbox, by protocol (`imap`, `jmap`) and operation (the IMAP command, `email_set`, `email_create`, `mailbox_set`). |
 | `imapceph_lmtp_fileinto_redirected_total{reason}` | Sieve `fileinto` deliveries that went to INBOX because the target could not take them (`locked`: a `mailbox_delete` holds it). |
 | `imapceph_imap_sessions_closed_total{reason}` | IMAP sessions closed with `BYE` because of their selected mailbox: `mailbox_locked` (a `mailbox_delete` is about to remove it), `mailbox_deleted` (another session deleted it). |
-| `imapceph_jobs_mailbox_delete_runs_total{mode,result}` | `mailbox_delete` runs by `mode` (`offline`, `online`) and `result` (`ok`, `busy`, `drift`, `error`). |
+| `imapceph_jobs_mailbox_delete_runs_total{mode,result}` | `mailbox_delete` runs by `mode` (`offline`, `online`) and `result` (`ok`, `busy`, `drift`, `error`). Since 0.53.0 an offline run that fails while deleting counts as `error`; before, it was not counted. |
 | `imapceph_imap_watches{object}` | RADOS watches the IMAP watch hub of the pod holds, by `object` (`mailbox`: IDLE, `account`: NOTIFY). One per object however many sessions follow it, so it grows with the mailboxes and accounts in use, not with the sessions. |
 | `imapceph_imap_watch_subscribers{object}` | Sessions following a watch of the hub; against `imapceph_imap_watches` it shows how much the hub shares. |
 | `imapceph_imap_watch_rearms_total` | Watches the hub set up again after an error (the OSD dropped it, a key rotation). A burst after a rotation is expected; a steady rate is not. |
@@ -90,7 +90,7 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_auth_cache_flushes_total{scope,source}` | Flushes, by `scope` (`account`, `all`) and `source`: `local` (this server's admin API), `remote` (an entry of the flush log another server wrote, or this server's own when another came between) and `resync` (everything, after a lost watch, a failed first read of the flush log or a gap in it). A steady `resync` rate means the watch on `auth-flush` keeps failing. |
 | `imapceph_auth_backend_seconds{op}` | Latency of the Nauthilus calls behind the cache (one per miss, however many callers shared it; a bearer login is up to three requests in one observation). |
 | `imapceph_jmap_delayed_submissions_total{outcome}` | Delayed JMAP submissions ([JMAP](jmap.md#delayed-sending)), by `outcome`: `scheduled` (a client created one), `sent` (the relay took it), `canceled` (a client or the admin API canceled it), `failed` (refused by the relay, its copy gone, or given up after `retry_attempts`), `unknown` (the sending was interrupted — the conversation broke while the message was transferred, or the server stopped while sending and the sending timeout passed — and it is not sent again), `retried` (a temporary failure before the message was transferred; tried again after a backoff) and `conflict` (the worker found the record changed after sending: the sending timeout was shorter than the conversation, or the account was purged; its outcome is not recorded). Counted in the server that did it. `unknown` and `conflict` should stay near 0; a rising `unknown` after restarts is the at-most-once rule at work. No account labels. |
-| `imapceph_jmap_submission_queue_entries{state}` | Entries of the submission queue (`all`) and of those the ones due now (`due`), counted at most once per `jmap.submission.delayed.poll_seconds` by the server holding worker partition 0, up to 100 000; absent in servers that do not hold partition 0. A `due` that stays above 0 means no worker sends (no relay, `worker: false` everywhere, a worker that cannot take its lease). `unowned` is set by every worker each round: the entries overdue by more than a poll in partitions this server does not hold. Their holder may just be busy; persistently above 0 means probably no server holds them (servers × `max_partitions` below `partitions`). |
+| `imapceph_jmap_submission_queue_entries{state}` | Entries of the submission queue (`all`) and of those the ones due now (`due`), counted at most once per `jmap.submission.delayed.poll_seconds` by the server holding worker partition 0, up to 100 000; absent in servers that do not hold partition 0 (since 0.53.0 a server that loses the partition withdraws its count; before, it kept exporting its last value). `unowned` is the number of overdue entries in partitions the server does not hold, 0 on a server without any partition. A `due` that stays above 0 means no worker sends (no relay, `worker: false` everywhere, a worker that cannot take its lease). `unowned` is set by every worker each round: the entries overdue by more than a poll in partitions this server does not hold. Their holder may just be busy; persistently above 0 means probably no server holds them (servers × `max_partitions` below `partitions`). |
 | `imapceph_jmap_push_partitions_held` | Push partitions this push pod holds (0.52.0, [JMAP: Push partitions](jmap.md#push-partitions)). The sum over the fresh push pods should be 64. |
 | `imapceph_jmap_push_partitions_unowned` | Partitions no fresh push pod holds, as this pod last read the membership; every pod reports it, alert on the maximum above 0 for two minutes. Above 0 for long means the pods have no capacity left (`jmap.push.max_watched_accounts` or `max_partitions` too small for the pod count) or disagree about the membership (clocks, see the NTP prerequisite). |
 | `imapceph_jmap_push_partition_events_total{event}` | What happened to this pod's partitions: `taken`, `taken_orphan` (taken over the share: orphaned or contested), `released` (given up at shutdown), `shed` (given up to even the load), `lost` (the lease's renewal failed), `expired` (the holder stopped the partition itself before the TTL was up, without a successful renewal, and released it), `rotated` (moved to the new connection after a key rotation), `rotate_failed`, `members_stale` (a cadence without a fresh membership: nothing taken or shed). `lost` rising for long means a lock object or an OSD in trouble. |
@@ -104,6 +104,18 @@ root traces. Without an argument the ratio is 1. A different
 | `imapceph_jmap_push_verifyq_age_seconds` | Age of the oldest verification waiting, set by the pod that sends them (the holder of the smallest held partition). Above 60 s: nobody holds a partition, or the push services do not answer. |
 | `imapceph_jmap_push_lock_op_seconds{op}` | Histogram of the lock operations of the partition leases: `take`, `renew`, `release`. A tail of seconds shows a lock object in peering; the loop never waits on it, the partition alone does. |
 | `imapceph_jmap_limit_total{limit,outcome}` | JMAP requests that met a full limit, by `limit` (`requests`, `uploads`, `downloads`, `event_sources`, `per_ip`) and `outcome`: `waited` (got a slot within `jmap.limit_wait`) and `rejected` (answered 429, or `serverUnavailable` for a `Blob/upload` call). A rising `rejected` means a client sends more at once than its account may run and queue. |
+| `imapceph_jmap_http_requests_total{endpoint,result}` | JMAP HTTP requests (0.53.0) by `endpoint` — `session`, `api`, `upload`, `download`, `eventsource`, and `other` for a request no route matches; the health check is not counted — and `result`: `ok` (a status below 400), `unauthenticated` (401), `forbidden` (403: no TLS, an account of another shard), `limited` (429), `client_error` (every other 4xx), `unavailable` (503: the authentication backend cannot decide, a locked account, a store that cannot take an upload), `server_error` (every other 5xx, and a handler that panicked) and `canceled` (the client went away before it had its answer: nothing was written, it was gone when the answer was written, or a write to it failed — whatever status was written for it). A redirect of the router (a path that lacks its slash) counts under `other`. A batch is one request however many methods it calls. A request is counted when its handler returns; an event source when its stream is established or refused. |
+| `imapceph_jmap_http_request_seconds{endpoint}` | Histogram: from the arrival of a request to the return of its handler, authentication and the wait for a slot (`jmap.limit_wait`) included. Event sources are not in it. |
+| `imapceph_jmap_http_inflight_requests{endpoint}` | Requests being served. An event source is not a request in flight: see `imapceph_jmap_event_streams`. |
+| `imapceph_jmap_http_request_bytes_total{endpoint}`, `imapceph_jmap_http_response_bytes_total{endpoint}` | Bytes read from request bodies (`api`, `upload`) and written to response bodies, counted as they pass (an event source moves the counter with every event) and not held for it. `upload` in and `download` out are the blob volume; an upload refused for its size counts what was read until then. Headers are not counted. |
+| `imapceph_jmap_event_streams` | Established event sources (`/jmap/eventsource/`). |
+| `imapceph_jmap_event_stream_seconds` | Histogram of the lifetime of an event source, observed when it ends (buckets from a second to a day). |
+| `imapceph_jmap_request_method_calls` | Histogram of the method calls per API request. |
+| `imapceph_jmap_method_calls_total{method,result}` | Method calls a client made, by `method` (the methods of this server; every other name is `unknown`) and `result`: `ok`, `client_error` (an error response that blames the request: `invalidArguments`, `unknownMethod`, `stateMismatch`, `cannotCalculateChanges` and the like — also a known method whose capability the request did not list), `unavailable` (`serverUnavailable`), `server_error` (`serverFail`, `serverPartialFail`) and `canceled` (an error after the client went away). An error response sits inside an HTTP 200, so it shows here and not in the request counter. Implicit calls are not in it. |
+| `imapceph_jmap_method_seconds{method}` | Histogram of the duration of a method call, its implicit call included. |
+| `imapceph_jmap_implicit_calls_total{method,result}` | Calls a method made on the client's behalf: the `Email/set` of `EmailSubmission/set` (`onSuccessUpdateEmail`, `onSuccessDestroyEmail`) and of `Email/copy` (`onSuccessDestroyOriginal`). They are no calls of the client, and their time is part of the calling method's. |
+| `imapceph_jmap_set_objects_total{method,outcome}` | Objects of successful `/set`, `Email/copy`, `Email/import` and `Blob/upload` calls by what became of them: `created`, `updated`, `destroyed`, and the partial failures `not_created`, `not_updated`, `not_destroyed` (the `notCreated`, `notUpdated` and `notDestroyed` of the response). A call that failed as a whole counts in `imapceph_jmap_method_calls_total` and no object here; the objects of an implicit `Email/set` count once, under `Email/set`. |
+| `imapceph_feature_enabled{feature}` | 1 for a part the configuration of this server (or runner) switches on, 0 for one it switches off (0.53.0): `auth_cache`, `lmtp`, `jmap`, `jmap_per_ip_limit`, `jobs`, `learning`, `delayed_submission`, `scrub_shadow`, `scrub_listing`, `purge_listing`, `quota_events`, `ext_programs`. The event metrics of a part that is off have no series. The push worker exports none. |
 
 In `commands_total`, POP3 counts only selected events; there `DELE` counts
 deleted messages. ManageSieve counts only the authentication outcomes
@@ -112,11 +124,67 @@ protocol response. Using the sum of all outcomes as the denominator of an
 error rate would mix different events. In the current histogram, IMAP `UID`
 commands are recorded together under `UID`.
 
-Missing series are not zero values. In particular, many labeled series only
-come into existence with the first event. For quantiles, the histogram
-buckets have to be summed across the selected pods before the quantile is
-computed; per-pod quantiles must not be averaged. Without observations,
-quantiles are not meaningful.
+### Zero, absent and switched off
+
+A labelled Prometheus metric has no series until its first event. Up to
+0.52.x that made a counter nobody had incremented indistinguishable from
+one nobody measured. Since 0.53.0 the processes that serve `/metrics`
+(`serve`, `push`, `runner`) create, when they start, the series of the
+parts they run, with every label value that part can produce:
+
+- **A series at 0** is a statement: no such event since the process
+  started.
+- **No series, and `imapceph_feature_enabled` 0 for the part**: the
+  configuration switches the part off (a scrub from the intents has no
+  shadow differences, a server without the auth cache no cache answers).
+- **No series, and the feature on**: the collection is broken, or the
+  process runs a version before 0.53.0.
+
+A few series still appear only with their event, because their label
+is not a small fixed set or the value belongs to one holder:
+
+| Family | Absent until |
+| --- | --- |
+| `imapceph_commands_total`, `imapceph_command_seconds` | The first command of that name. The logins, the connection limit and the polls exist from the start. |
+| `shardpost_admin_requests_total` | The first request with that operation and code; the successes of the common operations exist from the start. |
+| `imapceph_mailbox_lock_refusals_total{protocol="imap"}` | The first refused IMAP command of that name. |
+| `imapceph_batch_accounts_total` | The first batch of a kind other than `scrub`. |
+| `imapceph_jmap_submission_queue_entries{state="all"\|"due"}` | Exported by the holder of worker partition 0 only; a server that loses the partition withdraws its count. Read `max by(state)`. |
+| `imapceph_fts_shard_keys` | The first offline conversion this process runs. Online runs do not set it. |
+| `imapceph_rados_listings_total{site}` | The sites a configuration switches off (`scrub_orphans`, `scrub_unknown_index`, `purge_objects`) and the ones only a short-lived command reaches. |
+
+A histogram without observations has buckets at 0 and no quantile; its
+`_count` at 0 says that nothing was there to measure. For quantiles, the
+buckets have to be summed across the selected pods before the quantile
+is computed; per-pod quantiles must not be averaged.
+
+Gauges of a single holder read 0 on the other pods:
+`imap_imapsieve_learning_due` and `imap_imapsieve_learning_lag_seconds`
+(the learning lease), `imapceph_jmap_push_verifyq_age_seconds` (the pod
+sending verifications); `imapceph_fts_layout_configured` and
+`imapceph_fts_layout_effective` are 0 on the push worker. Read them with
+`max` over the pods of the role.
+
+### What is not collected
+
+Only `serve`, `push` and `runner` serve `/metrics`. The short-lived
+commands — `scrub` without `--batch`, `scrub --sweep`, `index backfill`,
+`index show`, `system`, `bench` — count into a registry nobody scrapes;
+what they did is in their log and their report. The scheduled scrub is
+not among them: `scrub --batch` writes one batch job into the admin
+store and ends, the servers run it, and the findings
+(`imapceph_scrub_findings_total`), the accounts
+(`imapceph_batch_accounts_total{kind="scrub"}`) and the skipped accounts
+show in the servers' scrapes. The import sidecar runs `shardpostctl`
+against the admin socket; its work shows in the server as
+`shardpost_admin_requests_total{operation="import_*"}`.
+
+Other limits to know when reading: deliveries through the admin API are
+not `imapceph_lmtp_deliveries_total`; `imapceph_auth_backend_seconds`
+is measured behind the auth cache only; `imap_imapsieve_events_total`
+counts failures, by the phase that failed; and
+`imap_imapsieve_learning_lock_attempts_total{result="busy"}` includes
+every failed attempt to take the lease.
 
 ## Traces and access
 

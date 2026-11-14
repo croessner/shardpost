@@ -31,7 +31,12 @@ func (u *User) notify(id string) {
 	go func() {
 		defer u.inflight.Done()
 
-		if _, _, err := u.idx.NotifyWithTimeout(mboxOID(id), nil, notifyTimeout); err != nil {
+		start := time.Now()
+		_, _, err := u.idx.NotifyWithTimeout(mboxOID(id), nil, notifyTimeout)
+
+		mh.notified(notifiedMailbox, start)
+
+		if err != nil {
 			u.log.Debug("notify failed", "mailbox", id, "err", err)
 		}
 	}()
@@ -44,7 +49,12 @@ func (u *User) notifyAccount() {
 	go func() {
 		defer u.inflight.Done()
 
-		if _, _, err := u.idx.NotifyWithTimeout(oidAccount, nil, notifyTimeout); err != nil {
+		start := time.Now()
+		_, _, err := u.idx.NotifyWithTimeout(oidAccount, nil, notifyTimeout)
+
+		mh.notified(notifiedAccount, start)
+
+		if err != nil {
 			u.log.Debug("account notify failed", "err", err)
 		}
 	}()

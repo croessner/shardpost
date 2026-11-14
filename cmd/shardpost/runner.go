@@ -51,6 +51,8 @@ func runRunner(ctx context.Context, log *slog.Logger, settings *config.Config, s
 	}
 	defer w.stop()
 
+	runnerMetrics(settings, w, programs)
+
 	log.Info("runner running", "http", settings.Server.HTTPAddr, "jobs", settings.Jobs.Enabled,
 		"learning", settings.IMAPSieve.Enabled && settings.IMAPSieve.Learning.Enabled, "version", version.Version)
 

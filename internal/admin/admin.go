@@ -52,6 +52,14 @@ const mimeRFC822 = "message/rfc822"
 
 var requests = promauto.NewCounterVec(prometheus.CounterOpts{Name: "shardpost_admin_requests_total", Help: "Admin API requests by operation and result code."}, []string{"operation", labelCode})
 
+// initRequests creates the series of the successful requests of the
+// given operations.
+func initRequests(operations ...string) {
+	for _, op := range operations {
+		requests.WithLabelValues(op, "ok")
+	}
+}
+
 // Options configure the admin API.
 type Options struct {
 	Delivery *delivery.Service
@@ -168,6 +176,10 @@ var _ adminapi.ServerInterface = (*Server)(nil)
 
 // New builds the API handler.
 func New(o Options) *Server {
+	// Zero rather than nothing until the first request (metrics.Init);
+	// of the operations only the common ones, with their success.
+	initRequests("version", "server", "deliver", "jobs", "job", "accounts", "account", "auth_flush", "other")
+
 	if o.MaxMessageBytes <= 0 {
 		panic("admin: MaxMessageBytes must be positive")
 	}

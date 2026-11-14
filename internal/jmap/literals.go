@@ -45,6 +45,9 @@ const (
 const (
 	schemeHTTPS          = "https"
 	methodEmailSet       = "Email/set"
+	methodEmailCopy      = "Email/copy"
+	methodEmailImport    = "Email/import"
+	methodBlobUpload     = "Blob/upload"
 	argFilter            = "filter"
 	descFilterObject     = "a filter is an object"
 	descTooManyObjects   = "more objects than maxObjectsInSet"

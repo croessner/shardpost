@@ -86,6 +86,22 @@ func New(cfg config.ExtPrograms) *Runner {
 	return r
 }
 
+// InitMetrics creates the series of the run counter for every
+// configured program and the results a run ends with, so that a
+// program that has not run shows zero rather than nothing
+// (metrics.Init). The process that runs the programs calls it.
+func (r *Runner) InitMetrics() {
+	if r == nil {
+		return
+	}
+
+	for name := range r.cfg.Programs {
+		for _, result := range []string{"ok", "failed", "tempfail", "timeout", "error", "unresolved", "args_refused", "input_too_large", "output_truncated"} {
+			runs.WithLabelValues(name, result)
+		}
+	}
+}
+
 // Enabled tells whether any program is configured.
 func (r *Runner) Enabled() bool { return r != nil && len(r.cfg.Programs) > 0 }
 

@@ -8,6 +8,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"shardpost/internal/metrics"
 )
 
 // invocation is one entry of methodCalls or methodResponses: the triple
@@ -112,8 +115,8 @@ var methods = map[string]method{
 	"Email/query":                  {capability: CapMail, run: emailQueryRun, shared: true},
 	"Email/queryChanges":           {capability: CapMail, run: emailQueryChanges, shared: true},
 	methodEmailSet:                 {capability: CapMail, run: emailSet, shared: true},
-	"Email/copy":                   {capability: CapMail, run: emailCopy, shared: true},
-	"Email/import":                 {capability: CapMail, run: emailImport, shared: true},
+	methodEmailCopy:                {capability: CapMail, run: emailCopy, shared: true},
+	methodEmailImport:              {capability: CapMail, run: emailImport, shared: true},
 	"Email/parse":                  {capability: CapMail, run: emailParse, shared: true},
 	"SearchSnippet/get":            {capability: CapMail, run: searchSnippetGet, shared: true},
 	"Thread/get":                   {capability: CapMail, run: threadGet, shared: true},
@@ -124,7 +127,7 @@ var methods = map[string]method{
 	"Quota/queryChanges":           {capability: CapQuota, run: quotaQueryChanges},
 	"VacationResponse/get":         {capability: CapVacationResponse, run: vacationGet},
 	"VacationResponse/set":         {capability: CapVacationResponse, run: vacationSet},
-	"Blob/upload":                  {capability: CapBlob, run: blobUpload},
+	methodBlobUpload:               {capability: CapBlob, run: blobUpload},
 	"Blob/get":                     {capability: CapBlob, run: blobGet},
 	"Blob/lookup":                  {capability: CapBlob, run: blobLookup},
 	"SieveScript/get":              {capability: CapSieve, run: sieveScriptGet},
@@ -269,6 +272,8 @@ func (s *Server) runCalls(ctx context.Context, sess *session, req *apiRequest) [
 
 	sess.using = using
 
+	metrics.JMAPRequestCalls.Observe(float64(len(req.MethodCalls)))
+
 	out := make([]invocation, 0, len(req.MethodCalls))
 
 	for _, call := range req.MethodCalls {
@@ -279,12 +284,18 @@ func (s *Server) runCalls(ctx context.Context, sess *session, req *apiRequest) [
 }
 
 // runCall executes one method call against the responses so far, in a
-// span of its own.
+// span of its own, and records it (see measure.go): a call the server
+// does not know, or whose capability the request did not use, is a call
+// all the same.
 func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bool,
 	call invocation, done []invocation,
 ) []invocation {
+	start := time.Now()
+
 	m, ok := methods[call.Name]
 	if !ok || !using[m.capability] {
+		observeCall(ctx, call.Name, start, nil, &methodError{Type: errUnknownMethod})
+
 		return []invocation{errorResponse(call.CallID, errUnknownMethod, "")}
 	}
 
@@ -294,16 +305,22 @@ func (s *Server) runCall(ctx context.Context, sess *session, using map[string]bo
 	span.end(merr)
 
 	if merr != nil {
+		observeCall(ctx, call.Name, start, nil, merr)
+
 		return []invocation{{Name: kwError, Args: mustRaw(merr), CallID: call.CallID}}
 	}
 
 	out := []invocation{{Name: call.Name, Args: mustRaw(res), CallID: call.CallID}}
+
+	observeCall(ctx, call.Name, start, out[0].Args, nil)
 
 	// A method that makes an implicit call of another (EmailSubmission/set
 	// and its Email/set, RFC 8621 7.5) returns that call's response after
 	// its own, under the same call id.
 	if f, ok := res.(followUp); ok {
 		for _, inv := range f.followUps() {
+			observeImplicit(ctx, inv)
+
 			inv.CallID = call.CallID
 			out = append(out, inv)
 		}

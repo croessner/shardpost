@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/ceph/go-ceph/rados"
 
@@ -222,7 +223,12 @@ func (h *userHandle) notify(oid string, data []byte) {
 	go func() {
 		defer done()
 
-		if _, _, err := u.idx.NotifyWithTimeout(oid, data, notifyTimeout); err != nil && errCode(err) != syscall.ENOENT {
+		start := time.Now()
+		_, _, err := u.idx.NotifyWithTimeout(oid, data, notifyTimeout)
+
+		mh.notified(notifiedQueue, start)
+
+		if err != nil && errCode(err) != syscall.ENOENT {
 			u.log.Debug("queue notify failed", "object", oid, "err", err)
 		}
 	}()

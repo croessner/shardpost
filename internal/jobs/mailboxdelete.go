@@ -257,6 +257,8 @@ func (k *mailboxDelete) runOffline(run *Run) (any, error) {
 		}
 
 		if err := deleteTarget1(run.User, ml, t); err != nil {
+			metrics.MailboxDeleteRuns.WithLabelValues(rep.Mode, deleteError).Inc()
+
 			return cp, fmt.Errorf("delete %q: %w", t.Name, err)
 		}
 

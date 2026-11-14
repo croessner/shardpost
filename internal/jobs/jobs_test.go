@@ -354,8 +354,21 @@ func TestTakeoverKeepsSuccessorLock(t *testing.T) {
 		t.Fatalf("%+v", done)
 	}
 
-	if locked, _ := u.(model.Importer).ImportLocked(); locked {
-		t.Fatal("lock not released after the job ended")
+	// The runner writes the final state and then releases the lock, so
+	// the lock may be seen for a moment after the state.
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		locked, _ := u.(model.Importer).ImportLocked()
+		if !locked {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal("lock not released after the job ended")
+		}
+
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

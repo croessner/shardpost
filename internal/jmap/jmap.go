@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"shardpost/internal/auth"
+	"shardpost/internal/metrics"
 	"shardpost/internal/model"
 	"shardpost/internal/provision"
 )
@@ -337,6 +338,8 @@ func New(o Options) *Server {
 		o.Log = slog.Default()
 	}
 
+	initMetrics()
+
 	o.Limits = withDefaults(o.Limits)
 	o.Push = pushDefaults(o.Push)
 	o.Submission = submissionDefaults(o.Submission, o.Limits.MaxSizeUpload)
@@ -364,6 +367,8 @@ func New(o Options) *Server {
 	if o.Load.MaxConcurrentPerIP > 0 {
 		s.perIP = newLimiter("per_ip", o.Load.MaxConcurrentPerIP)
 	}
+
+	s.initLimitMetrics()
 
 	s.watches = newWatchHub(o.Store, 0, o.Log)
 	s.fillSlots = make(chan struct{}, o.Limits.AttachmentBackfills)
@@ -470,9 +475,6 @@ func blobDefaults(l Limits) Limits {
 	return l
 }
 
-// ServeHTTP implements http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
-
 // HTTPServer wraps the front-end in a server with the timeouts a
 // public listener needs. A read or write timeout is deliberately absent:
 // an event source stays open for hours. Shutting the server down ends
@@ -517,6 +519,22 @@ func (s *Server) Close() {
 			s.o.Log.Warn("jmap: background fills still running at shutdown")
 		}
 	})
+}
+
+// initLimitMetrics creates the series of the limit counter for the
+// limits this front-end has: an event source never waits, and the
+// bound per address exists only when it is configured.
+func (s *Server) initLimitMetrics() {
+	for _, l := range []*limiter{s.inAPI, s.inUpload, s.inDown} {
+		metrics.JMAPLimit.WithLabelValues(l.name, "waited")
+		metrics.JMAPLimit.WithLabelValues(l.name, "rejected")
+	}
+
+	metrics.JMAPLimit.WithLabelValues(s.inEvents.name, "rejected")
+
+	if s.perIP != nil {
+		metrics.JMAPLimit.WithLabelValues(s.perIP.name, "rejected")
+	}
 }
 
 // slot takes a slot of a limit for key. A request that waits (wait

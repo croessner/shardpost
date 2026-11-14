@@ -69,6 +69,13 @@ func NewService(cfg config.Quota, runner *extprograms.Runner, log *slog.Logger) 
 		return nil
 	}
 
+	// Zero rather than nothing until the first event (metrics.Init).
+	for _, event := range []string{eventWarning, eventOverFlag} {
+		for _, result := range []string{"dispatched", "dropped"} {
+			events.WithLabelValues(event, result)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Service{runner: runner, log: log, warnings: cfg.Warnings, over: cfg.OverFlag,

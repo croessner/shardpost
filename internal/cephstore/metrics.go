@@ -22,6 +22,19 @@ func (metricsHooks) casRetry(kind, class string) {
 func (metricsHooks) timer(op string) func() { return metrics.Timer(op) }
 func (metricsHooks) listing(site string)    { metrics.RadosListings.WithLabelValues(site).Inc() }
 
+// Objects of imapceph_rados_notify_seconds (label "object").
+const (
+	notifiedMailbox = "mailbox"
+	notifiedAccount = "account"
+	notifiedQueue   = "queue"
+)
+
+// notified records how long a notify on an object of a kind took, from
+// sending it to the last acknowledgement or the timeout.
+func (metricsHooks) notified(object string, start time.Time) {
+	metrics.NotifyLatency.WithLabelValues(object).Observe(time.Since(start).Seconds())
+}
+
 // Online quota recount (stage B16).
 func (metricsHooks) recountHold(d time.Duration) { metrics.QuotaRecountHold.Observe(d.Seconds()) }
 func (metricsHooks) recountCapture(kind string) {

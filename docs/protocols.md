@@ -737,7 +737,7 @@ under `/admin/v1`, and the command-line client `shardpostctl`; see
 
 | Feature | Standard | Notes |
 |---|---|---|
-| Metrics | Prometheus exposition | `GET /metrics` on `server.http_addr`. |
+| Metrics | Prometheus exposition | `GET /metrics` on `server.http_addr` of the server, the push worker and the runner. Protocol commands, deliveries, the store, jobs, push, and since 0.53.0 the JMAP requests, methods, partial `/set` failures, event sources and blob volume. Event counters exist at 0 from the start of the process; `imapceph_feature_enabled` names the parts switched off. |
 | Health | — | `/healthz` (process), `/readyz` (store reachable, not draining; 503 otherwise); JMAP also serves `/jmap/healthz`. |
 | Tracing | OpenTelemetry OTLP (gRPC or HTTP/protobuf), W3C Trace Context and Baggage | Spans per IMAP, POP3 and ManageSieve command, JMAP request and method call (not the event source), LMTP delivery, admin operation and job, with store operations below them; personal attributes (account and mailbox names, client addresses, error texts) only with `telemetry.user_attributes` (default off); off without an endpoint; sampled with `telemetry.sample_ratio` (default 1.0). |
 | Logs | JSON (`slog`) | Session ID and the client address from the PROXY header. |
