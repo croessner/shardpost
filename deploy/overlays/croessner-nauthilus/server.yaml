@@ -24,7 +24,11 @@ server:
   drain_seconds: 20
   key_poll_seconds: 60
   quota_attribute: "rnsMSQuota"
-  lmtp_hostname: "shardpost.shardpost.svc.cluster.local"
+  # The public name of this mail server, as clients reach it: it stands after
+  # "by" in the Received field of every delivery, where a client tells the
+  # server's own fields (and the Authentication-Results above them) from what
+  # a sender wrote. A cluster-internal name belongs to no domain of the user.
+  lmtp_hostname: "mail.roessner-net.de"
 nauthilus:
   transport: "grpc"
   grpc_addr: "nauthilus-service.auth.svc.cluster.local:8444"
