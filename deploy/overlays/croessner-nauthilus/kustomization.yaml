@@ -7,6 +7,7 @@ resources:
   - ../croessner
   - network-policy.yaml
   - jmap.yaml
+  - mcp.yaml
 components:
   - ../../components/nauthilus
   - ../../components/quota-ldap-renew

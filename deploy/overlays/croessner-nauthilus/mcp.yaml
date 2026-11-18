@@ -1,0 +1,42 @@
+# Read-only MCP endpoint behind HAProxy on lbr1/lbr2
+# (https://mail.roessner-net.de/mcp, administrative networks only).
+# externalTrafficPolicy Local keeps the LBR address, which the endpoint
+# trusts for X-Forwarded-*; the policy admits only the two LBRs.
+# The route on the LBRs: rns-server services/haproxy/shardpost-mcp-route.py.
+#
+# Requires the Secret shardpost-mcp-introspection (key client-secret), the
+# secret of the Nauthilus client shardpost-mcp, created by the handover
+# script of the other repository (never by hand, never in plain text here):
+#   nauthilus-tests/kubernetes: scripts/handover-shardpost-mcp.py --apply
+apiVersion: v1
+kind: Service
+metadata:
+  name: shardpost-mcp
+  namespace: shardpost
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: shardpost-server
+  ports:
+    - name: mcp
+      port: 9097
+      targetPort: mcp
+      nodePort: 30446
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shardpost-mcp-ingress
+  namespace: shardpost
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shardpost-server
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: {cidr: 192.168.0.5/32}
+        - ipBlock: {cidr: 192.168.0.6/32}
+      ports:
+        - {protocol: TCP, port: 9097}

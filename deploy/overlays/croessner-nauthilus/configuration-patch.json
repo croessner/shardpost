@@ -88,12 +88,21 @@
                 "name": "sieve-after",
                 "mountPath": "/etc/sieve/after",
                 "readOnly": true
+              },
+              {
+                "name": "mcp-introspection",
+                "mountPath": "/secrets/mcp-introspection",
+                "readOnly": true
               }
             ],
             "ports": [
               {
                 "name": "jmap",
                 "containerPort": 9443
+              },
+              {
+                "name": "mcp",
+                "containerPort": 9097
               }
             ]
           }
@@ -159,6 +168,19 @@
             "name": "sieve-after",
             "configMap": {
               "name": "shardpost-sieve-after"
+            }
+          },
+          {
+            "name": "mcp-introspection",
+            "secret": {
+              "secretName": "shardpost-mcp-introspection",
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "client-secret",
+                  "path": "client-secret"
+                }
+              ]
             }
           }
         ]

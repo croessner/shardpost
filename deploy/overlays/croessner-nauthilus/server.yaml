@@ -262,3 +262,24 @@ scrub:
   orphan_source: intents
 purge:
   listing: false
+# Read-only MCP endpoint (docs/mcp.md): HAProxy on lbr1/lbr2 terminates TLS
+# for https://mail.roessner-net.de/mcp, admits only the administrative
+# networks and reaches this port through the NodePort shardpost-mcp
+# (externalTrafficPolicy Local keeps the LBR address). Tokens come from
+# Nauthilus prod for the support client rns-support-cli and are introspected
+# with shardpost-mcp, the client that owns the resource there. As for the
+# Nauthilus support MCP, the LDAP group admin is entitled.
+mcp:
+  enabled: true
+  address: "0.0.0.0:9097"
+  trusted_proxies: ["192.168.0.5/32", "192.168.0.6/32"]
+  oauth:
+    resource: "https://mail.roessner-net.de/mcp"
+    issuer: "https://login.authserv.me"
+    static_clients: ["rns-support-cli"]
+    introspect_client_id: "shardpost-mcp"
+    introspect_client_secret_file: "/secrets/mcp-introspection/client-secret"
+  principals:
+    - group: "admin"
+      roles: ["diagnose"]
+      all_accounts: true
