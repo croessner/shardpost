@@ -17,6 +17,7 @@ import (
 	"shardpost/internal/delivery"
 	"shardpost/internal/jobs"
 	"shardpost/internal/learnindex"
+	"shardpost/internal/mcpserver"
 
 	"shardpost/internal/model"
 	"shardpost/internal/sendqueue"
@@ -29,6 +30,9 @@ type adminServers struct {
 	unixSrv *http.Server
 	unixLn  net.Listener
 	tlsSrv  *http.Server
+	// mcpSrv is the read-only MCP endpoint (mcp.enabled), served by the
+	// same API in-process.
+	mcpSrv *http.Server
 	// api is the handler behind them; its import reshard runs stop at
 	// shutdown, before the store closes.
 	api *admin.Server
@@ -46,7 +50,7 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 	c := settings.Admin
 	a := &adminServers{}
 
-	if c.Socket == "" && c.Addr == "" {
+	if c.Socket == "" && c.Addr == "" && !settings.MCP.Enabled {
 		return a, nil
 	}
 
@@ -80,7 +84,37 @@ func newAdminServers(log *slog.Logger, settings *config.Config, authn auth.Authe
 		a.unixLn, a.unixSrv = ln, s.UnixServer()
 	}
 
+	if settings.MCP.Enabled {
+		srv, err := newMCPServer(log, settings, s)
+		if err != nil {
+			return nil, err
+		}
+
+		a.mcpSrv = srv
+	}
+
 	return a, nil
+}
+
+// newMCPServer builds the read-only MCP endpoint over the admin API. Its
+// tokens are introspected at the issuer with the client that owns the
+// resource there.
+func newMCPServer(log *slog.Logger, settings *config.Config, api *admin.Server) (*http.Server, error) {
+	in := settings.MCPIntrospection()
+	timeout := time.Duration(settings.Nauthilus.Timeout) * time.Second
+	introspector := &mcpserver.HTTPIntrospector{URL: in.URL, ClientID: in.ClientID, ClientSecret: in.ClientSecret,
+		HTTP: auth.NewHTTPClient(timeout, int(settings.Nauthilus.HTTPMaxIdlePerHost))}
+
+	endpoint, err := mcpserver.New(mcpserver.Deps{Settings: settings.MCP, Tokens: introspector, Admin: api,
+		Logger: log.With("component", "mcp"), Version: version.Version, IntrospectionTimeout: timeout})
+	if err != nil {
+		return nil, fmt.Errorf("mcp: %w", err)
+	}
+
+	mcpserver.InitMetrics()
+	log.Info("MCP endpoint configured", "address", settings.MCP.GetAddress(), "resource", endpoint.Resource())
+
+	return endpoint.HTTPServer(), nil
 }
 
 // adminOptions are the options of the admin API.
@@ -218,13 +252,18 @@ func (a *adminServers) start(errc chan<- error) {
 		// The certificates come from GetConfigForClient (reloaded on change).
 		go func() { errc <- fmt.Errorf("admin tls: %w", a.tlsSrv.ListenAndServeTLS("", "")) }()
 	}
+
+	if a.mcpSrv != nil {
+		// TLS ends at the trusted reverse proxy in front (mcp.tls_termination).
+		go func() { errc <- fmt.Errorf("mcp: %w", a.mcpSrv.ListenAndServe()) }()
+	}
 }
 
 // shutdown stops accepting and waits for running requests until ctx ends
 // (the job runner, if this process runs one, stops with the background
 // and hands its jobs over).
 func (a *adminServers) shutdown(ctx context.Context) {
-	for _, srv := range []*http.Server{a.unixSrv, a.tlsSrv} {
+	for _, srv := range []*http.Server{a.mcpSrv, a.unixSrv, a.tlsSrv} {
 		if srv != nil {
 			_ = srv.Shutdown(ctx)
 		}

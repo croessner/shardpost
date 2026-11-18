@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"shardpost/internal/charset"
 	"shardpost/internal/model"
@@ -56,6 +57,8 @@ type Config struct {
 	// Limits bounds what one account can grow (mailboxes, keywords,
 	// METADATA entries, shared pointers).
 	Limits Limits `mapstructure:"limits"`
+	// MCP configures the read-only MCP endpoint (off unless enabled).
+	MCP MCP `mapstructure:"mcp"`
 }
 
 // Logging configures the log output.
@@ -672,6 +675,10 @@ var defaults = []struct {
 	{"nauthilus.token_file", ""},
 	{"nauthilus.oidc_client_secret_file", ""},
 	{"server.master_password_file", ""},
+	{"mcp.enabled", false},
+	{"mcp.address", ""},
+	{"mcp.oauth.introspect_client_secret", ""},
+	{"mcp.oauth.introspect_client_secret_file", ""},
 }
 
 // Load accepts an optional YAML file. Explicit environment values override it.
@@ -715,6 +722,10 @@ func load(path string, runner bool) (*Config, error) {
 
 	if !runner {
 		if err := c.checkAuth(); err != nil {
+			return nil, err
+		}
+
+		if err := c.checkMCP(); err != nil {
 			return nil, err
 		}
 	}
@@ -999,7 +1010,7 @@ func (c *Config) checkAuth() error {
 		return fmt.Errorf("OIDC token URL requires client ID and secret")
 	}
 
-	if c.Server.AuthBackend == "nauthilus" && c.Nauthilus.Transport == "http" && c.Nauthilus.URL == "" {
+	if c.Server.AuthBackend == "nauthilus" && c.Nauthilus.Transport == SchemeHTTP && c.Nauthilus.URL == "" {
 		return fmt.Errorf("HTTP authentication requires nauthilus.url")
 	}
 
@@ -1150,6 +1161,7 @@ var runnerUnusedSecrets = map[string]bool{
 	"NAUTHILUS_TOKEN_FILE":                    true,
 	"NAUTHILUS_OIDC_CLIENT_SECRET_FILE":       true,
 	"JMAP_PUSH_VAPID_KEY_FILE":                true,
+	"MCP_INTROSPECT_CLIENT_SECRET_FILE":       true,
 }
 
 // resolveSecrets reads every "<Field>File" into "<Field>". lenient lets a
@@ -1199,6 +1211,15 @@ func resolveSecrets(v reflect.Value, lenient bool) error {
 }
 
 func strictTypes(from, to reflect.Type, data any) (any, error) {
+	// A duration is written as Go writes it ("15s"), as in Nauthilus.
+	if to == durationType {
+		if from.Kind() != reflect.String {
+			return nil, fmt.Errorf("expected duration")
+		}
+
+		return time.ParseDuration(data.(string))
+	}
+
 	if to.Kind() == reflect.Int64 && from.Kind() != reflect.Int && from.Kind() != reflect.Int64 {
 		return nil, fmt.Errorf("expected integer")
 	}
@@ -1209,6 +1230,9 @@ func strictTypes(from, to reflect.Type, data any) (any, error) {
 
 	return data, nil
 }
+
+// durationType is the type of the duration fields.
+var durationType = reflect.TypeFor[time.Duration]()
 
 // Literal spellings accepted for boolean environment values.
 const (

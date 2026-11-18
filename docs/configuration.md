@@ -560,6 +560,19 @@ Socket callers always have it. See
 
 YAML only. See [Admin API: support tools](admin-api.md#support-tools-stage-8d).
 
+### MCP endpoint (`mcp`)
+
+The read-only MCP endpoint is off unless `mcp.enabled` is true. Its keys
+are those of the Nauthilus MCP endpoint (`address`, `tls_termination`,
+`trusted_proxies`, `allowed_hosts`, `allowed_browser_origins`,
+`limits.*` with durations such as `15s`, `audit.enabled`); `mcp.oauth`
+describes the protected resource and the introspection at Nauthilus,
+`mcp.principals` grant the role `diagnose` and an account scope. Only
+`mcp.enabled`, `mcp.address` and the introspection secret have
+environment variables (`MCP_ENABLED`, `MCP_ADDRESS`,
+`MCP_INTROSPECT_CLIENT_SECRET` and `_FILE`). The full table and an
+example are in [MCP endpoint](mcp.md#configuration).
+
 ### Admin store indexes (`admin.kv_index`)
 
 | Key | Default | Meaning |

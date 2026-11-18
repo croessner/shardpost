@@ -147,6 +147,7 @@ is not a small fixed set or the value belongs to one holder:
 | --- | --- |
 | `imapceph_commands_total`, `imapceph_command_seconds` | The first command of that name. The logins, the connection limit and the polls exist from the start. |
 | `shardpost_admin_requests_total` | The first request with that operation and code; the successes of the common operations exist from the start. |
+| `shardpost_mcp_requests_total` | The server runs with `mcp.enabled`; then every `result` exists from the start. |
 | `imapceph_mailbox_lock_refusals_total{protocol="imap"}` | The first refused IMAP command of that name. |
 | `imapceph_batch_accounts_total` | The first batch of a kind other than `scrub`. |
 | `imapceph_jmap_submission_queue_entries{state="all"\|"due"}` | Exported by the holder of worker partition 0 only; a server that loses the partition withdraws its count. Read `max by(state)`. |

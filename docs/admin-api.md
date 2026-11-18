@@ -142,6 +142,13 @@ Error codes: `bad_request` 400, `unauthenticated` 401, `forbidden` 403,
 [configuration](configuration.md#account-limits-limits); every API that
 changes an account answers it the same way), `temporary` 503, `internal` 500.
 
+## MCP endpoint
+
+The read-only operations with the role `diagnose` are also offered as
+MCP tools; a call is served by this API in-process, with the role and
+the account scope the MCP principals grant, and is audited here with
+`transport=mcp`. See [MCP endpoint](mcp.md).
+
 ## shardpostctl
 
 In the image at `/usr/local/bin/shardpostctl`. The default is the socket

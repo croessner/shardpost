@@ -30,6 +30,7 @@ deliberately stable metric families.
 | extend Sieve or learning programs | [Sieve, IMAPSieve and external programs](docs/imapsieve.md) |
 | quota rules, warnings, over flag | [Quota](docs/quota.md) |
 | Admin API, shardpostctl, local delivery | [Admin API and LDA](docs/admin-api.md) |
+| Read-only MCP endpoint for AI hosts | [MCP endpoint](docs/mcp.md) |
 | roll out or investigate an incident | [Operations and releases](docs/operations/README.md) |
 | understand logs, metrics and traces | [Observability](docs/observability.md) |
 | assess limits and test coverage | [Quality status](docs/development/quality.md) |

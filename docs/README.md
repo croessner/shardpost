@@ -35,6 +35,7 @@ are documented as [manual pages](man/README.md).
 | [Sieve and learning](imapsieve.md) | Script execution, external programs, learning queue |
 | [Quota](quota.md) | Grace, mailbox rules, warning programs, over flag |
 | [Admin API and LDA](admin-api.md) | OpenAPI contract, shardpostctl, roles, local delivery |
+| [MCP endpoint](mcp.md) | Read-only MCP endpoint over the admin API: tools, tokens, configuration, metrics |
 | [JMAP](jmap.md) | Account state, session resource, API endpoint, blobs, what is built and what is not |
 | [JMAP by example](jmap-examples.md) | A recorded send and receive through the Director, as JSON |
 | [Manual pages](man/README.md) | `shardpostctl` command by command, with examples |
