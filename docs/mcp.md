@@ -1,6 +1,6 @@
 # MCP endpoint (read-only diagnostics)
 
-Unreleased (after 0.53.0, written 2026-11-18): a server can offer the read-only operations of
+Since 0.54.0 (2026-11-18) a server can offer the read-only operations of
 the [admin API](admin-api.md) as an MCP endpoint (Model Context
 Protocol), so that an MCP host — Claude Code, Claude Desktop, an own
 agent — can look at ShardPost without `shardpostctl`, a client
