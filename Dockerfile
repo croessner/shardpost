@@ -15,6 +15,8 @@ COPY go.mod go.sum ./
 COPY vendor ./vendor
 COPY cmd ./cmd
 COPY internal ./internal
+# The MCP endpoint embeds the admin API contract (api/admin/spec.go).
+COPY api ./api
 COPY programs ./programs
 RUN go vet -tags tentacle ./... \
  && LDFLAGS="-s -w -X shardpost/internal/version.Version=${VERSION}" \
