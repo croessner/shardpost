@@ -41,7 +41,7 @@ SITE = {
     "base_url": "https://shardpost.de",
     "github": "https://github.com/croessner/shardpost",
     "support_email": "christian@roessner.email",
-    "version": "0.52.0",
+    "version": "0.54.0",
     "year": str(date.today().year),
 }
 SITE["stack_diagram"] = (SRC / "partials" / "stack.html").read_text(encoding="utf-8")
@@ -77,6 +77,8 @@ DOCS = [
          "What the metrics mean, sampling, privacy, operational logs."),
         ("admin-api", "docs/admin-api.md", "Admin API and LDA",
          "OpenAPI contract, shardpostctl, roles, local delivery."),
+        ("mcp", "docs/mcp.md", "MCP endpoint",
+         "Read-only MCP endpoint over the admin API: tools, tokens, configuration, metrics."),
         ("quota", "docs/quota.md", "Quota",
          "Grace, mailbox rules, warning programs, over flag."),
         ("sieve", "docs/imapsieve.md", "Sieve and learning",
